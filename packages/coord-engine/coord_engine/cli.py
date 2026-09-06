@@ -843,8 +843,9 @@ def print_close_hint(row: dict[str, Any], *, team: str) -> None:
     print(_close_on_reply_breadcrumb(team, owner, slug))
 
 
-def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
-    now = _iso(_now())
+def _needs_me_from_files(args: argparse.Namespace, transport: Any, now: str) -> list[dict[str, Any]]:
+    """The file-plane needs-me: task index, role resolution, projection-first fold, review and forge add-ons,
+    blocked-on-human first. Unchanged pre-cutover behaviour, called ONLY when the cutover switch says files."""
     doc_sink: list[Any] = []
     feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
@@ -863,16 +864,6 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
                          held_roles=held_roles, include_history=args.all,
                          aggregate_doc=agg_doc, feed_evidence=feed_evidence)
-    # bus-v4 cutover (coord_engine.cutover): when the switch on the bus says "fold", the file-plane fold above
-    # is NOT the answer — the agent's coord-fold checkpoint is. A checkpoint that cannot answer prepends a
-    # `fold-degraded` marker, which the envelope reads as UNKNOWN (rc 3): never CLEAR for an unseeded identity.
-    serve, serve_why = cutover_mod.read_switch(transport, args.team)
-    if serve == "fold":
-        fold_rows, fold_why = cutover_mod.fold_rows(transport, args.team, args.agent)
-        if fold_rows is None:
-            got = [cutover_mod.degraded_row(f"{serve_why}; {fold_why}")] + got
-        else:
-            got = fold_rows
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
@@ -900,6 +891,26 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     seen = {r.get("id") for r in blocked}
     got = blocked + [r for r in got if r.get("id") not in seen]
+    return got
+
+
+def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
+    now = _iso(_now())
+    # bus-v4 cutover (coord_engine.cutover): the switch is read BEFORE any file-plane work. "unknown" (the switch
+    # could not be read) answers with ONE fold-degraded marker and consults nothing — never files (codex-reviewer
+    # P0); "fold" answers from the agent's coord-fold checkpoint and never invokes the task index, role
+    # resolution or the review listing (codex-coder P0); a checkpoint that cannot answer is UNKNOWN, never CLEAR.
+    serve, serve_why = cutover_mod.read_switch(transport, args.team)
+    if serve == "unknown":
+        got: list[dict[str, Any]] = [cutover_mod.degraded_row(serve_why)]
+    elif serve == "fold":
+        fold_rows, fold_why = cutover_mod.fold_rows(transport, args.team, args.agent)
+        got = fold_rows if fold_rows is not None else [cutover_mod.degraded_row(f"{serve_why}; {fold_why}")]
+        if fold_rows is not None:
+            add_on = Deadline.open(_briefing_budget())
+            got += _forge_feedback_for(transport, args.team, args.agent, deadline=add_on.instant)
+    else:
+        got = _needs_me_from_files(args, transport, now)
     # Contract 2 (OC2/OC3, ladder PR 1): the envelope is sealed FIRST and rc is
     # a pure function of its health — UNKNOWN/DEGRADED exit 3 even when partial
     # rows were served (this widens the old forge-only rc: a degraded role or
@@ -6203,6 +6214,58 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
             ok, reason, unresolved)
 
 
+def _authority_unknown_probes(why: str) -> "list[obligations_mod.Component]":
+    """Every component UNREADABLE with the same reason: the cutover switch could not be read, so which plane is
+    authoritative is unknown and NOTHING is consulted (codex-reviewer P0, engine-ship-gate-6445cde8)."""
+    P, S, C = obligations_mod.ProbeResult, obligations_mod.ProbeState, obligations_mod.Component
+    return [C(name=n, probe=(lambda: P(state=S.UNREADABLE, detail=why)))
+            for n in obligations_mod.OBLIGATION_COMPONENTS]
+
+
+def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
+                 ) -> "list[obligations_mod.Component]":
+    """The component set served from the agent's coord-fold checkpoint — ONE pointed read, no task index, no
+    role resolution, no review-register listing (codex-coder P0, engine-ship-gate-6445cde8). The fold carries
+    every open addressed to the agent as (slug, pri, ptr, from, to); kinds are not distinguished on the stream,
+    so `tasks` carries them all, `directives` the non-review ones, `reviews` the review-request rows, and
+    `blocks`/`reminders`/`role_duties` are consulted-and-subsumed (a block, a reminder or a role-routed duty is
+    an open in the fold, and its ptr says which). `forge_feedback` is GitHub-mirror evidence, not the file
+    plane the cutover replaces, and keeps its own bounded probe. A checkpoint that cannot answer makes every
+    component UNREADABLE: UNKNOWN, never CLEAR, for an unseeded identity."""
+    P, S, C = obligations_mod.ProbeResult, obligations_mod.ProbeState, obligations_mod.Component
+    rows, why = cutover_mod.fold_rows(transport, team, agent)
+    if rows is None:
+        detail = f"{serve_why}; {why}"
+        return [C(name=n, probe=(lambda: P(state=S.UNREADABLE, detail=detail)))
+                for n in obligations_mod.OBLIGATION_COMPONENTS]
+    owed_all = [r for r in rows if not str(r.get("type") or "").endswith("-source")]
+    reviews = [r for r in owed_all if r.get("kind") == "review"]
+    directives = [r for r in owed_all if r.get("kind") != "review"]
+    subsumed = f"{why}; not distinguished on the fold — an open of this kind is served under tasks"
+    fold_dl = Deadline.open(_obligation_budget())
+
+    def _forge_probe():
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise COORD_OBLIGATION_BUDGET")
+        found = _forge_feedback_for(transport, team, agent, deadline=fold_dl.instant)
+        markers = [r.get("type") for r in found if isinstance(r.get("type"), str) and r["type"].endswith("-degraded")]
+        real = [r for r in found if not (isinstance(r.get("type"), str)
+                                         and (r["type"].endswith("-degraded") or r["type"].endswith("-source")))]
+        if markers:
+            return P(state=S.UNREADABLE, owed=real, detail="; ".join(sorted(set(markers))))
+        return P(state=S.OK, owed=real)
+
+    return [
+        C(name="blocks", probe=(lambda: P(state=S.OK, detail=subsumed))),
+        C(name="directives", probe=(lambda: P(state=S.OK, owed=directives, detail=why))),
+        C(name="forge_feedback", probe=_forge_probe),
+        C(name="reminders", probe=(lambda: P(state=S.OK, detail=subsumed))),
+        C(name="reviews", probe=(lambda: P(state=S.OK, owed=reviews, detail=why))),
+        C(name="role_duties", probe=(lambda: P(state=S.OK, detail=f"{why}; role-routed opens are folded at seed and on the stream"))),
+        C(name="tasks", probe=(lambda: P(state=S.OK, owed=owed_all, detail=why))),
+    ]
+
+
 def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
                        ) -> "list[obligations_mod.Component]":
     """Bind the real coordination surface to obligation probes.
@@ -6234,6 +6297,14 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # allowance and the probe budget opens AFTER it, so a slow store degrades
     # GRADUALLY (an expensive early probe still shrinks what later ones get)
     # instead of collapsing to zero coverage.
+    # bus-v4 cutover (coord_engine.cutover): the switch is read BEFORE any file-plane setup, so "fold" never
+    # invokes the task index or role resolution (codex-coder P0, engine-ship-gate-6445cde8) and "unknown" never
+    # consults anything at all (codex-reviewer P0): authority first, then the plane it names.
+    serve, serve_why = cutover_mod.read_switch(transport, team)
+    if serve == "unknown":
+        return _authority_unknown_probes(serve_why)
+    if serve == "fold":
+        return _fold_probes(transport, team, agent, serve_why)
     setup_dl = Deadline.open(_obligation_budget())
     doc_sink: list[Any] = []
     feed_sink: list[Any] = []
@@ -6273,31 +6344,10 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # into known-empty.
     needs_me_cache: "Optional[list[dict[str, Any]]]" = None
     needs_me_failure: "Optional[str]" = None
-    # bus-v4 cutover (coord_engine.cutover): ONE pointed read of the switch decides which plane answers the
-    # row-derived components. "fold" bypasses the file-plane index entirely — its readability is not this
-    # answer's concern — and a missing checkpoint is UNREADABLE (UNKNOWN), never CLEAR.
-    serve, serve_why = cutover_mod.read_switch(transport, team)
 
     def _rows_probe(kinds: "tuple[str, ...]"):
         def probe():
             nonlocal needs_me_cache, needs_me_failure
-            if serve == "fold":
-                if fold_dl.expired():
-                    return P(state=S.UNREADABLE,
-                             detail="obligation probe budget exhausted — raise "
-                                    "COORD_OBLIGATION_BUDGET")
-                if needs_me_failure is not None:
-                    return P(state=S.UNREADABLE, detail=needs_me_failure)
-                if needs_me_cache is None:
-                    fold_rows, fold_why = cutover_mod.fold_rows(transport, team, agent)
-                    if fold_rows is None:
-                        needs_me_failure = f"{serve_why}; {fold_why}"
-                        return P(state=S.UNREADABLE, detail=needs_me_failure)
-                    needs_me_cache = fold_rows
-                owed = [r for r in needs_me_cache
-                        if not str(r.get("type") or "").endswith("-source")
-                        and (not kinds or (r.get("kind") or "task") in kinds)]
-                return P(state=S.OK, owed=owed)
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():

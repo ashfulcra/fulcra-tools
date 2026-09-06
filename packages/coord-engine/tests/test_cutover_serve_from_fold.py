@@ -1,8 +1,10 @@
 """The bus-v4 cutover switch (coord_engine.cutover): what `obligations` and `needs-me` answer from.
 
 Truths, each a failure it prevents:
-* No switch, an unreadable switch, or a malformed one -> files, exactly today's answer. The flip cannot happen
-  by accident or by a corrupt document.
+* No switch -> files, exactly today's answer. An unreadable or malformed switch -> UNKNOWN (rc 3) and NOTHING is
+  consulted: after the flip, answering from files on a switch you cannot read is split-brain (codex-reviewer P0).
+* serve=fold never invokes the task index, role resolution or the review listing (codex-coder P0): sentinels
+  on every file-plane entry point prove it.
 * serve=fold -> the agent's coord-fold checkpoint IS the answer; the file plane is not consulted for the rows.
 * serve=fold with no checkpoint -> UNKNOWN (rc 3), never CLEAR: an unseeded identity does not owe nothing.
 * `cutover set` writes the switch once and prints before/after; `--serve files` is the rollback, same verb.
@@ -65,21 +67,24 @@ def test_no_switch_means_files():
 
 @pytest.mark.parametrize("body", ["not json", "[]", json.dumps({"v": 1}), json.dumps({"v": 2, "serve": "fold"}),
                                   json.dumps({"v": 1, "serve": "FOLD"}), json.dumps({"v": 1, "serve": "stream"})])
-def test_a_malformed_switch_means_files_never_fold(body):
+def test_a_malformed_switch_is_unknown_authority_never_files_never_fold(body):
+    """Bytes exist and are not a switch: after the flip this could be a corrupted fold switch, so answering from
+    files would be split-brain (codex-reviewer P0). Only an ABSENT switch selects files."""
     serve, why = cutover.read_switch(FakeTransport({SWITCH: body}), TEAM)
-    assert serve == "files" and "serving from files" in why
+    assert serve == "unknown" and "authority unknown" in why
 
 
-def test_an_unreadable_switch_means_files_and_says_so():
+def test_an_unreadable_switch_is_unknown_authority_and_says_so():
     serve, why = cutover.read_switch(FakeTransport(error_paths=[SWITCH]), TEAM)
-    assert serve == "files" and "error" in why
+    assert serve == "unknown" and "error" in why
 
 
-def test_a_switch_that_raises_means_files():
+def test_a_switch_read_that_raises_is_unknown_authority():
     class Boom:
         def read_classified(self, path, **kw):
             raise RuntimeError("transport down")
-    assert cutover.read_switch(Boom(), TEAM)[0] == "files"
+    serve, why = cutover.read_switch(Boom(), TEAM)
+    assert serve == "unknown" and "transport down" in why
 
 
 def test_only_a_well_formed_fold_switch_serves_from_the_fold():
@@ -126,53 +131,113 @@ def test_an_unreadable_checkpoint_is_none():
     assert rows is None and "error" in why
 
 
-# ---- obligations: the terminal answer ----------------------------------------------------------------------
+# ---- obligations and needs-me: the public reads ------------------------------------------------------------
+
+class _FilePlaneTouched(AssertionError):
+    pass
+
+
+def _sentinel(*a, **kw):
+    raise _FilePlaneTouched("FILE_PLANE_WAS_CONSULTED")
+
+
+def _arm_file_plane_sentinels(monkeypatch):
+    """Every file-plane entry point raises. Under serve=fold and serve=unknown none may be reached
+    (codex-coder P0: a diagnostic sentinel on _load_rows_status fired for both public reads on 6445cde8)."""
+    for name in ("_load_rows_status", "_held_roles_for_rows", "_needs_me_rows", "_pending_reviews_for",
+                 "_blocked_on_human_section"):
+        monkeypatch.setattr(cli, name, _sentinel)
+    monkeypatch.setattr(cli, "_forge_feedback_for", lambda *a, **kw: [])
+
 
 def _obl_args(**kw):
     return argparse.Namespace(team=TEAM, agent=AGENT, json=True, **kw)
 
 
-def _run_obligations(monkeypatch, transport, capsys):
-    """Run cmd_obligations with every NON-row component stubbed to CLEAR, so the answer isolates the row path."""
-    monkeypatch.setattr(cli, "_load_rows_status", lambda t, team, **kw: ([], True, ""))
-    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **kw: (set(), []))
-    monkeypatch.setattr(cli, "_needs_me_rows", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("file plane consulted")))
-    monkeypatch.setattr(cli, "_pending_reviews_for", lambda *a, **kw: [])
-    monkeypatch.setattr(cli, "_forge_feedback_for", lambda *a, **kw: [])
-    monkeypatch.setattr(cli, "_reminders_due", lambda *a, **kw: [], raising=False)
+def _obligations(transport, capsys):
     rc = cli.cmd_obligations(_obl_args(), transport)
     out = capsys.readouterr().out
-    payload = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
-    return rc, payload
+    return rc, json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
+
+
+def _nm_args(**kw):
+    return argparse.Namespace(team=TEAM, agent=AGENT, json=True, all=False, envelope_only=False, **kw)
+
+
+def _needs_me(transport, capsys):
+    rc = cli.cmd_needs_me(_nm_args(), transport)
+    out = capsys.readouterr().out
+    return rc, json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
 
 
 def test_obligations_served_from_the_fold_never_touch_the_file_plane(monkeypatch, capsys):
-    t = FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS)})
-    rc, payload = _run_obligations(monkeypatch, t, capsys)
-    assert payload["state"] == "DATA" and payload["owed_count"] >= 2, payload
-    assert "directives" in payload["consulted"] and not payload["degraded"]
-    assert rc == 0
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, payload = _obligations(FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS)}), capsys)
+    assert rc == 0 and payload["state"] == "DATA" and payload["owed_count"] >= 2, payload
+    assert set(payload["consulted"]) == set(obligations_mod.OBLIGATION_COMPONENTS) and not payload["degraded"]
 
 
 def test_obligations_served_from_the_fold_with_no_checkpoint_are_unknown_never_clear(monkeypatch, capsys):
-    t = FakeTransport({SWITCH: _switch("fold")})
-    rc, payload = _run_obligations(monkeypatch, t, capsys)
-    assert payload["state"] == "UNKNOWN" and rc == 3, payload
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, payload = _obligations(FakeTransport({SWITCH: _switch("fold")}), capsys)
+    assert rc == 3 and payload["state"] == "UNKNOWN", payload
     assert any("has not seeded its fold" in str(v) for v in payload["details"].values()), payload["details"]
+
+
+def test_obligations_with_an_unreadable_switch_are_unknown_and_consult_nothing(monkeypatch, capsys):
+    """codex-reviewer P0, the integrated negative control: switch read error + an empty file plane used to read
+    rc=0 CLEAR. Now rc 3 UNKNOWN, and the file plane is not even consulted."""
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, payload = _obligations(FakeTransport(error_paths=[SWITCH]), capsys)
+    assert rc == 3 and payload["state"] == "UNKNOWN" and payload["owed_count"] == 0, payload
+    assert all("authority unknown" in str(v) for v in payload["details"].values()), payload["details"]
+    rc, payload = _obligations(FakeTransport({SWITCH: "corrupt"}), capsys)
+    assert rc == 3 and payload["state"] == "UNKNOWN"
 
 
 def test_obligations_with_no_switch_still_answer_from_the_file_plane(monkeypatch, capsys):
     """The pre-cutover path is untouched: the file-plane fold is consulted, the checkpoint is not."""
-    t = FakeTransport({CKPT: _ckpt(ROWS)})
-    monkeypatch.setattr(cli, "_load_rows_status", lambda tr, team, **kw: ([], True, ""))
-    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **kw: (set(), []))
     called = []
-    monkeypatch.setattr(cli, "_needs_me_rows", lambda *a, **kw: called.append(1) or [])
+    monkeypatch.setattr(cli, "_load_rows_status", lambda tr, team, **kw: (called.append("index") or ([], True, "")))
+    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **kw: (set(), []))
+    monkeypatch.setattr(cli, "_needs_me_rows", lambda *a, **kw: (called.append("needs-me") or []))
     monkeypatch.setattr(cli, "_pending_reviews_for", lambda *a, **kw: [])
     monkeypatch.setattr(cli, "_forge_feedback_for", lambda *a, **kw: [])
-    monkeypatch.setattr(cli, "_reminders_due", lambda *a, **kw: [], raising=False)
-    cli.cmd_obligations(_obl_args(), t)
-    assert called, "the file plane must still be the answer without a switch"
+    cli.cmd_obligations(_obl_args(), FakeTransport({CKPT: _ckpt(ROWS)}))
+    assert called == ["index", "needs-me"]
+
+
+def test_needs_me_served_from_the_fold_never_touches_the_file_plane(monkeypatch, capsys):
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, env = _needs_me(FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS)}), capsys)
+    assert rc == 0 and env["health"] == "DATA" and env["source"] == "projection", env
+
+
+def test_needs_me_served_from_the_fold_with_no_checkpoint_is_unknown_never_clear(monkeypatch, capsys):
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, env = _needs_me(FakeTransport({SWITCH: _switch("fold")}), capsys)
+    assert rc == 3 and env["health"] == "UNKNOWN", env
+
+
+def test_needs_me_with_an_unreadable_switch_is_unknown_and_consults_nothing(monkeypatch, capsys):
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, env = _needs_me(FakeTransport(error_paths=[SWITCH]), capsys)
+    assert rc == 3 and env["health"] == "UNKNOWN", env
+    rc, env = _needs_me(FakeTransport({SWITCH: json.dumps({"v": 1, "serve": "stream"})}), capsys)
+    assert rc == 3 and env["health"] == "UNKNOWN", env
+
+
+def test_needs_me_with_no_switch_still_answers_from_the_file_plane(monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(cli, "_load_rows_status", lambda tr, team, **kw: (called.append("index") or ([], True, "")))
+    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **kw: (set(), []))
+    monkeypatch.setattr(cli, "_needs_me_rows", lambda *a, **kw: (called.append("needs-me") or []))
+    monkeypatch.setattr(cli, "_pending_reviews_for", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_forge_feedback_for", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_blocked_on_human_section", lambda *a, **kw: [])
+    cli.cmd_needs_me(_nm_args(), FakeTransport({CKPT: _ckpt(ROWS)}))
+    capsys.readouterr()
+    assert called == ["index", "needs-me"]
 
 
 # ---- the verbs ---------------------------------------------------------------------------------------------
