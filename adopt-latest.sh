@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="430f6835ac4e730f6522d4e6ceb553083da263d1"   # coord-engine at 430f6835. SIXTH pin move of 2026-09-05. Carries the star-row ruling (PR 721: the old open set includes open broadcast rows for every agent except their owner, so a live broadcast no longer reads as divergence for its recipients) and the forge projection prune (PR 722: the parent feedback dir is listed once, per-PR only where feedback exists), alongside COORD_FORGE_BUILD_BUDGET=180 on the reconciling host. Engine delta from c46e6cc2 is bridge + projection plus tests. Everything in c46e6cc2 is still here.
+PIN="ee853a01e57ae69a732b252f817244f207b29a7f"   # coord-engine at ee853a01. SEVENTH pin move (first of 2026-09-06). Carries ruling 13a58789 (PR 724: broadcast closes are per-recipient on the old plane, so a recipient who closed a broadcast stops carrying it while the other recipients still do). Engine delta from 430f6835 is cli.py plus its test. Everything in 430f6835 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
