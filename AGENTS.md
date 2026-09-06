@@ -1642,7 +1642,12 @@ acts on today.
   owner is not the agent — needs-me never lists them — matching the fold's `to == all and from != agent`;
   RULING 13a58789 2026-09-05: broadcast closes are PER-RECIPIENT — the row's single status is the OWNER's disposition,
   never a recipient's close, so a broadcast stays open for every non-owner until THAT agent acks it (`acked_by` on the
-  row, or the ack doc at `_coord/acks/<slug>/<agent_key>.md`); an unreadable ack reads as no ack), idempotent via
+  row, or the ack doc at `_coord/acks/<slug>/<agent_key>.md`); an unreadable ack reads as no ack;
+  RULING 55b1056b 2026-09-06: the OWNER's terminal status (`router.TERMINAL_STATUSES`) ends a broadcast for EVERYONE —
+  it is open for nobody, on the old set and on the seed — while a recipient's ack still closes it for that recipient
+  only; `respond` on a broadcast writes the responder's ack record itself. DUAL-RUN RULE: `coord-fold close` on a
+  broadcast is half a close — coord-fold stays old-plane-free by design, so pair it with
+  `coord-engine inbox <team> --ack <slug> --agent <you>` until cutover, or the old plane reads only_old), idempotent via
   `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). A re-seed RECONCILES: every slug open in the agent's
   coord-fold checkpoint that the correct set no longer contains gets a bus-v4 `close` (ptr = the seed marker),
   so a leaked open is retired on the stream rather than deleted (G28); an unreadable checkpoint makes the whole

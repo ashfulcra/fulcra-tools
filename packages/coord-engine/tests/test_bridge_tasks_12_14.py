@@ -352,7 +352,7 @@ def test_a_directive_whose_task_is_already_terminal_at_emit_time_is_not_mirrored
     assert dual_emit.mirror(FakeTransport(docs), "fulcra", sender="a", to="coord-boss", kind="directive", priority="P1", slug="live", ptr="task/live.md") is True
 
 
-def test_the_old_open_set_includes_star_rows_for_every_non_owner_until_that_agent_acks(monkeypatch):
+def test_the_old_open_set_includes_live_star_rows_for_every_non_owner_until_that_agent_acks_and_never_terminal_ones(monkeypatch):
     """RULING 1 (f9f5823b): a broadcast is an obligation of every recipient except its sender. needs-me yields no
     star rows, so the old set adds them from the full row load: open, assignee "*", owner != agent, deduplicated."""
     rows = [
@@ -369,8 +369,9 @@ def test_the_old_open_set_includes_star_rows_for_every_non_owner_until_that_agen
     monkeypatch.setattr(cli, "_needs_me_rows", lambda transport, team, agent, rows, now, held_roles: [r for r in rows if r["id"] == "mine"])   # by id, never by index
     tr = FakeTransport({cli._ack_path("fulcra", "bcast-ack-doc", "coord-maintainer"): "acked"})   # the engine's own ack path (agent_key is hash-suffixed)
     got, ok, _ = cli._old_open_set(tr, "fulcra", "coord-maintainer")
-    # RULING 13a58789: `bcast-done` stays OPEN for me (the owner's done is not my close); the two I acked are closed for me only
-    assert ok and sorted(r["id"] for r in got) == ["bcast-all-spelling", "bcast-by-boss", "bcast-done", "mine"]
+    # RULING 55b1056b (refining 13a58789): the OWNER's terminal status ends the ask for everyone — `bcast-done` opens
+    # for nobody; the two I acked are closed for me only
+    assert ok and sorted(r["id"] for r in got) == ["bcast-all-spelling", "bcast-by-boss", "mine"]
     got_boss, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-boss")
     assert sorted(r["id"] for r in got_boss) == ["bcast-by-me"]                    # coord-boss owes MY broadcast, never his own
     got_other, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-opus-worker")
