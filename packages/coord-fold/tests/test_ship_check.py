@@ -348,7 +348,10 @@ def test_the_expected_tree_travels_on_stdin_and_its_digest_is_compared_exactly(m
     forged = json.dumps({"file": str(site / "coord_engine" / "__init__.py"), "reported_commit": PIN, "tree_verified": len(tree), "dist_info": "x",
                          "loader": "verified-bytes", "memory_loaded": 1, "tree_digest": hashlib.sha256(b"other").hexdigest(), "rc": 0,
                          "status": {"state": "APPROVED", "head": HEAD, "approvals": ["codex-reviewer", "codex-coder"]}})
-    monkeypatch.setattr(ship_check.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=forged + "\n", stderr=""))
+    # Only the attestation CHILD (the `-c ATTEST` invocation) is forged. r40: the blanket stub used to feed this payload to
+    # `/bin/ls -led` as well, and the P0 hole (any rc-0 body parsed as "no ACL") is what let that pass on macOS.
+    monkeypatch.setattr(ship_check.subprocess, "run",
+                        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=forged + "\n", stderr="") if "-c" in cmd else real_run(cmd, **kw))
     ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "canonical digest" in detail
 
@@ -953,3 +956,44 @@ def test_a_failed_acl_inspection_or_removal_refuses_instead_of_reading_as_no_acl
         ship_check.read_owned_file(str(body))                                        # never reads on a failed inspection
     with pytest.raises((RuntimeError, PermissionError), match="failed"):
         ship_check.strip_acls(str(d))                                                # never "stripped" on a failed removal
+
+
+# ---- coord-fold-ship-24c1e518 P0 (codex-reviewer): an rc-0 `ls -led` body of a shape the gate does not understand is a
+# ---- FAILED inspection, never proof that no ACL is present. -------------------------------------------------------------
+class _Done:
+    def __init__(self, rc, out, err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def test_a_synthetic_unparseable_success_refuses_instead_of_reading_as_no_acl(monkeypatch):
+    monkeypatch.setattr(ship_check.sys, "platform", "darwin")
+    monkeypatch.setattr(ship_check.subprocess, "run", lambda *a, **k: _Done(0, "synthetic unparseable success\n"))
+    import pytest
+    with pytest.raises(PermissionError, match="not the long-format header"):
+        ship_check.acl_entries("/tmp/x")
+    with pytest.raises(PermissionError):
+        ship_check.strip_acls("/tmp/x")                                             # strip must not accept it as "stripped" either
+
+
+def test_the_real_ls_led_shapes_parse_and_only_those(monkeypatch):
+    monkeypatch.setattr(ship_check.sys, "platform", "darwin")
+    header = "drwx------  3 ash  staff  96 Sep  6 10:00 /tmp/x"
+    monkeypatch.setattr(ship_check.subprocess, "run", lambda *a, **k: _Done(0, header + "\n"))
+    assert ship_check.acl_entries("/tmp/x") == []                                    # header only: no ACL, proven by shape
+    body = header + "+\n 0: group:everyone allow write,delete\n 1: user:_spotlight deny delete\n"
+    monkeypatch.setattr(ship_check.subprocess, "run", lambda *a, **k: _Done(0, body))
+    assert ship_check.acl_entries("/tmp/x") == ["0: group:everyone allow write,delete", "1: user:_spotlight deny delete"]
+    import pytest
+    for bad in (header + "\n garbage line\n", "total 0\n" + header + "\n", "", "\n\n"):
+        monkeypatch.setattr(ship_check.subprocess, "run", (lambda _b: (lambda *a, **k: _Done(0, _b)))(bad))
+        with pytest.raises(PermissionError):
+            ship_check.acl_entries("/tmp/x")
+
+
+def test_the_siblings_are_loaded_beside_the_script_and_stay_under_the_ceiling():
+    here = SCRIPT.parent
+    assert (here / "ship_check_private.py").is_file() and (here / "ship_check_attest.py").is_file()
+    assert ship_check.ATTEST.lstrip().startswith("import sys, json")                    # the child program, verbatim
+    assert ship_check.acl_entries.__module__ == "ship_check_private"
+    for f in ("ship_check.py", "ship_check_private.py", "ship_check_attest.py"):
+        assert sum(1 for _ in (here / f).open()) <= 400, f
