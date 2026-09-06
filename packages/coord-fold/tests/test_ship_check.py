@@ -348,7 +348,10 @@ def test_the_expected_tree_travels_on_stdin_and_its_digest_is_compared_exactly(m
     forged = json.dumps({"file": str(site / "coord_engine" / "__init__.py"), "reported_commit": PIN, "tree_verified": len(tree), "dist_info": "x",
                          "loader": "verified-bytes", "memory_loaded": 1, "tree_digest": hashlib.sha256(b"other").hexdigest(), "rc": 0,
                          "status": {"state": "APPROVED", "head": HEAD, "approvals": ["codex-reviewer", "codex-coder"]}})
-    monkeypatch.setattr(ship_check.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=forged + "\n", stderr=""))
+    # Only the attestation CHILD (the `-c ATTEST` invocation) is forged. r40: the blanket stub used to feed this payload to
+    # `/bin/ls -led` as well, and the P0 hole (any rc-0 body parsed as "no ACL") is what let that pass on macOS.
+    monkeypatch.setattr(ship_check.subprocess, "run",
+                        lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=forged + "\n", stderr="") if "-c" in cmd else real_run(cmd, **kw))
     ok, detail, _ = ship_check.attested_status(str(launcher), "acme", f"coord-fold-ship-{HEAD}", PIN)
     assert not ok and "canonical digest" in detail
 
