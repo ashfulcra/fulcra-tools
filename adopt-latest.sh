@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="ee853a01e57ae69a732b252f817244f207b29a7f"   # coord-engine at ee853a01. SEVENTH pin move (first of 2026-09-06). Carries ruling 13a58789 (PR 724: broadcast closes are per-recipient on the old plane, so a recipient who closed a broadcast stops carrying it while the other recipients still do). Engine delta from 430f6835 is cli.py plus its test. Everything in 430f6835 is still here.
+PIN="35baf72777e9c2f8d2b568b610cbf769f0752ab3"   # coord-engine at 35baf727. EIGHTH pin move (second of 2026-09-06). Carries ruling 55b1056b (PR 726): a broadcast whose owner status is terminal is open for nobody, and respond on a broadcast writes the responder's per-recipient ack. Every identity re-seeds --force ONCE on this pin so settled broadcasts leave the fold. Engine delta from ee853a01 is bridge + cli respond plus tests and AGENTS.md. Everything in ee853a01 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
