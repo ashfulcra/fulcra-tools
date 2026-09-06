@@ -8,8 +8,10 @@ This module is the flip. One durable document on the bus,
 
 decides, fleet-wide, what `needs-me` and `obligations` answer from:
 
-* absent / unreadable / malformed / any value but "fold"  -> "files": the old plane stays authoritative. The
-  switch fails SAFE toward today's behaviour; nothing is served from a fold nobody proved.
+* absent -> "files": the old plane stays authoritative until a switch exists. A well-formed "files" also serves files.
+* unreadable / not JSON / malformed -> "unknown": authority cannot be established, so `needs-me` and `obligations`
+  answer UNKNOWN (rc 3) and consult NOTHING — a host that cannot read the switch after the flip must not answer
+  from files and report clean (split-brain; codex-reviewer P0 on engine-ship-gate-6445cde8).
 * "fold" -> the agent's coord-fold checkpoint (team/<team>/member/<agent>/fold/checkpoint.json) is the answer.
   A checkpoint that is absent, unreadable or corrupt is UNKNOWN (rc 3) — never CLEAR: an identity that has not
   seeded its fold does not thereby owe nothing (Ash, 2026-09-06: the identities woken after the flip are exactly
@@ -41,21 +43,29 @@ def checkpoint_path(team: str, agent: str) -> str:
 
 
 def read_switch(transport: Any, team: str) -> tuple[str, str]:
-    """-> ("fold" | "files", why). Only a well-formed document saying "fold" serves from the fold."""
+    """-> ("fold" | "files" | "unknown", why).
+
+    Three states, because two were a split-brain (codex-reviewer, engine-ship-gate-6445cde8 P0): once the fleet
+    has flipped, a host that CANNOT READ the switch must not answer from files and report a clean result.
+    * "files"   — the switch is ABSENT (pre-cutover) or a well-formed document says files.
+    * "fold"    — a well-formed document says fold.
+    * "unknown" — the read failed, raised, or returned bytes that are not a switch. Authority cannot be
+                  established, so the public reads answer UNKNOWN (rc 3) and consult nothing.
+    """
     try:
         body, state = transport.read_classified(switch_path(team))
-    except Exception as exc:                                     # a transport that raises is "files", loudly
-        return "files", f"cutover switch unreadable ({exc}); serving from files"
+    except Exception as exc:
+        return "unknown", f"cutover switch unreadable ({exc}); authority unknown"
     if state == "absent":
         return "files", "no cutover switch on the bus; serving from files"
     if state != "ok" or not body:
-        return "files", f"cutover switch {state}; serving from files"
+        return "unknown", f"cutover switch read state {state!r}; authority unknown"
     try:
         doc = json.loads(body)
     except ValueError:
-        return "files", "cutover switch is not JSON; serving from files"
+        return "unknown", "cutover switch is not JSON; authority unknown"
     if not isinstance(doc, dict) or doc.get("v") != SWITCH_VERSION or doc.get("serve") not in SERVE_VALUES:
-        return "files", "cutover switch malformed; serving from files"
+        return "unknown", "cutover switch is malformed; authority unknown"
     if doc.get("serve") == "fold":
         return "fold", f"cutover switch says fold (set {doc.get('at')} by {doc.get('by')})"
     return "files", f"cutover switch says files (set {doc.get('at')} by {doc.get('by')})"
@@ -93,7 +103,8 @@ def fold_rows(transport: Any, team: str, agent: str) -> tuple[Optional[list[dict
             return None, f"coord-fold checkpoint for {agent} carries a non-object row at {slug!r}"
         rows.append({
             "id": slug, "name": slug, "slug": slug, "title": slug,
-            "priority": str(row.get("pri") or "?"), "status": "open", "kind": "task",
+            "priority": str(row.get("pri") or "?"), "status": "open",
+            "kind": "review" if slug.startswith("review-request-") else "task",
             "owner": row.get("from"), "assignee": row.get("to"), "ptr": row.get("ptr"),
             "opened_at": row.get("at"), "claimed_by": row.get("claimed_by"),
             "served_from": "coord-fold",
