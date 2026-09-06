@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="d1bb4143888f47db7316b9bb7acd01cbc5b31f73"   # coord-engine at d1bb4143. NINTH pin move (third of 2026-09-06). Carries PR 728 (coord-boss 8a280028): export-open confirms each row against the doc its pointer names before seeding it, skips a terminal one as skipped_terminal_doc, keeps an unreadable one; a --force re-seed can no longer re-open a row closed inside the reconcile lag. Every identity re-seeds --force ONCE on this pin. Engine delta from 35baf727 is bridge export-open plus its test and AGENTS.md. Everything in 35baf727 is still here.
+PIN="caeacaa4a9520aa2385d82eb8a303c8128e34fc5"   # coord-engine at caeacaa4. TENTH pin move (third of 2026-09-06). Carries PR 730: a response on a broadcast mirrors its v4 close to ALL recipients (the v3 record still goes to the owner), so a broadcast that goes terminal no longer strands an open in every other recipient's fold. Every identity runs ONE --force re-seed on this pin; the doc check closes stranded opens as stale. Engine delta from d1bb4143 is records.emit_event plus its test and AGENTS.md. Everything in d1bb4143 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
