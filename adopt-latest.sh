@@ -36,7 +36,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="caeacaa4a9520aa2385d82eb8a303c8128e34fc5"   # coord-engine at caeacaa4. TENTH pin move (third of 2026-09-06). Carries PR 730: a response on a broadcast mirrors its v4 close to ALL recipients (the v3 record still goes to the owner), so a broadcast that goes terminal no longer strands an open in every other recipient's fold. Every identity runs ONE --force re-seed on this pin; the doc check closes stranded opens as stale. Engine delta from d1bb4143 is records.emit_event plus its test and AGENTS.md. Everything in d1bb4143 is still here.
+PIN="4f8dcd1921b119d0ecca93d6aaa643da5af19f45"   # coord-engine at 4f8dcd19. ELEVENTH pin move (fourth of 2026-09-06). Carries ruling 316ef7ab (PR 732): a non-owner's respond on a broadcast never flips its status, writes only its own ack and closes only its own fold; the v4 close-to-all fires only on an OWNER-terminal transition. Every identity runs ONE --force re-seed on this pin. Engine delta from caeacaa4 is cmd_respond plus tests and AGENTS.md. Everything in caeacaa4 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
