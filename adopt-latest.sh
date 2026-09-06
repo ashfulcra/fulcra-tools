@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="4f8dcd1921b119d0ecca93d6aaa643da5af19f45"   # coord-engine at 4f8dcd19. ELEVENTH pin move (fourth of 2026-09-06). Carries ruling 316ef7ab (PR 732): a non-owner's respond on a broadcast never flips its status, writes only its own ack and closes only its own fold; the v4 close-to-all fires only on an OWNER-terminal transition. Every identity runs ONE --force re-seed on this pin. Engine delta from caeacaa4 is cmd_respond plus tests and AGENTS.md. Everything in caeacaa4 is still here.
+PIN="6445cde8c3171bddcf4b6fc4c7ceca49776b8240"   # coord-engine at 6445cde8. TWELFTH pin move (fifth of 2026-09-06). Carries the bus-v4 cutover switch (PR 737): coord_engine.cutover reads _coord/bus-v4/cutover.json on every needs-me/obligations call; absent means files (unchanged), serve=fold means the identity's coord-fold checkpoint answers, no checkpoint means UNKNOWN never CLEAR. Nothing is flipped by adopting this build. No re-seed needed: the checkpoint is untouched. Engine delta from 4f8dcd19 is cutover.py + cli hooks/verbs + tests. Everything in 4f8dcd19 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
