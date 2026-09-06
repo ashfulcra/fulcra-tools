@@ -43,6 +43,7 @@ from . import (
     handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
+from . import cutover as cutover_mod
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -862,6 +863,16 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     got = _needs_me_rows(transport, args.team, args.agent, rows, now=now,
                          held_roles=held_roles, include_history=args.all,
                          aggregate_doc=agg_doc, feed_evidence=feed_evidence)
+    # bus-v4 cutover (coord_engine.cutover): when the switch on the bus says "fold", the file-plane fold above
+    # is NOT the answer — the agent's coord-fold checkpoint is. A checkpoint that cannot answer prepends a
+    # `fold-degraded` marker, which the envelope reads as UNKNOWN (rc 3): never CLEAR for an unseeded identity.
+    serve, serve_why = cutover_mod.read_switch(transport, args.team)
+    if serve == "fold":
+        fold_rows, fold_why = cutover_mod.fold_rows(transport, args.team, args.agent)
+        if fold_rows is None:
+            got = [cutover_mod.degraded_row(f"{serve_why}; {fold_why}")] + got
+        else:
+            got = fold_rows
     # Public-read failure contract: an UNKNOWN task fold must announce itself with
     # the shared marker BEFORE the review/forge add-ons pile their own markers onto
     # what would otherwise read as a silently-empty (but "complete") needs-me.
@@ -919,6 +930,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             elif r.get("type") == _READ_DEGRADED:
                 print(f"  read degraded: {r.get('reason')} — task fold unknown "
                       f"(not empty), retry")
+            elif r.get("type") == cutover_mod.FOLD_DEGRADED:
+                print(f"  fold degraded: {r.get('reason')} — obligations UNKNOWN "
+                      f"(not empty): adopt the fleet pin, run one "
+                      f"`obligations --export-open --force`, then `coord-fold fold`")
             elif r.get("type") == _ROLE_DEGRADED:
                 print(_role_degraded_line(r))
             elif (review_line := _review_row_line(r)) is not None:
@@ -6258,10 +6273,31 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # into known-empty.
     needs_me_cache: "Optional[list[dict[str, Any]]]" = None
     needs_me_failure: "Optional[str]" = None
+    # bus-v4 cutover (coord_engine.cutover): ONE pointed read of the switch decides which plane answers the
+    # row-derived components. "fold" bypasses the file-plane index entirely — its readability is not this
+    # answer's concern — and a missing checkpoint is UNREADABLE (UNKNOWN), never CLEAR.
+    serve, serve_why = cutover_mod.read_switch(transport, team)
 
     def _rows_probe(kinds: "tuple[str, ...]"):
         def probe():
             nonlocal needs_me_cache, needs_me_failure
+            if serve == "fold":
+                if fold_dl.expired():
+                    return P(state=S.UNREADABLE,
+                             detail="obligation probe budget exhausted — raise "
+                                    "COORD_OBLIGATION_BUDGET")
+                if needs_me_failure is not None:
+                    return P(state=S.UNREADABLE, detail=needs_me_failure)
+                if needs_me_cache is None:
+                    fold_rows, fold_why = cutover_mod.fold_rows(transport, team, agent)
+                    if fold_rows is None:
+                        needs_me_failure = f"{serve_why}; {fold_why}"
+                        return P(state=S.UNREADABLE, detail=needs_me_failure)
+                    needs_me_cache = fold_rows
+                owed = [r for r in needs_me_cache
+                        if not str(r.get("type") or "").endswith("-source")
+                        and (not kinds or (r.get("kind") or "task") in kinds)]
+                return P(state=S.OK, owed=owed)
             if not rows_ok:
                 return P(state=S.UNREADABLE, detail=rows_reason)
             if fold_dl.expired():
@@ -6844,6 +6880,41 @@ def cmd_compare_to_fold(args: argparse.Namespace, transport: Any) -> int:
     print(f"DIVERGE slugs={slugs} only_old={len(only_old)} only_new={len(only_new)}")
     return 2
 
+
+
+def cmd_cutover_show(args: argparse.Namespace, transport: Any) -> int:
+    """`cutover show <team>` — which plane serves obligations right now, from the switch on the bus."""
+    serve, why = cutover_mod.read_switch(transport, args.team)
+    if getattr(args, "json", False):
+        print(jsonutil.dumps({"type": "cutover", "serve": serve, "why": why, "path": cutover_mod.switch_path(args.team)}))
+    else:
+        print(f"cutover: serving from {serve} — {why}")
+    return 0
+
+
+def cmd_cutover_set(args: argparse.Namespace, transport: Any) -> int:
+    """`cutover set <team> --serve fold|files --reason ...` — THE flip, and its rollback. One write; the previous
+    state is printed first so the change is a diff, never a surprise. Refuses without a reason or an identity."""
+    by = _declared_identity(getattr(args, "agent", None))
+    if not by:
+        print("cutover set: --agent or FULCRA_COORD_AGENT required (the switch records who flipped it)", file=sys.stderr)
+        return 2
+    before, before_why = cutover_mod.read_switch(transport, args.team)
+    try:
+        doc = cutover_mod.switch_doc(serve=args.serve, by=by, reason=args.reason, at=_iso(_now()))
+    except ValueError as exc:
+        print(f"cutover set: {exc}", file=sys.stderr)
+        return 2
+    if not transport.write(cutover_mod.switch_path(args.team), doc):
+        print("cutover set: the switch write did not confirm — nothing changed", file=sys.stderr)
+        return 3
+    after, after_why = cutover_mod.read_switch(transport, args.team)
+    print(f"cutover: was {before} ({before_why}); now {after} ({after_why})")
+    return 0 if after == args.serve else 3
+
+
+def cmd_cutover_dispatch(args: argparse.Namespace, transport: Any) -> int:
+    return {"show": cmd_cutover_show, "set": cmd_cutover_set}[args.cutover_command](args, transport)
 
 def cmd_cutover_ready(args: argparse.Namespace, transport: Any) -> int:
     """`cutover-ready <team> --agent <a>` — Task 14: exit 0 only if the trailing AGREE run is >= --min-run (24),
@@ -13210,6 +13281,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Task 14: old open set vs coord-fold checkpoint, as (slug, pri, ptr) tuples")
     cf.add_argument("team"); cf.add_argument("--agent", required=True)
     cf.set_defaults(func=cmd_compare_to_fold)
+
+    co = sub.add_parser("cutover", help="bus-v4 cutover switch: which plane serves obligations (show / set)")
+    co_sub = co.add_subparsers(dest="cutover_command", required=True)
+    cos = co_sub.add_parser("show", help="which plane serves obligations right now, from the switch on the bus")
+    cos.add_argument("team"); add_json(cos)
+    cot = co_sub.add_parser("set", help="THE flip (and its rollback): write the switch; one write, fleet-wide")
+    cot.add_argument("team"); cot.add_argument("--serve", required=True, choices=list(cutover_mod.SERVE_VALUES))
+    cot.add_argument("--reason", required=True); cot.add_argument("--agent")
+    co.set_defaults(func=cmd_cutover_dispatch)
     cr = sub.add_parser("cutover-ready",
                         help="Task 14: exit 0 only when the trailing AGREE run, span, growth, drill and ship gate all hold")
     cr.add_argument("team"); cr.add_argument("--agent", required=True)
@@ -13846,7 +13926,7 @@ def build_parser() -> argparse.ArgumentParser:
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
     # cmd_obligations_dispatch is MIXED (below): `--export-open`, `--repair-unknown` and `--seed-checkpoint`
     # all write, so the flag decides (Task 12 bridge, 2026-09-05).
-    cmd_obligations_stream, cmd_cutover_ready,
+    cmd_obligations_stream, cmd_cutover_ready, cmd_cutover_show,
     # NOT cmd_obligations_repair: it exists to MUTATE the checkpoint, so
     # running it is activity. The stream fold's checkpoint advance is
     # incidental to a read; this verb's write is the whole point.
@@ -13890,6 +13970,8 @@ _MIXED_MODE_ACTIVITY: dict[Any, Any] = {
     cmd_obligations_dispatch: lambda a: bool(getattr(a, "export_open", False)
                                              or getattr(a, "repair_unknown", False)
                                              or getattr(a, "seed_checkpoint", False)),
+    # `cutover show TEAM` views the switch; `cutover set TEAM --serve ...` writes it (the flip / rollback).
+    cmd_cutover_dispatch: lambda a: getattr(a, "cutover_command", None) == "set",
     # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
     # defers to the same `_digest_persists` the command branches on.
     cmd_digest: lambda a: _digest_persists(a),
