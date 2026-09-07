@@ -593,6 +593,8 @@
 
                   <template x-if="is_done_step">
                     <button @click="next()"
+                            :disabled="firstRunStatus === 'running'"
+                            x-text="completion_label"
                             class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors text-sm">
                       Continue
                     </button>
@@ -610,9 +612,9 @@
                       Skip step
                     </button>
                   </template>
-                  <button @click="if (confirm('Skip this plugin? It won\'t be enabled — you can configure it later from Preferences.')) skipPlugin()"
+                  <button @click="if (confirm('Leave this setup? Saved settings will be kept. This does not stop an existing sync.')) skipPlugin()"
                           class="text-xs text-slate-400 hover:text-slate-600 underline">
-                    Skip plugin
+                    Leave setup
                   </button>
                 </div>
 
@@ -809,15 +811,17 @@
 
               <template x-if="is_done_step">
                 <button @click="next()"
+                        :disabled="firstRunStatus === 'running'"
+                        x-text="completion_label"
                         class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors text-sm">
                   Done
                 </button>
               </template>
 
               <div class="flex-1"></div>
-              <button @click="if (confirm('Cancel this plugin\'s setup? Any partial changes will not be applied.')) skipPlugin()"
+              <button @click="if (confirm('Leave this setup? Saved settings will be kept. This does not stop an existing sync.')) skipPlugin()"
                       class="text-xs text-slate-400 hover:text-slate-600 underline">
-                Cancel setup
+                Leave setup
               </button>
             </div>
 

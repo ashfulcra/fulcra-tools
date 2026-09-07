@@ -16,7 +16,7 @@ from datetime import timedelta
 import time
 from pathlib import Path
 
-from fulcra_collect.plugin import Permission, Plugin, RunContext
+from fulcra_collect.plugin import Permission, Plugin, RunContext, Setting, SetupStep
 
 from . import report
 from .notestore import AccessDeniedError, DEFAULT_GROUP_CONTAINER
@@ -60,39 +60,41 @@ def run(ctx: RunContext) -> None:
                       "error": f"{type(exc).__name__}: {exc}",
                       "elapsed_s": round(time.monotonic() - started, 2)})
         raise
-    payload = {"ok": True, "dry_run": dry_run,
+    payload = {"ok": not bool(stats.errors), "dry_run": dry_run,
                "elapsed_s": round(time.monotonic() - started, 2),
                **stats.as_dict()}
     report.write(payload)
     ctx.log.info("apple-notes: %s", payload)
     ctx.progress(stage="done", **{
         k: v for k, v in stats.as_dict().items() if isinstance(v, int)})
-    # A run where every note failed is a failed run, not a quiet success.
-    if stats.notes_seen and stats.notes_failed == stats.notes_seen:
-        raise RuntimeError(
-            f"apple-notes: all {stats.notes_seen} notes failed to decode; "
-            f"first error: {stats.errors[0] if stats.errors else 'unknown'}")
+    if stats.errors:
+        raise RuntimeError("Apple Notes import completed with errors; "
+                           "progress is saved. See the local run report.")
 
 
 def permission_check(ctx: RunContext) -> dict:
     """Verify the Notes store is actually readable from this process."""
     import sqlite3
+    import tempfile
+    from .notestore import NoteStoreError, snapshot
 
     store = _container(ctx) / "NoteStore.sqlite"
-    if not store.exists():
-        return {"granted": False,
-                "hint": f"No Apple Notes store found at {store}."}
     try:
-        conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True, timeout=2.0)
-        conn.execute("select 1").fetchone()
-        conn.close()
+        with tempfile.TemporaryDirectory() as td:
+            copied = snapshot(store, Path(td))
+            with sqlite3.connect(f"file:{copied}?mode=ro", uri=True, timeout=2.0) as conn:
+                # SELECT 1 does not read the database and accepts an empty file.
+                conn.execute("SELECT Z_PK FROM ZICCLOUDSYNCINGOBJECT LIMIT 1").fetchone()
         return {"granted": True, "hint": None}
-    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+    except (AccessDeniedError, PermissionError):
         return {"granted": False, "hint": (
-            "Cannot open the Notes store — grant Full Disk Access to the "
-            f"process running fulcra-collect. ({exc})")}
-    except AccessDeniedError as exc:
-        return {"granted": False, "hint": str(exc)}
+            "Open Notes and let it finish syncing. In System Settings → Privacy & Security → Full Disk Access, "
+            "Enable access for the app running Collect, then restart Collect "
+            "and choose Verify access.")}
+    except (NoteStoreError, OSError, sqlite3.Error):
+        return {"granted": False, "hint": (
+            "Could not read an Apple Notes database. Open Notes on this Mac "
+            "and let it finish syncing, then verify Full Disk Access for Collect.")}
 
 
 PLUGIN = Plugin(
@@ -111,6 +113,37 @@ PLUGIN = Plugin(
     default_interval=timedelta(hours=6),
     requires_network=True,
     required_permissions=(_FULL_DISK_ACCESS,),
+    permission_check=permission_check,
+    category="journal",
+    required_settings=(
+        Setting(key="dry_run", label="Preview only", kind="toggle", default=False,
+                required=False, help="Read your notes without uploading anything."),
+    ),
+    setup_steps=(
+        SetupStep(kind="intro", title="Bring your Apple Notes into Fulcra",
+                  body_md="Collect copies notes and available attachments from this Mac "
+                  "to your Fulcra vault. It checks for changes every six hours. "
+                  "Your original notes stay in Apple Notes. Open Notes first so notes "
+                  "from your other devices have time to download."),
+        SetupStep(kind="permission_request", title="Allow Collect to read Notes",
+                  body_md="Open **System Settings → Privacy & Security → Full Disk Access** "
+                  "and add the app running Collect. For the downloaded app, add "
+                  "**Fulcra Collect** from Applications. For a source installation, "
+                  "add its Python executable. Restart Collect after granting access, "
+                  "then choose **Verify access**. Collect uses this permission to read "
+                  "the local Notes database. Normal sync leaves your original notes unchanged."),
+        SetupStep(kind="input", title="Choose whether to upload",
+                  body_md="Leave Preview only off to copy your notes to your Fulcra "
+                  "account. Turn it on to check the import without uploading.",
+                  settings_keys=("dry_run",)),
+        SetupStep(kind="done", title="Ready to sync Apple Notes",
+                  body_md="Choose **Enable & start sync** to upload your notes and attachments "
+                  "to your Fulcra vault. In preview mode, choose **Enable & run preview** "
+                  "to check the import without uploading. Large libraries "
+                  "may need several runs; each run saves its progress. Find your "
+                  "copies in **vault/notes/apple/**. Edits outside the imported "
+                  "section are preserved; edits inside it can be replaced on sync."),
+    ),
 )
 
 
@@ -142,6 +175,8 @@ def _run_writeback(ctx: RunContext) -> None:
     from . import writeback
 
     started = time.monotonic()
+    if ctx.config.get("writeback_enabled") is not True:
+        raise RuntimeError("Experimental writeback is disabled. It requires separate explicit opt-in.")
     dry_run = bool(ctx.config.get("dry_run", True))
     result = run_reconcile(container=_container(ctx), log=ctx.log)
 
@@ -164,8 +199,7 @@ def _run_writeback(ctx: RunContext) -> None:
         notes_by_uuid = {n.uuid: n for n in snap[0]}
         attachments_by_note: dict[str, list] = {}
         for att in snap[1]:
-            if att.has_file:
-                attachments_by_note.setdefault(att.note_uuid, []).append(att)
+            attachments_by_note.setdefault(att.note_uuid, []).append(att)
 
     allowed, refused = writeback.plan_writeback(
         changes, notes_by_uuid=notes_by_uuid,

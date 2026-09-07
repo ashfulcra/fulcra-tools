@@ -1500,6 +1500,26 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
 
 ## The daemon (Collect)
 
+- **Apple Notes:** included in the macOS bundle and registry fallback. Use the
+  [wizard](packages/apple-notes/README.md) for Full Disk Access verification and
+  one-way import. Snapshots use a bounded SQLite online-backup subprocess;
+  entity IDs are resolved from Z_PRIMARYKEY. Preserve unowned Markdown and
+  refuse missing/ambiguous fences. Keep real library metrics and source data
+  out of public code, tests, commits, and reports.
+- **Bundled runtime:** the Briefcase app supports --collect and --fulcra CLI
+  dispatch plus an internal --notes-snapshot worker. Build-generated sibling
+  launchers supply fulcra-collect, fulcra, and fulcra-api without a developer
+  venv. Workers must use the bundled launcher, never Python -m flags on the
+  native app executable. The build installs these before signing.
+- **AppleScript writeback is experimental:** it additionally requires explicit
+  writeback_enabled = true and refuses all attachment types. Do not enable it
+  as part of ordinary Notes setup.
+- **Setup does not imply sync consent:** entering the final wizard step must
+  never enable or run a plugin. Use its explicit start action, persist the
+  displayed preview mode before enabling, and fail closed if settings cannot
+  be saved. Run `node --test packages/web-ui/tests/*.test.cjs` when changing
+  wizard navigation or first-run behavior.
+
 - Run it durably as a **launchd** agent, NOT a backgrounded shell process — a
   foreground/`&` daemon dies when its terminal or session ends. Install + load:
   `uv run fulcra-collect install`, then `launchctl bootstrap gui/$(id -u)

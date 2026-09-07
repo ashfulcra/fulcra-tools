@@ -145,3 +145,10 @@ def test_is_running_returns_false_when_pgrep_has_no_match(monkeypatch):
         lambda *a, **kw: _Result(),
     )
     assert ml.is_running() is False
+
+
+def test_bundle_relaunch_uses_launchservices_once(tmp_path, monkeypatch):
+    app = tmp_path / 'Fulcra Collect.app'
+    monkeypatch.setattr(ml.sys, 'executable', str(app / 'Contents/MacOS/Fulcra Collect'))
+    monkeypatch.setattr(ml, 'is_supported', lambda: True)
+    assert ml.find_menubar_command() == ['/usr/bin/open', str(app)]

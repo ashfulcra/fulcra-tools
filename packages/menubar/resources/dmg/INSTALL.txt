@@ -17,10 +17,21 @@ of the screen) — click it to open the app.
 On first launch the app walks you through:
   • signing in to Fulcra,
   • starting the background collector,
-  • and connecting the sources you want (including Gmail).
+  • and connecting the sources you want (including Apple Notes).
 
 
-2. Set up the browser extension (optional)
+2. Connect Apple Notes
+----------------------
+Open Notes on your Mac and let it finish syncing. In Collect's dashboard,
+choose Apple Notes, then Set up. Follow the Full Disk Access step: add Fulcra
+Collect from Applications in System Settings > Privacy & Security > Full Disk
+Access, restart Collect, then Verify access. Choose Enable & start sync to
+upload your notes and attachments to your Fulcra vault. Preview mode checks
+the import without uploading.
+Your notes are copied to vault/notes/apple/ in your Fulcra account; originals
+stay in Notes. Large imports resume over several runs.
+
+3. Set up the browser extension (optional)
 ------------------------------------------
 The attention extension is loaded manually in Chrome:
 

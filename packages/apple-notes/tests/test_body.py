@@ -5,7 +5,7 @@ import pytest
 
 from fulcra_apple_notes import protobuf as pb
 from fulcra_apple_notes.body import BodyDecodeError, decode, decompress
-from conftest import make_body, make_run, pb_str, pb_varint
+from apple_notes_test_helpers import make_body, make_run, pb_str, pb_varint
 
 
 def test_varint_multibyte_roundtrip():

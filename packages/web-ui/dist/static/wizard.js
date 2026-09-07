@@ -146,8 +146,8 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
 
     // First-run state on the wizard's "done" step. User feedback 2026-05-26:
     // after completing setup, the user expected the plugin to actually run
-    // and report success before sending them to the dashboard. We auto-trigger
-    // Run-now on done-step entry for non-service plugins and poll status
+    // and report success before sending them to the dashboard. An explicit
+    // start action on the done step runs non-service plugins and polls status
     // until the run completes (or 10s elapses).
     //   "idle"    — service plugin, no auto-run, or run not started yet
     //   "running" — POST fired, polling for completion
@@ -318,6 +318,13 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     get is_done_step() {
       return this.current_step.kind === "done";
     },
+    get completion_label() {
+      if (this.firstRunStatus === "error") return "Retry sync";
+      if (this.firstRunStatus !== "idle") return "Done";
+      if (this.plugin_contract.kind === "service") return "Enable plugin";
+      const preview = this.inputValues.dry_run;
+      return preview === true || preview === "true" ? "Enable & run preview" : "Enable & start sync";
+    },
 
     // Rendered HTML for body_md
     get body_html() {
@@ -398,13 +405,22 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       }
 
       if (step.kind === "done") {
-        // Enable was already POSTed by _triggerFirstRun on step entry, but
-        // re-issue it in case the user reached this step via a service-kind
-        // plugin (where _triggerFirstRun was skipped). Enable is idempotent.
-        try {
-          await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
-        } catch (e) {
-          console.warn("enable failed:", e);
+        if (this.firstRunStatus === "running") return;
+        if (this.firstRunStatus === "idle" || this.firstRunStatus === "error") {
+          if (this.plugin_contract.kind !== "service") {
+            this.firstRunStatus = "idle";
+            await this._triggerFirstRun();
+            return;
+          }
+          this.firstRunStatus = "running";
+          try {
+            await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
+            this.firstRunStatus = "done";
+          } catch (e) {
+            this.firstRunStatus = "idle";
+            this.stepError = e.message || "Could not enable the plugin.";
+            return;
+          }
         }
         // Cancel any in-flight first-run poll so we don't leak a setTimeout
         // across the route change to the dashboard.
@@ -583,18 +599,8 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.nextBlocked = false;
         }
       }
-      if (this.current_step.kind === "done") {
-        // Auto-trigger the first run when the user reaches the done step.
-        // This closes the loop that user feedback (2026-05-26) flagged:
-        // "this should have offered run for the first time and reported
-        // success when i finished onboarding". For service-kind plugins
-        // (Attention, Plex webhook) there's no scheduled run to trigger
-        // — the service IS the plugin — so we skip and let the dashboard
-        // show "Healthy" once the first event lands.
-        if (this.plugin_contract.kind !== "service") {
-          this._triggerFirstRun();
-        }
-      }
+      // Reaching the final screen is navigation, not permission to upload.
+      // Only its explicitly labeled start action enables and runs a plugin.
     },
 
     // ---------------------------------------------------------------------
@@ -602,6 +608,24 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // ---------------------------------------------------------------------
 
     async _triggerFirstRun() {
+      if (this.firstRunStatus !== "idle") return;
+      this.firstRunStatus = "running";
+      this.firstRunSummary = "";
+      // Persist exactly the execution mode named by the start button, even
+      // if the user skipped the input step after changing its preview toggle.
+      if (this.settingsMap.dry_run) {
+        const preview = this.inputValues.dry_run;
+        try {
+          await api(`/api/plugin/${this.plugin_id}/settings`, {
+            method: "PUT",
+            body: JSON.stringify({dry_run: preview === true || preview === "true"}),
+          });
+        } catch (e) {
+          this.firstRunStatus = "error";
+          this.firstRunSummary = e.message || "Could not save preview mode.";
+          return;
+        }
+      }
       // Capture the prior last_run so we can tell whether the run we kick
       // off has completed (vs reading a stale state from a previous run).
       try {
@@ -611,15 +635,9 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       } catch (_) {
         this._firstRunPriorLastRun = null;
       }
-      // Make sure the plugin is enabled before we trigger — otherwise the
-      // run is a no-op. The done branch in next() also enables, but that
-      // hasn't fired yet (we're on done-step ENTRY, not Finish click).
+      // The user explicitly chose to enable and start the import.
       try {
         await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
-      } catch (_) {}
-      this.firstRunStatus = "running";
-      this.firstRunSummary = "";
-      try {
         await api(`/api/plugin/${this.plugin_id}/run`, { method: "POST" });
       } catch (e) {
         this.firstRunStatus = "error";

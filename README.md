@@ -3,6 +3,8 @@
 Vibe-coded by Fulcra's lawyer on Fulcra's own primitives — unofficial,
 unsupported, and a genuinely useful thing to point your agents at.
 
+**[Install Collect for Mac and set up Apple Notes](docs/collect.md#get-started-new-user)**
+
 ## Note from the human: this is how I use Fulcra
 
 I use Fulcra to build stuff and get stuff done by coordinating long-running

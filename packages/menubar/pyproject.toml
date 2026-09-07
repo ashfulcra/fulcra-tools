@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fulcra-menubar"
-version = "0.1.0"
+version = "0.1.1"
 description = "macOS menubar UI for fulcra-collect (Python v1, pre-Swift)."
 requires-python = ">=3.12"
 dependencies = [
@@ -52,7 +52,7 @@ packages = ["fulcra_menubar"]
 [tool.briefcase]
 project_name = "Fulcra Collect"
 bundle = "com.fulcradynamics"
-version = "0.1.0"
+version = "0.1.1"
 author = "Fulcra Dynamics"
 author_email = "support@fulcradynamics.com"
 
@@ -72,6 +72,7 @@ requires = [
     "fulcra-collect",
     "fulcra-media-helpers",
     "fulcra-dayone",
+    "fulcra-apple-notes",
     "fulcra-attention",
     "fulcra-csv-importer",
     "fulcra-gmail",

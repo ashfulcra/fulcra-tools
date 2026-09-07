@@ -19,40 +19,36 @@ consolidated (see [History](#history)).
 
 ## Get started (new user)
 
-macOS, from source:
+### Mac app (Apple silicon)
+
+The app installer is awaiting Apple notarization. It is **not yet available for
+download**. When ready, it will appear on the [releases page](https://github.com/ashfulcra/fulcra-tools/releases).
+The installation steps below describe that upcoming release.
+
+1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
+2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.
+3. Choose **Install & start daemon** if prompted, then open the dashboard and
+   **Sign in with Fulcra**.
+4. Choose a source and follow **Set up**. For [Apple Notes](../packages/apple-notes),
+   grant Full Disk Access, verify access, then choose **Enable & start sync**.
+
+Requires an Apple silicon Mac running macOS 12 or later. The app includes Python,
+Collect, the Fulcra client, and the plugins; you do not need Terminal or Homebrew.
+The first release will be a beta. Source installation is available for contributors below.
+
+### From source (contributors)
 
 ```bash
-# 1. Prerequisites
-brew install uv python@3.12
-uv tool install fulcra-api          # the `fulcra` CLI — used for browser sign-in
-
-# 2. Clone + install (the extras pull in PyObjC for the menubar + test tooling;
-#    a bare `uv sync` is NOT enough)
-git clone https://github.com/ashfulcra/fulcra-tools.git
-cd fulcra-tools
-uv sync --all-packages --all-extras
-
-# 3. Run the daemon as a login service (survives logout; the hub at 127.0.0.1:9292)
+bash scripts/setup.sh
 uv run fulcra-collect install
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fulcra.collect.plist
-
-# 4. Open the onboarding wizard in your browser
 open "$(cat ~/.config/fulcra-collect/web-url)"
 ```
 
-Then, in the wizard: click **Sign in with Fulcra** → pick a source (e.g. **Trakt
-watch history**) → **Set up** and follow the steps → **Enable plugin**. Your data
-starts syncing into Fulcra. Check progress anytime with `uv run fulcra-collect
-status` or the Dashboard's **Recently** feed.
-
-Optional menu-bar app (one-tap Moment annotations), launched from a GUI session:
-
-```bash
-uv run --package fulcra-menubar python -m fulcra_menubar
-```
-
-Keep a checkout current later with `bash scripts/update.sh`. Full step-by-step
-walkthrough + troubleshooting: **[docs/TESTING.md](TESTING.md)**.
+Run these commands from a checkout of this repository. The setup script requires
+Homebrew on macOS and installs the development environment. Keep a source
+checkout current with `bash scripts/update.sh`.
+[Detailed troubleshooting](TESTING.md).
 
 ## How it fits together
 

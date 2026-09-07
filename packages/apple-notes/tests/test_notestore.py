@@ -90,3 +90,40 @@ def test_note_exposes_its_core_data_primary_key_for_writeback(notes_db):
         note = next(n for n in store.notes() if n.uuid == "note-uuid-1111")
     # AppleScript addresses notes as x-coredata://<store>/ICNote/p<pk>.
     assert note.pk == 2
+
+
+def test_entity_ids_are_resolved_from_the_store(notes_db):
+    import sqlite3
+    with sqlite3.connect(notes_db / 'NoteStore.sqlite') as conn:
+        conn.execute('UPDATE Z_PRIMARYKEY SET Z_ENT=Z_ENT+100')
+        conn.execute('UPDATE ZICCLOUDSYNCINGOBJECT SET Z_ENT=Z_ENT+100')
+    with notestore.NoteStore(notes_db / 'NoteStore.sqlite') as store:
+        assert len(store.notes()) == 2
+        assert len(store.attachments()) == 2
+
+
+def test_snapshot_keeps_committed_wal_rows_during_checkpoint(tmp_path, monkeypatch):
+    import sqlite3
+    import subprocess
+    source = tmp_path / 'live.sqlite'
+    writer = sqlite3.connect(source)
+    writer.execute('PRAGMA journal_mode=WAL')
+    writer.execute('PRAGMA wal_autocheckpoint=0')
+    writer.execute('CREATE TABLE notes (body TEXT)')
+    writer.execute('INSERT INTO notes VALUES ("synthetic note")')
+    writer.commit()
+    original = subprocess.run
+
+    def checkpoint_between_copies(command, **kwargs):
+        result = original(command, **kwargs)
+        if command[:2] == ['cp', '-c'] and command[2] == str(source):
+            writer.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        return result
+
+    monkeypatch.setattr(subprocess, 'run', checkpoint_between_copies)
+    dest = tmp_path / 'snapshot'
+    dest.mkdir()
+    snapshot = notestore.snapshot(source, dest)
+    with sqlite3.connect(snapshot) as conn:
+        assert conn.execute('SELECT count(*) FROM notes').fetchone()[0] == 1
+    writer.close()

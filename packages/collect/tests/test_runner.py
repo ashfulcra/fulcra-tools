@@ -302,3 +302,12 @@ def test_runner_persists_definition_validated_at_from_the_result(collect_home: P
                now=datetime(2026, 7, 6, tzinfo=timezone.utc))
     st = state.load("p")
     assert st.definition_validated_at == "2026-07-06T12:00:00+00:00"
+
+
+def test_bundled_worker_uses_app_cli_not_python_flags(tmp_path, monkeypatch):
+    appbin = tmp_path / 'Collect.app' / 'Contents' / 'MacOS'
+    appbin.mkdir(parents=True)
+    launcher = appbin / 'fulcra-collect'
+    launcher.write_text('#!/bin/sh\n')
+    monkeypatch.setattr(sys, 'executable', str(appbin / 'Fulcra Collect'))
+    assert runner.worker_command('apple-notes') == [str(launcher), '_worker', 'apple-notes']

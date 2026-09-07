@@ -9,6 +9,7 @@ members = [
     "coord-mesh",
     "coord-tracker-bridge",
     "fde-engine",
+    "fulcra-apple-notes",
     "fulcra-attention",
     "fulcra-collect",
     "fulcra-common",
@@ -355,6 +356,28 @@ wheels = [
 ]
 
 [[package]]
+name = "fulcra-apple-notes"
+version = "0.1.0"
+source = { editable = "packages/apple-notes" }
+dependencies = [
+    { name = "fulcra-collect" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fulcra-collect", editable = "packages/collect" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "fulcra-attention"
 version = "0.1.0"
 source = { editable = "packages/attention" }
@@ -630,7 +653,7 @@ provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-menubar"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/menubar" }
 dependencies = [
     { name = "fulcra-collect" },

@@ -204,6 +204,8 @@ def _sync_attachments(attachments, container: Path, state: dict, stats: SyncStat
             stats.attachments_no_file += 1
             continue
         known = state["attachments"].get(att.media_uuid)
+        if known and known.get("path"):
+            links[att.uuid] = known["path"]
         local = notestore.media_file(container, att.media_uuid, att.filename)
         if local is None:
             stats.attachments_no_file += 1
@@ -219,7 +221,16 @@ def _sync_attachments(attachments, container: Path, state: dict, stats: SyncStat
             continue
         remote_rel = render.attachment_path(att.media_uuid, att.filename or local.name)
         remote = f"/vault/{remote_rel}"
-        if known and known.get("size") == size and known.get("path") == remote_rel:
+        import hashlib
+        try:
+            with local.open("rb") as attachment_file:
+                fingerprint = hashlib.file_digest(attachment_file, "sha256").hexdigest()
+        except OSError as exc:
+            stats.attachments_failed += 1
+            stats.errors.append(f"attachment {att.media_uuid}: read failed: {exc}")
+            continue
+        if (known and known.get("sha256") == fingerprint
+                and known.get("path") == remote_rel):
             stats.attachments_unchanged += 1
             links[att.uuid] = remote_rel
             continue
@@ -234,7 +245,7 @@ def _sync_attachments(attachments, container: Path, state: dict, stats: SyncStat
             stats.attachments_failed += 1
             stats.errors.append(f"attachment {att.media_uuid}: {exc}")
             continue
-        state["attachments"][att.media_uuid] = {"path": remote_rel, "size": size}
+        state["attachments"][att.media_uuid] = {"path": remote_rel, "size": size, "sha256": fingerprint}
         stats.attachments_uploaded += 1
         stats.attachment_bytes += size
         links[att.uuid] = remote_rel
@@ -350,8 +361,14 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
 
             if not dry_run:
                 try:
+                    try:
+                        existing = vaultio.read_text(f"/vault/{path_rel}")
+                    except vaultio.MissingFile:
+                        existing = None
+                    if existing is not None:
+                        markdown = render.merge_note(existing, markdown)
                     vaultio.write_text(f"/vault/{path_rel}", markdown)
-                except vaultio.VaultIOError as exc:
+                except (vaultio.VaultIOError, ValueError) as exc:
                     stats.notes_failed += 1
                     stats.errors.append(f"note {note.uuid[:8]}: write failed: {exc}")
                     continue

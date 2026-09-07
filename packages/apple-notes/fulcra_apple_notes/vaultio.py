@@ -13,7 +13,7 @@ decides to overwrite something it merely failed to read).
 from __future__ import annotations
 
 import os
-import shutil
+import shlex
 import subprocess
 import tempfile
 
@@ -29,11 +29,12 @@ class MissingFile(VaultIOError):
 def _cli() -> list[str]:
     env = os.environ.get("FULCRA_CLI_COMMAND", "").strip()
     if env:
-        return env.split()
-    found = shutil.which("fulcra-api")
+        return shlex.split(env)
+    from fulcra_common.client import find_fulcra_cli
+    found = find_fulcra_cli()
     if found:
         return [found]
-    return ["uv", "tool", "run", "fulcra-api"]
+    raise VaultIOError("Fulcra CLI is unavailable. Reinstall Collect or install fulcra-api.")
 
 
 def _is_missing(stderr: str) -> bool:

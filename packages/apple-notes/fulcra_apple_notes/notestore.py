@@ -23,20 +23,13 @@ import sqlite3
 import subprocess
 import tempfile
 
-# Z_ENT discriminators, resolved from Z_PRIMARYKEY on the live store.
-ENT_ATTACHMENT = 5
-ENT_MEDIA = 11
-ENT_NOTE = 12
-ENT_FOLDER = 15
-
 # Core Data stores timestamps as seconds since 2001-01-01 UTC.
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 
 DEFAULT_GROUP_CONTAINER = Path(
     "~/Library/Group Containers/group.com.apple.notes").expanduser()
 
-# A clonefile snapshot is normally fast on APFS. Anything approaching
-# this bound is not slow disk -- it is a process without Full Disk Access
+# Bound the backup process so a blocked Full Disk Access probe cannot
 # parking inside open(2), which must surface as a failure and never as
 # "no notes found".
 SNAPSHOT_TIMEOUT_S = 120
@@ -98,40 +91,26 @@ def default_store_path() -> Path:
 
 
 def snapshot(store: Path, dest_dir: Path) -> Path:
-    """APFS clonefile the store (and its WAL) so we read a stable copy.
-
-    The live database is held open by the Notes app; reading it in place
-    risks `database is locked` and torn reads mid-transaction.
-    """
+    """Read a transaction-consistent backup, killing a blocked permission probe."""
+    import sys
     dest = dest_dir / "NoteStore.sqlite"
-    copied_main = False
-    for suffix in ("", "-wal", "-shm"):
-        src = Path(str(store) + suffix)
-        if not src.exists():
-            continue
-        try:
-            subprocess.run(
-                ["cp", "-c", str(src), str(dest) + suffix],
-                check=True, timeout=SNAPSHOT_TIMEOUT_S, capture_output=True,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise AccessDeniedError(
-                f"copying {src.name} exceeded {SNAPSHOT_TIMEOUT_S}s -- this is "
-                "the signature of a process without Full Disk Access parking "
-                "inside open(2), not a slow disk"
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or b"").decode("utf-8", "replace").lower()
-            if "permission" in stderr or "denied" in stderr:
-                raise AccessDeniedError(
-                    f"permission denied copying {src.name}: grant Full Disk "
-                    "Access to the process running fulcra-collect"
-                ) from exc
-            raise NoteStoreError(f"snapshot failed for {src.name}: {stderr}") from exc
-        if suffix == "":
-            copied_main = True
-    if not copied_main:
-        raise NoteStoreError(f"no Notes store at {store}")
+    app_bin = Path(sys.executable).parent
+    if app_bin.name == "MacOS" and app_bin.parent.name == "Contents":
+        command = [sys.executable, "--notes-snapshot"]
+    else:
+        command = [sys.executable, "-m", "fulcra_apple_notes._snapshot"]
+    try:
+        subprocess.run([*command, str(store), str(dest)], check=True,
+                       timeout=SNAPSHOT_TIMEOUT_S, capture_output=True)
+    except subprocess.TimeoutExpired as exc:
+        raise AccessDeniedError(
+            "Reading Notes timed out. Check Full Disk Access and retry after Notes finishes syncing."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").lower()
+        if any(word in detail for word in ("permission", "denied", "unable to open")):
+            raise AccessDeniedError("Cannot read Notes; verify Full Disk Access.") from exc
+        raise NoteStoreError("Unable to create a consistent Notes snapshot.") from exc
     return dest
 
 
@@ -141,6 +120,15 @@ class NoteStore:
     def __init__(self, db_path: Path):
         self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         self._conn.row_factory = sqlite3.Row
+        try:
+            rows = self._conn.execute("SELECT Z_NAME, Z_ENT FROM Z_PRIMARYKEY").fetchall()
+            self.entities = {row[0]: int(row[1]) for row in rows}
+            for name in ("ICNote", "ICFolder", "ICAttachment", "ICMedia"):
+                if name not in self.entities:
+                    raise NoteStoreError(f"unsupported Notes schema: missing {name}")
+        except Exception:
+            self._conn.close()
+            raise
 
     def close(self) -> None:
         self._conn.close()
@@ -164,7 +152,7 @@ class NoteStore:
             try:
                 rows = self._conn.execute(
                     f"select Z_PK, {col} from ZICCLOUDSYNCINGOBJECT "
-                    f"where Z_ENT=? and {col} is not null", (ENT_FOLDER,)).fetchall()
+                    f"where Z_ENT=? and {col} is not null", (self.entities["ICFolder"],)).fetchall()
             except sqlite3.OperationalError:
                 continue
             for row in rows:
@@ -192,7 +180,7 @@ class NoteStore:
                 n = self._conn.execute(
                     f"select count(*) from ZICCLOUDSYNCINGOBJECT "
                     f"where Z_ENT=? and {candidate} is not null",
-                    (ENT_NOTE,)).fetchone()[0]
+                    (self.entities["ICNote"],)).fetchone()[0]
             except sqlite3.OperationalError:
                 continue
             if n:
@@ -216,7 +204,7 @@ class NoteStore:
             "from ZICCLOUDSYNCINGOBJECT n "
             "join ZICNOTEDATA d on n.ZNOTEDATA = d.Z_PK "
             "where n.Z_ENT = ? and d.ZDATA is not null",
-            (ENT_NOTE,)).fetchall()
+            (self.entities["ICNote"],)).fetchall()
         notes = []
         for row in rows:
             notes.append(Note(
@@ -235,7 +223,7 @@ class NoteStore:
         """Attachments joined to their note and (when present) media row.
 
         LEFT JOIN on media: an INNER join here would silently drop attachments
-        of attachments that have no backing file.
+        that have no backing file.
         """
         rows = self._conn.execute(
             "select a.ZIDENTIFIER as uuid, n.ZIDENTIFIER as note_uuid, "
@@ -247,7 +235,7 @@ class NoteStore:
             "left join ZICCLOUDSYNCINGOBJECT m "
             "       on a.ZMEDIA = m.Z_PK and m.Z_ENT = ? "
             "where a.Z_ENT = ? and n.Z_ENT = ?",
-            (ENT_MEDIA, ENT_ATTACHMENT, ENT_NOTE)).fetchall()
+            (self.entities["ICMedia"], self.entities["ICAttachment"], self.entities["ICNote"])).fetchall()
         return [
             Attachment(
                 uuid=r["uuid"] or "",

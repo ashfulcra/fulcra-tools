@@ -1,160 +1,80 @@
-# fulcra-apple-notes
+# Apple Notes for Fulcra Collect
 
-Syncs Apple Notes into a Fulcra vault as markdown, with attachments.
+Copy Apple Notes and available attachments from your Mac to your Fulcra vault.
+Collect checks for changes every six hours. Your originals remain in Apple Notes.
 
-One way for now (Notes → vault), and additive: it writes only under
-`vault/notes/apple/` and never touches the rest of the vault.
+## Set up
 
-## Install
+1. [Install Fulcra Collect](../../docs/collect.md#get-started-new-user) and sign in.
+2. Open **Notes** on your Mac and let iCloud finish downloading your notes.
+3. In Collect, choose **Apple Notes → Set up**.
+4. Follow the **Full Disk Access** step. Add **Fulcra Collect** from Applications
+   in **System Settings → Privacy & Security → Full Disk Access**, restart
+   Collect, then click **Verify access**.
+5. Leave **Preview only** off to upload, then choose **Enable & start sync**.
+   To check without uploading, turn on **Preview only** and choose **Enable & run preview**.
 
-```bash
-uv pip install -e packages/apple-notes
-fulcra-collect enable apple-notes
+Find your copies in `vault/notes/apple/` in your Fulcra account. Large libraries
+can need several runs. Each run saves progress before stopping; **Run Now** resumes.
+Apple Notes is included in the Mac app; no separate plugin installation is needed.
+
+## What is preserved
+
+- Notes deleted in Apple Notes are marked in the vault and retained.
+- The imported body lives between `<!-- section:apple-note owner:fulcra-collect/apple-notes -->`
+  and `<!-- /section:apple-note -->`. Text outside those markers and unrelated
+  frontmatter fields survive updates. Edits inside the imported section can be
+  replaced by Apple Notes changes.
+- If you remove the markers, Collect refuses to overwrite that file.
+- A failed database read or body decode does not replace good content with an
+  empty note. The database reader uses a consistent SQLite backup.
+- Attachments without available files, including some tables and drawings,
+  appear as unsupported attachments. Previously uploaded links are retained
+  if a local file temporarily becomes unavailable. Files above 25 MB are skipped.
+- Attachment content fingerprints detect changes even when the file size stays
+  the same. An upgrade from the earlier prototype may upload attachments once
+  to establish these fingerprints.
+
+## Troubleshooting
+
+**Access is not verified:** open Notes first, confirm Full Disk Access for
+Collect, then restart Collect. A source installation needs access for the
+Python executable running the daemon instead of the downloadable app.
+
+**Nothing has uploaded:** confirm Fulcra sign-in, that the plugin is enabled,
+and that **Preview only** is off. Use **Run Now** and inspect its result.
+
+**A large import stopped:** a run has a ten-minute work budget. Saved progress
+is resumed on the next run. Keep the Mac awake and connected during import.
+
+Run reports are local files under `~/Library/Logs/fulcra-collect/`:
+`apple-notes-last-run.json` and `apple-notes-runs.jsonl`. These reports can
+contain private identifiers and errors; do not post them unredacted to GitHub.
+
+**Manually removed a vault copy:** the current importer may leave it absent
+until the source note changes. It does not yet offer a full repair pass.
+
+## Advanced modes
+
+The supported setup is one-way import. `mode = "reconcile"` in
+`[plugin_settings.apple-notes]` reports changes on either side without writing.
+Reconciliation reports live in `apple-notes-reconcile.json` in the log directory.
+
+AppleScript writeback is experimental and excluded from the setup wizard.
+It requires `mode = "writeback"` **and** a separate `writeback_enabled = true`;
+`dry_run = true` previews the plan. Do not enable actual writes on valuable
+notes without testing. Writeback refuses conflicts, missing ownership markers,
+and notes with any attachment, including inline tables or drawings. macOS
+Automation permission is also required; a timeout alone does not prove why
+AppleScript failed.
+
+## Development
+
+From a repository checkout with the workspace environment installed:
+
+```sh
+uv run --package fulcra-apple-notes --extra dev pytest packages/apple-notes/tests -q
 ```
 
-It runs inside the collect daemon, which is deliberate: the Notes store
-lives in a TCC-protected group container, so the daemon holds Full Disk
-Access where an arbitrary shell does not.
-
-## Settings
-
-`~/.config/fulcra-collect/config.toml`:
-
-```toml
-[plugin_settings.apple-notes]
-dry_run           = false  # true: decode and count, write nothing
-limit             = 0      # >0: only process the first N notes
-max_attachment_mb = 25     # skip attachments larger than this
-```
-
-## What it writes
-
-```
-vault/notes/apple/<slug>-<uuid8>.md      one file per note
-vault/notes/apple/_attachments/<uuid>/   attachment files
-vault/notes/apple/.sync-state.json       per-note hash + mod date
-```
-
-Each note keeps its body inside an owner-fenced section:
-
-```markdown
-<!-- section:apple-note owner:fulcra-collect/apple-notes -->
-...note content...
-<!-- /section:apple-note -->
-```
-
-Anything you write **outside** that fence survives every later sync. The
-sync only ever rewrites what is inside it.
-
-## Safety properties
-
-These are the behaviours worth knowing, because a sync into a vault you
-already use can do real damage:
-
-- **Deletions are marked, never applied.** A note removed from Apple Notes
-  gets `apple-deleted: true` and keeps its body — at that point the vault
-  copy is the only copy.
-- **A note that fails to decode is skipped, not written empty.** Writing an
-  empty body over a good note would destroy content; staleness will not.
-- **A failed read of the sync state aborts the run.** Treating a transport
-  failure as "no state" would re-upload the entire library and look like a
-  successful first run.
-- **A partial pass never concludes notes were deleted.** The live set is
-  built from the full store read, before any limit is applied.
-- **Runs checkpoint and stop before the worker timeout.** The collect worker
-  is killed at 900s; a first sync of a large library takes far longer, so
-  runs save every 50 notes and stop at 780s. Each run leaves durable
-  progress and the next resumes.
-
-## Observability
-
-Every run writes a report, because the worker's logger output does not
-reach a file an operator can read — a sync could otherwise do nothing and
-still report `done`:
-
-```
-~/Library/Logs/fulcra-collect/apple-notes-last-run.json   latest run
-~/Library/Logs/fulcra-collect/apple-notes-runs.jsonl      history
-```
-
-The report carries content aggregates (`markdown_chars`, `notes_empty_body`,
-`notes_with_structure`) as well as counts, so a decoder regression that
-produced empty bodies shows up as a quality drop rather than a clean run.
-
-## Store schema notes
-
-The reader handles these Apple Notes schema details:
-
-- Notes, folders, attachments and media all share `ZICCLOUDSYNCINGOBJECT`
-  (214 columns), discriminated by `Z_ENT`. **Column meanings differ by
-  entity**: a note's mod date is `ZMODIFICATIONDATE1` and its title
-  `ZTITLE1`; `ZMODIFICATIONDATE`/`ZTITLE` belong to attachments.
-- **Some note rows are husks** — no body, no title, no folder, no mod
-  date, and not marked deleted. Change detection keyed on a mod date can miss valid notes, so notes are filtered on body presence instead.
-- **Not every attachment has a backing file.** Some are inline
-  tables, links and drawings. The media join is a LEFT join so those rows
-  are kept and flagged rather than silently dropped.
-- Attachment files sit **two** levels below `Media/<media-uuid>/`, not one.
-- Bodies are gzip-wrapped protobuf; `body.py` decodes the wire format
-  directly rather than taking a protobuf dependency.
-
-## Two-way sync
-
-Not implemented. The state it needs is recorded from the first write —
-each note carries `apple-uuid`, `apple-modified` and `apple-hash` — so a
-future writer can tell vault-side edits from Notes-side ones without a
-re-import.
-
-## Two-way sync
-
-Detection is built and working; writeback is built but **gated on a macOS
-permission that has not been granted**.
-
-### Modes
-
-```toml
-[plugin_settings.apple-notes]
-mode = "sync"        # default: one-way Apple Notes -> vault
-# mode = "reconcile" # report what changed on each side; writes nothing
-# mode = "writeback" # push vault edits back into Apple Notes
-```
-
-### Reconcile (works today, no permissions)
-
-Classifies every note using three inputs — the Apple note, the vault file,
-and what the last sync wrote. Two of the three is not enough: a vault that
-differs from Apple does not say *which side moved*.
-
-| Status | Meaning |
-|---|---|
-| `unchanged` | neither side moved |
-| `apple_changed` | normal forward sync |
-| `vault_edited` | you edited it in the vault — writeback candidate |
-| `conflict` | both sides moved; not resolved automatically |
-| `new_in_apple` / `missing_in_vault` / `deleted_in_apple` | membership changes |
-
-Only notes whose vault file looks newer than our own write are downloaded.
-Unchanged files are skipped; candidate edits are downloaded for comparison.
-
-Report: `~/Library/Logs/fulcra-collect/apple-notes-reconcile.json`
-
-### Writeback (blocked)
-
-Pushes `vault_edited` notes back via AppleScript. It **refuses** by default:
-
-- any note with attachments — replacing a body is expected to drop them
-  (**unverified**: confirming it needs the consent below)
-- any `conflict`
-- any note no longer in the store
-- any file whose owner fence was removed (we cannot delimit what to push)
-
-It is dry-run unless explicitly disabled, because bulk body replacement
-can lose content and cannot be automatically undone.
-
-**Blocked on:** TCC Automation consent for Notes. AppleScript currently
-returns `AppleEvent timed out (-1712)`, which is what an unanswered consent
-prompt looks like. Approve under System Settings → Privacy & Security →
-Automation, then run with `mode = "writeback"`, `dry_run = false`.
-
-Note that a dry run does **not** probe AppleScript, because probing
-launches Notes.app; set `probe_automation = true` to check availability.
+The tests use synthetic Notes stores. Keep personal library sizes, note titles,
+contents, paths, account identifiers, and real exports out of commits and PRs.

@@ -75,7 +75,7 @@ def _fm_value(value) -> str:
         return "true" if value else "false"
     text = str(value)
     if text == "" or re.search(r'[:#\[\]{}",\n]', text) or text.strip() != text:
-        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r") + '"'
     return text
 
 
@@ -101,6 +101,8 @@ def resolve_attachments(markdown: str, links: dict[str, str]) -> str:
         if not target:
             return "*(unsupported attachment)*"
         ext = target[target.rfind("."):].lower() if "." in target else ""
+        if target.startswith(NOTES_DIR + "/"):
+            target = target[len(NOTES_DIR) + 1:]
         name = target.rsplit("/", 1)[-1]
         if ext in _EMBEDDABLE:
             return f"![{name}]({_encode(target)})"
@@ -150,3 +152,36 @@ def render_note(*, uuid: str, title: str, folder: str, body_markdown: str,
     parts.append(f"- {synced_at.date().isoformat()} synced from Apple Notes by {OWNER}")
     parts.append("")
     return "\n".join(parts)
+
+
+def merge_note(existing: str, generated: str) -> str:
+    """Replace the owned section and managed metadata, preserving user text."""
+    for text in (existing, generated):
+        if (text.count(OPEN_FENCE) != 1 or text.count(CLOSE_FENCE) != 1
+                or text.index(OPEN_FENCE) > text.index(CLOSE_FENCE)):
+            raise ValueError("owner fence missing or ambiguous; refusing to overwrite")
+    start = existing.index(OPEN_FENCE)
+    end = existing.index(CLOSE_FENCE) + len(CLOSE_FENCE)
+    owned = generated[generated.index(OPEN_FENCE):
+                      generated.index(CLOSE_FENCE) + len(CLOSE_FENCE)]
+    merged = existing[:start] + owned + existing[end:]
+    # Generated metadata is single-line YAML. Leave all unowned keys intact.
+    header = re.match(r"\A---\n(.*?)\n---(?:\n|$)", merged, re.S)
+    fresh = re.match(r"\A---\n(.*?)\n---(?:\n|$)", generated, re.S)
+    if not header or not fresh:
+        raise ValueError("frontmatter missing; refusing to overwrite")
+    lines = header.group(1).splitlines()
+    for line in fresh.group(1).splitlines():
+        key = line.split(":", 1)[0]
+        hits = [i for i, old in enumerate(lines) if old.startswith(key + ":")]
+        if len(hits) > 1:
+            raise ValueError("ambiguous managed metadata; refusing to overwrite")
+        if hits:
+            i = hits[0]
+            # Multiline YAML edited by a user cannot safely be rewritten linewise.
+            if i + 1 < len(lines) and lines[i + 1].startswith((" ", "\t")):
+                raise ValueError("multiline managed metadata; refusing to overwrite")
+            lines[i] = line
+        else:
+            lines.append(line)
+    return merged[:header.start(1)] + "\n".join(lines) + merged[header.end(1):]

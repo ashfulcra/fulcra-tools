@@ -376,3 +376,74 @@ def test_state_updated_at_is_the_save_time_not_the_run_start(notes_db, monkeypat
     assert saved["run_started_at"].startswith("2020-01-01")
     assert not saved["updated_at"].startswith("2020-01-01"), \
         "updated_at must reflect when the state was actually written"
+
+
+def test_resync_preserves_user_text_and_frontmatter(notes_db, monkeypatch):
+    import sqlite3
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    path = '/vault/' + render.note_filename('note-uuid-1111', 'Soup')
+    vault.files[path] = vault.files[path].replace('source: apple-notes', 'my-tag: keep\nsource: apple-notes') + '\nMy annotation stays.\n'
+    with sqlite3.connect(notes_db / 'NoteStore.sqlite') as conn:
+        conn.execute('UPDATE ZICCLOUDSYNCINGOBJECT SET ZMODIFICATIONDATE1=ZMODIFICATIONDATE1+1 WHERE Z_PK=2')
+    sync.run_sync(container=notes_db, log=LOG)
+    assert vault.files[path].endswith('\nMy annotation stays.\n')
+    assert 'my-tag: keep\n' in vault.files[path]
+
+
+def test_resync_refuses_removed_fence(notes_db, monkeypatch):
+    import sqlite3
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    path = '/vault/' + render.note_filename('note-uuid-1111', 'Soup')
+    vault.files[path] = 'My restructured note'
+    with sqlite3.connect(notes_db / 'NoteStore.sqlite') as conn:
+        conn.execute('UPDATE ZICCLOUDSYNCINGOBJECT SET ZMODIFICATIONDATE1=ZMODIFICATIONDATE1+1 WHERE Z_PK=2')
+    stats = sync.run_sync(container=notes_db, log=LOG)
+    assert vault.files[path] == 'My restructured note'
+    assert stats.notes_failed == 1
+
+
+def test_unavailable_attachment_retains_previously_exported_link(notes_db, monkeypatch):
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    path = '/vault/' + render.note_filename('note-uuid-1111', 'Soup')
+    before = vault.files[path]
+    for p in notes_db.rglob('photo.png'):
+        p.unlink()
+    sync.run_sync(container=notes_db, log=LOG)
+    assert vault.files[path] == before
+
+
+def test_same_size_attachment_edit_is_uploaded(notes_db, monkeypatch):
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    vault.uploads.clear()
+    for p in notes_db.rglob('photo.png'):
+        p.write_bytes(b'y' * p.stat().st_size)
+    sync.run_sync(container=notes_db, log=LOG)
+    assert len(vault.uploads) == 1
+
+
+def test_attachment_link_resolves_from_note_directory():
+    from urllib.parse import urljoin
+    md = render.resolve_attachments('{{attachment:a}}', {'a': 'notes/apple/_attachments/m/x.png'})
+    target = md.split('](', 1)[1].rstrip(')')
+    assert urljoin('https://example.test/vault/notes/apple/soup.md', target) == 'https://example.test/vault/notes/apple/_attachments/m/x.png'
+
+
+def test_unreadable_attachment_does_not_stop_later_notes(notes_db, monkeypatch):
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    photo = next(notes_db.rglob('photo.png'))
+    original_open = Path.open
+
+    def deny_body(path, *args, **kwargs):
+        if path == photo:
+            raise PermissionError('synthetic unreadable attachment')
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', deny_body)
+    stats = sync.run_sync(container=notes_db, log=LOG)
+    assert stats.attachments_failed == 1
+    assert stats.notes_unchanged == 2

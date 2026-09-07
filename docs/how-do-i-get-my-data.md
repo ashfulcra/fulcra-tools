@@ -289,3 +289,14 @@ shows up in Fulcra, with no machine-id suffix.
 `packages/{attention,dayone,gmail,media-helpers,purpleair}/pyproject.toml` and the
 plugin definitions in `collect_plugin.py` / `collect_plugins.py`. If
 you add or remove a plugin, update this page.
+
+
+## Apple Notes
+
+The `apple-notes` plugin in [Fulcra Collect](collect.md#get-started-new-user)
+copies notes and available attachments from the Notes app on your Mac into
+`vault/notes/apple/` in your Fulcra account. It checks for changes every six hours.
+Open Notes and let it sync, then choose **Apple Notes → Set up** in Collect,
+grant Full Disk Access, verify access, and enable the plugin. **Run Now** starts
+an import immediately. Large imports resume over multiple runs.
+[Setup, limitations, and troubleshooting](../packages/apple-notes/README.md).
