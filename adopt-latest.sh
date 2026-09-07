@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="e9bbe55b6efa1f8cce2873fc2401c0b97602f30a"   # coord-engine at e9bbe55b. FOURTEENTH pin move (fifth of 2026-09-06). Carries PR 741 (cutover round 3): the checkpoint's own health (unread_events, unreadable_pointers) survives the serving boundary as UNKNOWN with rows retained, and forge feedback under fold is served from the projection by pointed reads only. Adopting flips nothing; the switch is absent on the bus. Engine delta from c4a8410a is cutover.py + cli fold probes + tests. Everything in c4a8410a is still here.
+PIN="3901251e7cb7bde8b37690315c335f466bfa9298"   # coord-engine at 3901251e. FIFTEENTH pin move (first after the bus-v4 cutover of 2026-09-07T10:54:20Z). Carries PR 744: the forge projection build budget default rises 60s -> 300s so reconcile hosts stamp a COMPLETE forge section, which the fold-served obligations answer needs to read DATA instead of UNKNOWN. Adopting flips nothing (the switch is already fold). No re-seed. Engine delta from e9bbe55b is one constant in projection.py. Everything in e9bbe55b is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
