@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="3901251e7cb7bde8b37690315c335f466bfa9298"   # coord-engine at 3901251e. FIFTEENTH pin move (first after the bus-v4 cutover of 2026-09-07T10:54:20Z). Carries PR 744: the forge projection build budget default rises 60s -> 300s so reconcile hosts stamp a COMPLETE forge section, which the fold-served obligations answer needs to read DATA instead of UNKNOWN. Adopting flips nothing (the switch is already fold). No re-seed. Engine delta from e9bbe55b is one constant in projection.py. Everything in e9bbe55b is still here.
+PIN="1994a3ead63189afc4b1e18d159c6a31bb7a5c1c"   # coord-engine at 1994a3ea. SIXTEENTH pin move (second after the bus-v4 cutover of 2026-09-07T10:54:20Z). Carries PR 746: reconcile writes summaries.json (fence-stamped) when generation publication is refused ONLY because inventory sections (responses/acks/roles/presence) exhausted their budget while every projection section is complete; current.json still never advances on refusal. Measured 2026-09-07: no 2.0.6 host had rewritten summaries.json in weeks, so every fold-served obligations answer read UNKNOWN on "forge fence mismatch". Adopting flips nothing (the switch is already fold). No re-seed. Engine delta from 3901251e is reconcile.py + tests. Everything in 3901251e is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
