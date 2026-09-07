@@ -130,11 +130,14 @@ DEFAULT_MAX_AGE_HOURS = 24.0
 #: ``complete: false`` (readers keep raw-scanning, loudly) and the next pass
 #: resumes converging — carried rows cost nothing, so each pass reaches further.
 DEFAULT_BUILD_BUDGET = 240.0
-#: The FORGE section's own budget, seconds. Deliberately smaller than the review
-#: budget: the forge fold is one listing per watched PR over a far smaller
-#: population, so it does not need parity — it needs a floor that a busy review
-#: fold cannot take away.
-DEFAULT_FORGE_BUDGET = 60.0
+#: The FORGE section's own budget, seconds. Deliberately DIFFERENT from the review
+#: budget (the decoupling test pins that): the forge fold is one listing per
+#: watched PR over a smaller population, so it does not need parity — it needs a
+#: floor that a busy review fold cannot take away. Raised 60 -> 300 on 2026-09-07:
+#: after the bus-v4 cutover the forge section is served by pointed reads only and
+#: an INCOMPLETE section makes every fold-served answer UNKNOWN; measured on the
+#: live team, 60s left `complete: false` on every v2.0.6 reconcile host.
+DEFAULT_FORGE_BUDGET = 300.0
 
 #: How many UNKNOWN slugs may be re-scanned once within the same pass. Small by
 #: intent: a handful is a transient, a crowd is a budget cut, and only the first
