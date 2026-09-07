@@ -121,6 +121,11 @@ under `skills/`, each package with its own README, build, and tests.
   logic belongs in the **macOS app target** even when only the extension uses
   it at runtime — that is what makes it reachable by `@testable import
   FulcraAttention`.
+- **Sign the native command launchers explicitly.** Briefcase does not discover
+  the extra `fulcra-collect`, `fulcra`, and `fulcra-api` executables in
+  `Contents/MacOS`. The release script signs each with Developer ID, a secure
+  timestamp, and hardened runtime before Briefcase seals the outer app. A valid
+  outer resource seal alone does not establish notarization eligibility.
 - **Shipping a new plugin in the frozen macOS app** — the menubar Briefcase
   `requires` is the ONLY list you edit, but it is not sufficient on its own: a
   monorepo package isn't on PyPI, so the release build must also build a local

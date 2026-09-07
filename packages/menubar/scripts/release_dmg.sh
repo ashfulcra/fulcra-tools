@@ -67,6 +67,12 @@ echo "=== 2/7  sign the app inside-out via Briefcase (Developer ID, hardened run
 # `package -p zip … --no-notarize` runs Briefcase's signer over every nested
 # Mach-O with the macOS template's Python entitlements, then zips the signed
 # app. We only want the side effect: build/…/Fulcra Collect.app signed in place.
+# Briefcase signs its app stub and dependencies, but does not discover these
+# extra command executables in Contents/MacOS. Sign them before sealing the app.
+for launcher in fulcra-collect fulcra fulcra-api; do
+  codesign --force --timestamp --options runtime -s "$FULCRA_SIGN_IDENTITY" \
+    "$APP/Contents/MacOS/$launcher"
+done
 cd "$MENUBAR"
 PIP_FIND_LINKS="$REPO/wheelhouse" uvx briefcase package macOS \
   -p zip -i "$FULCRA_SIGN_IDENTITY" --no-notarize
