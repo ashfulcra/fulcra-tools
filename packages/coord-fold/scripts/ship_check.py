@@ -26,12 +26,14 @@ REQUIRED = ("codex-reviewer", "codex-coder")
 # Engine heads whose register `review-winning-envelope-e9c0089b` read APPROVED AND whose pin PR shipped.
 # EMPTY until a deliberate plan revision adds one; an empty set means ship_check refuses, correctly.
 APPROVED_ENGINE_PINS: frozenset = frozenset({
-    "e9bbe55b6efa1f8cce2873fc2401c0b97602f30a",   # 2026-09-06: the fleet pin moved here (PR #742 merged; store adopt-latest.sh uploaded 21:43:24Z,
-                                                  # byte-verified). Register `engine-ship-gate-e9bbe55b` read APPROVED by codex-coder and
-                                                  # codex-reviewer on this exact head (round 3 of the cutover-switch engine, 21:49Z). Carries the
-                                                  # bus-v4 cutover switch (PRs #737, #739, #741) on top of 4f8dcd19: three-state switch read
-                                                  # first, fold served from the checkpoint with its health preserved, forge by pointed reads.
-                                                  # The set names exactly the adopted fleet pin; the previous pin leaves when the fleet leaves it.
+    "1994a3ead63189afc4b1e18d159c6a31bb7a5c1c",   # 2026-09-07: the fleet pin moved here (PR #747 merged; store adopt-latest.sh uploaded 16:42:34Z,
+                                                  # byte-verified). Register `engine-ship-gate-1994a3ea` read APPROVED by codex-coder and
+                                                  # codex-reviewer on this exact head (17:23Z). Carries, on top of e9bbe55b: the forge build
+                                                  # budget default 60s -> 300s (PR #744, pin 3901251e, register engine-ship-gate-3901251e also
+                                                  # APPROVED by both) and reconcile writing the fence-stamped summaries.json when only the
+                                                  # generation's inventory sections refuse publication (PR #746). Nothing in the switch or the
+                                                  # fold-serving path changed. The set names exactly the adopted fleet pin; the previous pin
+                                                  # leaves when the fleet leaves it.
 })
 
 
