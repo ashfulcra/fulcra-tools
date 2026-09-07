@@ -129,7 +129,7 @@ form folds to the newest across all your tasks. Both are pure reads — safe to 
 ```json
 { "schema": "coord.teams.continuity.v1",
   "checkpoint_id": "CHK-<iso>-<task>",
-  "agent": "ash", "task": "build-l6",
+  "agent": "user", "task": "build-l6",
   "objective": "ship the continuity layer",
   "decisions": ["chose structured json over freeform"],
   "next_actions": ["land the PR", "write the skill"],
@@ -228,8 +228,7 @@ Rules, each earned there:
         initial-source / mirror-push / same-owner fork; HARNESS-MAP wall 11).
   - [ ] Write permission: the successor's credential can PUSH the target
         repo — whichever access path applies (GitHub App grant, deploy key,
-        or the accepted internal path: the FulcraBot fine-grained PAT for
-        `ashfulcra/*`, with upstream contributor handoff where applicable) —
+        or a scoped project-bot credential managed in your team's secret store) —
         verified with a `git push --dry-run` probe, not by assumption.
   ```
 

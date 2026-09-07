@@ -98,11 +98,11 @@ def test_threads_json_is_one_value(capsys):
     t = FakeTransport()
     for name in ("a", "b"):
         t.put(f"team/r/task/{name}.md",
-              f"---\ntype: Task\ntitle: {name}\nstatus: active\nassignee: ash\n"
+              f"---\ntype: Task\ntitle: {name}\nstatus: active\nassignee: user\n"
               f"timestamp: 2020-01-01T00:00:00Z\ntags: []\n---\nb")
     reconcile.reconcile(t, "r", now="2026-07-20T00:00:00Z", today="2026-07-20", host="h")
     capsys.readouterr()
-    assert cli.main(["threads", "r", "--for", "ash", "--json"], transport=t) == 0
+    assert cli.main(["threads", "r", "--for", "user", "--json"], transport=t) == 0
     out = capsys.readouterr().out
     v = _one_json_value(out)  # must not raise
     assert isinstance(v, list) and len(v) >= 2
@@ -123,12 +123,12 @@ def test_threads_json_degraded_marker_is_in_the_value(capsys):
     t = T()
     # Fresh timestamp so bounded retention does not archive it before the fold runs.
     t.put("team/r/task/a.md",
-          "---\ntype: Task\ntitle: A\nstatus: proposed\nassignee: ash\n"
-          "timestamp: 2026-07-20T00:00:00Z\ntags: [\"intent:ash\"]\n---\nb")
+          "---\ntype: Task\ntitle: A\nstatus: proposed\nassignee: user\n"
+          "timestamp: 2026-07-20T00:00:00Z\ntags: [\"intent:user\"]\n---\nb")
     reconcile.reconcile(t, "r", now="2026-07-20T00:00:00Z", today="2026-07-20", host="h")
     t.armed = True
     capsys.readouterr()
-    assert cli.main(["threads", "r", "--for", "ash", "--json"], transport=t) == 0
+    assert cli.main(["threads", "r", "--for", "user", "--json"], transport=t) == 0
     out = capsys.readouterr().out
     v = _one_json_value(out)
     assert any(o.get("type") == "threads-degraded" for o in v), v

@@ -116,8 +116,8 @@ def test_blocked_ask_renders_unlock_independent_of_blocked_on(
 
     row = {"name": "slug-1", "owner": "coord-boss", "priority": "P1",
            "title": "A blocked thing", "status": "blocked",
-           "blocked_on": "user:ash", "unlock": "grant the permission"}
-    args = argparse.Namespace(team="r", json=True, human="ash")
+           "blocked_on": "user:user", "unlock": "grant the permission"}
+    args = argparse.Namespace(team="r", json=True, human="user")
     monkeypatch.setattr(cli, "_load_rows_status",
                         lambda transport, team: ([row], True, ""))
     monkeypatch.setattr(
@@ -126,7 +126,7 @@ def test_blocked_ask_renders_unlock_independent_of_blocked_on(
     cli.cmd_asks(args, SimpleNamespace())
     rows = needs_me_rows(strict_parse(capsys.readouterr().out))
     rendered = json.dumps(rows)
-    assert "user:ash" in rendered
+    assert "user:user" in rendered
     assert "grant the permission" in rendered, (
         "unlock must render independently of blocked_on (C12; pr-625)")
 
@@ -242,11 +242,11 @@ def test_oc2_inbox_unreadable_index_is_unknown_rc3(capsys):
 
 def test_oc2_asks_envelope_leads_stdout(capsys, monkeypatch):
     # LADDER PR 3: asks joins contract 2 — same envelope, same health->rc law.
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     t.put("team/r/task/blocked-1.md",
           "---\ntype: Task\ntitle: Decide\nstatus: blocked\nowner: boss\n"
-          "assignee: ash\nblocked_on: user:ash\n"
+          "assignee: user\nblocked_on: user:user\n"
           "timestamp: 2026-08-15T00:00:00Z\n---\n")
     rc = cli.main(["asks", "r", "--json"], transport=t)
     value = strict_parse(capsys.readouterr().out)
@@ -259,7 +259,7 @@ def test_oc2_asks_unreadable_index_is_unknown_rc3(capsys):
     # An unreadable index must never read as "nothing waiting on the human".
     t = FakeTransport()
     t.put("team/r/_coord/summaries.json", "{not json")
-    rc = cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)
+    rc = cli.main(["asks", "r", "--human", "user", "--json"], transport=t)
     v = strict_parse(capsys.readouterr().out)
     assert (v["health"], rc) == ("UNKNOWN", 3)
     assert "source-unreadable" in v["basis"]

@@ -2,7 +2,7 @@
 
 An agent skill that takes a brand-new user from "I messaged a skill link to
 my bot" to "my Netflix viewing history lives in my own Fulcra account as a
-Watched annotation, shared with the movie-night pool."
+Watched annotation, optionally shared with a recipient the user chooses."
 
 The deliverable is the **skill folder** (`skills/fulcra-netflix/`), not a
 Python library: a runtime-agnostic SKILL.md conversation state machine

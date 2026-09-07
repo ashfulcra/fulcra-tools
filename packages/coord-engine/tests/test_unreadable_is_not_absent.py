@@ -327,7 +327,7 @@ def test_escalate_still_mints_when_the_day_row_is_genuinely_absent():
 # the sealed path instead of the transport, and it lands on a write-caller:
 # peer_parks sees status != "error" with existing is None and stubs over a live
 # role doc. Incomplete sections are live on this fleet — reconcile on
-# Ashs-MBP-Work reports "publication refused: incomplete required section(s)"
+# Example-Laptop reports "publication refused: incomplete required section(s)"
 # every pass.
 # ---------------------------------------------------------------------------
 

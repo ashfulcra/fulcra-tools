@@ -73,7 +73,7 @@ TEAM = "team-abc"
 #: nothing under test depends on the words removed.
 ROSTER = """# Fleet roster — nickname resolution
 
-| Nickname (Ash) | Agent name (bus address) | Notes |
+| Nickname (User) | Agent name (bus address) | Notes |
 |---|---|---|
 | Tycho | coord-boss | persistent fleet coordinator (cloud session) |
 | Fabio | coord-fable-worker | reviewer/worker |
@@ -294,7 +294,7 @@ def test_a_name_in_both_tables_resolves_to_nobody():
 @pytest.mark.parametrize("text", ["", "   ", "# heading only\n\nno tables here\n"])
 def test_a_roster_that_yields_no_fleet_agents_is_unreadable(text):
     """NOT 'nobody resolves'. That would file a confident triage verdict on
-    every card in Ash's board on the strength of a failed read."""
+    every card in the user's board on the strength of a failed read."""
     with pytest.raises(RosterUnreadable):
         parse_roster(text)
 
@@ -590,7 +590,7 @@ def test_an_unreadable_roster_is_unknown_and_delivers_nothing(tmp_path):
 
 def test_a_cold_start_refuses_to_deliver(tmp_path):
     """The near-miss that shaped this lane was a plan that would have pushed
-    ~503 creates into a curated board. A cold watermark has the same shape with
+    many creates into a curated board. A cold watermark has the same shape with
     the bus as the target."""
     dispatcher = FakeDispatcher()
     outcome = _run(tmp_path, [_node(f"A-{i}", who="Opie") for i in range(5)],

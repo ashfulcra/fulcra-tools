@@ -252,11 +252,11 @@
     "expected": "https://example.com/cb"
   },
   {
-    "input": "https://example.com/login?email=ash@example.com&token=ABC",
+    "input": "https://example.com/login?email=user@example.com&token=ABC",
     "expected": "https://example.com/login"
   },
   {
-    "input": "https://example.com/welcome?username=ash&theme=dark",
+    "input": "https://example.com/welcome?username=user&theme=dark",
     "expected": "https://example.com/welcome?theme=dark"
   },
   {

@@ -26,7 +26,7 @@ REQUIRED = ("codex-reviewer", "codex-coder")
 # Engine heads whose register `review-winning-envelope-e9c0089b` read APPROVED AND whose pin PR shipped.
 # EMPTY until a deliberate plan revision adds one; an empty set means ship_check refuses, correctly.
 APPROVED_ENGINE_PINS: frozenset = frozenset({
-    "e06e69e5d44d92b2b52a09020f53f2bd1ccdc1d5",   # r38, 2026-09-05: the fleet pin moved here (PR #698 merged; store adopt-latest.sh uploaded by Ash);
+    "e06e69e5d44d92b2b52a09020f53f2bd1ccdc1d5",   # r38, 2026-09-05: the fleet pin moved here (PR #698 merged; store adopt-latest.sh uploaded by the user);
                                                   # this build carries the review supersession contract (PR #695, APPROVED by both required reviewers)
 })
 

@@ -50,7 +50,7 @@ id: fix-the-widget
 status: active                     # proposed|active|waiting|blocked|done|abandoned
 priority: P1
 owner: <the invoking identity>
-assignee: ash
+assignee: user
 next_action: write the test
 ---
 # Fix the widget

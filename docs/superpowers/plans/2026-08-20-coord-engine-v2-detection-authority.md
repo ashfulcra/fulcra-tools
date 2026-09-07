@@ -22,9 +22,9 @@ projections are deterministic, replaceable views.
 `budget.Deadline` for every bounded operation.
 
 **Review protocol:** Implement units in order. Each unit ends at a pushed exact
-head and opens its own `coord-boss` review register naming the invariant. Do not
+head and opens its own `coordinator` review register naming the invariant. Do not
 start the next unit before the prior exact head is approved. Through 2026-08-23,
-`coord-boss` is required and `codex-reviewer` is optional.
+`coordinator` is required and `reviewer` is optional.
 
 **Global constraints:**
 
@@ -140,7 +140,7 @@ Expected: all tests PASS; no diff errors.
 
 Commit with the repository-required co-author trailer. Verify the pushed hash
 with `git ls-remote`, then open review slug
-`engine-v2-unit-1-outcome-spine` for `coord-boss` at the exact head.
+`engine-v2-unit-1-outcome-spine` for `coordinator` at the exact head.
 
 ## Unit 2: Identity and Canonical Classifier
 

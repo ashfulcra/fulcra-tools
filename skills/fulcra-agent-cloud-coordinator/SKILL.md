@@ -17,9 +17,7 @@ of state lives in the Fulcra store, not on the machine.
 
 This is the OpenClaw/Hermes experience (persistent identity, heartbeat,
 durable context) rebuilt on managed cloud infrastructure you don't operate.
-The reference deployment ran a full fleet day — 4 merged PRs, 2 live-incident
-diagnoses, ~20 dispatches — through **seven container resets**, losing
-nothing. The whole trick is one sentence:
+The recovery principle is:
 
 > **The machine is disposable, the agent is permanent, and the context lives
 > in the store.**
@@ -158,8 +156,7 @@ installed tools (reinstall or PYTHONPATH from checkout), MCP connections
 
 **4e. The engine itself rolls back.** A container reset can silently restore
 an OLDER coord-engine than the fleet pin — on a coordinator that is
-blindness (a pre-v1.7 engine has no `queue` verb; this happened twice in one
-morning on the reference deployment). Your bootstrap must probe the verb and
+a capability gap (for example, pre-v1.7 engines have no `queue` verb). Your bootstrap must probe the verb and
 reinstall the pinned engine when it is missing — **install-only, never a
 queue read**: setup can run before the agent wakes, and a cursor-advancing
 read whose output nobody processes silently discards wake hints. For
@@ -167,7 +164,7 @@ fleet-wide convergence there is one command (install pinned engine + your
 own queue read + an adoption claim to the coordinator):
 
 ```bash
-fulcra-api file download team/fulcra/_coord/bus-v3/adopt-latest.sh /tmp/adopt-latest.sh && \
+fulcra-api file download team/<team>/_coord/bus-v3/adopt-latest.sh /tmp/adopt-latest.sh && \
   bash /tmp/adopt-latest.sh <you>
 ```
 

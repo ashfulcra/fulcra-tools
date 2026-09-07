@@ -1,14 +1,14 @@
 {
-  "created_at": "2026-08-17T21:54:44.217573Z",
-  "datashare_name": "mesh outbox for Ash",
+  "created_at": "2024-01-01T12:00:00Z",
+  "datashare_name": "Example shared outbox",
   "fulcra_data_types": [
-    "MomentAnnotation/ca40e083-0810-4d66-914c-cf9935f54502",
+    "MomentAnnotation/00000000-0000-4000-8000-000000000096",
     "file:/reports/"
   ],
-  "fulcra_user_name": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "fulcra_user_name": "00000000-0000-4000-8000-000000000100",
   "fulcra_user_picture": null,
-  "fulcra_userid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-  "permission_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "fulcra_userid": "00000000-0000-4000-8000-000000000100",
+  "permission_id": "00000000-0000-4000-8000-000000000113",
   "share_all_data": false,
   "time_end": null,
   "time_start": null

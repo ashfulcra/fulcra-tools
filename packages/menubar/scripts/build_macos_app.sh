@@ -38,7 +38,9 @@ cd "$REPO/packages/menubar"
 rm -rf build dist
 PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase create macOS
 python3 scripts/install_bundle_launchers.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
+python3 scripts/sanitize_bundle.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
 PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase build macOS
+python3 scripts/sanitize_bundle.py --check-only "build/fulcra-menubar/macos/app/Fulcra Collect.app"
 
 APP="$REPO/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
 PKGS="$APP/Contents/Resources/app_packages"

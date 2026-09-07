@@ -1,6 +1,6 @@
 # Write-path modernization + native revocation (fulcra-api 0.1.37/0.1.38)
 
-**Status:** design note (QA dispatch, fulcra-api 0.1.38 pass) · **Author:** fulcra-prefs-maintainer
+**Status:** design note (QA dispatch, fulcra-api 0.1.38 pass) · **Author:** fulcra-preferences-maintainer
 
 `fulcra-api` 0.1.37 shipped first-class record write/delete, which changes two
 long-standing prefs limitations. This note records the evaluation + the intended

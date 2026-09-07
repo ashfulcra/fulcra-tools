@@ -23,17 +23,17 @@ from coord_engine_test_helpers import FakeTransport
 
 TEAM = "r"
 
-BASE = "cb951ecb-f21c-4aee-826e-2cb0b12517d6"
-AGENT = "0913d5df-830c-458e-b40a-0a04eafaa5cd"
+BASE = "00000000-0000-4000-8000-000000000097"
+AGENT = "00000000-0000-4000-8000-000000000003"
 PLATFORM = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
 HARNESS = "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f60"
 MODEL = "3e4f5a6b-7c8d-4e9f-a0b1-2c3d4e5f6071"
 FULL = {"agent": AGENT, "platform": PLATFORM, "harness": HARNESS,
         "model": MODEL}
 
-#: The live channel (operator-provisioned 2026-08-04), spec set, separate from
+#: A synthetic checkpoint channel, separate from
 #: the events channel.
-CHECKPOINT_TYPE = "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49"
+CHECKPOINT_TYPE = "MomentAnnotation/00000000-0000-4000-8000-000000000074"
 
 
 class RecordingTransport(FakeTransport):
@@ -129,26 +129,26 @@ def test_park_emits_one_moment_per_parked_role():
 
 def test_snapshot_emits_a_moment(capsys):
     t = RecordingTransport()
-    _seed(t, config=_config(), tags={"ash": FULL})
+    _seed(t, config=_config(), tags={"user": FULL})
 
-    assert cli.main(["continuity", "snapshot", TEAM, "ash", "build-l6",
+    assert cli.main(["continuity", "snapshot", TEAM, "user", "build-l6",
                      "--objective", "ship the layer"], transport=t) == 0
 
     (moment,) = _moments(t)
-    assert moment["source"] == "ash"
+    assert moment["source"] == "user"
     assert moment["tags"] == [AGENT, PLATFORM, HARNESS, MODEL, BASE]
     assert json.loads(moment["note"]) == {
-        "v": 1, "kind": "checkpoint", "agent": "ash", "task": "build-l6",
+        "v": 1, "kind": "checkpoint", "agent": "user", "task": "build-l6",
         "objective": "ship the layer",
-        "path": "team/r/member/ash/continuity/build-l6/latest.json"}
+        "path": "team/r/member/user/continuity/build-l6/latest.json"}
     assert capsys.readouterr().err == ""
 
 
 def test_snapshot_moment_carries_the_slugified_task():
     """The note's task/path must name the bytes on disk, not the raw argument."""
     t = RecordingTransport()
-    _seed(t, config=_config(), tags={"ash": FULL})
-    cli.main(["continuity", "snapshot", TEAM, "ash", "feat/Sub Task",
+    _seed(t, config=_config(), tags={"user": FULL})
+    cli.main(["continuity", "snapshot", TEAM, "user", "feat/Sub Task",
               "--objective", "x"], transport=t)
     note = _note(t)
     assert note["task"] == "feat-sub-task"
@@ -161,14 +161,14 @@ def test_resume_emits_nothing_reads_are_not_saves(capsys):
     state was saved when nothing was, and would double every checkpoint's
     apparent frequency."""
     t = RecordingTransport()
-    _seed(t, config=_config(), tags={"ash": FULL})
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    _seed(t, config=_config(), tags={"user": FULL})
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert len(_moments(t)) == 1
 
-    assert cli.main(["continuity", "resume", TEAM, "ash", "w"],
+    assert cli.main(["continuity", "resume", TEAM, "user", "w"],
                     transport=t) == 0
-    assert cli.main(["continuity", "resume", TEAM, "ash"], transport=t) == 0
+    assert cli.main(["continuity", "resume", TEAM, "user"], transport=t) == 0
     assert len(_moments(t)) == 1        # unchanged by two reads
 
 
@@ -209,11 +209,11 @@ def test_absent_config_is_silent_and_park_still_succeeds(capsys):
 
 def test_absent_config_snapshot_still_writes_and_exits_zero(capsys):
     t = RecordingTransport()
-    assert cli.main(["continuity", "snapshot", TEAM, "ash", "w",
+    assert cli.main(["continuity", "snapshot", TEAM, "user", "w",
                      "--objective", "x"], transport=t) == 0
     assert _moments(t) == []
     assert capsys.readouterr().err == ""
-    assert "team/r/member/ash/continuity/w/latest.json" in t.store
+    assert "team/r/member/user/continuity/w/latest.json" in t.store
 
 
 def test_malformed_config_is_loud_and_park_still_succeeds(capsys):
@@ -240,7 +240,7 @@ def test_malformed_config_is_loud_and_park_still_succeeds(capsys):
 def test_malformed_config_never_auto_creates_the_document(capsys):
     t = RecordingTransport()
     _seed(t, config="not json at all")
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert t.store[checkpoint_channel.config_path(TEAM)] == "not json at all"
     assert "INVALID" in capsys.readouterr().err
@@ -252,7 +252,7 @@ def test_a_records_config_copied_into_place_is_invalid_not_interpreted(capsys):
     t = RecordingTransport()
     _seed(t, config='{"data_type": "MomentAnnotation/events", '
                     '"api_version": "v1alpha1"}')
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert _moments(t) == []
     assert t.records_written == []
@@ -291,10 +291,10 @@ def test_record_write_raising_cannot_fail_the_park(capsys):
 def test_record_write_raising_cannot_fail_the_snapshot(capsys):
     t = RecordingTransport(record_raises=True)
     _seed(t, config=_config())
-    assert cli.main(["continuity", "snapshot", TEAM, "ash", "w",
+    assert cli.main(["continuity", "snapshot", TEAM, "user", "w",
                      "--objective", "x"], transport=t) == 0
     assert "checkpoint moment" in capsys.readouterr().err
-    assert "team/r/member/ash/continuity/w/latest.json" in t.store
+    assert "team/r/member/user/continuity/w/latest.json" in t.store
 
 
 def test_unreadable_config_is_unknown_not_absent_and_never_cached(capsys):
@@ -313,13 +313,13 @@ def test_unreadable_config_is_unknown_not_absent_and_never_cached(capsys):
 
     t = Erroring()
     _seed(t, config=_config())
-    assert cli.main(["continuity", "snapshot", TEAM, "ash", "w",
+    assert cli.main(["continuity", "snapshot", TEAM, "user", "w",
                      "--objective", "x"], transport=t) == 0
     assert _moments(t) == []
     assert "unreadable" in capsys.readouterr().err
 
     t.fail_config = False                     # store recovers
-    assert cli.main(["continuity", "snapshot", TEAM, "ash", "w",
+    assert cli.main(["continuity", "snapshot", TEAM, "user", "w",
                      "--objective", "x"], transport=t) == 0
     assert len(_moments(t)) == 1              # the "error" verdict was not memoized
 
@@ -343,16 +343,16 @@ def test_moment_tags_use_the_same_registry_states_as_bus_events(capsys):
     moment still lands — identical to the bus contract."""
     t = RecordingTransport()
     _seed(t, config=_config(), tags={"someone-else": {"agent": AGENT}})
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert _moments(t)[0]["tags"] == [BASE]
-    assert "no identity tag for 'ash'" in capsys.readouterr().err
+    assert "no identity tag for 'user'" in capsys.readouterr().err
 
 
 def test_absent_tag_registry_emits_untagged_and_silently(capsys):
     t = RecordingTransport()
     _seed(t, config=_config())
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert _moments(t)[0]["tags"] is None
     assert capsys.readouterr().err == ""
@@ -360,8 +360,8 @@ def test_absent_tag_registry_emits_untagged_and_silently(capsys):
 
 def test_a_partial_registry_entry_tags_what_it_has():
     t = RecordingTransport()
-    _seed(t, config=_config(), tags={"ash": {"agent": AGENT, "model": MODEL}})
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    _seed(t, config=_config(), tags={"user": {"agent": AGENT, "model": MODEL}})
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert _moments(t)[0]["tags"] == [AGENT, MODEL, BASE]
 
@@ -374,7 +374,7 @@ def test_objective_is_truncated_to_140_characters():
     long_objective = "x" * 139 + "CUT" + "y" * 100
     t = RecordingTransport()
     _seed(t, config=_config())
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w",
+    cli.main(["continuity", "snapshot", TEAM, "user", "w",
               "--objective", long_objective], transport=t)
 
     note = _note(t)
@@ -393,8 +393,8 @@ def test_an_objective_at_the_boundary_is_untouched():
 
 def test_the_note_is_compact_json_in_declared_key_order():
     note = checkpoint_channel.build_note(
-        agent="ash", task="t", objective="o", path="p")
-    assert note == '{"v":1,"kind":"checkpoint","agent":"ash","task":"t",' \
+        agent="user", task="t", objective="o", path="p")
+    assert note == '{"v":1,"kind":"checkpoint","agent":"user","task":"t",' \
                    '"objective":"o","path":"p"}'
     assert " " not in note                         # compact separators
 
@@ -420,8 +420,8 @@ def test_config_lives_beside_records_json_not_inside_it():
 
 def test_emission_never_reads_or_writes_the_records_authority():
     t = RecordingTransport()
-    _seed(t, config=_config(), tags={"ash": FULL})
-    cli.main(["continuity", "snapshot", TEAM, "ash", "w", "--objective", "x"],
+    _seed(t, config=_config(), tags={"user": FULL})
+    cli.main(["continuity", "snapshot", TEAM, "user", "w", "--objective", "x"],
              transport=t)
     assert records.config_path(TEAM) not in t.store
     assert len(_moments(t)) == 1

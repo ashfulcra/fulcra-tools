@@ -1,8 +1,7 @@
-"""`linear-inbox` reads Ash's board and can never write to it.
+"""`linear-inbox` reads the user's board and can never write to it.
 
 The hard rail on this lane is coord-boss's, and it exists because of a
-near-miss: an earlier cutover plan would have pushed ~503 creates into a
-55-issue curated board. So "this verb does not call mutations" is not the
+near-miss: an earlier cutover plan could have flooded a curated board. So "this verb does not call mutations" is not the
 property under test — "this verb CANNOT call one" is.
 
 The second property is the coord-mesh one: a read that fails is UNKNOWN, never
@@ -10,14 +9,10 @@ an empty board. An empty board and an unreadable board look identical to a
 caller unless the code refuses to conflate them, and here the caller is a person
 deciding whether they have work.
 
-FIXTURES ARE SYNTHETIC AND SAY SO. There is no Linear API key on this host, so
-no response has ever been captured from the live API. Per the sealed-secrets and
-coord-mesh lesson — a fixture whose provenance is assumed reads exactly like one
-that was measured — nothing here is labelled captured. `tools/capture_inbox.py`
-exists to stamp a real one on the first live read; until then these shapes are
-hand-built from Linear's published schema and the package's own ISSUES_QUERY,
-and the contract test that pins them against a live capture is skipped rather
-than faked.
+The transport contract fixture preserves a captured API schema with synthetic
+resource identities, issue numbers, activity times and capture time. Payload
+content is redacted. The capture helper applies those substitutions before
+writing a fixture; no live account is accessed by these tests.
 """
 
 import json
@@ -134,15 +129,15 @@ def test_a_transport_failure_is_unknown_not_empty():
 def test_a_stalled_cursor_is_unknown():
     """paginate() raises on a cursor that does not advance; that must surface as
     UNKNOWN rather than as the rows read so far."""
-    pages = [_page([_node("ASH-1", "one")], has_next=True, cursor="c1"),
-             _page([_node("ASH-2", "two")], has_next=True, cursor="c1")]
+    pages = [_page([_node("EXAMPLE-1", "one")], has_next=True, cursor="c1"),
+             _page([_node("EXAMPLE-2", "two")], has_next=True, cursor="c1")]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.unknown, result
 
 
 def test_an_unidentifiable_row_degrades_the_whole_read():
     """A board missing rows it never mentions is the same lie as an empty one."""
-    pages = [_page([_node("ASH-1", "one"), {"title": "no identifier"}])]
+    pages = [_page([_node("EXAMPLE-1", "one"), {"title": "no identifier"}])]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.unknown
     assert "partial" in result.detail
@@ -154,11 +149,11 @@ def test_an_empty_board_is_empty_not_unknown():
 
 
 def test_pagination_collects_every_page():
-    pages = [_page([_node("ASH-2", "two")], has_next=True, cursor="c1"),
-             _page([_node("ASH-1", "one")])]
+    pages = [_page([_node("EXAMPLE-2", "two")], has_next=True, cursor="c1"),
+             _page([_node("EXAMPLE-1", "one")])]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.state == OK
-    assert [i.identifier for i in result.items] == ["ASH-1", "ASH-2"], "sorted, deterministic"
+    assert [i.identifier for i in result.items] == ["EXAMPLE-1", "EXAMPLE-2"], "sorted, deterministic"
 
 
 # --- rendering ------------------------------------------------------------
@@ -178,15 +173,15 @@ def test_the_fold_distinguishes_a_real_empty_board():
 
 def test_the_fold_renders_identifier_state_assignee_and_labels():
     result = fetch_inbox(LinearClient(FakeTransport([
-        _page([_node("ASH-7", "Wire the thing", state="In Progress",
-                     who="Ash", labels=("infra", "p1"))])])), TEAM)
+        _page([_node("EXAMPLE-7", "Wire the thing", state="In Progress",
+                     who="User", labels=("infra", "p1"))])])), TEAM)
     text = render_fold(result, team_id=TEAM)
-    assert "ASH-7" in text and "In Progress" in text and "Ash" in text
+    assert "EXAMPLE-7" in text and "In Progress" in text and "User" in text
     assert "[infra, p1]" in text and "Wire the thing" in text
 
 
 def test_an_unassigned_issue_renders_as_unassigned():
-    result = fetch_inbox(LinearClient(FakeTransport([_page([_node("ASH-9", "orphan")])])), TEAM)
+    result = fetch_inbox(LinearClient(FakeTransport([_page([_node("EXAMPLE-9", "orphan")])])), TEAM)
     assert "unassigned" in render_fold(result, team_id=TEAM)
 
 
@@ -197,11 +192,11 @@ def test_to_item_rejects_a_row_with_no_identifier():
 
 
 def test_to_item_rejects_a_row_with_no_title():
-    assert to_item({"identifier": "ASH-1"}) is None
+    assert to_item({"identifier": "EXAMPLE-1"}) is None
 
 
 def test_to_item_tolerates_missing_optional_fields():
-    item = to_item({"identifier": "ASH-1", "title": "t"})
+    item = to_item({"identifier": "EXAMPLE-1", "title": "t"})
     assert item.state == "unknown" and item.assignee is None and item.labels == ()
 
 
@@ -216,15 +211,7 @@ def real_capture():
 
 
 def test_the_query_fields_exist_on_a_real_response():
-    """UN-SKIPPED 2026-08-19. Pinned against a REAL capture, the same way
-    coord-mesh pins its argv against a captured --help.
-
-    This test was skipped for its whole life until now, deliberately: a
-    hand-written fixture labelled "real" is the exact defect that cost
-    sealed-secrets a review round, so it waited rather than faking one. The
-    capture arrived when coord-boss ran the first live read - 100 nodes from
-    team BUS, payload fields redacted, provenance stamped by
-    tools/capture_inbox.py."""
+    """A captured API shape remains valid after replacing private values."""
     captured = real_capture()
     assert captured.get("captured_from") == "linear.app"
     nodes = captured["response"]["data"]["issues"]["nodes"]
@@ -240,9 +227,10 @@ def test_the_capture_was_taken_with_THIS_query():
     assert real_capture().get("query") == INBOX_QUERY
 
 
-def test_the_capture_carries_its_own_measured_provenance():
+def test_the_capture_carries_schema_provenance_and_synthetic_values():
     captured = real_capture()
     assert captured.get("captured_at")
+    assert "synthetic" in captured.get("fixture_privacy", "")
     assert captured.get("operation") == "CoordInbox"
     assert captured.get("node_count") == len(
         captured["response"]["data"]["issues"]["nodes"])
@@ -297,13 +285,12 @@ def test_the_generic_label_vocabulary_survived_redaction():
         for node in real_capture()["response"]["data"]["issues"]["nodes"]
         for label in ((node.get("labels") or {}).get("nodes") or [])
     }
-    assert {"kind:directive", "lane:active", "origin:ash"} <= names, sorted(names)
+    assert {"kind:directive", "lane:active", "origin:user"} <= names, sorted(names)
 
 
 def test_the_captured_page_is_page_one_of_more():
     """Worth pinning because it shapes the test below: the real board is larger
-    than one page — coord-boss's live read rendered 124 issues from a 100-node
-    first page — so this capture ends with hasNextPage true."""
+    than one page — the synthetic response has a full first page — so this capture ends with hasNextPage true."""
     page_info = real_capture()["response"]["data"]["issues"]["pageInfo"]
     assert page_info["hasNextPage"] is True
     assert page_info["endCursor"]
@@ -324,8 +311,8 @@ def test_the_real_board_renders_a_fold():
     text = render_fold(result, team_id=TEAM)
     assert "UNKNOWN" not in text
     assert f"{captured['node_count']} issue(s)" in text
-    # Real identifiers and states survive normalization into the fold.
-    assert "BUS-" in text
+    # Synthetic identifiers and representative states survive normalization into the fold.
+    assert "EXAMPLE-" in text
     assert any(item.state in {"Backlog", "Done", "In Progress", "Todo"}
                for item in result.items)
 
@@ -401,7 +388,7 @@ def test_a_null_node_is_UNKNOWN_not_a_clean_empty_board():
 
 def test_a_null_among_good_rows_still_degrades_the_whole_read():
     """Partial is the dangerous shape: the good rows make the answer look real."""
-    pages = [_page([_node("ASH-1", "one"), None, _node("ASH-2", "two")])]
+    pages = [_page([_node("EXAMPLE-1", "one"), None, _node("EXAMPLE-2", "two")])]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.unknown
     assert "3 node(s) read" in result.detail, result.detail
@@ -409,7 +396,7 @@ def test_a_null_among_good_rows_still_degrades_the_whole_read():
 
 def test_a_null_on_a_LATER_page_is_not_lost():
     """Cardinality must be preserved across the page boundary too."""
-    pages = [_page([_node("ASH-1", "one")], has_next=True, cursor="c1"),
+    pages = [_page([_node("EXAMPLE-1", "one")], has_next=True, cursor="c1"),
              _page([None])]
     assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
 
@@ -465,7 +452,7 @@ def test_a_missing_pageInfo_is_UNKNOWN_because_completeness_must_be_STATED():
     NOTHING. No labels asserts nothing; "no pagination metadata" would be read
     as "this is the last page", which is a claim of COMPLETENESS — the one claim
     this verb exists never to fake."""
-    result = fetch_inbox(LinearClient(FakeTransport([_page_with(None, [_node("ASH-1", "one")])])), TEAM)
+    result = fetch_inbox(LinearClient(FakeTransport([_page_with(None, [_node("EXAMPLE-1", "one")])])), TEAM)
     assert result.unknown, result
     assert "pageInfo" in result.detail
 
@@ -486,13 +473,13 @@ def test_a_malformed_labels_collection_degrades_the_row(bad):
     non-list under labels.nodes would iterate character by character and yield
     no labels — wrong rather than loud. An issue whose labels cannot be read is
     an issue that cannot be rendered faithfully."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["labels"] = {"nodes": bad} if not isinstance(bad, dict) else bad
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
 def test_absent_labels_are_simply_no_labels():
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node.pop("labels")
     result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
     assert result.state == OK and result.items[0].labels == ()
@@ -503,7 +490,7 @@ def test_absent_labels_are_simply_no_labels():
 # while fixing the issue-level one. Absent has a default; malformed never does.
 
 def _with_labels(labels_value):
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["labels"] = labels_value
     return node
 
@@ -528,7 +515,7 @@ def test_a_truthy_non_object_labels_root_is_UNKNOWN_not_absent(root):
 
 def test_absent_labels_and_absent_nodes_are_both_simply_no_labels():
     for value in (None, {}, {"nodes": None}):
-        node = _with_labels(value) if value is not None else _node("ASH-1", "one")
+        node = _with_labels(value) if value is not None else _node("EXAMPLE-1", "one")
         if value is None:
             node.pop("labels", None)
         result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
@@ -542,23 +529,23 @@ def test_absent_labels_and_absent_nodes_are_both_simply_no_labels():
 # about a field we could not read.
 
 @pytest.mark.parametrize("field,value", [
-    ("state", ["nope"]), ("state", "Todo"), ("assignee", ["nope"]), ("assignee", "Ash"),
+    ("state", ["nope"]), ("state", "Todo"), ("assignee", ["nope"]), ("assignee", "User"),
 ])
 def test_a_truthy_non_object_subfield_degrades_the_row(field, value):
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node[field] = value
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
 @pytest.mark.parametrize("field", ["url", "updatedAt"])
 def test_a_non_string_scalar_degrades_the_row(field):
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node[field] = {"not": "a string"}
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
 def test_absent_state_and_assignee_still_render():
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node.pop("state"); node["assignee"] = None
     result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
     assert result.state == OK
@@ -593,22 +580,22 @@ from coord_tracker_bridge.inbox import _REQUIRED_SUBFIELDS  # noqa: E402
 def test_a_present_but_hollow_state_degrades_the_row(state_obj):
     """It used to render as state='unknown' — a confident answer about a field
     we could not read, on a row we were happy to show."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["state"] = state_obj
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
-@pytest.mark.parametrize("who", [{}, {"name": "Ash"}, {"displayName": "   "}])
+@pytest.mark.parametrize("who", [{}, {"name": "User"}, {"displayName": "   "}])
 def test_a_present_but_hollow_assignee_degrades_the_row(who):
     """It used to render as 'unassigned', which is a claim about who owns work."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["assignee"] = who
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
 def test_absent_state_and_absent_assignee_still_render():
     """The other half of the rule, kept honest: absent is not malformed."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node.pop("state")
     node["assignee"] = None
     result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
@@ -619,16 +606,16 @@ def test_absent_state_and_absent_assignee_still_render():
 
 
 def test_a_whole_state_and_assignee_render_their_values():
-    node = _node("ASH-1", "one", state="In Progress", stype="started", who="Ash")
+    node = _node("EXAMPLE-1", "one", state="In Progress", stype="started", who="User")
     item = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).items[0]
     assert item.state == "In Progress" and item.state_type == "started"
-    assert item.assignee == "Ash"
+    assert item.assignee == "User"
 
 
 def test_the_hollow_state_case_exits_3_through_the_CLI(monkeypatch, capsys):
     from coord_tracker_bridge import cli as _cli
     monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["state"] = {"type": "started"}
     transport = FakeTransport([_page([node])])
     monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
@@ -666,28 +653,28 @@ def test_a_present_malformed_identifier_is_not_masked_by_the_id_fallback(bad):
     """codex's control: identifier=[] fell through `or` to `id`, so a row we
     could not identify rendered as one we could. A fallback is exactly where
     absent and malformed get confused."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["identifier"] = bad
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
 def test_the_id_fallback_still_works_when_identifier_is_genuinely_absent():
     """The other half: absent is not malformed, and the fallback exists for it."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node.pop("identifier")
     result = fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM)
     assert result.state == OK
-    assert result.items[0].identifier == "issue-ASH-1"
+    assert result.items[0].identifier == "issue-EXAMPLE-1"
 
 
 def test_a_null_identifier_falls_back_rather_than_degrading():
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["identifier"] = None
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).state == OK
 
 
 def test_neither_identifier_nor_id_usable_degrades():
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["identifier"] = None
     node["id"] = "   "
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
@@ -697,13 +684,13 @@ def test_neither_identifier_nor_id_usable_degrades():
 def test_a_blank_or_non_string_title_degrades(bad):
     """A blank title rendered a row with an empty label — present, unusable,
     and shown anyway."""
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["title"] = bad
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
 
 def test_an_absent_title_degrades_because_title_is_required():
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node.pop("title")
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
@@ -711,7 +698,7 @@ def test_an_absent_title_degrades_because_title_is_required():
 @pytest.mark.parametrize("field", _OPTIONAL_SCALARS)
 @pytest.mark.parametrize("bad", ["   ", 7, [], {}])
 def test_a_present_unusable_optional_scalar_degrades(field, bad):
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node[field] = bad
     assert fetch_inbox(LinearClient(FakeTransport([_page([node])])), TEAM).unknown
 
@@ -719,7 +706,7 @@ def test_a_present_unusable_optional_scalar_degrades(field, bad):
 @pytest.mark.parametrize("field", _OPTIONAL_SCALARS)
 def test_an_absent_or_null_optional_scalar_is_simply_absent(field):
     for value in (None, "__POP__"):
-        node = _node("ASH-1", "one")
+        node = _node("EXAMPLE-1", "one")
         if value == "__POP__":
             node.pop(field)
         else:
@@ -731,7 +718,7 @@ def test_an_absent_or_null_optional_scalar_is_simply_absent(field):
 def test_the_malformed_identifier_case_exits_3_through_the_CLI(monkeypatch, capsys):
     from coord_tracker_bridge import cli as _cli
     monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
-    node = _node("ASH-1", "one")
+    node = _node("EXAMPLE-1", "one")
     node["identifier"] = []
     transport = FakeTransport([_page([node])])
     monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
@@ -758,7 +745,7 @@ def test_a_falsy_or_non_bool_hasNextPage_is_UNKNOWN_not_the_last_page(bad):
     """The dangerous half: a falsy malformed value stopped pagination early and
     reported a partial board as complete — no error, no missing rows visible,
     just fewer of them than exist."""
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")],
                                   "pageInfo": {"hasNextPage": bad, "endCursor": "c1"}}}}]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.unknown, (bad, result)
@@ -769,7 +756,7 @@ def test_a_falsy_or_non_bool_hasNextPage_is_UNKNOWN_not_the_last_page(bad):
 def test_a_non_string_endCursor_is_UNKNOWN_not_coerced(bad):
     """str([1]) == "[1]" would have sent fabricated pagination back to the
     platform and paged from a cursor nobody issued."""
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")],
                                   "pageInfo": {"hasNextPage": True, "endCursor": bad}}}}]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.unknown, (bad, result)
@@ -777,7 +764,7 @@ def test_a_non_string_endCursor_is_UNKNOWN_not_coerced(bad):
 
 
 def test_a_present_but_hollow_pageInfo_is_UNKNOWN():
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")], "pageInfo": {}}}}]
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")], "pageInfo": {}}}}]
     assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
 
 
@@ -786,13 +773,13 @@ def test_an_omitted_pageInfo_key_is_UNKNOWN_too():
     I argued in the r6 reply that making this raise would trade a silent-pass
     defect for a silent-fail one. That was wrong: a silent PASS here asserts the
     board is whole, and there is no honest default for that."""
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")]}}}]
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")]}}}]
     assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).unknown
 
 
 def test_hasNextPage_false_with_no_endCursor_is_the_last_page():
     """endCursor is only required when we are actually continuing."""
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")],
                                   "pageInfo": {"hasNextPage": False}}}}]
     assert fetch_inbox(LinearClient(FakeTransport(pages)), TEAM).state == OK
 
@@ -806,7 +793,7 @@ def test_a_whitespace_endCursor_does_not_become_a_real_cursor():
 def test_the_bad_pagination_case_exits_3_through_the_CLI(monkeypatch, capsys):
     from coord_tracker_bridge import cli as _cli
     monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")],
                                   "pageInfo": {"hasNextPage": 0, "endCursor": "c1"}}}}]
     transport = FakeTransport(pages)
     monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
@@ -822,7 +809,7 @@ def test_the_bad_pagination_case_exits_3_through_the_CLI(monkeypatch, capsys):
 def test_an_explicit_terminal_page_is_the_only_clean_ending():
     """The positive control for the retirement above: hasNextPage=false is
     evidence of a last page. Nothing else is."""
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")],
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")],
                                   "pageInfo": {"hasNextPage": False}}}}]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.state == OK and len(result.items) == 1
@@ -832,9 +819,9 @@ def test_a_two_step_cursor_cycle_is_detected():
     """THE REGRESSION. Comparing only against the PREVIOUS cursor catches
     c1 -> c1 and misses c1 -> c2 -> c1, which walks until the platform tires."""
     pages = [
-        _page([_node("ASH-1", "one")], has_next=True, cursor="c1"),
-        _page([_node("ASH-2", "two")], has_next=True, cursor="c2"),
-        _page([_node("ASH-3", "three")], has_next=True, cursor="c1"),
+        _page([_node("EXAMPLE-1", "one")], has_next=True, cursor="c1"),
+        _page([_node("EXAMPLE-2", "two")], has_next=True, cursor="c2"),
+        _page([_node("EXAMPLE-3", "three")], has_next=True, cursor="c1"),
     ]
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.unknown, result
@@ -860,9 +847,9 @@ def test_the_immediate_repeat_is_still_caught():
 def test_a_long_acyclic_walk_still_completes():
     """The guard must not overshoot: distinct cursors across many pages are a
     healthy read, however many there are."""
-    pages = [_page([_node(f"ASH-{i}", str(i))], has_next=True, cursor=f"c{i}")
+    pages = [_page([_node(f"EXAMPLE-{i}", str(i))], has_next=True, cursor=f"c{i}")
              for i in range(1, 6)]
-    pages.append(_page([_node("ASH-6", "six")]))
+    pages.append(_page([_node("EXAMPLE-6", "six")]))
     result = fetch_inbox(LinearClient(FakeTransport(pages)), TEAM)
     assert result.state == OK
     assert len(result.items) == 6
@@ -871,7 +858,7 @@ def test_a_long_acyclic_walk_still_completes():
 def test_the_missing_pageInfo_case_exits_3_through_the_CLI(monkeypatch, capsys):
     from coord_tracker_bridge import cli as _cli
     monkeypatch.setenv("LINEAR_API_KEY", "not-a-real-key")
-    pages = [{"data": {"issues": {"nodes": [_node("ASH-1", "one")]}}}]
+    pages = [{"data": {"issues": {"nodes": [_node("EXAMPLE-1", "one")]}}}]
     transport = FakeTransport(pages)
     monkeypatch.setattr(_cli, "HttpxGraphQLTransport", lambda key: transport)
     monkeypatch.setattr(_cli, "ReadOnlyTransport", lambda inner: inner)
@@ -899,7 +886,7 @@ def _capture_tool():
 @pytest.mark.parametrize("value", [
     "agent:coord-boss",
     "agent:claude-code:Mac:fulcra-tools",
-    "agent:coord-reconcile:Ashs-MBP-Work.localdomai",
+    "agent:coord-reconcile:Example-Laptop.localdomai",
     "AGENT:Mixed-Case",
 ])
 def test_agent_labels_are_redacted(value):
@@ -909,7 +896,7 @@ def test_agent_labels_are_redacted(value):
 @pytest.mark.parametrize("value", [
     "coord-reconcile:some-host.local",
     "box.localdomain",
-    "Ashs-MBP-Work.internal",
+    "Example-Laptop.internal",
 ])
 def test_hostname_shaped_labels_are_redacted(value):
     assert _capture_tool().redact_label(value) == "<redacted host label>"
@@ -917,11 +904,11 @@ def test_hostname_shaped_labels_are_redacted(value):
 
 @pytest.mark.parametrize("value", [
     "kind:directive", "kind:task", "lane:active", "lane:backlog",
-    "origin:ash", "origin:fleet", "blocked-on-ash", "P1",
+    "origin:user", "origin:fleet", "blocked-on-user", "P1",
 ])
 def test_generic_vocabulary_survives(value):
     """The other half of the ruling. Over-redacting would strip the labels the
-    contract tests legitimately exercise, and origin:ash is already a committed
+    contract tests legitimately exercise, and origin:user is already a committed
     public value in this package's own default-v2.json policy."""
     assert _capture_tool().redact_label(value) == value
 
@@ -947,3 +934,58 @@ def test_redact_tolerates_a_malformed_labels_block():
     for labels in (None, {}, {"nodes": None}, {"nodes": ["not-a-dict"]}, "nope"):
         node = {"identifier": "BUS-1", "labels": labels}
         tool.redact(node)          # must not raise
+
+
+def test_capture_response_removes_resource_ids_times_and_cursor_without_mutation():
+    tool = _capture_tool()
+    body = {"data": {"issues": {"nodes": [
+        {"id": "private-issue-id", "identifier": "PRIVATE-42",
+         "updatedAt": "2025-03-04T05:06:07.890Z", "title": "Private task",
+         "url": "https://private.example/task", "assignee": None,
+         "state": {"name": "Backlog", "type": "backlog"},
+         "labels": {"nodes": []}},
+        {"id": "private-other-id", "identifier": "PRIVATE-43",
+         "updatedAt": "2025-03-05T05:06:07.890Z", "title": "Other task",
+         "labels": {"nodes": []}},
+    ], "pageInfo": {"hasNextPage": True, "endCursor": "private-page-cursor"}}}}
+    before = json.dumps(body)
+    cleaned = tool.sanitize_response(body)
+    encoded = json.dumps(cleaned)
+    for value in ("private-issue-id", "private-other-id", "PRIVATE-42", "PRIVATE-43",
+                  "2025-03-04", "2025-03-05", "Private task", "private-page-cursor"):
+        assert value not in encoded
+    nodes = cleaned["data"]["issues"]["nodes"]
+    assert len({node["id"] for node in nodes}) == 2
+    assert nodes[0]["identifier"] == "EXAMPLE-1"
+    assert nodes[0]["state"] == {"name": "Backlog", "type": "backlog"}
+    assert cleaned["data"]["issues"]["pageInfo"]["hasNextPage"] is True
+    assert json.dumps(body) == before
+
+
+def test_capture_writes_only_synthetic_identity_and_time_metadata(monkeypatch, tmp_path):
+    tool = _capture_tool()
+    row = _node("PRIVATE-42", "Private task")
+    transport = FakeTransport([_page([row], has_next=True, cursor="private-cursor")])
+    output = tmp_path / "fixture.json"
+    monkeypatch.setenv("LINEAR_API_KEY", "synthetic-test-key")
+    monkeypatch.setattr(tool, "HttpxGraphQLTransport", lambda _: transport)
+    monkeypatch.setattr(tool, "FIXTURE", str(output))
+    monkeypatch.setattr(tool.sys, "argv", ["capture_inbox.py", "--team-id", "private-team"])
+    assert tool.main() == 0
+    encoded = output.read_text()
+    for value in (row["id"], row["identifier"], row["updatedAt"], row["title"],
+                  "private-cursor", "private-team", "synthetic-test-key"):
+        assert value not in encoded
+    result = json.loads(encoded)
+    assert result["captured_at"] == "2024-01-01T00:00:00+00:00"
+    assert "synthetic" in result["fixture_privacy"]
+    assert result["query"] == INBOX_QUERY
+    assert len(transport.posted) == 1
+
+
+@pytest.mark.parametrize("label, expected", [
+    ("origin:private-person", "origin:user"),
+    ("Private project name", "<redacted label>"),
+])
+def test_capture_does_not_reintroduce_private_principals_or_custom_labels(label, expected):
+    assert _capture_tool().redact_label(label) == expected

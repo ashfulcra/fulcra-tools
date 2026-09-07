@@ -51,18 +51,18 @@ def test_pure_classifier_takes_no_transport():
 
 
 def test_typed_user_block_surfaces():
-    rows = [_row("t1", blocked_on="user:ash")]
-    out = query.blocked_on_human(rows, human="ash")
+    rows = [_row("t1", blocked_on="user:user")]
+    out = query.blocked_on_human(rows, human="user")
     assert [r["name"] for r in out] == ["t1"]
     assert out[0]["type"] == "blocked-on-human"
-    assert out[0]["blocked_on_user"] == "ash"
+    assert out[0]["blocked_on_user"] == "user"
     assert not out[0].get("blocked_on_degraded")
 
 
 def test_agent_block_with_known_agent_is_not_surfaced():
     # A legacy plain blocked_on naming a KNOWN agent is agent-blocked, not human.
     rows = [_row("t1", blocked_on="bob")]
-    out = query.blocked_on_human(rows, human="ash", known_agents={"bob"})
+    out = query.blocked_on_human(rows, human="user", known_agents={"bob"})
     assert out == []
 
 
@@ -70,10 +70,10 @@ def test_legacy_ambiguous_value_surfaces():
     # blocked_on names something that is NOT a known agent/role: ambiguity resolves
     # toward SURFACING — show it in the human section (no degraded note; the set was
     # known, the value simply is not in it).
-    rows = [_row("t1", blocked_on="ash")]
-    out = query.blocked_on_human(rows, human="ash", known_agents={"bob"})
+    rows = [_row("t1", blocked_on="user")]
+    out = query.blocked_on_human(rows, human="user", known_agents={"bob"})
     assert [r["name"] for r in out] == ["t1"]
-    assert out[0]["blocked_on_user"] == "ash"
+    assert out[0]["blocked_on_user"] == "user"
     assert not out[0].get("blocked_on_degraded")
 
 
@@ -82,23 +82,23 @@ def test_ambiguity_surfaces_with_degraded_note_when_listing_unknown():
     # plain blocked_on value we cannot classify is SHOWN, with a degraded note —
     # never hidden. Fail-closed here means SHOW.
     rows = [_row("t1", blocked_on="reviewer")]
-    out = query.blocked_on_human(rows, human="ash", known_agents=set(),
+    out = query.blocked_on_human(rows, human="user", known_agents=set(),
                                  roles_unknown=True)
     assert [r["name"] for r in out] == ["t1"]
     assert out[0].get("blocked_on_degraded") is True
 
 
 def test_needs_human_tag_is_human_block():
-    rows = [_row("t1", assignee="ash", blocked_on="please decide X",
+    rows = [_row("t1", assignee="user", blocked_on="please decide X",
                  tags=["needs:human"])]
-    out = query.blocked_on_human(rows, human="ash")
+    out = query.blocked_on_human(rows, human="user")
     assert [r["name"] for r in out] == ["t1"]
-    assert out[0]["blocked_on_user"] == "ash"
+    assert out[0]["blocked_on_user"] == "user"
 
 
 def test_terminal_rows_excluded():
-    rows = [_row("t1", status="done", blocked_on="user:ash")]
-    assert query.blocked_on_human(rows, human="ash") == []
+    rows = [_row("t1", status="done", blocked_on="user:user")]
+    assert query.blocked_on_human(rows, human="user") == []
 
 
 # --- `--on-user` typing ------------------------------------------------------
@@ -108,11 +108,11 @@ def test_on_user_types_blocked_on_field(capsys):
     cli.main(["task", "start", "r", "Ship it", "--status", "active"], transport=t)
     slug = "ship-it"
     capsys.readouterr()
-    rc = cli.main(["task", "block", "r", slug, "--on-user", "ash"], transport=t)
+    rc = cli.main(["task", "block", "r", slug, "--on-user", "user"], transport=t)
     assert rc == 0
     doc = t.store[f"team/r/task/{slug}.md"]
     fm = okf.parse_frontmatter(doc)
-    assert fm["blocked_on"] == "user:ash", fm
+    assert fm["blocked_on"] == "user:user", fm
     assert fm["status"] == "blocked"
     assert "needs:human" in (fm.get("tags") or [])
 
@@ -139,11 +139,11 @@ def _seed(t, rows_docs):
 
 
 def test_briefing_json_has_blocked_on_human_key_first(capsys, monkeypatch):
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     _seed(t, {
-        "t1": {"title": "Decide launch", "status": "blocked", "assignee": "ash",
-               "blocked_on": "user:ash", "tags": ["needs:human"]},
+        "t1": {"title": "Decide launch", "status": "blocked", "assignee": "user",
+               "blocked_on": "user:user", "tags": ["needs:human"]},
         "t2": {"title": "Normal work", "status": "active", "assignee": "alice"},
     })
     capsys.readouterr()
@@ -155,11 +155,11 @@ def test_briefing_json_has_blocked_on_human_key_first(capsys, monkeypatch):
 
 
 def test_briefing_text_renders_blocked_on_human_first(capsys, monkeypatch):
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     _seed(t, {
-        "t1": {"title": "Decide launch", "status": "blocked", "assignee": "ash",
-               "blocked_on": "user:ash", "tags": ["needs:human"]},
+        "t1": {"title": "Decide launch", "status": "blocked", "assignee": "user",
+               "blocked_on": "user:user", "tags": ["needs:human"]},
     })
     capsys.readouterr()
     cli.main(["briefing", "r", "--agent", "alice"], transport=t)
@@ -170,11 +170,11 @@ def test_briefing_text_renders_blocked_on_human_first(capsys, monkeypatch):
 
 
 def test_needs_me_surfaces_blocked_on_human_first(capsys, monkeypatch):
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     _seed(t, {
-        "t1": {"title": "Decide launch", "status": "blocked", "assignee": "ash",
-               "blocked_on": "user:ash", "tags": ["needs:human"]},
+        "t1": {"title": "Decide launch", "status": "blocked", "assignee": "user",
+               "blocked_on": "user:user", "tags": ["needs:human"]},
         "t2": {"title": "Alice work", "status": "active", "assignee": "alice"},
     })
     capsys.readouterr()
@@ -189,7 +189,7 @@ def test_section_costs_zero_additional_transport_ops(capsys, monkeypatch):
     # The op-count proof: a briefing WITH a user:-blocked row must issue exactly the
     # same number of transport ops as one WITHOUT it. The section is derived from
     # rows already in memory, so it can add none.
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
 
     # Both fixtures are IDENTICAL except the one field the section reads from
     # memory (t1.blocked_on): a typed human block that SURFACES vs a known-agent
@@ -200,7 +200,7 @@ def test_section_costs_zero_additional_transport_ops(capsys, monkeypatch):
         t = CountingTransport()
         docs = {
             "t1": {"title": "A task", "status": "blocked", "assignee": "worker",
-                   "blocked_on": ("user:ash" if blocked else "worker")},
+                   "blocked_on": ("user:user" if blocked else "worker")},
             "t2": {"title": "Other", "status": "active", "assignee": "worker"},
         }
         _seed(t, docs)

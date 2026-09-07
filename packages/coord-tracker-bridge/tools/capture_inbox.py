@@ -9,7 +9,7 @@ capture tool that stamps what it observed, and this is the same tool for this
 surface.
 
 It is also read-only by construction: it drives the same `ReadOnlyTransport` the
-verb uses, so a capture run cannot mutate Ash's board either.
+verb uses, so a capture run cannot mutate the user's board either.
 
 Usage (needs LINEAR_API_KEY and a team id; neither is ever written to the
 fixture):
@@ -21,7 +21,6 @@ import json
 import re
 import os
 import sys
-from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -32,8 +31,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURE = os.path.join(os.path.dirname(HERE), "tests", "fixtures", "real_linear_issues.json")
 
 #: Fields we must never write into a fixture that lands in the repository.
-#: Titles and descriptions are Ash's private workspace content; identifiers and
-#: state names are what the tests actually pin.
+#: Titles and descriptions are private workspace content. Field names and
+#: state types are what the contract tests pin. Resource identities and
+#: activity timestamps are replaced separately before publication.
 _REDACT = ("title", "description", "url")
 
 #: Label values that identify the fleet rather than describe the work.
@@ -46,22 +46,35 @@ _REDACT = ("title", "description", "url")
 #: `kind:*`, `lane:*` and other generic vocabulary stay intact: they describe
 #: the work, they leak nothing, and the tests legitimately exercise them.
 _AGENT_LABEL = re.compile(r"^agent:", re.IGNORECASE)
-#: A dotted token with a TLD-ish tail, e.g. "Ashs-MBP-Work.localdomain".
+#: A dotted token with a TLD-ish tail, e.g. "Example-Laptop.localdomain".
 #: Matched anywhere in the value, because the identifier that prompted this rule
 #: was a suffix on an agent label rather than a bare hostname.
 _HOSTNAME_ISH = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z][A-Za-z0-9-]{1,}")
 
 
+# Only public fixture vocabulary survives; custom workspace label names can
+# contain private project names or principals even when they are not hostnames.
+_PUBLIC_LABELS = frozenset({
+    "kind:directive", "kind:task", "kind:idea", "kind:missed",
+    "lane:active", "lane:blocked", "lane:backlog", "lane:asks", "lane:missed",
+    "lane:threads-missed", "origin:user", "origin:fleet", "blocked-on-user",
+    "P1", "P2", "P3", "qa-answer", "type:both", "type:factual",
+})
+
+
 def redact_label(name):
-    """One label name, redacted if it identifies the fleet. Returns the name
-    unchanged when it is generic vocabulary."""
+    """Keep public fixture vocabulary and replace private/custom labels."""
     if not isinstance(name, str):
         return name
     if _AGENT_LABEL.search(name):
         return "<redacted agent label>"
     if _HOSTNAME_ISH.search(name):
         return "<redacted host label>"
-    return name
+    if name in _PUBLIC_LABELS:
+        return name
+    if name.startswith("origin:"):
+        return "origin:user"
+    return "<redacted label>"
 
 
 def redact(node):
@@ -80,6 +93,32 @@ def redact(node):
             for entry in labels["nodes"]
         ]
     return out
+
+
+
+def sanitize_response(response):
+    """Preserve the API shape with synthetic issue identity and activity values.
+
+    Counter-based replacements are independent of the private values: hashing
+    identifiers would still preserve a link to the original workspace.
+    """
+    body = json.loads(json.dumps(response))
+    issues = body.get("data", {}).get("issues", {})
+    sanitized = []
+    for index, node in enumerate(issues.get("nodes", []), 1):
+        out = redact(node)
+        if "id" in out:
+            out["id"] = f"00000000-0000-4000-8000-{index:012d}"
+        if "identifier" in out:
+            out["identifier"] = f"EXAMPLE-{index}"
+        if "updatedAt" in out:
+            out["updatedAt"] = f"2024-01-{1 + (index - 1) // 24:02d}T{(index - 1) % 24:02d}:00:00.000Z"
+        sanitized.append(out)
+    issues["nodes"] = sanitized
+    page = issues.get("pageInfo")
+    if isinstance(page, dict) and page.get("endCursor"):
+        page["endCursor"] = "synthetic-page-cursor"
+    return body
 
 
 def main() -> int:
@@ -104,20 +143,22 @@ def main() -> int:
         print(f"capture failed: status={response.status_code}", file=sys.stderr)
         return 1
 
-    body = json.loads(json.dumps(response.body))       # plain dict
+    body = sanitize_response(response.body)
     nodes = body.get("data", {}).get("issues", {}).get("nodes", [])
-    body["data"]["issues"]["nodes"] = [redact(n) for n in nodes]
 
     stamped = {
-        # MEASURED at capture time, not typed by the runner.
+        # The API/query provenance is measured; time and resource values are
+        # synthetic so the fixture carries no private activity history.
         "captured_from": "linear.app",
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_at": "2024-01-01T00:00:00+00:00",
+        "fixture_privacy": "Captured schema; identities and activity/capture timestamps are synthetic.",
         "operation": "CoordInbox",
         "query": INBOX_QUERY,
         "node_count": len(nodes),
         "redacted_fields": list(_REDACT) + [
             "assignee.displayName", "labels.nodes.name(agent:*)",
-            "labels.nodes.name(hostname-shaped)"],
+            "labels.nodes.name(hostname-shaped)",
+            "id", "identifier", "updatedAt", "pageInfo.endCursor"],
         "response": body,
     }
     os.makedirs(os.path.dirname(FIXTURE), exist_ok=True)

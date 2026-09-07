@@ -24,7 +24,7 @@ def _pin_module_clock(monkeypatch):
 
 def test_build_snapshot_normalizes_lists():
     s = continuity.build_snapshot(
-        agent="ash", task="build-l6", objective="ship continuity", now=NOW,
+        agent="user", task="build-l6", objective="ship continuity", now=NOW,
         next_actions="write tests", decisions=["chose json"], open_questions=None)
     assert s["schema"] == "coord.teams.continuity.v1"
     assert s["checkpoint_id"] == "CHK-2026-07-01T18:00:00Z-build-l6"
@@ -60,7 +60,7 @@ def test_render_resume_none():
 
 def test_render_resume_includes_fields():
     s = continuity.build_snapshot(
-        agent="ash", task="t", objective="ship it", now=NOW,
+        agent="user", task="t", objective="ship it", now=NOW,
         next_actions=["land PR"], open_questions=["naming?"], context_used_percent=42)
     out = continuity.render_resume(s)
     assert "objective: ship it" in out

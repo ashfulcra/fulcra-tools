@@ -1,12 +1,6 @@
-# Proposal: a new **community** `fulcra-vault` skill (locked notes + hot-context injection)
+# Proposal: a new **community** `fulcra-vault` skill
 
-**Status:** draft (reeval epic phase-4, item 2) · **Author:** fulcra-prefs-maintainer
-**Target venue:** `fulcradynamics/community-skills` (operator ruling 2026-07-16:
-`agent-skills` is core-only; community proposals go to community-skills. Filed by
-coord-maintainer, who has fulcradynamics access — this session cannot reach that repo.)
-**Source of record:** phase-3 realignment verdict (`artifact/2026-07-04-prefs-vault-realignment-verdict.md`, APPROVED)
-
-> Staged in-repo for codex-prefs review before any external post. This proposes a
+> Historical contribution proposal for public review. This proposes a
 > new community skill (prose over `fulcra-api file`) for `fulcradynamics/community-skills`;
 > no package code ships from it, and it changes nothing in the core `agent-skills` repo.
 > The `fulcra-tools/packages/fulcra-vault` CLI remains the power-user reference

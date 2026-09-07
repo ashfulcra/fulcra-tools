@@ -178,7 +178,7 @@ def test_an_undatable_holder_verdict_is_unknown_not_absent():
 from coord_engine_test_helpers import FakeTransport  # noqa: E402
 
 STALE_LEASE = "---\ntype: Lease\nagent: codex-reviewer\ntimestamp: 2026-08-03T08:00:00Z\n---\n"
-ROLE_DOC = "---\ntype: Role\nsla_hours: 12\nmaintainer: ash\n---\n"
+ROLE_DOC = "---\ntype: Role\nsla_hours: 12\nmaintainer: user\n---\n"
 
 
 def _team_with_stale_lease():
@@ -451,8 +451,8 @@ def test_the_notice_is_never_rerouted_to_a_worse_address():
     appears as a lease agent, had its notice moved off a real person onto the
     bare 'human' default that nobody reads. Detect and report; never rewrite the
     destination — the same rule we hold for alias resolution."""
-    assert cli._is_self_addressed_vacancy("ash", [{"agent": "ash"}]) is True
-    assert cli._is_self_addressed_vacancy("coord-boss", [{"agent": "ash"}]) is False
+    assert cli._is_self_addressed_vacancy("user", [{"agent": "user"}]) is True
+    assert cli._is_self_addressed_vacancy("coord-boss", [{"agent": "user"}]) is False
     assert cli._is_self_addressed_vacancy("coord-boss", []) is False
     assert cli._is_self_addressed_vacancy("coord-boss", None) is False
 

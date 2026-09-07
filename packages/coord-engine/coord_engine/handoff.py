@@ -59,7 +59,7 @@ _PERMANENT = re.compile(
 #: can tell who to ask, not that a particular syntax was used.
 _OWNER = re.compile(
     r"(\bowner\s*[:=]|\bowes?\b|\bawait(?:ing)?\b|\bask\b|\bdeferred to\b"
-    r"|\b(?:ash|operator|coord-[a-z0-9-]+|codex-[a-z0-9-]+)\b)", re.I)
+    r"|\b(?:user|operator|coord-[a-z0-9-]+|codex-[a-z0-9-]+)\b)", re.I)
 
 #: A next action must be startable "without archaeology" — so it has to carry at
 #: least one concrete identifier. A path, a PR number, or a slug-shaped token.

@@ -42,7 +42,7 @@ def test_build_record_wire_shape_rich_variant(ni, fixtures_dir):
     # recorded_at consistency: end - start round-trips through the wire strings
     assert md["recorded_at"]["start_time"] < md["recorded_at"]["end_time"]
     payload = json.loads(rec["data"])
-    assert payload["external_ids"]["profile"] == "Ash"
+    assert payload["external_ids"]["profile"] == "User"
     assert payload["external_ids"]["device_type"] == "TV"
     assert payload["external_ids"]["timestamp_confidence"] == "high"
     assert payload["duration_seconds"] == 9312

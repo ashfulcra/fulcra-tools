@@ -31,7 +31,7 @@ tags: [workstream:fulcra-coord, kind:bug]                     # OKF recommended
 id: TASK-20260626-fix-summaries-2ee6e720
 status: done                       # proposed|active|waiting|blocked|done|abandoned
 priority: P1                       # P0|P1|P2|P3
-owner: claude-code:Ashs-MBP-Work:fulcra-tools
+owner: claude-code:example-host:fulcra-tools
 assignee: null
 blocked_on: null
 due: null
@@ -104,7 +104,7 @@ high-level description; its contents are not individually indexed.
 { "schema": "coord.teams.summaries.v1",
   "team": "<team>",
   "generated_at": "2026-06-26T18:00:00Z",
-  "reconcile_host": "claude-code:Ashs-MBP-Work:fulcra-tools",
+  "reconcile_host": "claude-code:example-host:fulcra-tools",
   "rows": [ { "id": "...", "name": "fix-summaries", "path": "task/fix-summaries.md",
               "title": "...", "description": "...", "status": "done", "priority": "P1",
               "owner": "...", "assignee": null, "tags": [...], "timestamp": "...",

@@ -16,7 +16,7 @@ def test_mixed_case_md_normalized():
 
 
 def test_no_suffix_gets_md():
-    assert normalize_note_path("Ash") == "Ash.md"
+    assert normalize_note_path("User") == "User.md"
 
 
 def test_non_md_suffix_still_rejected():

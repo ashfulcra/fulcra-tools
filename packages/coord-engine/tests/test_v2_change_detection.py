@@ -10,8 +10,8 @@ import pytest
 from coord_engine.budget import Deadline
 
 
-COORDINATION_TYPE = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
-CHECKPOINT_TYPE = "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49"
+COORDINATION_TYPE = "MomentAnnotation/00000000-0000-4000-8000-000000000102"
+CHECKPOINT_TYPE = "MomentAnnotation/00000000-0000-4000-8000-000000000074"
 LIVE_ENVELOPE_FIXTURE = (
     Path(__file__).parent / "fixtures" / "live_data_updates_2026-08-20T2013Z.min.json"
 )
@@ -106,7 +106,7 @@ def test_captured_live_envelope_preserves_the_named_boundary_recovery_reason():
     # the captured two-key envelope exactly as the production CLI emits it.
     transport.envelope = envelope
 
-    batch = _poll(transport, team="fulcra")
+    batch = _poll(transport, team="example")
 
     assert batch.trusted is False
     assert batch.reason == "data-updates coverage boundary unavailable or unparseable"
@@ -233,9 +233,9 @@ def test_mixed_precision_lifecycle_instants_sort_temporally():
 def test_captured_data_types_materializes_the_configured_coordination_channel_once():
     """Ignoring live ``data_types`` loses real coordination record triggers."""
     envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
-    transport = ConfiguredFeedTransport(envelope, records=_attested_records(13))
+    transport = ConfiguredFeedTransport(envelope, records=_attested_records(3))
 
-    batch = _poll(transport, team="fulcra")
+    batch = _poll(transport, team="example")
 
     assert transport.record_calls == 1
     assert transport.record_channels == [(COORDINATION_TYPE, "2026-08-20T11:00:00Z")]
@@ -322,8 +322,8 @@ def test_captured_engine_owned_file_shapes_are_explicit_and_trusted():
     """Supported live engine state must not poison feed coverage as unknown."""
     envelope = json.loads(LIVE_ENVELOPE_FIXTURE.read_text())
     batch = _poll(
-        ConfiguredFeedTransport(envelope, records=_attested_records(13)),
-        team="fulcra",
+        ConfiguredFeedTransport(envelope, records=_attested_records(3)),
+        team="example",
     )
 
     assert batch.trusted is True

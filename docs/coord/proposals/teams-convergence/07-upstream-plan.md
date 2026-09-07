@@ -6,10 +6,8 @@
 > not for runnable commands; current setup is in
 > [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
 
-**Goal:** get coord's skills + engine adopted upstream (`fulcradynamics/agent-skills` + the fulcra-api
-surface), so the "pro tier of the official skill" stops being a personal fork and becomes the official
-capability. Operator (Ash) is at Fulcra — this is an internal champion play, not a cold OSS PR: optimize
-for *trivially adoptable*, not *persuasive*.
+**Goal:** make the skills and engine independently reviewable upstream, with
+clear ownership, compatibility, and migration requirements.
 
 ## What goes upstream (three separable tracks)
 
@@ -55,30 +53,20 @@ Decision gates:
   sizing says the command group is worth carrying in fulcra-api proper.
 
 ### Track 3 — fulcra-api platform asks (filed as issues w/ evidence, independent of 1–2)
-Each has a concrete incident/measurement behind it from this build:
-- **`--format json` for `file` + `catalog` + `data-type` verbs.** Evidence: coord line-parses text
-  (two review findings — list-order nondeterminism, minute-granular mtimes); the catalog **shape drift
-  in 0.1.35 caused the duplicate-timeline-tracks incident** (9× + 4× dupes) because there is no stable
-  structured contract.
-- **Per-file version-id (or precise timestamp) in `file list`.** Evidence: incremental reconcile is
-  forced to a conservative minute-granularity compare.
-- **Batch read (`file download` many / prefix fetch).** Evidence: every fold is list + N×download at
-  ~1s/op; the 139-task migration took 12 min of sequential round-trips; reconcile cost scales linearly
-  with every new shard dir.
-- **`catalog` should hide (or flag) archived data types.** Evidence: `data-type archive` leaves entries
-  listed with no marker — we needed per-host pins (0.15.18) purely because archived duplicates still
-  match by name.
-- **Record-write CLI verbs** (create/correct/delete). Evidence: coord deferred timeline-annotate on
-  this gap; the prefs backlog (`native record delete/replace`) is blocked on the same thing.
+Platform requests should include minimal synthetic reproductions:
+
+- Stable JSON for file, catalog, and data-type commands.
+- Precise per-file version metadata for incremental reconciliation.
+- Batch reads to reduce per-shard transport overhead.
+- Explicit archived-type markers to disambiguate catalog results.
+- Record create, correct, and delete verbs.
 
 ## Sequencing
-1. **Package** (me, now): upstream-ready branch — skills polished + standalone DESIGN.md + evidence
-   summary (test counts, review lineage, live-migration numbers, incident postmortems).
-2. **Internal pitch** (Ash): one pager + demo on the live team (`briefing`, `board`, `health` on real
-   data beats any deck). Decide Track-2 home with the API team; hand them Track-3 issues.
-3. **PRs**: wave-1 skills PR → teams-amendment + wave-2 PR → engine per the Track-2 decision.
-4. **Post-acceptance:** coord repo becomes a thin dev mirror or archives; fleet reinstalls from
-   upstream (setup script already installs by copy — repointing the clone URL is the whole change).
+
+1. Package standalone skills, architecture documentation, and reproducible tests.
+2. Discuss the engine's ownership and API integration costs with maintainers.
+3. Submit additive skills, then convention changes, then the agreed engine work.
+4. Update install and compatibility documentation after upstream acceptance.
 
 ## Standalone posture if Fulcra stalls
 If Fulcra does not accept or host the work within ~3 months, coord remains a credible standalone package
@@ -89,7 +77,7 @@ rather than an indefinitely personal experiment:
   `fulcra-agent-teams` commit/tag, and any required migration step for `_coord/` or task shards.
 - Install docs: keep a forge-neutral install path that does not assume upstream acceptance
   (`uv tool install`, copy/install skills from a tag, verify with `coord-engine doctor/reconcile`).
-- Ownership: Ash owns product direction; automation agents can prepare fixes, but security and
+- Ownership: the operator owns product direction; automation agents can prepare fixes, but security and
   data-loss releases require explicit operator review plus the same independent bus review before merge.
 - Exit criteria: if Fulcra accepts wave 1 or hosts the engine, standalone docs switch to "development
   mirror"; if not, coord keeps tagged releases and compatibility notes until the bus stack is replaced.

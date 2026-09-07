@@ -50,7 +50,7 @@ outstanding for today; just re-claim on your cadence to keep the lease fresh.
   description: Adversarial code/plan review for the team's PRs.
   policy: shared            # shared | exclusive
   sla_hours: 24             # vacancy longer than this escalates
-  maintainer: ash           # who gets the escalation (an agent or member name)
+  maintainer: user           # who gets the escalation (an agent or member name)
   ---
   # Duties
   - Pick up review requests from the team inbox…
@@ -76,8 +76,7 @@ outstanding for today; just re-claim on your cadence to keep the lease fresh.
 Write `roles/<name>.md` with `type: Role` + policy/SLA/maintainer — complete worked
 examples (exclusive maintainer, shared reviewer, shared multi-host monitor) are in
 [`examples/`](examples/). A `roles/index.md` is optional human courtesy: the engine
-folds role status from the directory listing, and the reference deployment does not
-maintain one.
+folds role status from the directory listing without requiring an index.
 
 **Parking a role for a successor? The role doc is YOUR job, not theirs.** A role
 can be claimed and worked without `roles/<name>.md` ever being written — `claim`
@@ -116,10 +115,10 @@ For **CONTESTED**, resolve by having all but one holder release.
 
 ### Role-as-identity (recommended)
 When a session exists to serve one role, use the role name AS its agent identity
-(`FULCRA_COORD_AGENT=coord-maintainer`) — see fulcra-agent-presence's "Pick your identity by ROLE"
+(`FULCRA_COORD_AGENT=maintainer`) — see fulcra-agent-presence's "Pick your identity by ROLE"
 section. Claim the role's lease while you act as it. Know what each guard does and does not catch:
 
-- **Different ids claiming an exclusive role** (e.g. `coord-maintainer` and a stray
+- **Different ids claiming an exclusive role** (e.g. `maintainer` and a stray
   `claude-code:host:repo`): two FRESH lease shards (within `sla_hours`) → `roles status` reports
   **CONTESTED**. A stale stray shard yields HELD, not CONTESTED. Detected.
 - **Two sessions under the SAME id string**: they write the SAME lease shard (shard names derive from
@@ -135,12 +134,12 @@ section. Claim the role's lease while you act as it. Know what each guard does a
   claimed — a fresher timestamp you did not write means another session is acting under your id;
   (3) only then re-claim to refresh. Re-claiming FIRST destroys that evidence.
 
-Multi-host variants (`coord-maintainer@host1`, `@host2`) are acceptable when one role legitimately
-runs in several places — each host claims the SAME role (`roles claim <team> coord-maintainer --agent
-coord-maintainer@host1`), never a role named after the variant. Such a role needs `policy: shared`:
+Multi-host variants (`maintainer@host1`, `@host2`) are acceptable when one role legitimately
+runs in several places — each host claims the SAME role (`roles claim <team> maintainer --agent
+maintainer@host1`), never a role named after the variant. Such a role needs `policy: shared`:
 on `exclusive` it would sit in permanent CONTESTED by construction — and note `shared` trades away
 the CONTESTED collision guard for that role. Keep the role doc's `maintainer:` field
-a distinct SUPERVISING identity (e.g. `maintainer: ash`): vacancy escalations are assigned to that
+a distinct SUPERVISING identity (e.g. `maintainer: user`): vacancy escalations are assigned to that
 field, so pointing it at the role itself mails the alert to the very inbox that just went dark.
 
 ### Escalate a vacancy — engine decides, you act
@@ -154,7 +153,7 @@ The engine already computed `escalation_due` above. When it is **true**, perform
    **Check first.** A vacancy that is already on the board does not need saying again: an open,
    unacked notice keeps surfacing on its own (that is what the read-side fold in `directives.py` is
    for — re-notify *surfaces* an unacked directive, it does not mint a second one). Restating it
-   daily is how 117 open rows came to carry 12 distinct facts. The engine's `escalate` enforces this
+   daily creates duplicate obligations without adding new information. The engine's `escalate` enforces this
    as a state-change guard; doing it by hand here would re-create the debt the guard removes.
 
    The **first** notice for a role is the one that carries information — send that one.

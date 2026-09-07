@@ -45,7 +45,7 @@ tags: [workstream:web, kind:bug]
 # coord extensions (OKF-legal producer keys):
 status: active                     # proposed|active|waiting|blocked|done|abandoned
 priority: P1                       # P0|P1|P2|P3
-assignee: ash                      # for needs-me
+assignee: user                      # for needs-me
 owner: claude-code:host:web
 blocked_on: null
 due: null

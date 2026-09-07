@@ -1,7 +1,7 @@
 """coord-engine dropped-threads command — the `threads` fold (fulcra-agent).
 
 Extracted verbatim from ``cli.py`` (behavior-preserving module split): the bus
-adapter for ``threads.classify`` (candidate rows + ash-activity attribution +
+adapter for ``threads.classify`` (candidate rows + user-activity attribution +
 intent windows) and ``cmd_threads``. The window/budget knobs parse through the
 one shared ``config.env_float`` policy (``_threads_window`` carries the flag>env
 delegator form). Shared cli-level helpers (``_now``/``_iso`` and the task/ack/
@@ -23,7 +23,7 @@ from .budget import Deadline
 
 
 #: Aggregate deadline (seconds) for the `threads` fold's per-candidate shard/doc
-#: reads (ash-activity attribution + intent_by). Bounds the same slow-bleed class
+#: reads (user-activity attribution + intent_by). Bounds the same slow-bleed class
 #: the overlay/briefing budgets do: N principal candidates x per-doc transport
 #: timeout under a degraded transport. On breach the fold STOPS and emits a
 #: `threads-degraded` row (never silence, never crash).
@@ -38,7 +38,7 @@ DEFAULT_THREADS_INTENT_GRACE_HOURS = 48.0
 
 # --- dropped threads (fulcra-agent — 2026-07-11-dropped-threads) -------------
 #
-# The bus ADAPTER for `threads.classify`. Reversibility (Ash requirement): the
+# The bus ADAPTER for `threads.classify`. Reversibility (operator requirement): the
 # pure fold consumes a NEUTRAL row shape; this adapter is the ONLY place bus
 # specifics live, so a GitHub/fulcra-pm source later is a new adapter emitting the
 # same rows, not a rewrite. v1 reads ONE source — coord bus items on the team
@@ -81,7 +81,7 @@ def _threads_blocked_signal(row: dict[str, Any], principal: str,
     return None
 
 
-def _threads_ash_activity(transport: Any, team: str, slug: str, principal: str,
+def _threads_principal_activity(transport: Any, team: str, slug: str, principal: str,
                           response_slugs: set[str], row_ts: Optional[str],
                           ) -> tuple[Optional[str], bool, str]:
     """Last activity ATTRIBUTABLE to the principal for a mode-1 candidate.
@@ -141,7 +141,7 @@ def _threads_candidate_rows(
     """Build the NEUTRAL rows `threads.classify` consumes, from summaries + the
     freshness overlay (inherited free via ``_load_rows_status`` — fresh intents ARE
     visible), filtered to principal items. Per-candidate reads only for the signals
-    summaries lack: ``intent_by`` (intent window) and ash-activity attribution.
+    summaries lack: ``intent_by`` (intent window) and user-activity attribution.
 
     Returns ``(rows, ok, reason)``: ``ok`` False (with a reason) whenever the
     summaries/overlay load degraded OR the fold budget was exhausted with candidates
@@ -194,12 +194,12 @@ def _threads_candidate_rows(
         # surfaced as mode-1 silence off the item-timestamp fallback). A terminal
         # item is NEVER a dropped thread; when summaries already reads terminal we
         # trust it (terminal is sticky), otherwise we CONFIRM against the doc's own
-        # status. For a terminal row we then SKIP the ash-activity signal reads
+        # status. For a terminal row we then SKIP the user-activity signal reads
         # (suspenders: no per-candidate reads for a row the fold will refuse) — the
         # authoritative status rides the row and threads.classify does the refusing.
         status = str(r.get("status") or "")
         declared_window = None
-        ash_ts: Optional[str] = None
+        principal_ts: Optional[str] = None
         attributed = True
         source = ""
         # Read the doc when we need something summaries lack: the intent window,
@@ -235,9 +235,9 @@ def _threads_candidate_rows(
 
         terminal = status in model.TERMINAL_STATUSES
         if not is_intent and not terminal:
-            # Mode-1/2 candidates: attribute ash-activity from shards. Skipped for
+            # Mode-1/2 candidates: attribute user-activity from shards. Skipped for
             # terminal rows — the fold refuses them, so their signal reads are waste.
-            ash_ts, attributed, source = _threads_ash_activity(
+            principal_ts, attributed, source = _threads_principal_activity(
                 transport, team, slug, principal, response_slugs, r.get("timestamp"))
 
         rows.append({
@@ -250,9 +250,9 @@ def _threads_candidate_rows(
             "blocked_signal": _threads_blocked_signal(r, principal, tags) or "",
             "parked": r.get("assignee") == directives.BACKLOG,
             "not_before": r.get("not_before"),
-            "ash_activity_ts": ash_ts,
-            "ash_activity_attributed": attributed,
-            "ash_activity_source": source,
+            "principal_activity_ts": principal_ts,
+            "principal_activity_attributed": attributed,
+            "principal_activity_source": source,
             "declared_window": declared_window,
             "captured_ts": r.get("timestamp"),
             "followup": {
@@ -309,7 +309,7 @@ def cmd_threads(args: argparse.Namespace, transport: Any) -> int:
         # miss interactively — the house stdout/stderr split.
         print(f"threads degraded (partial): {reason or 'source unreadable'}",
               file=sys.stderr)
-    labels = {1: "started-then-silent", 2: "blocked-on-ash", 3: "intent-never-started"}
+    labels = {1: "started-then-silent", 2: "blocked-on-user", 3: "intent-never-started"}
     if not dropped:
         print(f"threads — {principal}: nothing dropped")
         return 0

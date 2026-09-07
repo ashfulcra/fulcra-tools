@@ -257,7 +257,7 @@ def test_resolve_force_new_creates_even_when_match_exists():
 
 
 def test_resolve_force_new_defaults_machine_id_to_platform_node(monkeypatch):
-    monkeypatch.setattr("fulcra_common.definitions.platform.node", lambda: "Ash-MacBook.local")
+    monkeypatch.setattr("fulcra_common.definitions.platform.node", lambda: "User-MacBook.local")
     client = _FakeClient()
     out = resolve_definition_id(
         canonical_name="attention",
@@ -267,7 +267,7 @@ def test_resolve_force_new_defaults_machine_id_to_platform_node(monkeypatch):
     assert out == "new-101"
     # Hostname suffix only the first dotted component:
     assert client.create_calls == [
-        {"name": "attention (Ash-MacBook)", "annotation_type": "moment"}
+        {"name": "attention (User-MacBook)", "annotation_type": "moment"}
     ]
 
 

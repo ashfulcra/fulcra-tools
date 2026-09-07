@@ -34,7 +34,7 @@ def _extract_letterboxd_username(raw: str) -> str:
     `@foo` shorthand. Strips trailing slashes and path segments so the RSS
     fetcher gets just the username.
 
-    User feedback 2026-05-26: Goodreads had the same pain — wizard asked
+    user feedback 2026-05-26: Goodreads had the same pain — wizard asked
     for a numeric ID and got a URL pasted. Parsing it permissively here
     saves the user the same dance.
     """

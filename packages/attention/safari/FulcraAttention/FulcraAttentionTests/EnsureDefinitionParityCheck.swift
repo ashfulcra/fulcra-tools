@@ -163,7 +163,7 @@ struct ParityMain {
 
         // ---- slugify golden cases (byte-parity with TS) ----
         c.eq(slugifyIdentity("Work MBP — Chrome"), "work-mbp-chrome", "slug: Work MBP — Chrome")
-        c.eq(slugifyIdentity("ash@fulcra's laptop!!"), "ash-fulcra-s-laptop", "slug: ash@fulcra's laptop!!")
+        c.eq(slugifyIdentity("user@example's laptop!!"), "user-example-s-laptop", "slug: user@example's laptop!!")
         c.eq(slugifyIdentity("  ---Hello___World---  "), "hello-world", "slug: ---Hello___World---")
         c.eq(slugifyIdentity("a   b"), "a-b", "slug: a   b")
         c.eq(slugifyIdentity(""), "browser", "slug: empty")

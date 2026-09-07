@@ -1,6 +1,6 @@
 ---
 name: fulcra-content-review
-description: "Review prose meant for humans — proposals, docs, posts — before it ships: measured AI-tell sweep, voice matching against the real author, claims discipline, and a parallel multi-lane review protocol. Born from a live editing session (2026-07-25) where the author-agent's tics were counted, not guessed."
+description: "Review prose meant for humans — proposals, docs, posts — before it ships: measured AI-tell sweep, voice matching against the real author, claims discipline, and a parallel multi-lane review protocol."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
@@ -144,20 +144,15 @@ they can earn their place when the journey is the argument.
   reintroduce the tics — twice now, consciously avoiding them. Re-run the §2
   meter after reconciliation, not just after the original edit.
 
-## 7. House style for internal documents — simple and direct (operator-set 2026-07-26)
+## 7. House style for internal documents — simple and direct
 
-The Modest Proposal cycle ended with the operator choosing the plain
-first-person draft over a longer essay version, then cutting it harder. That
-choice is the standing style for internal documents. Review against it:
+Use the author's stated style preferences and the document's purpose.
 
-- **Simple and direct.** Short declaratives, first person, thinks out loud.
-  If a passage needs re-reading, it is wrong — the operator's word for a
-  dense-but-correct block was "incomprehensible," and the fix he accepted was
-  five plain sentences in sequence.
-- **The last sentence of a block is usually the good one.** ("Really only the
-  last sentence is any good.") Find the sentence that earns its place and
-  rebuild the block as the shortest path to it. Additions must clarify, not
-  decorate: "you can add more if it is clarifying not obtuse."
+- **Simple and direct.** Use short, connected sentences. Rewrite passages that
+  require repeated reading to understand.
+- **Make each sentence useful.** Keep the argument and supporting evidence;
+  remove repetition. Add detail when it clarifies the reader's decision.
+
 - **Put the ask right after the argument** that motivates it, not at the end
   of the document. Conclusions don't need restating; one is enough.
 - **Cut on sight:** thesis announcements ("X is the argument"), restatements

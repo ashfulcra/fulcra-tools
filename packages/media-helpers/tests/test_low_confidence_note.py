@@ -8,7 +8,7 @@ the typed ingest path dropped the field on the wire, because the typed schema
 has no slot for it and — per the comment in fulcra.py — "nothing reads those
 back from the server".
 
-That premise was true of CODE and false of the USER. Ash opened his Watched
+That premise was true of CODE and false of the USER. User opened his Watched
 annotations, found 110 hours of television stamped inside a 2h50m window, and
 had no way to tell those rows from things he actually watched. The signal was
 computed correctly and then thrown away one step before the only consumer who

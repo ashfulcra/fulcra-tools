@@ -108,7 +108,7 @@ def build_payload(*, to: str, kind: str, priority: str, slug: str,
         # 2026-08-21: most of 92 stream-only "opens" were exactly this).
         payload["fyi"] = True
     if on:
-        # WHAT it waits on, verbatim from the doc (`user:ash`, an agent name, a
+        # WHAT it waits on, verbatim from the doc (`user:user`, an agent name, a
         # role). Carried raw so a consumer can apply its own classifier rather
         # than inheriting ours.
         payload["on"] = on

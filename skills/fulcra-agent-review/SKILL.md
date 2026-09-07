@@ -41,7 +41,7 @@ proceed to request a new review or advance an existing one below.
   ---
   type: Review
   schema: review-request/v2
-  requested_by: ash
+  requested_by: user
   of: https://github.com/org/repo/pull/42
   required: [reviewer, security]   # all must approve for APPROVED (string "a, b" also accepted)
   head: 0123456789abcdef0123456789abcdef01234567

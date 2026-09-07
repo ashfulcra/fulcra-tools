@@ -56,7 +56,7 @@ def test_guard_refuses_secret_shaped_names(name):
 @pytest.mark.parametrize("content", [
     "export LINEAR=lin_oauth_abc123DEF",
     "key = sk-abcdefghijklmnop",
-    "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----",  # gitleaks:allow -- intentionally invalid one-byte test key
     "-----BEGIN RSA PRIVATE KEY-----",
 ])
 def test_guard_refuses_credential_shaped_content(content):

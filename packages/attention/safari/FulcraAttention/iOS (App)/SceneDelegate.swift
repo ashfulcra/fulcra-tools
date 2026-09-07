@@ -2,7 +2,7 @@
 //  SceneDelegate.swift
 //  iOS (App)
 //
-//  Created by Ash Kalb on 6/7/26.
+//  Fulcra Attention contributors.
 //
 
 import UIKit

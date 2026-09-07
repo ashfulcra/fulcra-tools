@@ -18,7 +18,7 @@ import subprocess
 import fulcra_common.annotations as annotations
 import pytest
 
-LIVE = "d04f357e-b556-4298-ad1e-4ce307d54041"
+LIVE = "00000000-0000-4000-8000-000000000102"
 SUPERSEDED = "ea49d0d3-acb7-49c6-93b6-bee81d126c92"
 
 

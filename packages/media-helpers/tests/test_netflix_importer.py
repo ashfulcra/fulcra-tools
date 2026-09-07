@@ -145,7 +145,7 @@ def test_parse_rich_movie_first_event():
     assert e.start_time == datetime(2026, 5, 12, 20, 32, 15, tzinfo=timezone.utc)
     assert e.end_time == datetime(2026, 5, 12, 22, 14, 45, tzinfo=timezone.utc)
     assert e.timestamp_confidence == "high"
-    assert e.external_ids["profile"] == "Ash"
+    assert e.external_ids["profile"] == "User"
     assert "Apple TV" in e.external_ids["device_type"]
     assert e.external_ids["country"].startswith("US")
     assert "time_estimated" not in e.external_ids

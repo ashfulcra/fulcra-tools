@@ -2,7 +2,7 @@
 
 **Status:** Spec only. Not yet provisioned. Architecture for v1 of the extension uses a localhost relay (no Auth0); this app is what eliminates the relay and unlocks public Chrome Web Store distribution in v2.
 
-**Owner:** Fulcra Dynamics platform team. Ash (redacted@users.noreply.github.com) is the requester and owns the [extension repo](https://github.com/ashfulcra/fulcra-attention).
+**Owner:** extension maintainer, with provisioning by an authorized tenant administrator.
 
 **Tenant:** `fulcra.us.auth0.com` (the same Auth0 tenant the `fulcra-api` Python CLI uses).
 
@@ -56,7 +56,7 @@ The extension's access token will be used to:
 - `GET /data/v1alpha1/event/DurationAnnotation` and `InstantAnnotation` (verify, dedup readback)
 - `GET /user/v1alpha1/tag/...` and `POST /user/v1alpha1/tag` (ensure the `attention`, `web`, `machine:<host>`, `category:<slug>`, and `identity:<email>` tags exist)
 - `POST /user/v1alpha1/annotation` (create the `Browsed` annotation definition on first run)
-- `GET /user/v1alpha1/me` (display "signed in as redacted@users.noreply.github.com" in the popup)
+- `GET /user/v1alpha1/me` (display "signed in as user@example.com" in the popup)
 
 Nothing else. If Fulcra has API-level scope enforcement beyond the resource server audience, the extension's role/scope should be `media:write` or equivalent — same as the CLI today. If no such scoping exists today, no action required.
 
@@ -172,4 +172,4 @@ The access token is used as `Authorization: Bearer <token>` on every call to `ht
 
 1. Does Fulcra's API today enforce scope-based authorization? If so, what scopes should the extension request beyond `openid profile email offline_access`?
 2. Should this extension's tokens be subject to a shorter session lifetime than the CLI's (e.g. force re-auth weekly) given the broader user base on CWS?
-3. Is there a Fulcra-internal review step before adding new applications to the production Auth0 tenant, or can ash (or another insider) self-provision?
+3. Is there a Fulcra-internal review step before adding new applications to the production Auth0 tenant, or can an authorized tenant administrator self-provision?

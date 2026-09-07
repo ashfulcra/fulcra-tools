@@ -2,7 +2,7 @@
 
 A checkpoint exists so that a SUCCESSOR AGENT WITH ZERO CONTEXT can resume your
 duties. A checkpoint that only summarizes your last hour is a diary entry, not a
-handoff. This standard is fleet doctrine (Ash, 2026-08-05).
+handoff.
 
 ## Two tiers
 
@@ -47,5 +47,5 @@ operator to re-explain anything already ruled?" If no — it is not done.
 
 ## Worked example
 
-See the agent's harness doc on the bus — `_coord/agents/<name>/harness.md` (Cold start section) and the 2026-08-05
-coord-boss handoff text that seeded this standard.
+Use the role templates in [`roles/examples/`](roles/examples/README.md) to build
+a team-specific cold-start reading list. Keep actual handoffs in your team's store.

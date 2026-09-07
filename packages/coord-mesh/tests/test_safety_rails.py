@@ -4,7 +4,7 @@ import pytest
 
 from coord_mesh import safety
 
-GOOD_UID = "a24a9667-c2c6-4bbf-9a0f-36ea0afcb521"
+GOOD_UID = "00000000-0000-4000-8000-000000000075"
 
 
 def test_named_uid_accepts_a_real_uuid():

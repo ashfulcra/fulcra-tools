@@ -41,8 +41,8 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 HELP = os.path.join(FIXTURES, "real_share_create_help.json")
 SHARE_ROW = os.path.join(FIXTURES, "real_share_row.json")
 
-PEER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-CHANNEL = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
+PEER = "00000000-0000-4000-8000-000000000100"
+CHANNEL = "MomentAnnotation/00000000-0000-4000-8000-000000000102"
 
 
 def capture():
@@ -248,3 +248,25 @@ def test_capability_unknown_names_the_binary_it_probed(monkeypatch):
         transport.share_create_help()
     assert "fulcra-api" in str(exc.value)
     assert "No such command" in str(exc.value)
+
+
+def test_help_capture_normalizes_private_executable_path(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    path = Path(__file__).parents[1] / "tools" / "capture_fixtures.py"
+    spec = importlib.util.spec_from_file_location("capture_fixtures_privacy", path)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    private_path = "/Users/example/private-install/bin/fulcra-api"
+    monkeypatch.setattr(tool, "_fulcra_cmd", lambda: [private_path])
+    monkeypatch.setattr(tool, "measure_distribution_version", lambda _: ("0.1.40", private_path))
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout=f"Usage: {private_path} share create [OPTIONS]\n", stderr=""))
+    result = tool.capture_help()
+    assert result["distribution_version"] == "0.1.40"
+    assert result["captured_from"] == "fulcra-api"
+    assert result["executable_path"] == "fulcra-api"
+    assert private_path not in json.dumps(result)
+    assert result["help"] == "Usage: fulcra-api share create [OPTIONS]\n"

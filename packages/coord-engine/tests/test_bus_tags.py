@@ -20,8 +20,8 @@ import pytest
 from coord_engine import bus_tags, cli, records
 from coord_engine_test_helpers import FakeTransport
 
-BASE = "cb951ecb-f21c-4aee-826e-2cb0b12517d6"
-AGENT = "0913d5df-830c-458e-b40a-0a04eafaa5cd"
+BASE = "00000000-0000-4000-8000-000000000097"
+AGENT = "00000000-0000-4000-8000-000000000003"
 PLATFORM = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
 HARNESS = "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f60"
 MODEL = "3e4f5a6b-7c8d-4e9f-a0b1-2c3d4e5f6071"

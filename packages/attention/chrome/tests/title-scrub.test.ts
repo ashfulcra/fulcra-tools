@@ -14,16 +14,16 @@ describe("scrubTitle", () => {
   });
 
   test("Gmail inbox titles collapse to a generic", () => {
-    expect(scrubTitle("mail.google.com", "Inbox (12) - ash@fulcra.com - Gmail"))
+    expect(scrubTitle("mail.google.com", "Inbox (12) - user@example.com - Gmail"))
       .toBe("Inbox — Gmail");
   });
 
   test("Gmail thread titles drop the subject", () => {
-    expect(scrubTitle("mail.google.com", "Re: confidential proposal - ash@fulcra.com - Gmail"))
+    expect(scrubTitle("mail.google.com", "Re: confidential proposal - user@example.com - Gmail"))
       .toBe("Email thread — Gmail");
     // The subject must NOT appear in the redacted output.
     expect(
-      scrubTitle("mail.google.com", "Re: confidential proposal - ash@fulcra.com - Gmail"),
+      scrubTitle("mail.google.com", "Re: confidential proposal - user@example.com - Gmail"),
     ).not.toContain("confidential");
   });
 

@@ -293,7 +293,7 @@ host does not already have one.
 OpenClaw-specific instructions:
 
 - Use channel/workstream identities such as `openclaw:discord:main-comms` or
-  `openclaw:discord:personal-palantir`.
+  `openclaw:discord:example-project`.
 - When a Discord/chat task becomes durable, create or claim coord work so the
   session-to-task pointer exists.
 - For short chat-only work, continuity-only checkpoints are allowed; do not force

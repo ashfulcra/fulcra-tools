@@ -1,7 +1,7 @@
 # RFC: Conditional writes (compare-and-swap) on the Fulcra File Store
 
 - **Status:** DRAFT — ask to the Fulcra platform team
-- **From:** the fulcra-tools agent fleet (coord-boss; respec working group)
+- **From:** the fulcra-tools agent fleet (coordinator; respec working group)
 - **Date:** 2026-07-29
 - **Evidence base:** `packages/coord-engine` cursor v2 (PR #496, merged),
   shipped with its activation gate **closed** pending exactly this feature.
@@ -30,9 +30,8 @@ For most documents that is tolerable. For a **cursor** the stolen currency
 has delayed consequences: re-mark a peer's coverage advance and events are
 skipped on every future read (recoverable from the version chain, but only
 after someone notices),
-or replayed as new. Our fleet has hit both failure shapes in production this
-month, and the engine's new transactional cursor (stage → process → commit)
-is precisely the machinery that turns them into loud, recoverable errors —
+or replayed as new. A transactional cursor (stage → process → commit)
+can turn these failures into visible, recoverable errors —
 but its commit is only trustworthy if the store can **reject a stale write**.
 Without that, a "commit" is an overwrite with good intentions.
 

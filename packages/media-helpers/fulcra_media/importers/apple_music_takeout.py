@@ -31,8 +31,7 @@ Input shapes accepted (mirrors apple_takeout):
   - .zip file (members searched; inner Apple_Media_Services zip handled)
 
 Blank-artist enrichment:
-  Container Artist Name is nearly always empty in real takeouts (verified:
-  3 of ~20,000 rows filled in a real 2026 takeout). Two sibling files in
+  Container Artist Name can be empty in takeouts. Two sibling files in
   the same "Apple Music Activity" bundle let us recover it:
 
     - "Apple Music - Play History Daily Tracks.csv" — column

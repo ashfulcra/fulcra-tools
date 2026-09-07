@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--coord-team", default=os.environ.get("COORD_TEAM", "fulcra"))
     parser.add_argument("--source", choices=("engine", "teams"), default="engine")
-    parser.add_argument("--principal", default="ash")
+    parser.add_argument("--principal", default="user")
     parser.add_argument("--linear-team-id", default=os.environ.get("LINEAR_TEAM_ID"))
     parser.add_argument("--policy", type=Path)
     parser.add_argument(
@@ -144,7 +144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = fetch_inbox(client, args.linear_team_id)
             print(render_fold(result, team_id=args.linear_team_id))
             # UNKNOWN must not exit 0: a caller scripting this verb has to be
-            # able to tell "Ash has no work" from "I could not read the board".
+            # able to tell "User has no work" from "I could not read the board".
             return 3 if result.unknown else 0
 
         if args.phase == "linear-assignments":

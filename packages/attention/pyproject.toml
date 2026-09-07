@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Capture what takes your attention while browsing, into your own Fulcra account."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{name = "ash", email = "redacted@users.noreply.github.com"}]
+authors = [{name = "Fulcra Dynamics", email = "support@fulcradynamics.com"}]
 dependencies = [
     # Shared Fulcra API client (sibling package in this monorepo).
     "fulcra-common",

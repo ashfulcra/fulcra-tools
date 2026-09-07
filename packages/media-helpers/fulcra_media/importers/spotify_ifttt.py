@@ -1,6 +1,6 @@
 """Spotify IFTTT->GDrive xlsx importer.
 
-Years ago, users (including ash@) wired IFTTT applets that poll Spotify's
+Years ago, users wired IFTTT applets that poll Spotify's
 /me/player/recently-played and append rows to a Google Sheets spreadsheet.
 The two common applets are 'Recent tracks' and 'Spotify Tracks V2', which
 emit nearly identical 5-column rows:

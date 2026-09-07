@@ -125,11 +125,11 @@ def test_by_model_counts_sorted_desc_then_name():
 # --- throttle events ---------------------------------------------------------
 
 def test_throttle_events_list_account_and_date():
-    shards = [_sh("frontier", account="openai-codex-ash", age_h=48, throttled=True),
+    shards = [_sh("frontier", account="openai-codex-user", age_h=48, throttled=True),
               _sh("cheap")]
     rep = report_fold(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
-    assert rep["throttle_events"] == [{"account": "openai-codex-ash", "date": "07-06"}]
-    assert "throttle events: 1 (openai-codex-ash, 07-06)" in render_report(rep)
+    assert rep["throttle_events"] == [{"account": "openai-codex-user", "date": "07-06"}]
+    assert "throttle events: 1 (openai-codex-user, 07-06)" in render_report(rep)
 
 
 def test_no_throttle_events_reads_zero():

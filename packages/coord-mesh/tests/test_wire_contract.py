@@ -6,7 +6,8 @@ the field the code wanted — and the transport emits `id`.
 
 So the fixture here is not hand-written. It is a real
 `fulcra-api get-records "MomentAnnotation/<channel>"` row captured on
-2026-08-18, with only the payload redacted; its SHAPE is untouched. If the
+a live API, with synthetic IDs/timestamps and a redacted payload; its
+SHAPE is untouched. If the
 platform renames a field, these fail.
 """
 import json

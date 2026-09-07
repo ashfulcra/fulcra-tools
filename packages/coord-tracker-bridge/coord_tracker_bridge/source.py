@@ -238,7 +238,7 @@ class EngineSourceAdapter:
         self,
         team: str,
         *,
-        principal: str = "ash",
+        principal: str = "user",
         runner: CommandRunner = subprocess_runner,
         timeout: float = 180.0,
         health_timeout: float = 360.0,

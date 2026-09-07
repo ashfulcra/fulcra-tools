@@ -2,7 +2,7 @@
 //  ViewController.swift
 //  Shared (App)
 //
-//  Created by Ash Kalb on 6/7/26.
+//  Fulcra Attention contributors.
 //
 
 import WebKit

@@ -137,11 +137,9 @@ the wall exists — not where it happened first.
     `setsid bash -c '… > out 2>&1' &` dies when the shell that launched it
     exits — and dies *silently*: the wrapper's own trailing
     `echo "RC=$?"` never runs, so the output file is left at **zero bytes**
-    with no error anywhere. The same command run through the harness's
-    background facility completes normally. Verified twice on 2026-08-06/07
-    with `coord-engine health fulcra` (~25 min on a 1.2s/op transport): two
-    `setsid` runs → 0 bytes, no RC line, no process; one harness-background
-    run → full census, `rc 0`.
+    with no error anywhere. Use the harness's background facility and verify
+    process completion with a trailing exit-code record.
+
     This is the same family as BOOTSTRAP's *"never `& disown` a leg inside a
     launchd job"* — a supervisor reaping the children of an exited parent — and
     it fails the same way: it survives an interactive test and vanishes in
@@ -180,46 +178,12 @@ the wall exists — not where it happened first.
     reads the bus — so it is currency, not capability, and it should keep
     working while it reports the block.
 
-14. **A fresh config file is not evidence its reader is alive; a coincidence in
-    time is not a cause; and a service that was switched off on purpose looks
-    exactly like one that crashed** (harness 3, any long-running service on a
-    remote host). A team's wake router stopped and nobody noticed for **70
-    hours**. Its cursor file had written every ~4 minutes across **10,626
-    versions** and then stopped dead; the hourly heartbeat shards stopped in the
-    same window. Three things kept it invisible, and all three generalise.
-    **(a) Liveness must be measured on artifacts the service WRITES.** The
-    router's `config.json` was modified the morning the outage was found — by an
-    agent, not by the router. A config file is written by whoever *edits* it,
-    never by whoever *reads* it, so its freshness says nothing about the reader
-    being alive. A dashboard keying on it would have shown green for three days.
-    **(b) Configuration correctness and mechanism liveness are two questions.** A
-    watchdog asking *"do these routes point at live sessions?"* returned
-    `0 stale` against a router that had not existed for three days — and
-    answering the second question confidently is exactly what hides the first
-    one's absence. The same watchdog checked only **2 of 5** bindings, silently
-    skipping every agent addressed by executor rather than by session id: **a
-    watchdog that narrows its own scope without saying so reports green about a
-    population it never looked at.** Make the unchecked set part of the output.
-    **(c) Before asserting that A killed B, confirm A and B are on the same
-    host.** The first diagnosis blamed a process tree on an unrelated machine —
-    two hosts went quiet six minutes apart and the coincidence was written up as
-    a mechanism. That mis-routed a P0 to an agent which was both dead and, being
-    elsewhere, never able to act. Presence identities encode
-    `harness:host:agent`, so the host was inside the string the whole time.
-    **The cause, once someone with shell finally looked, was none of the above:
-    the unit had been deliberately stopped and masked** under an earlier
-    containment ruling, because it was an unisolated decision plane sharing
-    state it should not have. It was already a supervised system unit — so
-    *"put it under supervision"*, the obvious structural fix, was already done
-    and was never the remedy. **An intentional shutdown and a crash present
-    identically to every external observer.** If a service is down, look for the
-    decision to take it down before you design a fix for the failure to stay up:
-    the journal answers in one query what three diagnoses guessed at.
-    Corollary that cost the most time: **a repair path that runs over the
-    mechanism being repaired is not a repair path** — it is an operator
-    escalation wearing one. Check that before assigning the fix.
-    Team-specific evidence for this wall — hosts, identities, timestamps, the
-    containment ruling — lives on the team store, not here.
+14. **Check service liveness independently from configuration.** A recent config
+    edit does not prove its reader is running. Monitor artifacts written by the
+    service, report unexamined bindings, and verify that the affected process and
+    proposed repair are on the same host. Before restarting a stopped service,
+    check whether it was intentionally disabled and whether the repair can run
+    independently of the failed service.
 
 15. **A tool result can be truncated BEFORE its exit line, so a verdict that
     rides at the tail of an unbounded payload is unobservable** (harness 2 /

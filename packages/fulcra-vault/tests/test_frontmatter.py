@@ -122,7 +122,7 @@ def test_quote_prefixed_strings_round_trip_as_strings():
 
 
 def test_single_quoted_scalars_parse_like_yaml_strings():
-    fm, body = parse_note("---\ntitle: 'Ash''s note'\n---\nBody\n")
+    fm, body = parse_note("---\ntitle: 'the user''s note'\n---\nBody\n")
 
-    assert fm == {"title": "Ash's note"}
+    assert fm == {"title": "the user's note"}
     assert body == "Body\n"

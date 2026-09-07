@@ -11,7 +11,7 @@
 
 ## Does not own
 
-**Not a bus-wide authority.** coord-boss remains coordinator. This role rules on
+**Not a bus-wide authority.** coordinator remains coordinator. This role rules on
 the mesh package and its rails; it does not dispatch, prioritise, or arbitrate
 outside them.
 

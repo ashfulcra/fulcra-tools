@@ -47,18 +47,18 @@ def _client(daemon) -> TestClient:
     return client
 
 
-# Captured verbatim from `fulcra auth login --get-auth-url` (fulcra-api
-# 0.1.35, live run 2026-07-06). Codes below are from an abandoned flow.
+# Synthetic codes in the output shape of `fulcra auth login --get-auth-url`
+# (fulcra-api 0.1.35). Never commit authorization codes from a live flow.
 GET_AUTH_URL_STDOUT = """\
 Open the web auth URL in a browser, verify the web auth code, and complete the web auth flow.
 
-Web auth URL: https://fulcra.us.auth0.com/activate?user_code=NQSW-TZHN
-- Web auth code: NQSW-TZHN
-- Device code: GkI_65iHqAeTVNxsPtpJ1KgH
+Web auth URL: https://fulcra.us.auth0.com/activate?user_code=TEST-CODE
+- Web auth code: TEST-CODE
+- Device code: synthetic-device-code
 
 After finishing the web auth flow, complete authentication with the device code by running:
 
-fulcra-api auth login --device-code GkI_65iHqAeTVNxsPtpJ1KgH
+fulcra-api auth login --device-code synthetic-device-code
 """
 
 
@@ -112,9 +112,9 @@ def _mock_httpx_success(mocker):
 def test_parse_get_auth_url_output_live_shape():
     parsed = _parse_get_auth_url_output(GET_AUTH_URL_STDOUT)
     assert parsed == {
-        "auth_url": "https://fulcra.us.auth0.com/activate?user_code=NQSW-TZHN",
-        "web_auth_code": "NQSW-TZHN",
-        "device_code": "GkI_65iHqAeTVNxsPtpJ1KgH",
+        "auth_url": "https://fulcra.us.auth0.com/activate?user_code=TEST-CODE",
+        "web_auth_code": "TEST-CODE",
+        "device_code": "synthetic-device-code",
     }
 
 
@@ -142,10 +142,10 @@ def test_cli_login_start_returns_url_and_codes(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["auth_url"] == (
-        "https://fulcra.us.auth0.com/activate?user_code=NQSW-TZHN"
+        "https://fulcra.us.auth0.com/activate?user_code=TEST-CODE"
     )
-    assert body["web_auth_code"] == "NQSW-TZHN"
-    assert body["device_code"] == "GkI_65iHqAeTVNxsPtpJ1KgH"
+    assert body["web_auth_code"] == "TEST-CODE"
+    assert body["device_code"] == "synthetic-device-code"
     assert "expires_hint" in body
     # And the CLI was invoked with the non-interactive flag.
     assert fake_run.seen == [
@@ -166,7 +166,7 @@ def test_cli_login_start_never_logs_device_code(
     with caplog.at_level(logging.DEBUG):
         r = client.post("/api/fulcra/auth/cli_login_start")
     assert r.status_code == 200
-    assert "GkI_65iHqAeTVNxsPtpJ1KgH" not in caplog.text
+    assert "synthetic-device-code" not in caplog.text
 
 
 def test_cli_login_start_old_cli_without_flag_is_409_fallback(
@@ -256,7 +256,7 @@ def test_cli_login_poll_success_stores_token_like_cli_login(
     client = _client(_build_daemon(collect_home))
     r = client.post(
         "/api/fulcra/auth/cli_login_poll",
-        json={"device_code": "GkI_65iHqAeTVNxsPtpJ1KgH"},
+        json={"device_code": "synthetic-device-code"},
     )
     assert r.status_code == 200, r.text
     assert r.json() == {"ok": True}
@@ -266,7 +266,7 @@ def test_cli_login_poll_success_stores_token_like_cli_login(
     # The CLI was driven with the device code, then print-access-token.
     assert fake_run.seen == [
         ["/usr/local/bin/fulcra", "auth", "login",
-         "--device-code", "GkI_65iHqAeTVNxsPtpJ1KgH"],
+         "--device-code", "synthetic-device-code"],
         ["/usr/local/bin/fulcra", "auth", "print-access-token"],
     ]
 
@@ -312,7 +312,7 @@ def test_cli_login_poll_redacts_device_code_from_cli_error(
 ):
     """If a future CLI echoes the device code in an error, keep it out of
     both daemon logs and the browser-visible error text."""
-    secret = "GkI_65iHqAeTVNxsPtpJ1KgH"
+    secret = "synthetic-device-code"
     monkeypatch.setattr(
         subprocess, "run",
         _fake_run_factory({
@@ -332,7 +332,7 @@ def test_cli_login_poll_redacts_device_code_from_cli_error(
     assert r.status_code == 400
     assert secret not in r.json()["detail"]
     assert secret not in caplog.text
-    assert "GkI_…(24 chars)" in r.json()["detail"]
+    assert "synt…(21 chars)" in r.json()["detail"]
 
 
 def test_cli_login_poll_empty_device_code_is_400(

@@ -55,7 +55,7 @@ coord skill brings the same engine; installing once serves all).
 ```bash
 # create a task doc at team/<team>/task/<slug>.md
 coord-engine task start <team> "Fix the widget" \
-    --workstream web --priority P1 --status proposed --assignee ash --summary "one-liner"
+    --workstream web --priority P1 --status proposed --assignee user --summary "one-liner"
 
 # move it through the machine (illegal transitions are rejected with a clear error)
 coord-engine task update <team> fix-the-widget --status active --next "write the test"

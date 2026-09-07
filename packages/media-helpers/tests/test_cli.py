@@ -119,7 +119,7 @@ def test_import_netflix_rich_variant(tmp_path: Path, mocker):
     csv = tmp_path / "rich.csv"
     csv.write_text(
         'Profile Name,Start Time,Duration,Attributes,Title,Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n'
-        '"Ash","2026-05-12 20:00:00","00:30:00","","Some: Season 1: Ep","","Apple TV","00:30:00","00:30:00","US"\n'
+        '"User","2026-05-12 20:00:00","00:30:00","","Some: Season 1: Ep","","Apple TV","00:30:00","00:30:00","US"\n'
     )
     state_path = tmp_path / "state.json"
     save(State(

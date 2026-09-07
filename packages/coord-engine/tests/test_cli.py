@@ -64,8 +64,8 @@ def _now_iso():
 def test_cli_roles_status_held(capsys):
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\nsla_hours: 24\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",
-          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",
+          f"---\ntype: Lease\nagent: user\ntimestamp: {_now_iso()}\n---\n")
     assert cli.main(["roles", "status", "r", "reviewer"], transport=t) == 0
     assert "HELD" in capsys.readouterr().out
 
@@ -78,8 +78,8 @@ def test_cli_roles_status_malformed_doc_is_unknown_not_default_sla(capsys):
     # parse is UNKNOWN, exactly like a read that failed: rc 1, no state asserted.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "not frontmatter\n")  # listed, unusable
-    t.put("team/r/roles/reviewer/leases/ash.md",  # a lease FRESH under the real SLA
-          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",  # a lease FRESH under the real SLA
+          f"---\ntype: Lease\nagent: user\ntimestamp: {_now_iso()}\n---\n")
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 1
     cap = capsys.readouterr()
     assert "state unknown" in cap.err
@@ -91,8 +91,8 @@ def test_cli_roles_escalate_skips_malformed_doc_no_false_vacancy(capsys):
     # listed role must be skipped as UNKNOWN, never judged under the 24h default.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "not frontmatter\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",  # stale ONLY under the default SLA
-          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",  # stale ONLY under the default SLA
+          "---\ntype: Lease\nagent: user\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     cap = capsys.readouterr()
     assert "state unknown" in cap.err
@@ -108,8 +108,8 @@ def test_cli_roles_status_invalid_sla_is_unknown_not_default(capsys):
     # so: rc 1, assert nothing.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: abc\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",  # stale ONLY under the default SLA
-          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",  # stale ONLY under the default SLA
+          "---\ntype: Lease\nagent: user\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 1
     cap = capsys.readouterr()
     assert "state unknown" in cap.err
@@ -121,8 +121,8 @@ def test_cli_roles_status_absent_sla_still_defaults(capsys):
     # unknown one. It must still fold under the default at rc 0.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",
-          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",
+          f"---\ntype: Lease\nagent: user\ntimestamp: {_now_iso()}\n---\n")
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
     import json as _json
     res = _json.loads(capsys.readouterr().out)
@@ -136,9 +136,9 @@ def test_cli_roles_escalate_skips_invalid_sla_no_p1_minted(capsys):
     # doc's real window is unknowable — it could make the lease perfectly fresh.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\nsla_hours: abc\nmaintainer: ash\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",  # stale ONLY under the default SLA
-          "---\ntype: Lease\nagent: ash\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
+          "---\ntype: Role\nsla_hours: abc\nmaintainer: user\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",  # stale ONLY under the default SLA
+          "---\ntype: Lease\nagent: user\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     cap = capsys.readouterr()
     assert "state unknown" in cap.err
@@ -156,19 +156,19 @@ def test_cli_roles_escalate_absent_sla_still_escalates(capsys):
     # the missing-`sla_hours` default, and a fixture where the maintainer holds
     # its own lapsed lease would also trip the closed-loop check and muddle
     # which property failed.
-    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nmaintainer: ash\n---\n")
+    t.put("team/r/roles/reviewer.md", "---\ntype: Role\nmaintainer: user\n---\n")
     t.put("team/r/roles/reviewer/leases/holder.md",
           "---\ntype: Lease\nagent: holder\ntimestamp: 2026-06-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
-    assert "escalated reviewer -> ash" in capsys.readouterr().out
+    assert "escalated reviewer -> user" in capsys.readouterr().out
     assert [p for p in t.store if "/task/" in p], "absent SLA must not suppress"
 
 
 def test_cli_roles_status_vacant_escalation_due(capsys):
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md", "---\ntype: Role\nsla_hours: 24\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",
-          "---\ntype: Lease\nagent: ash\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",
+          "---\ntype: Lease\nagent: user\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
     import json as _json
     res = _json.loads(capsys.readouterr().out)
@@ -176,7 +176,7 @@ def test_cli_roles_status_vacant_escalation_due(capsys):
     # same object names it. Escalation is unchanged — the split renamed a state,
     # it did not decide to stop alarming.
     assert res["status"] == "LAPSED"
-    assert res["holders"] == ["ash"]
+    assert res["holders"] == ["user"]
     assert res["fresh_holders"] == []
     assert res["escalation_due"] is True
 
@@ -252,11 +252,11 @@ def test_cli_review_keys_by_filename_not_frontmatter(capsys):
 
 def test_cli_continuity_snapshot_and_resume(capsys):
     t = FakeTransport()
-    assert cli.main(["continuity", "snapshot", "r", "ash", "build-l6",
+    assert cli.main(["continuity", "snapshot", "r", "user", "build-l6",
                      "--objective", "ship it", "--next", "land PR",
                      "--open-question", "naming?", "--context-percent", "40"], transport=t) == 0
     assert "snapshot CHK-" in capsys.readouterr().out
-    assert cli.main(["continuity", "resume", "r", "ash", "build-l6"], transport=t) == 0
+    assert cli.main(["continuity", "resume", "r", "user", "build-l6"], transport=t) == 0
     out = capsys.readouterr().out
     assert "objective: ship it" in out and "land PR" in out
     assert "checkpoint age:" in out
@@ -268,16 +268,16 @@ def test_cli_continuity_resume_reports_age_in_human_and_json(capsys, monkeypatch
     t = FakeTransport()
     created = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(cli, "_now", lambda: created)
-    cli.main(["continuity", "snapshot", "r", "ash", "work", "--objective", "ship"],
+    cli.main(["continuity", "snapshot", "r", "user", "work", "--objective", "ship"],
              transport=t)
     capsys.readouterr()
 
     monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 8, 3, 12, 30,
                                                        tzinfo=timezone.utc))
-    assert cli.main(["continuity", "resume", "r", "ash"], transport=t) == 0
+    assert cli.main(["continuity", "resume", "r", "user"], transport=t) == 0
     assert "checkpoint age: 30m (1800s)" in capsys.readouterr().out
 
-    assert cli.main(["continuity", "resume", "r", "ash", "--json"], transport=t) == 0
+    assert cli.main(["continuity", "resume", "r", "user", "--json"], transport=t) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["checkpoint_age_seconds"] == 1800
     assert out["error_code"] is None
@@ -290,16 +290,16 @@ def test_cli_continuity_resume_max_age_passes_and_fails(capsys, monkeypatch):
     t = FakeTransport()
     created = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(cli, "_now", lambda: created)
-    cli.main(["continuity", "snapshot", "r", "ash", "work", "--objective", "ship"],
+    cli.main(["continuity", "snapshot", "r", "user", "work", "--objective", "ship"],
              transport=t)
     capsys.readouterr()
     monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 8, 3, 12, 30,
                                                        tzinfo=timezone.utc))
 
-    assert cli.main(["continuity", "resume", "r", "ash", "--max-age", "30m"],
+    assert cli.main(["continuity", "resume", "r", "user", "--max-age", "30m"],
                     transport=t) == 0
     capsys.readouterr()
-    assert cli.main(["continuity", "resume", "r", "ash", "--max-age", "29m"],
+    assert cli.main(["continuity", "resume", "r", "user", "--max-age", "29m"],
                     transport=t) == 2
     assert "exceeding --max-age 29m" in capsys.readouterr().err
 
@@ -315,19 +315,19 @@ def test_cli_continuity_resume_rejects_huge_duration_and_future_checkpoint(
     t = FakeTransport()
     monkeypatch.setattr(cli, "_now", lambda: datetime(
         2026, 7, 1, tzinfo=timezone.utc))
-    t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
+    t.put(cli._continuity_path("r", "user", "future"), json.dumps({
         "created_at": "2026-07-01T00:00:02Z", "task": "future",
-        "agent": "ash", "objective": "impossible future checkpoint",
+        "agent": "user", "objective": "impossible future checkpoint",
     }))
 
     assert cli.main([
-        "continuity", "resume", "r", "ash", "future",
+        "continuity", "resume", "r", "user", "future",
         "--max-age", "1000000000d",
     ], transport=t) == 2
     assert "invalid --max-age duration" in capsys.readouterr().err
 
     assert cli.main([
-        "continuity", "resume", "r", "ash", "future",
+        "continuity", "resume", "r", "user", "future",
         "--max-age", "1s",
     ], transport=t) == 2
     assert "checkpoint age is unknown" in capsys.readouterr().err
@@ -339,13 +339,13 @@ def test_cli_continuity_resume_json_separates_rc2_reasons(capsys, monkeypatch):
     t = FakeTransport()
     monkeypatch.setattr(cli, "_now", lambda: datetime(
         2026, 7, 1, tzinfo=timezone.utc))
-    t.put(cli._continuity_path("r", "ash", "old"), json.dumps({
+    t.put(cli._continuity_path("r", "user", "old"), json.dumps({
         "created_at": "2026-06-30T23:00:00Z", "task": "old",
-        "agent": "ash", "objective": "old checkpoint",
+        "agent": "user", "objective": "old checkpoint",
     }))
-    t.put(cli._continuity_path("r", "ash", "future"), json.dumps({
+    t.put(cli._continuity_path("r", "user", "future"), json.dumps({
         "created_at": "2026-07-01T00:00:02Z", "task": "future",
-        "agent": "ash", "objective": "future checkpoint",
+        "agent": "user", "objective": "future checkpoint",
     }))
 
     cases = [
@@ -355,7 +355,7 @@ def test_cli_continuity_resume_json_separates_rc2_reasons(capsys, monkeypatch):
     ]
     for argv, error_code in cases:
         assert cli.main([
-            "continuity", "resume", "r", "ash", *argv, "--json"],
+            "continuity", "resume", "r", "user", *argv, "--json"],
             transport=t) == 2
         row = json.loads(capsys.readouterr().out)
         assert row["error_code"] == error_code
@@ -363,20 +363,20 @@ def test_cli_continuity_resume_json_separates_rc2_reasons(capsys, monkeypatch):
 
 def test_cli_continuity_resume_picks_latest_across_tasks(capsys):
     t = FakeTransport()
-    cli.main(["continuity", "snapshot", "r", "ash", "old", "--objective", "older"], transport=t)
-    cli.main(["continuity", "snapshot", "r", "ash", "new", "--objective", "newest"], transport=t)
+    cli.main(["continuity", "snapshot", "r", "user", "old", "--objective", "older"], transport=t)
+    cli.main(["continuity", "snapshot", "r", "user", "new", "--objective", "newest"], transport=t)
     capsys.readouterr()
     # no task arg -> fold to the newest across the member's snapshots
-    cli.main(["continuity", "resume", "r", "ash"], transport=t)
+    cli.main(["continuity", "resume", "r", "user"], transport=t)
     assert "newest" in capsys.readouterr().out
 
 
 def test_cli_continuity_slugifies_task(capsys):
     t = FakeTransport()
-    cli.main(["continuity", "snapshot", "r", "ash", "feat/Sub Task", "--objective", "x"], transport=t)
+    cli.main(["continuity", "snapshot", "r", "user", "feat/Sub Task", "--objective", "x"], transport=t)
     capsys.readouterr()
-    assert "team/r/member/ash/continuity/feat-sub-task/latest.json" in t.store
-    cli.main(["continuity", "resume", "r", "ash"], transport=t)
+    assert "team/r/member/user/continuity/feat-sub-task/latest.json" in t.store
+    cli.main(["continuity", "resume", "r", "user"], transport=t)
     assert "objective: x" in capsys.readouterr().out
 
 
@@ -397,13 +397,13 @@ def test_cli_task_block_pause_abandon_assign(capsys):
 
 def test_cli_task_block_on_user_honors_env_human(monkeypatch):
     from coord_engine import okf
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     cli.main(["task", "start", "r", "Human", "--status", "active"], transport=t)
     assert cli.main(["task", "block", "r", "human", "--on-user", "approve"], transport=t) == 0
     fm = okf.parse_frontmatter(t.store["team/r/task/human.md"])
     assert fm["blocked_on"] == "user:approve"  # typed (was the untyped ask text)
-    assert fm["assignee"] == "ash"
+    assert fm["assignee"] == "user"
     assert "needs:human" in fm["tags"]
 
 
@@ -436,7 +436,7 @@ def test_cli_task_assign(capsys):
 
 def test_cli_task_assign_clears_needs_human_when_reassigned_away(monkeypatch):
     from coord_engine import okf
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     cli.main(["task", "start", "r", "H", "--status", "active"], transport=t)
     cli.main(["task", "block", "r", "h", "--on-user", "decide"], transport=t)
@@ -448,13 +448,13 @@ def test_cli_task_assign_clears_needs_human_when_reassigned_away(monkeypatch):
 
 def test_cli_task_assign_keeps_needs_human_when_reassigned_to_human(monkeypatch):
     from coord_engine import okf
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     cli.main(["task", "start", "r", "Keep", "--status", "active"], transport=t)
     cli.main(["task", "block", "r", "keep", "--on-user", "decide"], transport=t)
-    assert cli.main(["task", "assign", "r", "keep", "ash"], transport=t) == 0
+    assert cli.main(["task", "assign", "r", "keep", "user"], transport=t) == 0
     fm = okf.parse_frontmatter(t.store["team/r/task/keep.md"])
-    assert fm["assignee"] == "ash"
+    assert fm["assignee"] == "user"
     assert "needs:human" in fm["tags"]
 
 
@@ -1524,14 +1524,14 @@ def test_cli_digest_blocked_on_human_uses_token_match(capsys):
     import json as _j
     t = FakeTransport()
     t.put("team/r/task/exact.md",
-          "---\ntype: Task\ntitle: Exact\nstatus: blocked\nblocked_on: ash\n---\n")
+          "---\ntype: Task\ntitle: Exact\nstatus: blocked\nblocked_on: user\n---\n")
     t.put("team/r/task/list.md",
-          "---\ntype: Task\ntitle: List\nstatus: blocked\nblocked_on: amy, ash\n---\n")
+          "---\ntype: Task\ntitle: List\nstatus: blocked\nblocked_on: amy, user\n---\n")
     t.put("team/r/task/substring.md",
           "---\ntype: Task\ntitle: Substring\nstatus: blocked\nblocked_on: trash\n---\n")
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
-    assert cli.main(["digest", "r", "--human", "ash", "--json"], transport=t) == 0
+    assert cli.main(["digest", "r", "--human", "user", "--json"], transport=t) == 0
     d = _j.loads(capsys.readouterr().out)
     assert [r["name"] for r in d["blocked_on_you"]] == ["exact", "list"]
 
@@ -1540,17 +1540,17 @@ def test_cli_escalate_vacant_role_once_per_day(capsys):
     from coord_engine import okf
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\npolicy: shared\nsla_hours: 24\nmaintainer: ash\n---\n")
+          "---\ntype: Role\npolicy: shared\nsla_hours: 24\nmaintainer: user\n---\n")
     t.put("team/r/roles/reviewer/leases/ghost.md",
           "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     out = capsys.readouterr().out
-    assert "escalated reviewer -> ash" in out
+    assert "escalated reviewer -> user" in out
     # marker + P1 directive to maintainer exist
     assert any("escalations/" in p for p in t.store)
     slug = [p for p in t.store if p.startswith("team/r/task/role-vacant-")][0]
     fm = okf.parse_frontmatter(t.store[slug])
-    assert fm["assignee"] == "ash" and fm["priority"] == "P1"
+    assert fm["assignee"] == "user" and fm["priority"] == "P1"
     # second sweep same day: marker dedupes
     assert cli.main(["escalate", "r"], transport=t) == 0
     assert "0 escalated" in capsys.readouterr().out
@@ -1582,7 +1582,7 @@ def test_cli_escalate_does_NOT_remint_while_a_vacancy_row_is_open(capsys):
     """
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: user\n---\n")
     # yesterday's marker + yesterday's directive already exist
     t.put("team/r/roles/reviewer/escalations/2026-07-01.md", "---\ntype: Escalation\n---\n")
     t.put("team/r/task/role-vacant-2026-07-01-reviewer-unattended-past-24h-sla.md",
@@ -1610,12 +1610,12 @@ def test_cli_continuity_checkpoint_get_set_preserves_role_fields(capsys):
     from coord_engine import okf
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\npolicy: exclusive\nsla_hours: 12\nmaintainer: ash\n---\nDuties.\n")
+          "---\ntype: Role\npolicy: exclusive\nsla_hours: 12\nmaintainer: user\n---\nDuties.\n")
     assert cli.main(["continuity", "checkpoint", "r", "--role", "reviewer",
                      "--ref", "team/r/member/amy/continuity/role-reviewer/latest.json"], transport=t) == 0
     fm = okf.parse_frontmatter(t.store["team/r/roles/reviewer.md"])
     assert fm["checkpoint_ref"].endswith("latest.json")
-    assert fm["policy"] == "exclusive" and fm["maintainer"] == "ash"   # preserved
+    assert fm["policy"] == "exclusive" and fm["maintainer"] == "user"   # preserved
     assert "Duties." in t.store["team/r/roles/reviewer.md"]            # body preserved
     capsys.readouterr()
     assert cli.main(["continuity", "checkpoint", "r", "--role", "reviewer"], transport=t) == 0
@@ -1904,14 +1904,14 @@ def test_operator_ask_answer_round_trip(capsys):
     # agent hits a wall and asks the operator
     cli.main(["task", "start", "r", "Deploy thing", "--status", "active"], transport=t)
     import os
-    os.environ["FULCRA_COORD_HUMAN"] = "ash"
+    os.environ["FULCRA_COORD_HUMAN"] = "user"
     try:
         cli.main(["task", "block", "r", "deploy-thing", "--on-user",
                   "need prod credentials: use vault A or B?"], transport=t)
         cli.main(["reconcile", "r"], transport=t)
         capsys.readouterr()
         # orchestrator pulls asks
-        assert cli.main(["asks", "r", "--human", "ash", "--json"], transport=t) == 0
+        assert cli.main(["asks", "r", "--human", "user", "--json"], transport=t) == 0
         got = needs_me_rows(_j.loads(capsys.readouterr().out))
         assert len(got) == 1 and got[0]["name"] == "deploy-thing"
         assert "vault A or B" in got[0]["blocked_on"]
@@ -1924,7 +1924,7 @@ def test_operator_ask_answer_round_trip(capsys):
         assert "needs:human" not in (fm.get("tags") or [])
         assert fm["assignee"] == fm["owner"]          # back in the owner's inbox
         cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
-        cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)
+        cli.main(["asks", "r", "--human", "user", "--json"], transport=t)
         assert needs_me_rows(_j.loads(capsys.readouterr().out)) == []  # ask cleared
     finally:
         os.environ.pop("FULCRA_COORD_HUMAN", None)
@@ -1963,11 +1963,11 @@ def test_answer_rejects_blocked_non_human_dependency(capsys):
 
 def test_answer_accepts_configured_human_without_tag(capsys, monkeypatch):
     from coord_engine import okf
-    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "user")
     t = FakeTransport()
     for slug, assignee, blocked_on in (
-        ("assignee-ask", "ash", "choose a branch"),
-        ("blocked-on-ask", "build-agent", "ash"),
+        ("assignee-ask", "user", "choose a branch"),
+        ("blocked-on-ask", "build-agent", "user"),
     ):
         t.put(
             f"team/r/task/{slug}.md",
@@ -2273,18 +2273,18 @@ def test_roles_claim_warns_on_unregistered_role(capsys):
 
 
 def test_answer_human_flag_matches_asks(capsys):
-    # env-skew footgun: asks --human ash listed it; answer must accept with the same flag
+    # env-skew footgun: asks --human user listed it; answer must accept with the same flag
     t = FakeTransport()
     cli.main(["task", "start", "r", "Pick window", "--status", "active"], transport=t)
     cli.main(["task", "update", "r", "pick-window", "--status", "blocked",
-              "--blocked-on", "ash", "--assignee", "ash"], transport=t)
+              "--blocked-on", "user", "--assignee", "user"], transport=t)
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     import json as _j
-    cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)   # asks lists it...
+    cli.main(["asks", "r", "--human", "user", "--json"], transport=t)   # asks lists it...
     assert any(g["name"] == "pick-window" for g in needs_me_rows(_j.loads(capsys.readouterr().out)))
     assert cli.main(["answer", "r", "pick-window", "--with", "window B",
-                     "--human", "ash"], transport=t) == 0              # ...and answer accepts it
+                     "--human", "user"], transport=t) == 0              # ...and answer accepts it
 
 
 def test_answer_rejects_terminal_task_with_stale_needs_human(capsys):
@@ -2676,7 +2676,7 @@ def test_escalate_does_not_escalate_on_unknown_lease(capsys):
 
     t = LeaseListFails()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: user\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     out = capsys.readouterr().out
     assert "0 escalated" in out
@@ -2699,7 +2699,7 @@ def test_escalate_skips_role_on_transient_doc_read_failure(capsys):
     t = RoleDocReadFails()
     # 72h-SLA role; lease 30h old: fresh per its doc, stale per the 24h default
     t.put("team/r/roles/patient.md",
-          "---\ntype: Role\nsla_hours: 72\nmaintainer: ash\n---\n")
+          "---\ntype: Role\nsla_hours: 72\nmaintainer: user\n---\n")
     from datetime import datetime, timedelta, timezone
     ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
     t.put("team/r/roles/patient/leases/amy.md",
@@ -2775,7 +2775,7 @@ def test_escalate_skips_role_on_lease_shard_read_failure(capsys):
 
     t = LeaseReadFails()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n---\n")
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: user\n---\n")
     t.put("team/r/roles/reviewer/leases/amy.md",
           f"---\ntype: Lease\nagent: amy\ntimestamp: {_now_iso()}\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
@@ -2800,7 +2800,7 @@ def test_escalate_dormant_future_suppresses_vacancy(capsys):
     # NOT fire a vacancy escalation on any heartbeat host — the live incident.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          f"---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n"
+          f"---\ntype: Role\nsla_hours: 24\nmaintainer: user\n"
           f"dormant_until: {_future_iso()}\n---\n")
     t.put("team/r/roles/reviewer/leases/ghost.md",
           "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
@@ -2814,12 +2814,12 @@ def test_escalate_dormant_past_escalates_as_normal(capsys):
     # A park whose date has passed reverts to current behavior: it escalates.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          f"---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n"
+          f"---\ntype: Role\nsla_hours: 24\nmaintainer: user\n"
           f"dormant_until: {_past_iso()}\n---\n")
     t.put("team/r/roles/reviewer/leases/ghost.md",
           "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
-    assert "escalated reviewer -> ash" in capsys.readouterr().out
+    assert "escalated reviewer -> user" in capsys.readouterr().out
 
 
 def test_escalate_dormant_garbage_notes_stderr_and_escalates(capsys):
@@ -2827,13 +2827,13 @@ def test_escalate_dormant_garbage_notes_stderr_and_escalates(capsys):
     # Fail OPEN: a typo must never silently suppress an escalation.
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
-          "---\ntype: Role\nsla_hours: 24\nmaintainer: ash\n"
+          "---\ntype: Role\nsla_hours: 24\nmaintainer: user\n"
           "dormant_until: whenever\n---\n")
     t.put("team/r/roles/reviewer/leases/ghost.md",
           "---\ntype: Lease\nagent: ghost\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
     assert cli.main(["escalate", "r"], transport=t) == 0
     cap = capsys.readouterr()
-    assert "escalated reviewer -> ash" in cap.out
+    assert "escalated reviewer -> user" in cap.out
     assert "dormant_until" in cap.err
 
 
@@ -2867,8 +2867,8 @@ def test_roles_status_held_outranks_dormant(capsys):
     t = FakeTransport()
     t.put("team/r/roles/reviewer.md",
           f"---\ntype: Role\nsla_hours: 24\ndormant_until: {_future_iso()}\n---\n")
-    t.put("team/r/roles/reviewer/leases/ash.md",
-          f"---\ntype: Lease\nagent: ash\ntimestamp: {_now_iso()}\n---\n")
+    t.put("team/r/roles/reviewer/leases/user.md",
+          f"---\ntype: Lease\nagent: user\ntimestamp: {_now_iso()}\n---\n")
     assert cli.main(["roles", "status", "r", "reviewer", "--json"], transport=t) == 0
     res = json.loads(capsys.readouterr().out)
     assert res["status"] == "HELD"

@@ -33,7 +33,7 @@ uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0
 
 The release tag is the **cold-install** path — correct for this first install.
 The **fleet's runtime authority** is the store BOOTSTRAP
-(`team/fulcra/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
+(`team/<team>/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
 `pp-<sha>`), not this doc: once you can reach the store, adopt from there so you
 converge on what the fleet is actually running.
 
@@ -397,14 +397,14 @@ scheduler doesn't). Two standing duties, both learned live (2026-07-15):
   run the full three-leg chain (§2) on your heartbeat cadence (20 minutes by default from `install-heartbeat.sh`):
   `coord-engine reconcile <team> && coord-engine annotate project <team> && coord-engine digest <team> --store --emit-timeline`
   — idempotent across hosts, safe to run alongside other heartbeat hosts. Budget
-  notes (measured live on a 1.2s/op remote transport, ~750-task team, 2026-07-16):
+  notes (latency and workload size determine runtime):
   - **Steady state is cheap since v1.6.8**: the acks fold is change-driven (it asks
     the store what changed instead of listing every ack dir), so a warm reconcile
-    runs ~1 minute where the same pass took 13–18 minutes before.
+    avoids repeating the full scan when nothing relevant changed.
   - **Two slow passes are by design, not hangs**: the FIRST pass on a fresh host
     bootstraps with a full fold (no ack anchor yet), and roughly one pass per day
     (`COORD_ACKS_FULL_EVERY`, default 72) re-runs the full fold as a correctness
-    backstop — each measured ~18 minutes on that transport. Don't wrap reconcile
+    backstop. Don't wrap reconcile
     in a short timeout and misread your own kill (rc 143) as a hang.
   - **Mixed-fleet caveat**: a host running a pre-v1.6.8 engine wipes the ack
     anchor from the shared index on every pass, silently demoting every other

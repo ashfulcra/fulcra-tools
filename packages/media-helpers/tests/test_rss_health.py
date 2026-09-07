@@ -165,13 +165,13 @@ def test_letterboxd_url_is_built_from_username(monkeypatch):
         return httpx.Response(200, content=body)
 
     _install_transport(monkeypatch, handler)
-    # Pasted profile URL form — extractor strips it down to "ash".
-    ctx = _Ctx(config={"username": "https://letterboxd.com/ash/"})
+    # Pasted profile URL form — extractor strips it down to "user".
+    ctx = _Ctx(config={"username": "https://letterboxd.com/user/"})
 
     result = feed_plugin_health.letterboxd_health_check(ctx)
 
     assert result.ok is True
-    assert seen_urls == ["https://letterboxd.com/ash/rss/"]
+    assert seen_urls == ["https://letterboxd.com/user/rss/"]
 
 
 # ---------- goodreads_health_check ----------

@@ -1,9 +1,8 @@
 # docs — index
 
-A map of what's in `docs/`, marked by who it's for. If you're a founder (or a
-founder's agent) meeting this repo for the first time, read the **cold-reader**
-docs and skip the rest — the internal ones are Fulcra-team history and roadmap,
-kept for provenance, not written for you.
+A map of the public documentation. Start with the **cold-reader** guides for
+setup and capabilities. Historical designs preserve reusable technical rationale;
+private team history and deployment records belong in each team's own storage.
 
 ## Start here (cold reader)
 
@@ -23,10 +22,8 @@ kept for provenance, not written for you.
 - [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
   implementation plan for the wake router + engagement model build
-  (status: **shipped but unproven in deployment** — the reference deployment
-  was evaluated and retired 2026-08; the spec's own banner is the dated source,
-  and the engine is the operational truth): one fleet wake policy instead of N resident
-  listeners, cloud-first hosting.
+  (shipped; evaluate acceptance for each deployment): a shared fleet wake policy,
+  engagement declarations, and cloud-first hosting.
 - [`coord/wake-router-ADDENDUM-1-event-substrate.md`](coord/wake-router-ADDENDUM-1-event-substrate.md)
   — normative addendum (tasks E1–E3): the `data-updates` feed as the authoritative
   change ledger and feed-driven delta folds (incremental reconcile, listen/briefing,

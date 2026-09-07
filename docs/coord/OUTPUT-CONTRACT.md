@@ -14,7 +14,7 @@ shape detector — consumers never sniff.
 
 **Class A — bare-array folds** (`needs-me`, `inbox`, `asks`, `search`):
 migrate to the envelope. (ERRATA, each found by verifying the live shape
-before its migration PR: `board` [2026-08-19, ratified — coord-boss
+before its migration PR: `board` [2026-08-19, ratified — coordinator
 ae73ac49 + codex inside pr-647's scope] is ONE object keyed by section;
 `obligations` [2026-08-19, ladder PR 4's verification, pending
 ratification in this PR's review] already emits a single typed domain

@@ -21,7 +21,7 @@ Each is one tag, so each is one timeline filter:
 
 | dimension | tag name convention | example |
 | --- | --- | --- |
-| `agent` | `agent:<name>` | `agent:coord-boss` |
+| `agent` | `agent:<name>` | `agent:coordinator` |
 | `platform` | `platform:<name>` | `platform:claude-code` |
 | `harness` | `harness:<name>` | `harness:ccr` |
 | `model` | `model:<name>` | `model:opus-5` |

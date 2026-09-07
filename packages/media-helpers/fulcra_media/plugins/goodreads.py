@@ -32,8 +32,8 @@ def _extract_goodreads_user_id(raw: str) -> str:
 
     Accepts any of:
       - `12345678`              — bare numeric ID
-      - `12345678-singularity`  — numeric ID with a Goodreads name slug
-      - `https://www.goodreads.com/user/show/12345678-singularity` — full URL
+      - `12345678-example-reader`  — numeric ID with a Goodreads name slug
+      - `https://www.goodreads.com/user/show/12345678-example-reader` — full URL
       - `goodreads.com/user/show/12345678` — URL without scheme
       - mixed whitespace, trailing query strings, etc.
 
@@ -41,7 +41,7 @@ def _extract_goodreads_user_id(raw: str) -> str:
     ID can be found, so the user gets a clear "we couldn't parse that"
     message instead of a silent 404 from the RSS fetch.
 
-    User feedback 2026-05-26: wizard required users to extract the numeric
+    user feedback 2026-05-26: wizard required users to extract the numeric
     ID from their profile URL by hand. Now they paste anything Goodreads-y
     and we figure it out.
     """

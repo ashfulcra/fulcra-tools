@@ -15,12 +15,12 @@
     "lane:backlog",
     "kind:task",
     "kind:directive",
-    "origin:ash",
+    "origin:user",
     "origin:fleet"
   ],
   "max_managed_labels": 16,
   "workstream_projects": {},
-  "included_origins": ["ash", "fleet"],
+  "included_origins": ["user", "fleet"],
   "close_absent": true,
   "field_ownership": {
     "title": "source",

@@ -49,7 +49,7 @@ as `tell`. Use it the SAME turn a principal states a commitment ("later today", 
 enumerate that list") — an uncaptured commitment is the drop nobody can see, and
 `threads` only surfaces what was recorded.
 
-- `--for <principal>` — who owes the commitment (e.g. `ash`).
+- `--for <principal>` — who owes the commitment (e.g. `user`).
 - `--by <when>` — declared window (ISO or `5d`/`36h`/`10m`); absent = undeclared, and
   the `threads` fold falls back to capture-time + `--intent-grace-hours`.
 - **Identity is text + assignee only — `--by` is EXCLUDED from the slug.** So an

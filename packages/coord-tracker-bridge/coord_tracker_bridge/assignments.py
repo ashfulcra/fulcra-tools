@@ -1,11 +1,11 @@
 """`linear-assignments` — route Linear assignment/state changes to the fleet.
 
 PHASE 1, AND ONLY PHASE 1 (design: `_coord/agents/coord-boss/reports/
-2026-08-19-linear-integration-design.md`, approved by Ash 2026-08-19). Zero
+2026-08-19-linear-integration-design.md`, approved by the user 2026-08-19). Zero
 Linear writes: this module reaches the platform exclusively through
 `linear-inbox`'s `ReadOnlyTransport`, which refuses any document that is not a
 pure query. Phases 2 and 3 — the one-time board reconcile and the two-tier
-projection — are separately gated on Ash GO'ing a printed plan plus a
+projection — are separately gated on User GO'ing a printed plan plus a
 bot-actor token, and nothing here anticipates them.
 
 WHAT IT DOES. Reads the board, selects the issues that moved since a durable
@@ -18,13 +18,13 @@ WHY IT RE-READS THE WHOLE BOARD. It could filter server-side on `updatedAt`.
 It doesn't: `fetch_inbox` is the read path that survived nine review rounds and
 carries the completeness contract (null nodes, hollow sub-objects, pageInfo
 internals, cursor cycles), and a second query shape would be a second place for
-a partial board to be reported as a whole one. The board is ~124 issues; the
+a partial board to be reported as a whole one. A board can span multiple pages; the
 bandwidth is not worth a parallel contract. The watermark is applied to the
 rows AFTER they have been read faithfully.
 
 WHY A WATERMARK ALONE IS NOT ENOUGH. Linear bumps `updatedAt` for any edit — a
 retitle, a description tweak — so a watermark selects CANDIDATES, not changes.
-Routing on candidates would dispatch a directive every time Ash fixes a typo,
+Routing on candidates would dispatch a directive every time User fixes a typo,
 and the design names noise as a defect in its own right. So the durable state
 also remembers the (assignee, state) pair last observed per issue, and only a
 pair that actually differs is routed.
@@ -49,7 +49,7 @@ not "new", which under-claims, and not "repeat", which over-claims.
 PREVIEW IS THE DEFAULT. `--deliver` is what dispatches and what advances the
 watermark; without it the verb prints the plan and consumes nothing. The
 reason is on the record: the near-miss that shaped this whole lane was a plan
-that would have pushed ~503 creates into a curated board, and a first run of
+that would have pushed many creates into a curated board, and a first run of
 THIS verb against a cold watermark has exactly the same shape with the fleet
 bus as the target. A cold start therefore refuses to deliver at all until
 `--seed` establishes the baseline.
@@ -100,7 +100,7 @@ class RosterUnreadable(AssignmentsUnknown):
 
     Deliberately NOT "no mappings". An empty roster would route every issue to
     the coordinator as unresolved, which reads on the bus as a confident finding
-    about Ash's assignments when it is really a failure to read a file.
+    about the user's assignments when it is really a failure to read a file.
     """
 
 

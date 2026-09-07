@@ -46,7 +46,7 @@ def _make_sample_events() -> list[NormalizedEvent]:
     ]
     for (title, year, ts, guid, rw) in rows:
         ext = {
-            "feed_url": "https://letterboxd.com/ash/rss/",
+            "feed_url": "https://letterboxd.com/user/rss/",
             "guid": f"letterboxd-watch-{guid}",
             "film_title": title,
             "rewatch": rw,
@@ -74,7 +74,7 @@ def test_letterboxd_cli_missing_definition_emits_error_envelope(
     monkeypatch.setattr("fulcra_media.cli.STATE_PATH", state_path)
 
     res = CliRunner().invoke(cli, ["import", "letterboxd",
-                                    "--username", "ash", "--json"])
+                                    "--username", "user", "--json"])
     assert res.exit_code == 2
     payload = json.loads(res.output.strip())
     assert payload["ok"] is False
@@ -114,7 +114,7 @@ def test_letterboxd_cli_cold_start_no_watermark(fake_state, monkeypatch):
     )
 
     res = CliRunner().invoke(cli, ["import", "letterboxd",
-                                    "--username", "ash", "--json"])
+                                    "--username", "user", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.output.strip())
     assert payload["ok"] is True
@@ -122,7 +122,7 @@ def test_letterboxd_cli_cold_start_no_watermark(fake_state, monkeypatch):
     assert payload["since_watermark"] is None
     assert payload["posted"] == 4
     assert payload["new_watermark"] is not None
-    assert captured_urls == ["https://letterboxd.com/ash/rss/"]
+    assert captured_urls == ["https://letterboxd.com/user/rss/"]
 
 
 def test_letterboxd_cli_watermark_driven_incremental(fake_state, monkeypatch):
@@ -151,7 +151,7 @@ def test_letterboxd_cli_watermark_driven_incremental(fake_state, monkeypatch):
     )
 
     res = CliRunner().invoke(cli, ["import", "letterboxd",
-                                    "--username", "ash", "--json"])
+                                    "--username", "user", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.output.strip())
     # When a watermark is set, since_watermark surfaces (watermark - 1h overlap)
@@ -176,7 +176,7 @@ def test_letterboxd_cli_check_only_does_not_post(fake_state, monkeypatch):
     monkeypatch.setattr("fulcra_media.fulcra.FulcraClient.run_import", fake_run)
 
     res = CliRunner().invoke(cli, ["import", "letterboxd",
-                                    "--username", "ash",
+                                    "--username", "user",
                                     "--check-only", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.output.strip())
@@ -207,7 +207,7 @@ def test_letterboxd_cli_json_envelope_shape(fake_state, monkeypatch):
     )
 
     res = CliRunner().invoke(cli, ["import", "letterboxd",
-                                    "--username", "ash", "--json"])
+                                    "--username", "user", "--json"])
     assert res.exit_code == 0
     payload = json.loads(res.output.strip())
     required = {
@@ -241,7 +241,7 @@ def test_letterboxd_cli_fetch_error_surfaces_in_envelope(fake_state, monkeypatch
 
 def test_letterboxd_cli_invalid_since_format_emits_args_error(fake_state):
     res = CliRunner().invoke(cli, [
-        "import", "letterboxd", "--username", "ash",
+        "import", "letterboxd", "--username", "user",
         "--since", "not a date", "--json",
     ])
     assert res.exit_code == 2

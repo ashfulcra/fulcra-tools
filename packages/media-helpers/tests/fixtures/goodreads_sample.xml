@@ -3,16 +3,16 @@
      xmlns:content="http://purl.org/rss/1.0/modules/content/"
      xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
-    <title>ash's bookshelf: read</title>
+    <title>user's bookshelf: read</title>
     <copyright><![CDATA[Copyright (C) 2026 Goodreads Inc. All rights reserved.]]></copyright>
     <link><![CDATA[https://www.goodreads.com/review/list_rss/12345?shelf=read]]></link>
     <atom:link href="https://www.goodreads.com/review/list_rss/12345?shelf=read" rel="self" type="application/rss+xml"/>
-    <description><![CDATA[ash's bookshelf: read]]></description>
+    <description><![CDATA[user's bookshelf: read]]></description>
     <language>en-US</language>
     <lastBuildDate>Tue, 12 May 2026 12:34:56 +0000</lastBuildDate>
     <ttl>60</ttl>
     <image>
-      <title>ash's bookshelf: read</title>
+      <title>user's bookshelf: read</title>
       <link>https://www.goodreads.com/review/list_rss/12345?shelf=read</link>
       <width>144</width>
       <height>41</height>
@@ -37,7 +37,7 @@
       </book>
       <author_name><![CDATA[J.R.R. Tolkien]]></author_name>
       <isbn>0547928222</isbn>
-      <user_name>ash</user_name>
+      <user_name>user</user_name>
       <user_rating>5</user_rating>
       <user_read_at><![CDATA[Sat, 10 May 2026 00:00:00 +0000]]></user_read_at>
       <user_date_added><![CDATA[Mon, 11 May 2026 09:00:00 -0700]]></user_date_added>
@@ -48,7 +48,7 @@
       <book_published>1937</book_published>
       <description><![CDATA[<a href="https://www.goodreads.com/book/show/5907"><img alt="The Hobbit" src="https://images-na.ssl-images-amazon.com/images/I/91b0C2YNSrL._SY75_.jpg" /></a><br/>
                                       author: J.R.R. Tolkien<br/>
-                                      name: ash<br/>
+                                      name: user<br/>
                                       average rating: 4.28<br/>
                                       book published: 1937<br/>
                                       rating: 5<br/>
@@ -73,7 +73,7 @@
       </book>
       <author_name><![CDATA[Andy Weir]]></author_name>
       <isbn>0593135202</isbn>
-      <user_name>ash</user_name>
+      <user_name>user</user_name>
       <user_rating>4</user_rating>
       <user_read_at></user_read_at>
       <user_date_added><![CDATA[Sun, 10 May 2026 12:30:00 -0700]]></user_date_added>
@@ -99,7 +99,7 @@
       </book>
       <author_name><![CDATA[Anonymous]]></author_name>
       <isbn></isbn>
-      <user_name>ash</user_name>
+      <user_name>user</user_name>
       <user_rating>0</user_rating>
       <user_read_at><![CDATA[Wed, 07 May 2026 00:00:00 +0000]]></user_read_at>
       <user_date_added><![CDATA[Fri, 08 May 2026 23:15:00 -0700]]></user_date_added>

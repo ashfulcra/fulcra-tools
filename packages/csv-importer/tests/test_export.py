@@ -63,12 +63,12 @@ def test_definition_id_empty_when_no_def_source():
 def test_data_dot_path_pulls_from_data_payload():
     rec = _rec(data={
         "note": "n",
-        "external_ids": {"chrome_identity": "ash@fulcra.com"},
+        "external_ids": {"chrome_identity": "user@example.com"},
         "service": "web",
     })
     opts = ExportOptions()
     assert select_column(rec, "data.service", opts) == "web"
-    assert select_column(rec, "external_ids.chrome_identity", opts) == "ash@fulcra.com"
+    assert select_column(rec, "external_ids.chrome_identity", opts) == "user@example.com"
 
 
 def test_missing_field_returns_empty_string():

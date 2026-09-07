@@ -13,6 +13,8 @@ no read at all to the paths that were already answering.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from coord_engine import bus_tags, checkpoint_channel, read_retry, records
@@ -90,7 +92,7 @@ def test_a_rescue_leaves_a_breadcrumb(no_sleep, monkeypatch):
 
 
 def test_the_breadcrumb_is_info_not_a_warning(no_sleep, monkeypatch):
-    """Ash's complaint was red text. A rescued blip is not an alarm."""
+    """the user's complaint was red text. A rescued blip is not an alarm."""
     monkeypatch.delenv(read_retry.ENV_RETRY_MS, raising=False)
     sleep, _ = no_sleep
     log = _SilentLog()
@@ -260,9 +262,9 @@ def test_checkpoints_config_survives_one_transient_failure():
 def test_tags_registry_survives_one_transient_failure():
     bus_tags.cache_clear()
     body = ('{"schema": "coord.bus-tags.v2", '
-            '"base": "cb951ecb-f21c-4aee-826e-2cb0b12517d6", "agents": {}}')
+            '"base": "00000000-0000-4000-8000-000000000097", "agents": {}}')
     reg, status = bus_tags.load_registry(FlakyTransport(body), "fulcra")
-    assert status == "ok" and reg["base"].startswith("cb951ecb")
+    assert status == "ok" and reg["base"] == json.loads(body)["base"]
 
 
 def test_a_persistently_dark_store_is_still_UNKNOWN_at_every_call_site():

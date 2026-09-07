@@ -2,7 +2,7 @@
 //  SafariWebExtensionHandler.swift
 //  Shared (Extension)
 //
-//  Created by Ash Kalb on 6/7/26.
+//  Fulcra Attention contributors.
 //
 //  Thin adapter only. Every decision lives in NativeBridge, which is testable
 //  without an extension host; this file does the two things that genuinely
