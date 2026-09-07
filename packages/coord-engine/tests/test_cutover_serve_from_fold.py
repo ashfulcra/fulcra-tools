@@ -415,3 +415,62 @@ def test_needs_me_without_a_switch_is_the_file_plane_answer(monkeypatch, capsys)
     payload = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
     ids = [r.get("id") for r in payload["rows"] if r.get("id")]
     assert rc == 0 and ids == ["file-plane-row-00000001"], payload
+
+
+# ---- post-flip defect (2026-09-07 10:57Z): forge under fold prefers the validated generation ----------------
+
+def _gen_doc(forge_value):
+    return {"id": "gen0123456789abcdef", "sections": {"forge": {"schema": "x", "state": "complete", "value": forge_value}}}
+
+
+def _fenced_summaries(*, stale_generation="old-writer"):
+    """A summaries document whose forge section carries an older writer generation than the fence: the live shape."""
+    from datetime import datetime, timezone
+    from coord_engine import projection as projection_mod
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    section = {"schema": projection_mod.FORGE_SCHEMA, "generated_at": now, "complete": True, "responsible": {}, "feedback": {},
+               projection_mod.FENCE_GENERATION_KEY: stale_generation}
+    fence = {"schema": projection_mod.PUBLICATION_FENCE_SCHEMA, "generation": "new-writer"}
+    return json.dumps({"rows": [], projection_mod.FORGE_KEY: section, projection_mod.PUBLICATION_FENCE_KEY: fence})
+
+
+def _fresh_forge_value(forge=None):
+    from datetime import datetime, timezone
+    from coord_engine import projection as projection_mod
+    value = {"schema": projection_mod.FORGE_SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+             "complete": True, "responsible": {}, "feedback": {}}
+    value.update(forge or {})
+    return value
+
+
+def test_under_fold_forge_prefers_the_validated_generation_over_a_fence_mismatched_summaries_doc(monkeypatch, capsys):
+    _arm_file_plane_sentinels(monkeypatch)
+    from coord_engine import public_read
+    forge = {"responsible": {"pr-9": [AGENT]}, "feedback": {"pr-9": [{"id": "fb-1", "author": "rev"}]}}
+    monkeypatch.setattr(public_read, "_read_generation", lambda transport, team: ("raw", {}, _gen_doc(_fresh_forge_value(forge)), ""))
+    t = FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS), SUMMARIES: _fenced_summaries()})
+    rc, payload = _obligations(t, capsys)
+    assert rc == 0 and payload["state"] == "DATA" and not payload["degraded"], payload
+    assert payload["owed_count"] >= 3, payload                                       # 2 fold rows + 1 forge item
+    assert t.listed == []
+
+
+def test_under_fold_a_fence_mismatch_with_no_generation_is_unknown_never_a_raw_scan(monkeypatch, capsys):
+    _arm_file_plane_sentinels(monkeypatch)
+    from coord_engine import public_read
+    monkeypatch.setattr(public_read, "_read_generation", lambda transport, team: (None, None, None, "current manifest absent or unreadable"))
+    t = FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS), SUMMARIES: _fenced_summaries()})
+    rc, payload = _obligations(t, capsys)
+    assert rc == 3 and payload["degraded"] == ["forge_feedback"], payload
+    assert "fence mismatch" in payload["details"]["forge_feedback"] and "manifest absent" in payload["details"]["forge_feedback"]
+    assert t.listed == []
+
+
+def test_under_fold_needs_me_serves_forge_from_the_generation_too(monkeypatch, capsys):
+    _arm_file_plane_sentinels(monkeypatch)
+    from coord_engine import public_read
+    monkeypatch.setattr(public_read, "_read_generation", lambda transport, team: ("raw", {}, _gen_doc(_fresh_forge_value()), ""))
+    t = FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS), SUMMARIES: _fenced_summaries()})
+    rc, env = _needs_me(t, capsys)
+    assert rc == 0 and env["health"] == "DATA", env
+    assert t.listed == []

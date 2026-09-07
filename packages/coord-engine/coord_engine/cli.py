@@ -6231,31 +6231,62 @@ def _authority_unknown_probes(why: str) -> "list[obligations_mod.Component]":
             for n in obligations_mod.OBLIGATION_COMPONENTS]
 
 
-def _forge_rows_pointed(transport: Any, team: str, agent: str, *, deadline: Optional[float]
-                        ) -> tuple[Optional[list[dict[str, Any]]], str]:
-    """Forge feedback with POINTED READS ONLY (codex-coder P0, engine-ship-gate-c4a8410a): one read of the
-    summaries document, the FRESH ``forge`` projection section from it, and one ack read per feedback item for
-    this agent. ``changed_slugs`` is empty on purpose — the feed delta is what re-lists a PR's feedback directory,
-    and the fold path may never list. A projection that is absent, stale, incomplete or malformed is
-    (None, why): UNKNOWN at the serving boundary, never a raw scan."""
+def _forge_section_pointed(transport: Any, team: str) -> tuple[Optional[dict[str, Any]], str]:
+    """The forge projection section by POINTED READS ONLY, preferring the VALIDATED GENERATION document
+    (public_read._read_generation: current manifest + immutable generation, identity- and schema-checked, so its
+    sections are fence-consistent by construction) and falling back to the raw summaries document, whose
+    section must pass the publication fence. Measured after the flip (2026-09-07 10:57Z): every fold-served
+    answer read UNKNOWN because the summaries document's forge section carried an older writer generation than
+    the document's fence; the pre-cutover path hid that behind a raw scan, which the fold path may never run."""
+    now = _iso(_now())
+    authority = _PUBLIC_READ_CONTEXT.get()
+    if authority is not None:
+        value = dict(authority.section("forge") or {})
+        if value:
+            section, reason = projection_mod.fresh_section({projection_mod.FORGE_KEY: value}, projection_mod.FORGE_KEY,
+                                                           projection_mod.FORGE_SCHEMA, now=now)
+            if section is not None:
+                return section, "forge served from the sealed public-read generation"
+    try:
+        _raw, _manifest, doc, gen_reason = public_read._read_generation(transport, team)
+    except Exception as exc:
+        doc, gen_reason = None, f"generation read raised ({exc})"
+    if doc is not None:
+        value = dict(((doc.get("sections") or {}).get("forge") or {}).get("value") or {})
+        section, reason = projection_mod.fresh_section({projection_mod.FORGE_KEY: value}, projection_mod.FORGE_KEY,
+                                                       projection_mod.FORGE_SCHEMA, now=now)
+        if section is not None:
+            return section, f"forge served from the validated generation {doc.get('id', '')[:12]}"
+        gen_reason = reason or "generation forge section empty"
     try:
         body, state = transport.read_classified(rec.summaries_path(team))
     except Exception as exc:
-        return None, f"forge projection document unreadable ({exc})"
+        return None, f"forge projection document unreadable ({exc}); generation: {gen_reason}"
     if state != "ok" or not body:
-        return None, f"forge projection document {state}"
+        return None, f"forge projection document {state}; generation: {gen_reason}"
     try:
-        doc = json.loads(body)
+        sdoc = json.loads(body)
     except ValueError:
-        return None, "forge projection document is not JSON"
-    section, reason = projection_mod.fresh_section(doc, projection_mod.FORGE_KEY, projection_mod.FORGE_SCHEMA,
-                                                   now=_iso(_now()))
+        return None, f"forge projection document is not JSON; generation: {gen_reason}"
+    section, reason = projection_mod.fresh_section(sdoc, projection_mod.FORGE_KEY, projection_mod.FORGE_SCHEMA, now=now)
     if section is None:
-        return None, f"forge projection not servable: {reason or 'no forge section in the summaries document'}"
+        return None, f"forge projection not servable: {reason or 'no forge section in the summaries document'}; generation: {gen_reason}"
+    return section, "forge served from the summaries document projection"
+
+
+def _forge_rows_pointed(transport: Any, team: str, agent: str, *, deadline: Optional[float]
+                        ) -> tuple[Optional[list[dict[str, Any]]], str]:
+    """Forge feedback with POINTED READS ONLY (codex-coder P0, engine-ship-gate-c4a8410a): the projection section
+    from `_forge_section_pointed`, then one ack read per feedback item for this agent. ``changed_slugs`` is empty on
+    purpose — the feed delta is what re-lists a PR's feedback directory, and the fold path may never list. No
+    servable projection is (None, why): UNKNOWN at the serving boundary, never a raw scan."""
+    section, why = _forge_section_pointed(transport, team)
+    if section is None:
+        return None, why
     served = _forge_feedback_from_projection(transport, team, agent, section, deadline=deadline, changed_slugs=set())
     if served is None:
         return None, "forge projection malformed"
-    return served, "forge served from the projection (pointed reads only)"
+    return served, f"{why} (pointed reads only)"
 
 
 def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
