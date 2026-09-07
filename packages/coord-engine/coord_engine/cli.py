@@ -3210,6 +3210,11 @@ def _held_roles_for_rows(
     return held, unresolved
 
 
+#: Review dispatch is P1 (the pr-630 design). The DOCUMENT and the companion
+#: event must both carry it: a row whose two planes disagree on priority is
+#: a permanent `compare-to-fold` DIVERGE on a row nothing is wrong with.
+_REVIEW_REQUEST_PRIORITY = "P1"
+
 #: The title a review-request directive carries (``_deliver_review_directive``):
 #: ``REVIEW REQUEST: <slug>``, assignee = the reviewer. reconcile indexes that
 #: directive as an ordinary aggregate row, so the caller's OWN pending reviews are
@@ -5673,15 +5678,18 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
         _, content = tasks.new_task_doc(
             title, now=_iso(_now()), status="proposed", owner=sender,
             assignee=reviewer, summary=summary, next_action=next_action,
-            kind="directive", slug=dslug,
+            kind="directive", slug=dslug, priority=_REVIEW_REQUEST_PRIORITY,
         )
     except tasks.TaskError as e:
         print(f"review-request directive for {reviewer} failed: {e}", file=sys.stderr)
         return 1
-    # The namespace carries team for `_write_directive` plus sender/priority for
-    # the companion emit (`_known_sender` reads .sender; review dispatch is P1
-    # per the pr-630 design).
-    ns = argparse.Namespace(team=team, sender=sender, priority="P1")
+    # ONE priority, both planes. The companion event has always been P1 (review
+    # dispatch, per the pr-630 design) while the document took tasks' default
+    # P2, so the same row carried two priorities and `compare-to-fold` — which
+    # compares (slug, pri, ptr) — reported the slug as DIVERGE on BOTH sides
+    # forever. Measured 2026-09-07 on codex-reviewer: four review-request slugs,
+    # identical pointers, doc P2 against fold P1.
+    ns = argparse.Namespace(team=team, sender=sender, priority=_REVIEW_REQUEST_PRIORITY)
     rc = _write_directive(transport, ns, slug=dslug,
                           content=content, payload=payload, assignee=reviewer,
                           not_before=None)
