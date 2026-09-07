@@ -21,6 +21,11 @@ incident and fix it upstream at the surface that produced it, not with a
 defensive patch at the consumer. The models reading these surfaces are smart;
 what they need from us is surfaces that are durable.
 
+**Apple Notes reconciliation/writeback:** listing timestamps are not a content
+baseline. Reconciliation reads tracked vault bodies so edits near a sync are not
+missed; retain the complete internal change list and cap only report presentation.
+Partial AppleScript write failures must produce a failed report and failed run.
+
 ## Public repository privacy
 
 All packages, plugins, skills, examples, and release artifacts must be reusable

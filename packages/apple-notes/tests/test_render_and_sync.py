@@ -447,3 +447,99 @@ def test_unreadable_attachment_does_not_stop_later_notes(notes_db, monkeypatch):
     stats = sync.run_sync(container=notes_db, log=LOG)
     assert stats.attachments_failed == 1
     assert stats.notes_unchanged == 2
+
+
+@pytest.mark.parametrize("edit_seconds", [15, 75])
+@pytest.mark.parametrize("apple_changed, expected", [
+    (False, "vault_edited"), (True, "conflict"),
+])
+def test_reconcile_detects_vault_edits_inside_listing_timestamp_margin(
+        notes_db, monkeypatch, edit_seconds, apple_changed, expected):
+    from datetime import timedelta
+    import sqlite3
+    from apple_notes_test_helpers import make_body, make_run
+    from fulcra_apple_notes import reconcile
+
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, dry_run=False, log=LOG)
+    state = json.loads(vault.files[sync.STATE_PATH])
+    entry = state["notes"]["note-uuid-3333"]
+    entry["synced_at"] = NOW.isoformat()
+    vault.files[sync.STATE_PATH] = json.dumps(state)
+    path = f"/vault/{entry['path']}"
+    _, baseline = reconcile.parse_vault_note(vault.files[path])
+    vault.files[path] = vault.files[path].replace(baseline, "Vault edit")
+    if apple_changed:
+        with sqlite3.connect(notes_db / "NoteStore.sqlite") as db:
+            db.execute("UPDATE ZICNOTEDATA SET ZDATA=? WHERE Z_PK=12",
+                       (make_body("Apple edit", [make_run(10)]),))
+
+    # A real file listing truncates seconds, so even a later edit can appear
+    # in the sync minute or in the following minute. Time passing never
+    # changes this stored timestamp; both reconciliation passes must find it.
+    edited = NOW + timedelta(seconds=edit_seconds)
+    listing_row = (f"1 KiB {edited:%Y-%m-%d %I:%M%p} UTC "
+                   f"{entry['path'].rsplit('/', 1)[-1]}")
+    monkeypatch.setattr(vaultio, "list_dir", lambda *a, **k: listing_row)
+    for _ in range(2):
+        result = sync.run_reconcile(container=notes_db, log=LOG)
+        target = [c for c in result["changes"] if c["uuid"] == "note-uuid-3333"]
+        assert [c["status"] for c in target] == [expected]
+
+
+def test_reconcile_retains_edits_and_conflicts_beyond_two_hundred(
+        notes_db, monkeypatch):
+    import sqlite3
+    from apple_notes_test_helpers import make_body, make_run
+    from fulcra_apple_notes import reconcile
+
+    baseline = make_body("Baseline", [make_run(8)])
+    with sqlite3.connect(notes_db / "NoteStore.sqlite") as db:
+        for index in range(205):
+            key = 1000 + index
+            db.execute("INSERT INTO ZICNOTEDATA VALUES (?, ?)", (key, baseline))
+            db.execute(
+                "INSERT INTO ZICCLOUDSYNCINGOBJECT "
+                "(Z_PK, Z_ENT, ZIDENTIFIER, ZTITLE1, ZFOLDER, ZNOTEDATA, "
+                "ZMODIFICATIONDATE1, ZCREATIONDATE3, ZMARKEDFORDELETION) "
+                "VALUES (?, 12, ?, ?, 1, ?, 700000000.0, 690000000.0, 0)",
+                (key, f"bulk-{index:04d}", f"Example {index:04d}", key))
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, dry_run=False, log=LOG)
+    state = json.loads(vault.files[sync.STATE_PATH])
+    for uuid, entry in state["notes"].items():
+        if not uuid.startswith("bulk-"):
+            continue
+        path = f"/vault/{entry['path']}"
+        _, body = reconcile.parse_vault_note(vault.files[path])
+        vault.files[path] = vault.files[path].replace(body, "Vault edit")
+    with sqlite3.connect(notes_db / "NoteStore.sqlite") as db:
+        db.execute("UPDATE ZICNOTEDATA SET ZDATA=? WHERE Z_PK=1204",
+                   (make_body("Apple edit", [make_run(10)]),))
+    monkeypatch.setattr(vaultio, "list_dir", lambda *a, **k: "")
+
+    result = sync.run_reconcile(container=notes_db, log=LOG, download_all=True)
+    assert result["summary"]["vault_edited"] == 204
+    assert result["summary"]["conflict"] == 1
+    assert len(result["changes"]) == 205
+    assert {c["uuid"] for c in result["changes"]} == {
+        f"bulk-{index:04d}" for index in range(205)}
+    assert result["changes"][-1]["status"] == "conflict"
+
+
+def test_reconcile_propagates_unreadable_note_instead_of_returning_partial_worklist(
+        notes_db, monkeypatch):
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, dry_run=False, log=LOG)
+    state = json.loads(vault.files[sync.STATE_PATH])
+    target = f"/vault/{state['notes']['note-uuid-3333']['path']}"
+    read_text = vaultio.read_text
+
+    def unreadable_target(remote, **kwargs):
+        if remote == target:
+            raise vaultio.VaultIOError("synthetic transient read failure")
+        return read_text(remote, **kwargs)
+
+    monkeypatch.setattr(vaultio, "read_text", unreadable_target)
+    with pytest.raises(vaultio.VaultIOError, match="synthetic transient read failure"):
+        sync.run_reconcile(container=notes_db, log=LOG)

@@ -158,10 +158,14 @@ def _run_reconcile(ctx: RunContext) -> None:
     except Exception as exc:
         report.write({"ok": False, "mode": "reconcile",
                       "error": f"{type(exc).__name__}: {exc}",
-                      "elapsed_s": round(time.monotonic() - started, 2)})
+                      "elapsed_s": round(time.monotonic() - started, 2)},
+                     path=report.RECONCILE_PATH)
         raise
     payload = {"ok": True, "mode": "reconcile",
-               "elapsed_s": round(time.monotonic() - started, 2), **result}
+               "elapsed_s": round(time.monotonic() - started, 2), **result,
+               "changes": result["changes"][:200],
+               "changes_total": len(result["changes"]),
+               "changes_truncated": len(result["changes"]) > 200}
     report.write(payload, path=report.RECONCILE_PATH)
     ctx.log.info("apple-notes reconcile: %s", result["summary"])
 
@@ -178,7 +182,14 @@ def _run_writeback(ctx: RunContext) -> None:
     if ctx.config.get("writeback_enabled") is not True:
         raise RuntimeError("Experimental writeback is disabled. It requires separate explicit opt-in.")
     dry_run = bool(ctx.config.get("dry_run", True))
-    result = run_reconcile(container=_container(ctx), log=ctx.log)
+    try:
+        result = run_reconcile(container=_container(ctx), log=ctx.log)
+    except Exception as exc:
+        report.write({"ok": False, "mode": "writeback", "dry_run": dry_run,
+                      "error": f"{type(exc).__name__}: {exc}",
+                      "elapsed_s": round(time.monotonic() - started, 2)},
+                     path=report.WRITEBACK_PATH)
+        raise
 
     # Probing means talking to Notes, which LAUNCHES Notes.app. That is an
     # unwanted side effect for a routine dry run, so only probe when we
@@ -215,7 +226,7 @@ def _run_writeback(ctx: RunContext) -> None:
         elif not res.ok:
             failures.append({"uuid": change.uuid, "error": res.error})
 
-    payload = {"ok": True, "mode": "writeback", "dry_run": dry_run,
+    payload = {"ok": not bool(failures), "mode": "writeback", "dry_run": dry_run,
                "automation_available": available, "automation_detail": why,
                "candidates": len(allowed), "written": written,
                "refused": [{"uuid": c.uuid, "title": c.title, "reason": r}
@@ -224,6 +235,9 @@ def _run_writeback(ctx: RunContext) -> None:
                "elapsed_s": round(time.monotonic() - started, 2)}
     report.write(payload, path=report.WRITEBACK_PATH)
     ctx.log.info("apple-notes writeback: %s", payload)
+    if failures:
+        raise RuntimeError("Apple Notes writeback completed with errors; "
+                           "see the local run report.")
 
 
 def reconcile_change(raw: dict):

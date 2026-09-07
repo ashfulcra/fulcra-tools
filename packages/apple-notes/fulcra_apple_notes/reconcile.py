@@ -77,10 +77,10 @@ def classify(*, uuid: str, apple_hash: str | None, apple_modified: str | None,
              assume_vault_unchanged: bool = False) -> Change:
     """Decide what happened to one note since the last sync.
 
-    ``assume_vault_unchanged`` is set when a cheap freshness check (the
-    file listing's mtime) already proved the vault copy has not been
-    touched since we wrote it, so its body was not downloaded. Without this
-    the absent body would be misread as a deleted vault file.
+    ``assume_vault_unchanged`` requires an independently proven content
+    baseline, such as an unchanged server version. A listing timestamp is
+    insufficient. Production reconciliation reads each body and does not
+    enable this shortcut; otherwise an absent body means a missing file.
     """
     if state_entry is None:
         return Change(uuid=uuid, status=Status.NEW_IN_APPLE)

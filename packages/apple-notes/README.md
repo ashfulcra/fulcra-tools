@@ -58,7 +58,10 @@ until the source note changes. It does not yet offer a full repair pass.
 
 The supported setup is one-way import. `mode = "reconcile"` in
 `[plugin_settings.apple-notes]` reports changes on either side without writing.
-Reconciliation reports live in `apple-notes-reconcile.json` in the log directory.
+Reconciliation reads each tracked vault note to detect edits, including those made
+soon after a sync; large libraries can take time. Reports live in
+`apple-notes-reconcile.json` in the log directory. The report lists up to 200
+changes with the full total; experimental writeback evaluates the complete list.
 
 AppleScript writeback is experimental and excluded from the setup wizard.
 It requires `mode = "writeback"` **and** a separate `writeback_enabled = true`;
@@ -66,7 +69,8 @@ It requires `mode = "writeback"` **and** a separate `writeback_enabled = true`;
 notes without testing. Writeback refuses conflicts, missing ownership markers,
 and notes with any attachment, including inline tables or drawings. macOS
 Automation permission is also required; a timeout alone does not prove why
-AppleScript failed.
+AppleScript failed. Partial write failures mark the run failed and are recorded
+in the local writeback report.
 
 ## Development
 

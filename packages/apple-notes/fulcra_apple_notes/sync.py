@@ -10,14 +10,14 @@ leaving it stale.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import re
 import tempfile
 import time
 
-from . import listing, notestore, reconcile, render, vaultio
+from . import notestore, reconcile, render, vaultio
 from .body import BodyDecodeError, decode
 
 STATE_PATH = "/vault/notes/apple/.sync-state.json"
@@ -421,11 +421,6 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
     return stats
 
 
-# Files written within this margin of our own write are ours, not a user
-# edit: the vault's mtime is set server-side and can trail the local clock.
-FRESHNESS_MARGIN_S = 120
-
-
 def _links_from_state(attachments, state: dict) -> dict[str, str]:
     """Rebuild attachment links from state alone -- no disk, no network.
 
@@ -447,9 +442,13 @@ def run_reconcile(*, container: Path | None = None, log,
     """Classify every note as unchanged / apple-changed / vault-edited /
     conflict, without writing anything.
 
-    Only notes whose vault file looks newer than our own write are
-    downloaded: fetching all of them costs one request per note and would
-    make routine reconciliation unusably slow.
+    Read each tracked vault body before classifying it. Listing timestamps
+    have minute precision and cannot establish content equality with a local
+    sync timestamp, especially for edits made soon after a sync.
+
+    ``download_all`` remains accepted for caller compatibility; every checked
+    note now requires a content read. The returned changes are the complete
+    worklist; callers may cap presentation, but not writeback processing.
     """
     container = container or notestore.DEFAULT_GROUP_CONTAINER
     state = load_state(log=log)
@@ -477,48 +476,25 @@ def run_reconcile(*, container: Path | None = None, log,
             render.content_hash(body),
             note.modified.isoformat() if note.modified else "")
 
-    # Freshness pre-filter.
-    try:
-        raw = vaultio.list_dir("/vault/notes/apple")
-        mtimes = {e.name: e.modified for e in listing.parse(raw)}
-    except vaultio.VaultIOError as exc:
-        log.info("apple-notes: listing failed (%s); downloading every note", exc)
-        mtimes = {}
-        download_all = True
-
     changes: list[reconcile.Change] = []
     fetched = 0
     for uuid, entry in list(state["notes"].items())[:limit or None]:
         path = entry.get("path", "")
-        name = path.rsplit("/", 1)[-1]
         apple_hash, apple_modified = apple.get(uuid, (None, None))
 
-        stale_marker = entry.get("synced_at") or state.get("updated_at") or ""
-        vault_mtime = mtimes.get(name)
-        looks_touched = True
-        if vault_mtime is not None and stale_marker and not download_all:
-            try:
-                written = datetime.fromisoformat(stale_marker)
-                looks_touched = vault_mtime > written + timedelta(
-                    seconds=FRESHNESS_MARGIN_S)
-            except ValueError:
-                looks_touched = True
-
-        vault_text = None
-        if looks_touched or download_all:
-            try:
-                vault_text = vaultio.read_text(f"/vault/{path}")
-                fetched += 1
-            except vaultio.MissingFile:
-                vault_text = None
-            except vaultio.VaultIOError as exc:
-                log.info("apple-notes: could not read %s: %s", path, exc)
-                continue
+        try:
+            vault_text = vaultio.read_text(f"/vault/{path}")
+            fetched += 1
+        except vaultio.MissingFile:
+            vault_text = None
+        except vaultio.VaultIOError:
+            # A partial classification cannot safely authorize writeback:
+            # the unreadable note may contain an edit or a conflict.
+            raise
 
         changes.append(reconcile.classify(
             uuid=uuid, apple_hash=apple_hash, apple_modified=apple_modified,
-            vault_text=vault_text, state_entry=entry,
-            assume_vault_unchanged=(vault_text is None and not looks_touched)))
+            vault_text=vault_text, state_entry=entry))
 
     for note in notes:
         if note.uuid not in state["notes"]:
@@ -533,5 +509,5 @@ def run_reconcile(*, container: Path | None = None, log,
         "summary": reconcile.summarize(changes),
         "changes": [c.__dict__ | {"status": c.status.value}
                     for c in changes
-                    if c.status is not reconcile.Status.UNCHANGED][:200],
+                    if c.status is not reconcile.Status.UNCHANGED],
     }
