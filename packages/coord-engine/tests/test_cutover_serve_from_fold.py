@@ -220,6 +220,43 @@ def test_obligations_served_from_the_fold_never_touch_the_file_plane(monkeypatch
     assert t.listed == []                                                         # nothing was enumerated
 
 
+def test_obligations_under_fold_count_each_open_exactly_once(monkeypatch, capsys):
+    """Components must PARTITION the folded rows. `obligations.fold` extends one owed list per component, so a
+    row offered under both `tasks` and `directives` is one obligation counted twice. Measured live 2026-09-07 by
+    coord-opus-worker: an open=3 fold answered DATA 6 with each slug listed twice, and every fold-served count
+    fleet-wide was double. Only `tasks` carries rows; the rest are consulted-and-subsumed."""
+    _arm_file_plane_sentinels(monkeypatch)
+    rows = dict(ROWS)
+    rows["review-request-pr-9-abcd1234"] = {"pri": "P1", "from": "boss", "to": AGENT, "kind": "review",
+                                            "ptr": "team/acme/task/review-request-pr-9-abcd1234.md",
+                                            "at": "2026-09-06T11:00:00Z"}
+    t = FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(rows), SUMMARIES: _summaries()})
+
+    rc, payload = _obligations(t, capsys)
+
+    assert rc == 0 and payload["state"] == "DATA", payload
+    assert payload["owed_count"] == len(rows), payload                            # 3 opens, not 6
+    assert set(payload["consulted"]) == set(obligations_mod.OBLIGATION_COMPONENTS) and not payload["degraded"]
+    assert t.listed == []
+    # and directly: exactly ONE component carries the rows, and it carries all of them
+    carriers = {c.name: c.probe().owed for c in cli._fold_probes(t, TEAM, AGENT, "why")}
+    assert [n for n, owed in carriers.items() if owed] == ["tasks"], carriers
+    assert sorted(r.get("slug") for r in carriers["tasks"]) == sorted(rows), carriers["tasks"]
+
+
+def test_an_unhealthy_fold_also_counts_each_retained_open_once(monkeypatch, capsys):
+    """The partial-data branch retains rows too, and must not double them either."""
+    _arm_file_plane_sentinels(monkeypatch)
+    t = FakeTransport({SWITCH: _switch("fold"), CKPT: _ckpt(ROWS, unread=1), SUMMARIES: _summaries()})
+
+    rc, payload = _obligations(t, capsys)
+
+    assert rc == 3 and payload["state"] == "UNKNOWN", payload
+    assert payload["owed_count"] == len(ROWS), payload
+    carriers = {c.name: c.probe().owed for c in cli._fold_probes(t, TEAM, AGENT, "why")}
+    assert [n for n, owed in carriers.items() if owed] == ["tasks"], carriers
+
+
 def test_obligations_under_fold_serve_forge_from_the_projection_by_pointed_reads_only(monkeypatch, capsys):
     _arm_file_plane_sentinels(monkeypatch)
     forge = {"responsible": {"pr-9": [AGENT]}, "feedback": {"pr-9": [{"id": "fb-1", "author": "rev"}, {"id": "fb-2", "author": "rev"}]}}
