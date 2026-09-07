@@ -142,6 +142,77 @@ def test_incomplete_projection_never_replaces_complete_generation(monkeypatch):
     assert t.store[path] == complete_generation
 
 
+def _inventory_unknown(section_names):
+    """A ``_tree_section`` stand-in: the named inventory sections exhaust their
+    budget, every other section reads normally."""
+    orig = reconcile._tree_section
+
+    def fake(transport, prefix, *, section, deadline):
+        if section in section_names:
+            return "UNKNOWN", {"records": []}
+        return orig(transport, prefix, section=section, deadline=deadline)
+    return fake
+
+
+def test_inventory_only_refusal_still_writes_fenced_compatibility_cache(monkeypatch):
+    """Every projection section completes but the responses inventory exhausts
+    its budget.  The generation is refused (current.json must not advance), yet
+    summaries.json is the compatibility cache the folds read: it must be
+    written, stamped with this pass's fence, and the pass must report degraded
+    with the refusal reason.  Measured live on 2026-09-07: without this, no
+    current writer had rewritten summaries.json for weeks and every fold-served
+    answer read UNKNOWN against a stale unfenced document."""
+    monkeypatch.setattr(reconcile, "_tree_section", _inventory_unknown({"responses"}))
+    t = FakeTransport()
+    now = "2026-08-18T21:05:53Z"
+
+    result = _reconcile(t, now=now)
+
+    assert result["degraded"] is True
+    assert "publication refused" in result["reason"]
+    assert "responses" in result["reason"]
+    assert f"team/{TEAM}/_coord/projections/current.json" not in t.store
+    agg = _agg(t)
+    fence = agg[projection.PUBLICATION_FENCE_KEY]
+    assert fence["schema"] == projection.PUBLICATION_FENCE_SCHEMA
+    for key, schema in projection.REQUIRED_SECTIONS:
+        assert agg[key][projection.FENCE_GENERATION_KEY] == fence["generation"]
+        section, why = projection.fresh_section(agg, key, schema, now=now)
+        assert section is not None, (key, why)
+
+
+def test_projection_refusal_wins_over_inventory_refusal(monkeypatch):
+    """When a projection section is ALSO incomplete, the inventory-only carve-out
+    must not apply: the partial aggregate is never written."""
+    monkeypatch.setattr(reconcile, "_tree_section", _inventory_unknown({"responses"}))
+    monkeypatch.setattr(projection, "build_review_projection", _incomplete_reviews)
+    t = FakeTransport()
+
+    result = _reconcile(t, now="2026-08-18T21:05:53Z")
+
+    assert result["degraded"] is True
+    assert f"team/{TEAM}/_coord/summaries.json" not in t.store
+    assert f"team/{TEAM}/_coord/projections/current.json" not in t.store
+
+
+def test_inventory_only_refusal_never_advances_a_prior_generation(monkeypatch):
+    """A later inventory-cut pass rewrites the cache but leaves the published
+    generation pointer where the last complete pass put it."""
+    t = FakeTransport()
+    _put_review(t, "pr-1", "alice")
+    _reconcile(t, now="2026-08-17T20:00:00Z")
+    current_path = f"team/{TEAM}/_coord/projections/current.json"
+    published = t.store[current_path]
+    monkeypatch.setattr(reconcile, "_tree_section", _inventory_unknown({"acknowledgments"}))
+
+    result = _reconcile(t, now="2026-08-18T21:05:53Z")
+
+    assert result["degraded"] is True
+    assert "acknowledgments" in result["reason"]
+    assert t.store[current_path] == published
+    assert _agg(t)["generated_at"] == "2026-08-18T21:05:53Z"
+
+
 def test_refused_projection_persists_private_progress_and_converges(monkeypatch):
     """Refusing public partial state must not discard the review builder's
     convergence cursor.  The next pass resumes from the private partial section
