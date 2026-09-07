@@ -3,9 +3,9 @@
 macOS menubar UI for `fulcra-collect`. Python + PyObjC + rumps v1; a
 Swift rewrite follows once the UX is locked.
 
-> **First time here?** See [docs/TESTING.md](../../docs/TESTING.md) for
-> the end-to-end walkthrough: install, start the daemon, paste your
-> Fulcra token, and walk Trakt onboarding step by step.
+For installation and Apple Notes setup, start with the
+[Collect guide](../../docs/collect.md#get-started-new-user). The downloadable Mac
+app includes its runtime and plugins. The commands below are for development.
 
 ## Run in dev mode
 
@@ -30,14 +30,22 @@ below.
 
 ## Build the .app
 
-    uv sync --extra macos --extra build --package fulcra-menubar
-    cd packages/menubar
-    uv run python setup.py py2app -A      # alias build for dev
-    uv run python setup.py py2app         # distributable build
+From the repository root on an Apple silicon Mac:
 
-The unsigned `.app` lands in `packages/menubar/dist/Fulcra Collect.app`.
-The first launch will trip Gatekeeper (right-click → Open to bypass).
-Code-signing and notarization land in sub-project 3.
+```sh
+UV_PYTHON=3.13 bash packages/menubar/scripts/build_macos_app.sh
+bash packages/menubar/scripts/verify_bundle.sh
+```
+
+The Briefcase build includes workspace wheels, Python, native command launchers,
+and the web setup interface. It writes the app under
+`packages/menubar/build/fulcra-menubar/macos/app/`. The build rejects embedded
+builder-home paths and removes nonportable pip scripts before signing.
+
+For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
+Developer ID identity and a configured notary profile. It signs, notarizes,
+staples, and checks the installer. An unnotarized development build is not the
+normal installer; do not ask users to bypass Gatekeeper.
 
 ## Manual smoke checklist
 
