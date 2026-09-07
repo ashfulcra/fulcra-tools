@@ -2072,23 +2072,48 @@ def reconcile(
                 engine_version=__version__,
             )
             publication = generation.publish(transport, team, sealed)
+    cache_only_reason: Optional[str] = None
     if publication is not None and not publication.published:
         reason = "generation publication refused: " + publication.reason
         warnings.append(reason)
-        # A detector that cannot yet produce a sealed ChangeBatch is the
-        # rollout/mixed-fleet compatibility case.  Preserve summaries.json for
-        # its established readers, but never advance current.json.  Once the
-        # detector is trusted, an incomplete section is a real bounded-build
-        # failure and remains nonzero as required by the v2 authority contract.
-        result = {
-            "degraded": True, "reason": reason, "tasks": len(rows),
-            "warnings": warnings, "rows": rows,
-        }
-        _write_health_shard(transport, team, host=host, now=now,
-                            result=result, log=log)
-        log.error("reconcile generation publication refused", team=team,
-                  reason=publication.reason)
-        return result
+        # Two different refusals share this branch, and only one may preserve.
+        # (a) A projection section (tasks/reviews/forge/needs_me) is incomplete:
+        #     a budget-cut pass must NEVER replace the last complete aggregate
+        #     with a partial one (the live 187/290 regression). Preserve.
+        # (b) Every projection section is complete and only the generation's
+        #     INVENTORY sections (responses, acknowledgments, roles, presence)
+        #     fell short: current.json must not advance, but summaries.json is
+        #     the compatibility cache the folds READ — including, since the
+        #     bus-v4 cutover, the forge projection served by pointed reads with
+        #     no raw-scan fallback. Measured 2026-09-07 on the live team: the
+        #     responses inventory (762 directories, every file read) never
+        #     completed inside its budget, so no current writer had rewritten
+        #     summaries.json for weeks and every fold-served answer read UNKNOWN
+        #     against a stale, unfenced document left by a 1.11.0 writer. Write
+        #     the cache, stamped with this pass's fence, and stay degraded.
+        inventory = set(generation.INVENTORY_PREFIXES)
+        incomplete = set(getattr(sealed, "incomplete", ()) or ())
+        projections_complete = all(
+            isinstance(proj_state.get(key), dict)
+            and proj_state[key].get("complete") is True
+            for key, _schema in projection_mod.REQUIRED_SECTIONS)
+        inventory_only = (bool(incomplete) and incomplete <= inventory
+                          and projections_complete
+                          and publication.reason.startswith("incomplete required section(s)"))
+        if not inventory_only:
+            result = {
+                "degraded": True, "reason": reason, "tasks": len(rows),
+                "warnings": warnings, "rows": rows,
+            }
+            _write_health_shard(transport, team, host=host, now=now,
+                                result=result, log=log)
+            log.error("reconcile generation publication refused", team=team,
+                      reason=publication.reason)
+            return result
+        cache_only_reason = reason
+        log.warn("reconcile: generation refused on inventory sections only; "
+                    "summaries.json written as the compatibility cache",
+                    team=team, incomplete=sorted(incomplete))
     if not transport.write(summaries_path(team), jsonutil.dumps(agg)):
         warnings.append("summaries.json write failed")
 
@@ -2102,7 +2127,7 @@ def reconcile(
         transitions=len(transitions), warnings=len(warnings),
     )
     result = {
-        "degraded": False,
+        "degraded": cache_only_reason is not None,
         "tasks": len(rows),
         "reused": reused,
         "parsed": parsed,
@@ -2112,6 +2137,8 @@ def reconcile(
         "incremental": incremental,
         "drift_detected": drift_detected,
     }
+    if cache_only_reason is not None:
+        result["reason"] = cache_only_reason
     if recovery_requested:
         result["recovery"] = "detector-full-scan"
     return result
