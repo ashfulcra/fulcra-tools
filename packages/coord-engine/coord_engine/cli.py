@@ -6263,9 +6263,12 @@ def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
     """The component set served from the agent's coord-fold checkpoint — ONE pointed read, no task index, no
     role resolution, no review-register listing, no forge directory listing (codex-coder P0s). The fold carries
     every open addressed to the agent as (slug, pri, ptr, from, to); kinds are not distinguished on the stream,
-    so `tasks` carries them all, `directives` the non-review ones, `reviews` the review-request rows, and
-    `blocks`/`reminders`/`role_duties` are consulted-and-subsumed (a block, a reminder or a role-routed duty is
-    an open in the fold, and its ptr says which). `forge_feedback` is served from the forge PROJECTION by pointed
+    so `tasks` carries them ALL and every other row-derived component is consulted-and-subsumed with no rows of
+    its own (a directive, a review request, a block, a reminder or a role-routed duty is an open in the fold, and
+    its ptr says which). The components must PARTITION the rows, not view them twice: `obligations.fold` extends
+    one owed list per component, so a row offered under both `tasks` and `directives` is one obligation counted
+    twice. That is the doubling coord-opus-worker measured on 2026-09-07 (DATA 6 for an open=3 fold, each slug
+    listed twice), and it made every fold-served count wrong fleet-wide. `forge_feedback` is served from the forge PROJECTION by pointed
     reads (`_forge_rows_pointed`), never the raw scan. A checkpoint that cannot answer makes every component
     UNREADABLE; a checkpoint whose own health fields say the fold is incomplete (codex-reviewer P0) makes every
     component UNREADABLE too, with its rows retained as partial data: UNKNOWN, never CLEAR."""
@@ -6284,9 +6287,9 @@ def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
         def _partial(owed):
             return lambda: P(state=S.UNREADABLE, owed=owed, detail=f"{serve_why}; {unhealthy}")
         return [
-            C(name="blocks", probe=_partial([])), C(name="directives", probe=_partial(directives)),
+            C(name="blocks", probe=_partial([])), C(name="directives", probe=_partial([])),
             C(name="forge_feedback", probe=_partial([])), C(name="reminders", probe=_partial([])),
-            C(name="reviews", probe=_partial(reviews)), C(name="role_duties", probe=_partial([])),
+            C(name="reviews", probe=_partial([])), C(name="role_duties", probe=_partial([])),
             C(name="tasks", probe=_partial(owed_all)),
         ]
     subsumed = f"{why}; not distinguished on the fold — an open of this kind is served under tasks"
@@ -6306,10 +6309,10 @@ def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
 
     return [
         C(name="blocks", probe=(lambda: P(state=S.OK, detail=subsumed))),
-        C(name="directives", probe=(lambda: P(state=S.OK, owed=directives, detail=why))),
+        C(name="directives", probe=(lambda: P(state=S.OK, detail=f"{subsumed} ({len(directives)} of the folded opens)"))),
         C(name="forge_feedback", probe=_forge_probe),
         C(name="reminders", probe=(lambda: P(state=S.OK, detail=subsumed))),
-        C(name="reviews", probe=(lambda: P(state=S.OK, owed=reviews, detail=why))),
+        C(name="reviews", probe=(lambda: P(state=S.OK, detail=f"{subsumed} ({len(reviews)} of the folded opens are review requests)"))),
         C(name="role_duties", probe=(lambda: P(state=S.OK, detail=f"{why}; role-routed opens are folded at seed and on the stream"))),
         C(name="tasks", probe=(lambda: P(state=S.OK, owed=owed_all, detail=why))),
     ]
