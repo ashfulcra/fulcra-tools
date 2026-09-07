@@ -721,10 +721,10 @@ def test_executing_engine_commit_reads_direct_url_beside_the_dist_info(tmp_path,
 
 
 def test_the_shipped_approved_set_is_exactly_the_adopted_fleet_pin_and_any_other_pin_refuses(monkeypatch, capsys):
-    """2026-09-06: the fleet pin moved to e9bbe55b (PR #742 + store upload), the build whose register
-    engine-ship-gate-e9bbe55b read APPROVED by both required reviewers (the cutover-switch engine, round 3). The
-    approved set names exactly it (4f8dcd19 left the set when the fleet left it); a fleet pin outside it still refuses."""
-    assert ship_check.APPROVED_ENGINE_PINS == frozenset({"e9bbe55b6efa1f8cce2873fc2401c0b97602f30a"})
+    """2026-09-07: the fleet pin moved to 1994a3ea (PR #747 + store upload 16:42:34Z), the build whose register
+    engine-ship-gate-1994a3ea read APPROVED by both required reviewers (the intermediate 3901251e register too). The
+    approved set names exactly it (e9bbe55b left the set when the fleet left it); a fleet pin outside it still refuses."""
+    assert ship_check.APPROVED_ENGINE_PINS == frozenset({"1994a3ead63189afc4b1e18d159c6a31bb7a5c1c"})
     monkeypatch.setattr(ship_check, "sh", world(pin="0" * 40))
     monkeypatch.setattr(ship_check, "engine_executable", lambda: "/tool/bin/coord-engine")
     import sys
