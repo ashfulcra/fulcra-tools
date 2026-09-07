@@ -6,7 +6,7 @@ description: Maintains the coord layer — engine, skills, bus hygiene, migratio
 policy: exclusive
 sla_hours: 24
 maintainer: user
-checkpoint_ref: team/<team>/member/maintainer/continuity/role-maintainer/latest.json
+checkpoint_ref: team/<team>/member/<agent>/continuity/role-<role>/latest.json
 ---
 # Duties
 - Keep the team healed (heartbeat reconcile), triage the bus, drive coord development.

@@ -75,13 +75,13 @@ class SourceCase:
 def source_case(request):
     if request.param == "engine":
         return SourceCase(
-            EngineSourceAdapter("fulcra", runner=engine_runner(), clock=lambda: NOW),
-            EngineSourceAdapter("fulcra", runner=engine_runner(degraded=True), clock=lambda: NOW),
+            EngineSourceAdapter("acme", runner=engine_runner(), clock=lambda: NOW),
+            EngineSourceAdapter("acme", runner=engine_runner(degraded=True), clock=lambda: NOW),
             CapabilityState.COMPLETE,
         )
     return SourceCase(
-        TeamsSourceAdapter("fulcra", transport=TeamsTransport({"task.md": TASK}), clock=lambda: NOW),
-        TeamsSourceAdapter("fulcra", transport=TeamsTransport(list_error=True), clock=lambda: NOW),
+        TeamsSourceAdapter("acme", transport=TeamsTransport({"task.md": TASK}), clock=lambda: NOW),
+        TeamsSourceAdapter("acme", transport=TeamsTransport(list_error=True), clock=lambda: NOW),
         CapabilityState.UNSUPPORTED,
     )
 
@@ -139,7 +139,7 @@ def test_source_contract_degradation_suppresses_absence_close(source_case):
 # payload. The adapter predates it and read live 2.0.2 as schema-degraded:
 #   tasks -> "$.contract: expected list, got int"   (board gained contract: 2)
 #   asks  -> "$: expected list, got dict"           (asks became an envelope)
-# Measured on team fulcra 2026-08-22: board keys were
+# Measured on team acme 2026-08-22: board keys were
 # active/waiting/blocked/proposed (lists) + contract=2; asks was
 # {contract, health, source, degraded, basis, rows}. A degraded capability
 # cannot authorize absence-based closes, so this silently narrowed coverage —
@@ -153,7 +153,7 @@ def _engine_source(payloads):
         def _read(self, capability):  # type: ignore[override]
             return payloads.get(capability.name), None
 
-    return _Canned("fulcra")
+    return _Canned("acme")
 
 
 def _task_row(name="t-1", status="active"):

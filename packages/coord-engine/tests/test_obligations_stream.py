@@ -21,9 +21,9 @@ from coord_engine import cli, records
 from test_reconcile import FakeTransport
 
 
-TEAM = "fulcra"
+TEAM = "acme"
 AGENT = "coord-boss"
-CFG = "team/fulcra/_coord/bus-v3/records.json"
+CFG = "team/acme/_coord/bus-v3/records.json"
 DTYPE = "MomentAnnotation/test"
 
 

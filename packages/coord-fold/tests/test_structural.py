@@ -20,13 +20,14 @@ OWNERSHIP: dict[str, dict[str, str]] = {
     "checkpoint.py": {"SCHEMA_VERSION": "value", "path": "callable", "empty": "callable", "apply": "callable", "load": "callable", "save": "callable"},
     "fold.py": {"OVERLAP_SECONDS": "value", "FoldOutcome": "callable", "FoldRefused": "callable", "FoldContended": "callable", "run": "callable"},
     "cli.py": {"main": "callable", "build_parser": "callable"},
+    "pointers.py": {"qualify": "callable"},   # team-relative ptr -> team root (coord-boss finding 2026-09-05); a pure function, imports nothing
     "__init__.py": {"__version__": "value"},
 }
 ALLOWED_EDGES: dict[str, set[str]] = {
-    "cli.py": {"fold", "channel", "events", "checkpoint", "transport"},
-    "fold.py": {"channel", "checkpoint", "events", "transport"},
+    "cli.py": {"fold", "channel", "events", "checkpoint", "transport", "pointers"},
+    "fold.py": {"channel", "checkpoint", "events", "transport", "pointers"},
     "channel.py": {"transport"}, "checkpoint.py": {"transport"},
-    "events.py": set(), "transport.py": set(), "__init__.py": set(),
+    "events.py": set(), "transport.py": set(), "pointers.py": set(), "__init__.py": set(),
 }
 
 

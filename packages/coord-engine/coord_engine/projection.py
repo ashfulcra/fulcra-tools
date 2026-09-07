@@ -130,11 +130,14 @@ DEFAULT_MAX_AGE_HOURS = 24.0
 #: ``complete: false`` (readers keep raw-scanning, loudly) and the next pass
 #: resumes converging — carried rows cost nothing, so each pass reaches further.
 DEFAULT_BUILD_BUDGET = 240.0
-#: The FORGE section's own budget, seconds. Deliberately smaller than the review
-#: budget: the forge fold is one listing per watched PR over a far smaller
-#: population, so it does not need parity — it needs a floor that a busy review
-#: fold cannot take away.
-DEFAULT_FORGE_BUDGET = 60.0
+#: The FORGE section's own budget, seconds. Deliberately DIFFERENT from the review
+#: budget (the decoupling test pins that): the forge fold is one listing per
+#: watched PR over a smaller population, so it does not need parity — it needs a
+#: floor that a busy review fold cannot take away. Raised 60 -> 300 on 2026-09-07:
+#: after the bus-v4 cutover the forge section is served by pointed reads only and
+#: an INCOMPLETE section makes every fold-served answer UNKNOWN; measured on the
+#: live team, 60s left `complete: false` on every v2.0.6 reconcile host.
+DEFAULT_FORGE_BUDGET = 300.0
 
 #: How many UNKNOWN slugs may be re-scanned once within the same pass. Small by
 #: intent: a handful is a transient, a crowd is a budget cut, and only the first
@@ -1109,7 +1112,24 @@ def build_forge_projection(
             resp.setdefault(str(slug), set()).add(str(who))
 
     feedback: dict[str, list[dict[str, Any]]] = {}
+    # coord-boss ruling 30be1f8e (2026-09-05): stop re-paying one listing per responsible PR on every pass. Measured
+    # on the live store: 125 responsible PRs cost ~77 s of per-PR listings that almost all come back EMPTY, while ONE
+    # listing of the parent `_coord/forge/feedback/` returns the two PR directories that exist in under a second. So
+    # the parent listing prunes the loop to the PRs that have a feedback directory. An EMPTY or FAILED parent listing
+    # proves nothing (a listing cannot prove absence: it answers identically for a real empty dir and a bad path), so
+    # both fall back to the per-PR loop unchanged — the pruning only ever REMOVES work it has positive evidence for.
+    with_feedback: Optional[set] = None
+    try:
+        parent = transport.list_dir(f"team/{team}/_coord/forge/feedback/")
+        names = {str(e.get("name") or "").rstrip("/") for e in parent if e.get("is_dir") or str(e.get("name") or "").endswith("/")}
+        names.discard("")
+        if names:
+            with_feedback = names
+    except TransportError:
+        with_feedback = None
     for slug in sorted(resp):
+        if with_feedback is not None and slug not in with_feedback:
+            continue                                  # positive evidence: no feedback directory for this PR
         if deadline.expired():
             complete = False
             break

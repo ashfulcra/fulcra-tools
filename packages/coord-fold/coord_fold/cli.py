@@ -6,7 +6,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-from . import channel, checkpoint, events, fold
+from . import channel, checkpoint, events, fold, pointers
 from .transport import CliPointerReader, CliPointerWriter, TransportUnavailable
 
 RC_OK, RC_REFUSED, RC_UNKNOWN = 0, 2, 3
@@ -33,7 +33,8 @@ def _render_open(state: dict) -> str:
     lines = []
     for slug, r in sorted(state["open"].items(), key=_row_sort_key):
         claimed = f"  claimed_by={r['claimed_by']}" if r.get("claimed_by") else ""
-        lines.append(f"  [{r['pri']}] {slug}  from={r['from']}  ptr={r['ptr']}{claimed}")
+        to = f"  to={r['to']}" if r.get("to") else ""                     # absent on rows written before the field existed
+        lines.append(f"  [{r['pri']}] {slug}  from={r['from']}{to}  ptr={r['ptr']}{claimed}")
     return "\n".join(lines) if lines else "  (nothing open)"
 
 
@@ -68,7 +69,7 @@ def _owed_row(reader, team, agent, slug) -> tuple:
 
 def cmd_fold(args, reader, writer) -> int:
     try:
-        out = fold.run(reader, writer, args.team, args.agent, now=args.now, writer_id=f"{args.agent}:{uuid.uuid4().hex[:8]}", max_events=args.max_events, verify_pointers=args.verify_pointers)
+        out = fold.run(reader, writer, args.team, args.agent, now=args.now, writer_id=f"{args.agent}:{uuid.uuid4().hex[:8]}", max_events=args.max_events, verify_pointers=args.verify_pointers, rebuild=getattr(args, "rebuild", False))
     except (channel.ChannelUnresolved, fold.FoldRefused) as exc:
         print(f"fold: refused — {exc}", file=sys.stderr)
         return RC_REFUSED
@@ -118,7 +119,7 @@ def cmd_close(args, reader, writer) -> int:
     if row is None:
         print(f"close: refused — {args.slug} is not open in {args.agent}'s checkpoint", file=sys.stderr)
         return RC_REFUSED
-    _body, st = reader.read_classified(args.evidence)
+    _body, st = reader.read_classified(pointers.qualify(args.team, args.evidence))   # same resolution as --verify-pointers
     if st == "absent":
         print(f"close: refused — evidence {args.evidence} is absent", file=sys.stderr)
         return RC_REFUSED
@@ -168,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "fold":
             sp.add_argument("--max-events", type=int, default=5000)
             sp.add_argument("--verify-pointers", action="store_true")
+            sp.add_argument("--rebuild", action="store_true",
+                            help="recompute the open set from the stream (epoch cursor) under the current relevance rule; "
+                                 "generation/writer kept so a concurrent writer is still refused")
         sp.set_defaults(func=fn)
     return p
 

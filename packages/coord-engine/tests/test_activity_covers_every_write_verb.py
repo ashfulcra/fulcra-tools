@@ -115,6 +115,11 @@ EXPECTED_MIXED = {
                   ["obligations", "r", "--agent", "a", "--repair-unknown"],
                   ["obligations", "r", "--agent", "a", "--seed-checkpoint"]],
     },
+    # `cutover show` views the bus-v4 switch; `cutover set` writes it — the flip and its rollback.
+    "cmd_cutover_dispatch": {
+        "read": [["cutover", "show", "r"]],
+        "write": [["cutover", "set", "r", "--serve", "files", "--reason", "rollback", "--agent", "a"]],
+    },
     "cmd_digest": {
         "read": [["digest", "r"]],
         # BOTH flags enter the persistent branch. `--emit-timeline` was missing

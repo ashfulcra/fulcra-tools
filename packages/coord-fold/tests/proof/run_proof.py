@@ -88,7 +88,12 @@ EXPECTED_SEQUENCE = [
     "<tmp>"
     ],
     [
-    "record"
+    "record",
+    "MomentAnnotation/x",
+    "--api-version",
+    "v1alpha1",
+    "--source",
+    "me"
     ],
     [
     "file",
@@ -113,7 +118,12 @@ EXPECTED_SEQUENCE = [
     "<tmp>"
     ],
     [
-    "record"
+    "record",
+    "MomentAnnotation/x",
+    "--api-version",
+    "v1alpha1",
+    "--source",
+    "me"
     ],
     [
     "file",
@@ -138,7 +148,12 @@ EXPECTED_SEQUENCE = [
     "<tmp>"
     ],
     [
-    "record"
+    "record",
+    "MomentAnnotation/x",
+    "--api-version",
+    "v1alpha1",
+    "--source",
+    "me"
     ],
     [
     "file",
@@ -174,7 +189,12 @@ EXPECTED_SEQUENCE = [
     "<tmp>"
     ],
     [
-    "record"
+    "record",
+    "MomentAnnotation/x",
+    "--api-version",
+    "v1alpha1",
+    "--source",
+    "me"
     ],
     [
     "file",

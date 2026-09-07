@@ -24,7 +24,7 @@ import pytest
 from coord_engine import cli, obligations as obligations_mod
 from coord_engine_test_helpers import FakeTransport
 
-TEAM = "fulcra"
+TEAM = "acme"
 AGENT = "coord-boss"
 CKPT = f"team/{TEAM}/_coord/agents/{AGENT}/obligations-checkpoint.json"
 

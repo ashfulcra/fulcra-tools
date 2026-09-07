@@ -43,6 +43,7 @@ from . import (
     handoff, pin_currency, query, read_retry, records, review, review_gc,
     obligations as obligations_mod, roles, router, stash, tasks, wake_adapters,
 )
+from . import cutover as cutover_mod
 from .budget import Deadline
 from . import reconcile as rec
 from .log import get_logger
@@ -842,8 +843,9 @@ def print_close_hint(row: dict[str, Any], *, team: str) -> None:
     print(_close_on_reply_breadcrumb(team, owner, slug))
 
 
-def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
-    now = _iso(_now())
+def _needs_me_from_files(args: argparse.Namespace, transport: Any, now: str) -> list[dict[str, Any]]:
+    """The file-plane needs-me: task index, role resolution, projection-first fold, review and forge add-ons,
+    blocked-on-human first. Unchanged pre-cutover behaviour, called ONLY when the cutover switch says files."""
     doc_sink: list[Any] = []
     feed_sink: list[Any] = []
     rows, rows_ok, rows_reason = _load_rows_status(
@@ -889,6 +891,35 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
         rows, held_roles=held_roles or None, roles_unknown=bool(unresolved_roles))
     seen = {r.get("id") for r in blocked}
     got = blocked + [r for r in got if r.get("id") not in seen]
+    return got
+
+
+def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
+    now = _iso(_now())
+    # bus-v4 cutover (coord_engine.cutover): the switch is read BEFORE any file-plane work. "unknown" (the switch
+    # could not be read) answers with ONE fold-degraded marker and consults nothing — never files (codex-reviewer
+    # P0); "fold" answers from the agent's coord-fold checkpoint and never invokes the task index, role
+    # resolution or the review listing (codex-coder P0); a checkpoint that cannot answer is UNKNOWN, never CLEAR.
+    serve, serve_why = cutover_mod.read_switch(transport, args.team)
+    if serve == "unknown":
+        got: list[dict[str, Any]] = [cutover_mod.degraded_row(serve_why)]
+    elif serve == "fold":
+        fold_rows, fold_why, unhealthy = cutover_mod.fold_rows(transport, args.team, args.agent)
+        if fold_rows is None:
+            got = [cutover_mod.degraded_row(f"{serve_why}; {fold_why}")]
+        else:
+            got = list(fold_rows)
+            if unhealthy:
+                # coord-fold's own health contract survives the serving boundary: rows stay, the verdict is UNKNOWN.
+                got = [cutover_mod.degraded_row(f"{serve_why}; {unhealthy}")] + got
+            add_on = Deadline.open(_briefing_budget())
+            forge, forge_why = _forge_rows_pointed(transport, args.team, args.agent, deadline=add_on.instant)
+            if forge is None:
+                got.append({"type": "forge-degraded", "reason": forge_why})
+            else:
+                got += forge
+    else:
+        got = _needs_me_from_files(args, transport, now)
     # Contract 2 (OC2/OC3, ladder PR 1): the envelope is sealed FIRST and rc is
     # a pure function of its health — UNKNOWN/DEGRADED exit 3 even when partial
     # rows were served (this widens the old forge-only rc: a degraded role or
@@ -919,6 +950,10 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             elif r.get("type") == _READ_DEGRADED:
                 print(f"  read degraded: {r.get('reason')} — task fold unknown "
                       f"(not empty), retry")
+            elif r.get("type") == cutover_mod.FOLD_DEGRADED:
+                print(f"  fold degraded: {r.get('reason')} — obligations UNKNOWN "
+                      f"(not empty): adopt the fleet pin, run one "
+                      f"`obligations --export-open --force`, then `coord-fold fold`")
             elif r.get("type") == _ROLE_DEGRADED:
                 print(_role_degraded_line(r))
             elif (review_line := _review_row_line(r)) is not None:
@@ -3174,6 +3209,11 @@ def _held_roles_for_rows(
             held.add(role)
     return held, unresolved
 
+
+#: Review dispatch is P1 (the pr-630 design). The DOCUMENT and the companion
+#: event must both carry it: a row whose two planes disagree on priority is
+#: a permanent `compare-to-fold` DIVERGE on a row nothing is wrong with.
+_REVIEW_REQUEST_PRIORITY = "P1"
 
 #: The title a review-request directive carries (``_deliver_review_directive``):
 #: ``REVIEW REQUEST: <slug>``, assignee = the reviewer. reconcile indexes that
@@ -5638,15 +5678,18 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
         _, content = tasks.new_task_doc(
             title, now=_iso(_now()), status="proposed", owner=sender,
             assignee=reviewer, summary=summary, next_action=next_action,
-            kind="directive", slug=dslug,
+            kind="directive", slug=dslug, priority=_REVIEW_REQUEST_PRIORITY,
         )
     except tasks.TaskError as e:
         print(f"review-request directive for {reviewer} failed: {e}", file=sys.stderr)
         return 1
-    # The namespace carries team for `_write_directive` plus sender/priority for
-    # the companion emit (`_known_sender` reads .sender; review dispatch is P1
-    # per the pr-630 design).
-    ns = argparse.Namespace(team=team, sender=sender, priority="P1")
+    # ONE priority, both planes. The companion event has always been P1 (review
+    # dispatch, per the pr-630 design) while the document took tasks' default
+    # P2, so the same row carried two priorities and `compare-to-fold` — which
+    # compares (slug, pri, ptr) — reported the slug as DIVERGE on BOTH sides
+    # forever. Measured 2026-09-07 on codex-reviewer: four review-request slugs,
+    # identical pointers, doc P2 against fold P1.
+    ns = argparse.Namespace(team=team, sender=sender, priority=_REVIEW_REQUEST_PRIORITY)
     rc = _write_directive(transport, ns, slug=dslug,
                           content=content, payload=payload, assignee=reviewer,
                           not_before=None)
@@ -6188,6 +6231,101 @@ def _inbox_rows_status(transport: Any, team: str, agent: str, *,
             ok, reason, unresolved)
 
 
+def _authority_unknown_probes(why: str) -> "list[obligations_mod.Component]":
+    """Every component UNREADABLE with the same reason: the cutover switch could not be read, so which plane is
+    authoritative is unknown and NOTHING is consulted (codex-reviewer P0, engine-ship-gate-6445cde8)."""
+    P, S, C = obligations_mod.ProbeResult, obligations_mod.ProbeState, obligations_mod.Component
+    return [C(name=n, probe=(lambda: P(state=S.UNREADABLE, detail=why)))
+            for n in obligations_mod.OBLIGATION_COMPONENTS]
+
+
+def _forge_rows_pointed(transport: Any, team: str, agent: str, *, deadline: Optional[float]
+                        ) -> tuple[Optional[list[dict[str, Any]]], str]:
+    """Forge feedback with POINTED READS ONLY (codex-coder P0, engine-ship-gate-c4a8410a): one read of the
+    summaries document, the FRESH ``forge`` projection section from it, and one ack read per feedback item for
+    this agent. ``changed_slugs`` is empty on purpose — the feed delta is what re-lists a PR's feedback directory,
+    and the fold path may never list. A projection that is absent, stale, incomplete or malformed is
+    (None, why): UNKNOWN at the serving boundary, never a raw scan."""
+    try:
+        body, state = transport.read_classified(rec.summaries_path(team))
+    except Exception as exc:
+        return None, f"forge projection document unreadable ({exc})"
+    if state != "ok" or not body:
+        return None, f"forge projection document {state}"
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return None, "forge projection document is not JSON"
+    section, reason = projection_mod.fresh_section(doc, projection_mod.FORGE_KEY, projection_mod.FORGE_SCHEMA,
+                                                   now=_iso(_now()))
+    if section is None:
+        return None, f"forge projection not servable: {reason or 'no forge section in the summaries document'}"
+    served = _forge_feedback_from_projection(transport, team, agent, section, deadline=deadline, changed_slugs=set())
+    if served is None:
+        return None, "forge projection malformed"
+    return served, "forge served from the projection (pointed reads only)"
+
+
+def _fold_probes(transport: Any, team: str, agent: str, serve_why: str
+                 ) -> "list[obligations_mod.Component]":
+    """The component set served from the agent's coord-fold checkpoint — ONE pointed read, no task index, no
+    role resolution, no review-register listing, no forge directory listing (codex-coder P0s). The fold carries
+    every open addressed to the agent as (slug, pri, ptr, from, to); kinds are not distinguished on the stream,
+    so `tasks` carries them ALL and every other row-derived component is consulted-and-subsumed with no rows of
+    its own (a directive, a review request, a block, a reminder or a role-routed duty is an open in the fold, and
+    its ptr says which). The components must PARTITION the rows, not view them twice: `obligations.fold` extends
+    one owed list per component, so a row offered under both `tasks` and `directives` is one obligation counted
+    twice. That is the doubling coord-opus-worker measured on 2026-09-07 (DATA 6 for an open=3 fold, each slug
+    listed twice), and it made every fold-served count wrong fleet-wide. `forge_feedback` is served from the forge PROJECTION by pointed
+    reads (`_forge_rows_pointed`), never the raw scan. A checkpoint that cannot answer makes every component
+    UNREADABLE; a checkpoint whose own health fields say the fold is incomplete (codex-reviewer P0) makes every
+    component UNREADABLE too, with its rows retained as partial data: UNKNOWN, never CLEAR."""
+    P, S, C = obligations_mod.ProbeResult, obligations_mod.ProbeState, obligations_mod.Component
+    rows, why, unhealthy = cutover_mod.fold_rows(transport, team, agent)
+    if rows is None:
+        detail = f"{serve_why}; {why}"
+        return [C(name=n, probe=(lambda: P(state=S.UNREADABLE, detail=detail)))
+                for n in obligations_mod.OBLIGATION_COMPONENTS]
+    owed_all = [r for r in rows if not str(r.get("type") or "").endswith("-source")]
+    reviews = [r for r in owed_all if r.get("kind") == "review"]
+    directives = [r for r in owed_all if r.get("kind") != "review"]
+    fold_dl = Deadline.open(_obligation_budget())
+    if unhealthy:
+        # Partial data survives; the terminal state does not lie about completeness.
+        def _partial(owed):
+            return lambda: P(state=S.UNREADABLE, owed=owed, detail=f"{serve_why}; {unhealthy}")
+        return [
+            C(name="blocks", probe=_partial([])), C(name="directives", probe=_partial([])),
+            C(name="forge_feedback", probe=_partial([])), C(name="reminders", probe=_partial([])),
+            C(name="reviews", probe=_partial([])), C(name="role_duties", probe=_partial([])),
+            C(name="tasks", probe=_partial(owed_all)),
+        ]
+    subsumed = f"{why}; not distinguished on the fold — an open of this kind is served under tasks"
+
+    def _forge_probe():
+        if fold_dl.expired():
+            return P(state=S.UNREADABLE, detail="obligation probe budget exhausted — raise COORD_OBLIGATION_BUDGET")
+        found, forge_why = _forge_rows_pointed(transport, team, agent, deadline=fold_dl.instant)
+        if found is None:
+            return P(state=S.UNREADABLE, detail=forge_why)
+        markers = [r.get("type") for r in found if isinstance(r.get("type"), str) and r["type"].endswith("-degraded")]
+        real = [r for r in found if not (isinstance(r.get("type"), str)
+                                         and (r["type"].endswith("-degraded") or r["type"].endswith("-source")))]
+        if markers:
+            return P(state=S.UNREADABLE, owed=real, detail="; ".join(sorted(set(markers))))
+        return P(state=S.OK, owed=real, detail=forge_why)
+
+    return [
+        C(name="blocks", probe=(lambda: P(state=S.OK, detail=subsumed))),
+        C(name="directives", probe=(lambda: P(state=S.OK, detail=f"{subsumed} ({len(directives)} of the folded opens)"))),
+        C(name="forge_feedback", probe=_forge_probe),
+        C(name="reminders", probe=(lambda: P(state=S.OK, detail=subsumed))),
+        C(name="reviews", probe=(lambda: P(state=S.OK, detail=f"{subsumed} ({len(reviews)} of the folded opens are review requests)"))),
+        C(name="role_duties", probe=(lambda: P(state=S.OK, detail=f"{why}; role-routed opens are folded at seed and on the stream"))),
+        C(name="tasks", probe=(lambda: P(state=S.OK, owed=owed_all, detail=why))),
+    ]
+
+
 def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
                        ) -> "list[obligations_mod.Component]":
     """Bind the real coordination surface to obligation probes.
@@ -6219,6 +6357,14 @@ def _obligation_probes(transport: Any, team: str, agent: str, *, now: str
     # allowance and the probe budget opens AFTER it, so a slow store degrades
     # GRADUALLY (an expensive early probe still shrinks what later ones get)
     # instead of collapsing to zero coverage.
+    # bus-v4 cutover (coord_engine.cutover): the switch is read BEFORE any file-plane setup, so "fold" never
+    # invokes the task index or role resolution (codex-coder P0, engine-ship-gate-6445cde8) and "unknown" never
+    # consults anything at all (codex-reviewer P0): authority first, then the plane it names.
+    serve, serve_why = cutover_mod.read_switch(transport, team)
+    if serve == "unknown":
+        return _authority_unknown_probes(serve_why)
+    if serve == "fold":
+        return _fold_probes(transport, team, agent, serve_why)
     setup_dl = Deadline.open(_obligation_budget())
     doc_sink: list[Any] = []
     feed_sink: list[Any] = []
@@ -6653,6 +6799,44 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
     held_roles, _unresolved = _held_roles_for_rows(transport, team, agent, rows, now=now,
                                                    deadline_seconds=_role_fold_budget())
     got = _needs_me_rows(transport, team, agent, rows, now=now, held_roles=held_roles)
+    # RULING (2026-09-05, coord-boss blocker a0927018): an obligation belongs to its ASSIGNEE. needs-me also lists
+    # rows an agent merely OWNS and awaits ("waiting"), and a coordinator owns most of what it sends; seeding those
+    # made every coordinator diverge forever. Keep only rows assigned to this agent, to everyone, or to a role it holds.
+    mine = {agent, "@" + agent, "*"} | {r for r in (held_roles or set())} | {"@" + r for r in (held_roles or set())}
+    got = [r for r in got if str(r.get("assignee") or "") in mine]
+    # RULING 1 (coord-boss f9f5823b, 2026-09-05, corollary of the user's assignee ruling): a broadcast (assignee "*") is an
+    # obligation of EVERY recipient except its sender, until that recipient closes it. needs-me never lists star rows
+    # for an agent, so without this every broadcast diverged once for every non-sender (measured on three identities
+    # 20:24Z-22:23Z) and a --force re-seed closed it. The fold already keeps to==all for every agent except from
+    # (PR 716); the old set now asks the same question: open star rows whose owner is not this agent.
+    # RULING (coord-boss 13a58789, 2026-09-05): broadcast closes are PER-RECIPIENT. One agent replying with
+    # --closes flips the row's single status to done for everyone; that status is the OWNER's disposition and is
+    # NOT read as a per-recipient close. A broadcast stays open for every non-owner agent unless an ack record
+    # exists for THAT agent (the row's `acked_by`, or the ack doc at _ack_path), in which case it is closed for that
+    # agent only. bus-v4 already carries this per recipient (each ack/close is its own event); the old plane now
+    # approximates it the same way. An unreadable ack reads as no ack (over-capture, never a manufactured close).
+    # RULING (coord-boss 55b1056b, 2026-09-06, refining 13a58789): the OWNER's disposition ends the ask for everyone —
+    # a broadcast whose status is terminal (done/abandoned/archived, router.TERMINAL_STATUSES) is open for NOBODY;
+    # a recipient's ack still closes it for that recipient only. Measured on coord-opus-worker: 33 of 36 seeded opens
+    # were terminal broadcasts that no recipient could ever discharge.
+    from .router import TERMINAL_STATUSES as _TERMINAL
+    seen = {str(r.get("id") or r.get("name") or "") for r in got}
+    for r in rows or []:
+        if not isinstance(r, dict) or str(r.get("assignee") or "") not in ("*", "all"):   # both spellings exist on the store (measured: 30 rows, "*" and "all")
+            continue
+        slug = str(r.get("id") or r.get("name") or "")
+        if not slug or slug in seen or str(r.get("owner") or "") == agent:
+            continue
+        if str(r.get("status") or "") in _TERMINAL:
+            continue
+        if agent in (r.get("acked_by") or []):
+            continue
+        try:
+            if transport.read(_ack_path(team, slug, agent)) is not None:
+                continue
+        except Exception:
+            pass                                                   # unreadable ack: not an ack
+        got.append(r); seen.add(slug)
     return got, bool(rows_ok), str(rows_reason or "")
 
 
@@ -6696,26 +6880,69 @@ def cmd_obligations_export_open(args: argparse.Namespace, transport: Any) -> int
               "answer would enshrine the gap as absence", file=sys.stderr)
         return 3
     at = _iso(_now())
-    written, skipped = 0, []
+    written, skipped, stale_doc = 0, [], []
+    wanted: set[str] = set()
+    from .router import TERMINAL_STATUSES as _TERMINAL
     for row in rows:
         tup = _row_tuple(row)
         if not tup or tup[1] not in dual_emit.PRIORITIES or not tup[2]:
             skipped.append(str(row.get("id") or row.get("name") or "?"))
             continue
+        # coord-boss 8a280028 (2026-09-06): the old open set comes from a needs-me projection that LAGS the doc until
+        # reconcile, so a row closed seconds ago is re-exported as open and out-orders its own close on v4 (measured:
+        # 45 s). Confirm each row against the doc its pointer names — ONE pointed read per row, no enumeration — and
+        # skip it when the doc is already terminal. An unreadable doc keeps the projection's answer (over-capture):
+        # a transport blip must never silently drop an obligation.
+        ptr = tup[2]
+        doc_path = ptr if ptr.startswith("team/") else f"team/{team}/{ptr}"
+        try:
+            body = transport.read(doc_path)
+        except Exception:
+            body = None
+        if body is not None:
+            status = str((okf.parse_frontmatter(body) or {}).get("status") or "")
+            if status in _TERMINAL:
+                stale_doc.append(tup[0])
+                continue
+        wanted.add(tup[0])
         note = json.dumps(dual_emit.payload(at=at, sender=str(row.get("owner") or "seed"), to=agent, kind="open",
                                             slug=tup[0], pri=tup[1], ptr=tup[2]), sort_keys=True)
         if transport.record_write(cfg["data_type"], cfg["api_version"], note, agent):
             written += 1
         else:
             skipped.append(tup[0])
-    doc = (f"# bus-v4 seed for {agent}\n\nat: {at}\nwritten: {written}\nskipped: {len(skipped)}\n"
-           f"source: old fold (needs-me rows)\nslugs skipped (no ptr / bad pri / write unconfirmed): {skipped}\n")
+    # RECONCILE (2026-09-05, blocker a0927018): a re-seed must make the new plane EQUAL the old one, not merely add
+    # to it. Every open the agent's coord-fold checkpoint holds that the correct set does not contain gets a
+    # `close` (ptr = this marker), so the next fold removes it. Events are never deleted (G28); they are answered.
+    closed, ckpt_state = 0, "absent"
+    ck_body, ck_state = transport.read_classified(f"team/{team}/member/{agent}/fold/checkpoint.json")
+    if ck_state == "error":
+        print(f"obligations --export-open: UNKNOWN — the coord-fold checkpoint for {agent} is unreadable; opens written "
+              "but stale opens could not be reconciled; re-run", file=sys.stderr)
+        return 3
+    if ck_state == "ok" and ck_body:
+        try:
+            stale = [s for s in (json.loads(ck_body).get("open") or {}) if s not in wanted]
+            ckpt_state = f"ok ({len(stale)} stale)"
+        except ValueError:
+            stale, ckpt_state = [], "unparsable"
+        for slug in stale:
+            note = json.dumps(dual_emit.payload(at=at, sender=agent, to=agent, kind="close", slug=slug, pri="P3",
+                                                ptr=marker), sort_keys=True)
+            if transport.record_write(cfg["data_type"], cfg["api_version"], note, agent):
+                closed += 1
+            else:
+                skipped.append("close:" + slug)
+    doc = (f"# bus-v4 seed for {agent}\n\nat: {at}\nwritten: {written}\nclosed_stale: {closed}\nskipped: {len(skipped)}\n"
+           f"skipped_terminal_doc: {len(stale_doc)}\n"
+           f"source: old fold (needs-me rows, ASSIGNEE-filtered)\ncheckpoint: {ckpt_state}\n"
+           f"slugs skipped (no ptr / bad pri / write unconfirmed): {skipped}\n")
     if not transport.write(marker, doc):
         print(f"obligations --export-open: wrote {written} opens but the marker write did NOT confirm — a re-run "
               "will re-seed; fix the marker first", file=sys.stderr)
         return 3
     print(f"obligations --export-open: seeded {written} open(s) for {agent} onto {cfg['data_type']}; "
-          f"skipped {len(skipped)}; marker {marker}")
+          f"closed {closed} stale; skipped {len(skipped)}; skipped_terminal_doc {len(stale_doc)}; marker {marker}")
     return 0 if not skipped else 2
 
 
@@ -6763,6 +6990,41 @@ def cmd_compare_to_fold(args: argparse.Namespace, transport: Any) -> int:
     print(f"DIVERGE slugs={slugs} only_old={len(only_old)} only_new={len(only_new)}")
     return 2
 
+
+
+def cmd_cutover_show(args: argparse.Namespace, transport: Any) -> int:
+    """`cutover show <team>` — which plane serves obligations right now, from the switch on the bus."""
+    serve, why = cutover_mod.read_switch(transport, args.team)
+    if getattr(args, "json", False):
+        print(jsonutil.dumps({"type": "cutover", "serve": serve, "why": why, "path": cutover_mod.switch_path(args.team)}))
+    else:
+        print(f"cutover: serving from {serve} — {why}")
+    return 0
+
+
+def cmd_cutover_set(args: argparse.Namespace, transport: Any) -> int:
+    """`cutover set <team> --serve fold|files --reason ...` — THE flip, and its rollback. One write; the previous
+    state is printed first so the change is a diff, never a surprise. Refuses without a reason or an identity."""
+    by = _declared_identity(getattr(args, "agent", None))
+    if not by:
+        print("cutover set: --agent or FULCRA_COORD_AGENT required (the switch records who flipped it)", file=sys.stderr)
+        return 2
+    before, before_why = cutover_mod.read_switch(transport, args.team)
+    try:
+        doc = cutover_mod.switch_doc(serve=args.serve, by=by, reason=args.reason, at=_iso(_now()))
+    except ValueError as exc:
+        print(f"cutover set: {exc}", file=sys.stderr)
+        return 2
+    if not transport.write(cutover_mod.switch_path(args.team), doc):
+        print("cutover set: the switch write did not confirm — nothing changed", file=sys.stderr)
+        return 3
+    after, after_why = cutover_mod.read_switch(transport, args.team)
+    print(f"cutover: was {before} ({before_why}); now {after} ({after_why})")
+    return 0 if after == args.serve else 3
+
+
+def cmd_cutover_dispatch(args: argparse.Namespace, transport: Any) -> int:
+    return {"show": cmd_cutover_show, "set": cmd_cutover_set}[args.cutover_command](args, transport)
 
 def cmd_cutover_ready(args: argparse.Namespace, transport: Any) -> int:
     """`cutover-ready <team> --agent <a>` — Task 14: exit 0 only if the trailing AGREE run is >= --min-run (24),
@@ -8310,30 +8572,52 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
               f"failed (transport). NOTHING was closed; retry.", file=sys.stderr)
         return 3
     rc = 0
-    try:
-        out = tasks.apply_update(doc, now=now, status="done",
-                                 evidence=f"{args.outcome} (respond by {agent})")
-        if transport.write(path, out):
-            print(f"responded {args.name}: {args.outcome} (closed)")
-        else:
-            # apply_update succeeding is NOT the close landing.
-            print(f"responded {args.name}: {args.outcome} (response recorded; "
-                  f"not closed: the task write failed — the directive is still "
-                  f"OPEN)", file=sys.stderr)
-            rc = 3
-    except tasks.TaskError as e:
-        # NOT an error rc: the status machine legitimately refuses some closes
-        # (already done, illegal transition), and the response IS recorded. Only
-        # a failed WRITE — a response or close that never landed — is non-zero.
-        print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
+    # RULING (coord-boss 316ef7ab, 2026-09-06): a broadcast's status moves ONLY by its owner. A non-owner recipient's
+    # respond must not flip the row to done: under 55b1056b(1) an owner-terminal broadcast is open for NOBODY, so the
+    # first recipient's answer was discharging every other recipient in both planes (measured on 419aca64 after two
+    # responses). A non-owner on a broadcast records the shard, writes its own ack, and closes only its own fold.
+    _target_fm = okf.parse_frontmatter(doc) or {}
+    _is_broadcast = str(_target_fm.get("assignee") or "") in ("*", "all")
+    _is_owner = str(_target_fm.get("owner") or "") == agent
+    if _is_broadcast and not _is_owner:
+        print(f"responded {args.name}: {args.outcome} (broadcast: your ack recorded; the row's status is the owner's)")
+    else:
+        try:
+            out = tasks.apply_update(doc, now=now, status="done",
+                                     evidence=f"{args.outcome} (respond by {agent})")
+            if transport.write(path, out):
+                print(f"responded {args.name}: {args.outcome} (closed)")
+            else:
+                # apply_update succeeding is NOT the close landing.
+                print(f"responded {args.name}: {args.outcome} (response recorded; "
+                      f"not closed: the task write failed — the directive is still "
+                      f"OPEN)", file=sys.stderr)
+                rc = 3
+        except tasks.TaskError as e:
+            # NOT an error rc: the status machine legitimately refuses some closes
+            # (already done, illegal transition), and the response IS recorded. Only
+            # a failed WRITE — a response or close that never landed — is non-zero.
+            print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
     # THE REPLY LEG. This printed an unconditional "the owner's queue surfaces
     # it" while emitting nothing — the queue reads events and a shard cannot
     # reach it. The line was believed, so a responded-to directive was re-asked
     # twice at rising priority (2026-08-08). Say only what happened.
-    owner = str((okf.parse_frontmatter(doc) or {}).get("owner") or "")
+    target_fm = okf.parse_frontmatter(doc) or {}
+    owner = str(target_fm.get("owner") or "")
+    # RULING (coord-boss 55b1056b, 2026-09-06): a recipient's respond on a BROADCAST writes that recipient's ack record,
+    # so the old plane (which reads _ack_path per recipient) and bus-v4 (which carries the response's close per
+    # recipient) agree without a second verb. Same doc shape as `inbox --ack`. Best-effort: a failed ack write is
+    # reported, never fails the response (the shard is the durable truth).
+    if str(target_fm.get("assignee") or "") in ("*", "all"):
+        ack_fm = {"type": "Ack", "agent": agent, "timestamp": _iso(_now()), "via": "respond"}
+        if not transport.write(_ack_path(args.team, args.name, agent), okf.render_frontmatter(ack_fm) + "\nacked\n"):
+            print(f"respond: broadcast ack for {agent} did NOT land at {_ack_path(args.team, args.name, agent)}; "
+                  f"the old plane will keep this broadcast open for you until `inbox --ack {args.name}` succeeds",
+                  file=sys.stderr)
     delivered = _emit_response_companion(
         transport, args.team, slug=args.name, owner=owner, responder=agent,
-        shard_ptr=shard.split("/", 2)[-1])
+        shard_ptr=shard.split("/", 2)[-1],
+        for_agent=(records.BROADCAST if (_is_broadcast and _is_owner) else agent))   # 316ef7ab: close-to-all ONLY on owner-terminal
     if delivered:
         print("response recorded and delivered — the owner's queue surfaces it")
     else:
@@ -13107,6 +13391,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Task 14: old open set vs coord-fold checkpoint, as (slug, pri, ptr) tuples")
     cf.add_argument("team"); cf.add_argument("--agent", required=True)
     cf.set_defaults(func=cmd_compare_to_fold)
+
+    co = sub.add_parser("cutover", help="bus-v4 cutover switch: which plane serves obligations (show / set)")
+    co_sub = co.add_subparsers(dest="cutover_command", required=True)
+    cos = co_sub.add_parser("show", help="which plane serves obligations right now, from the switch on the bus")
+    cos.add_argument("team"); add_json(cos)
+    cot = co_sub.add_parser("set", help="THE flip (and its rollback): write the switch; one write, fleet-wide")
+    cot.add_argument("team"); cot.add_argument("--serve", required=True, choices=list(cutover_mod.SERVE_VALUES))
+    cot.add_argument("--reason", required=True); cot.add_argument("--agent")
+    co.set_defaults(func=cmd_cutover_dispatch)
     cr = sub.add_parser("cutover-ready",
                         help="Task 14: exit 0 only when the trailing AGREE run, span, growth, drill and ship gate all hold")
     cr.add_argument("team"); cr.add_argument("--agent", required=True)
@@ -13743,7 +14036,7 @@ def build_parser() -> argparse.ArgumentParser:
 _ACTIVITY_READ_FUNCS: frozenset = frozenset({
     # cmd_obligations_dispatch is MIXED (below): `--export-open`, `--repair-unknown` and `--seed-checkpoint`
     # all write, so the flag decides (Task 12 bridge, 2026-09-05).
-    cmd_obligations_stream, cmd_cutover_ready,
+    cmd_obligations_stream, cmd_cutover_ready, cmd_cutover_show,
     # NOT cmd_obligations_repair: it exists to MUTATE the checkpoint, so
     # running it is activity. The stream fold's checkpoint advance is
     # incidental to a read; this verb's write is the whole point.
@@ -13787,6 +14080,8 @@ _MIXED_MODE_ACTIVITY: dict[Any, Any] = {
     cmd_obligations_dispatch: lambda a: bool(getattr(a, "export_open", False)
                                              or getattr(a, "repair_unknown", False)
                                              or getattr(a, "seed_checkpoint", False)),
+    # `cutover show TEAM` views the switch; `cutover set TEAM --serve ...` writes it (the flip / rollback).
+    cmd_cutover_dispatch: lambda a: getattr(a, "cutover_command", None) == "set",
     # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
     # defers to the same `_digest_persists` the command branches on.
     cmd_digest: lambda a: _digest_persists(a),

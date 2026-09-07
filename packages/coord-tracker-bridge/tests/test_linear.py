@@ -164,7 +164,7 @@ def test_errors_never_echo_graphql_variables():
 
 
 def test_provider_metadata_round_trip_uses_full_identity_not_title():
-    source = SourceIdentity("coord-engine", "fulcra", "alpha-12345678")
+    source = SourceIdentity("coord-engine", "acme", "alpha-12345678")
     description = append_source_metadata(
         "operator-visible body",
         source,
@@ -181,7 +181,7 @@ def test_provider_metadata_round_trip_uses_full_identity_not_title():
 
 @pytest.mark.parametrize("capability", ["asks", "threads"])
 def test_created_before_ledger_write_preserves_capability_from_provider_metadata(capability):
-    source = SourceIdentity("coord-engine", f"fulcra/{capability}", "item-1")
+    source = SourceIdentity("coord-engine", f"acme/{capability}", "item-1")
     issue = {
         "id": "LIN-1", "title": "Task",
         "description": append_source_metadata("body", source, capability=capability),
@@ -201,7 +201,7 @@ def test_created_before_ledger_write_preserves_capability_from_provider_metadata
 
 
 def test_provider_metadata_without_capability_fails_closed_without_ledger():
-    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+    source = SourceIdentity("coord-engine", "acme/asks", "ask-1")
     description = append_source_metadata("body", source, capability="asks")
     decoded = dict(parse_bridge_metadata(description))
     decoded.pop("capability")
@@ -223,7 +223,7 @@ def test_provider_metadata_without_capability_fails_closed_without_ledger():
 
 
 def test_provider_capability_conflict_with_ledger_fails_closed():
-    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+    source = SourceIdentity("coord-engine", "acme/asks", "ask-1")
     issue = {
         "id": "LIN-1",
         "title": "Ask",
@@ -255,7 +255,7 @@ def test_issue_labels_paginate_independently_of_issue_page():
 def test_partial_update_does_not_wipe_description_or_labels():
     transport = FakeTransport([response({"issueUpdate": {"success": True}})])
     adapter = LinearTrackerAdapter(LinearClient(transport), "team")
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
 
     adapter.apply_change(Change(ChangeKind.UPDATE, source, "LIN-1", {"title": "Renamed"}))
 
@@ -265,7 +265,7 @@ def test_partial_update_does_not_wipe_description_or_labels():
 def test_false_success_update_is_rejected():
     transport = FakeTransport([response({"issueUpdate": {"success": False}})])
     adapter = LinearTrackerAdapter(LinearClient(transport), "team")
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
 
     with pytest.raises(LinearError, match="mutation did not succeed"):
         adapter.apply_change(Change(ChangeKind.UPDATE, source, "LIN-1", {"title": "Renamed"}))
@@ -276,7 +276,7 @@ def test_create_persists_capability_in_provider_metadata():
         response({"issueCreate": {"success": True, "issue": {"id": "LIN-1"}}}),
     ])
     adapter = LinearTrackerAdapter(LinearClient(transport), "team")
-    source = SourceIdentity("coord-engine", "fulcra/asks", "ask-1")
+    source = SourceIdentity("coord-engine", "acme/asks", "ask-1")
 
     provider_id = adapter.apply_change(Change(
         ChangeKind.CREATE,
@@ -303,7 +303,7 @@ def test_false_success_close_is_rejected():
         response({"issueUpdate": {"success": False}}),
     ])
     adapter = LinearTrackerAdapter(LinearClient(transport), "team")
-    source = SourceIdentity("coord-engine", "fulcra", "task-1")
+    source = SourceIdentity("coord-engine", "acme", "task-1")
 
     with pytest.raises(LinearError, match="mutation did not succeed"):
         adapter.apply_change(Change(ChangeKind.CLOSE, source, "LIN-1", {}))
@@ -324,7 +324,7 @@ def test_false_success_resource_creation_is_rejected(plan, root):
 
 
 def test_legacy_marker_adoption_uses_footer_and_checks_arbitrary_slug_suffix():
-    source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
+    source = SourceIdentity("coord-engine", "acme/tasks", "role-vacant-example-h24h-sla")
     snapshot = Snapshot(
         (WorkRecord(source, "tasks", "Canonical", "active", origin="fleet"),),
         True, (), {"tasks": CapabilityState.COMPLETE},
@@ -365,9 +365,9 @@ def test_legacy_marker_adoption_prefers_task_over_derived_row(
     # 2026-07-21) — like threads, asks is a derived observation of the task,
     # not a second identity.
     slug = "website-v2-queue-complete-759208b7"
-    task_source = SourceIdentity("coord-engine", "fulcra/tasks", slug)
+    task_source = SourceIdentity("coord-engine", "acme/tasks", slug)
     derived_source = SourceIdentity(
-        "coord-engine", f"fulcra/{derived_capability}", slug
+        "coord-engine", f"acme/{derived_capability}", slug
     )
     task = WorkRecord(task_source, "tasks", "Canonical", "done", origin="fleet")
     derived = WorkRecord(
@@ -404,15 +404,15 @@ def test_legacy_marker_adoption_three_way_collision_any_order():
     # task row regardless of arrival order (grouping happens before resolution).
     slug = "three-way-cafef00d"
     task = WorkRecord(
-        SourceIdentity("coord-engine", "fulcra/tasks", slug),
+        SourceIdentity("coord-engine", "acme/tasks", slug),
         "tasks", "Canonical", "active", origin="fleet",
     )
     thread = WorkRecord(
-        SourceIdentity("coord-engine", "fulcra/threads", slug),
+        SourceIdentity("coord-engine", "acme/threads", slug),
         "threads", "Derived", "threads-missed", origin="fleet",
     )
     ask = WorkRecord(
-        SourceIdentity("coord-engine", "fulcra/asks", slug),
+        SourceIdentity("coord-engine", "acme/asks", slug),
         "asks", "Derived", "asks", origin="fleet",
     )
     issue = {
@@ -450,7 +450,7 @@ def test_legacy_marker_adoption_rejects_unresolvable_slug_collision(rows):
     snapshot = Snapshot(
         tuple(
             WorkRecord(
-                SourceIdentity("coord-engine", f"fulcra/{cap}", slug),
+                SourceIdentity("coord-engine", f"acme/{cap}", slug),
                 cap, "Row", "active" if cap == "tasks" else cap, origin="fleet",
             )
             for cap in rows
@@ -488,7 +488,7 @@ def test_unknown_legacy_marker_fails_before_any_mutation():
 
 
 def test_legacy_adoption_resolves_terminal_task_absent_from_hot_snapshot():
-    source = SourceIdentity("coord-engine", "fulcra/tasks", "completed-task-deadbeef")
+    source = SourceIdentity("coord-engine", "acme/tasks", "completed-task-deadbeef")
     terminal = WorkRecord(
         source, "tasks", "Completed", "done", origin="fleet", archived=True
     )
@@ -541,7 +541,7 @@ def test_legacy_adoption_batches_terminal_task_resolution():
         calls.append(requested)
         return {
             slug: WorkRecord(
-                SourceIdentity("coord-engine", "fulcra/tasks", slug),
+                SourceIdentity("coord-engine", "acme/tasks", slug),
                 "tasks", "Completed", "done", origin="fleet", archived=True,
             )
             for slug in requested
@@ -588,7 +588,7 @@ def test_legacy_adoption_rejects_degraded_terminal_lookup_before_mutation():
 
 
 def test_legacy_adoption_rejects_source_already_mapped_to_another_issue():
-    source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
+    source = SourceIdentity("coord-engine", "acme/tasks", "role-vacant-example-h24h-sla")
     snapshot = Snapshot(
         (WorkRecord(source, "tasks", "Canonical", "active", origin="fleet"),),
         True, (), {"tasks": CapabilityState.COMPLETE},
@@ -628,7 +628,7 @@ def test_legacy_adoption_rejects_source_already_mapped_to_another_issue():
 def test_legacy_adoption_rejects_missing_footer_or_marker_mismatch(
     title, description, message
 ):
-    source = SourceIdentity("coord-engine", "fulcra/tasks", "role-vacant-example-h24h-sla")
+    source = SourceIdentity("coord-engine", "acme/tasks", "role-vacant-example-h24h-sla")
     snapshot = Snapshot(
         (WorkRecord(source, "tasks", "Canonical", "active", origin="fleet"),),
         True, (), {"tasks": CapabilityState.COMPLETE},

@@ -60,6 +60,21 @@ def test_fresh_review_request_emits_one_companion_to_the_reviewer(emitted):
     assert t.read(f"team/r/{event['ptr']}") is not None
 
 
+def test_the_review_request_document_carries_the_same_priority_as_its_event(emitted):
+    """ONE priority, both planes. The companion event has always been P1 (review dispatch, pr-630), but the
+    document took tasks' default P2, so `compare-to-fold` — which compares (slug, pri, ptr) — reported the slug
+    as DIVERGE on BOTH sides forever, on a row nothing was actually wrong with. Measured 2026-09-07 on
+    codex-reviewer: four review-request slugs, identical pointers, doc P2 against fold P1."""
+    t = FakeTransport()
+    assert _request(t) == 0
+    (event,) = [e for e in emitted if e.get("kind") == "directive"]
+    doc = t.read(f"team/r/{event['ptr']}")
+
+    assert doc is not None
+    assert f"priority: {event['priority']}" in doc, doc[:400]
+    assert event["priority"] == "P1"
+
+
 def test_same_head_re_request_dedupes_and_emits_nothing_new(emitted):
     t = FakeTransport()
     assert _request(t) == 0

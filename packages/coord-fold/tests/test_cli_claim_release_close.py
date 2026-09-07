@@ -52,7 +52,13 @@ def test_close_with_absent_evidence_is_refused_and_unreadable_is_unknown(capsys)
     # ONLY the evidence read fails (the checkpoint read still answers): this is the branch the plan's Task 9 mutation
     # removes. With fail_reads=True the checkpoint read failed first and the evidence branch was never reached,
     # so that mutation failed no test (measured while building, 2026-09-05).
-    st.fail_paths = {"x.md"}; assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "x.md"]) == 3
+    st.fail_paths = {"team/r/x.md"}; assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "x.md"]) == 3   # the RESOLVED path fails
     err = capsys.readouterr().err; assert "evidence x.md unreadable" in err and not any(w["payload"]["kind"] == "close" for w in st.written)
     st.fail_paths = set(); st.fail_reads = True; assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "x.md"]) == 3
     assert "checkpoint unreadable" in capsys.readouterr().err
+
+
+def test_close_resolves_a_team_relative_evidence_path_like_verify_pointers_does():
+    """The sibling of the --verify-pointers finding: --evidence read verbatim refused every team-relative path as absent."""
+    st = _folded(); st.docs["team/r/_coord/responses/s/reply.md"] = "# reply"
+    assert _m(st, ["close", "r", "s", "--agent", "me", "--evidence", "_coord/responses/s/reply.md", "--at", T1]) == 0

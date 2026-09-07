@@ -79,7 +79,7 @@ class _Store:
 def _attended(tree, holders, since, **kw):
     from coord_engine import cli
 
-    return cli._role_attended(_Store(tree), "fulcra", holders, since=since, **kw)
+    return cli._role_attended(_Store(tree), "acme", holders, since=since, **kw)
 
 
 def test_scan_finds_a_holder_verdict_by_filename():
@@ -87,8 +87,8 @@ def test_scan_finds_a_holder_verdict_by_filename():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     tree = {
-        "team/fulcra/review/": [{"name": "some-slug", "is_dir": True}],
-        "team/fulcra/review/some-slug/verdicts/": [
+        "team/acme/review/": [{"name": "some-slug", "is_dir": True}],
+        "team/acme/review/some-slug/verdicts/": [
             {"name": "abc123--codex-reviewer.md",
              "mtime": "2026-08-07 07:37AM UTC"},
         ],
@@ -105,7 +105,7 @@ def test_a_truncated_scan_is_unknown_not_absent():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     tree = {
-        "team/fulcra/review/": [
+        "team/acme/review/": [
             {"name": f"slug-{i}", "is_dir": True} for i in range(5)
         ],
     }
@@ -119,8 +119,8 @@ def test_a_complete_clean_sweep_may_say_absent():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     tree = {
-        "team/fulcra/review/": [{"name": "slug-0", "is_dir": True}],
-        "team/fulcra/review/slug-0/verdicts/": [
+        "team/acme/review/": [{"name": "slug-0", "is_dir": True}],
+        "team/acme/review/slug-0/verdicts/": [
             {"name": "abc--someone-else.md", "mtime": "2026-08-07 07:00AM UTC"},
         ],
     }
@@ -134,8 +134,8 @@ def test_an_old_verdict_does_not_count_as_attendance():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     tree = {
-        "team/fulcra/review/": [{"name": "slug-0", "is_dir": True}],
-        "team/fulcra/review/slug-0/verdicts/": [
+        "team/acme/review/": [{"name": "slug-0", "is_dir": True}],
+        "team/acme/review/slug-0/verdicts/": [
             {"name": "abc--codex-reviewer.md", "mtime": "2026-08-01 07:00AM UTC"},
         ],
     }
@@ -149,7 +149,7 @@ def test_no_holders_is_unknown_and_costs_nothing():
     store = _Store({})
     from coord_engine import cli
 
-    assert cli._role_attended(store, "fulcra", [], since=since) == (None, 0, 0)
+    assert cli._role_attended(store, "acme", [], since=since) == (None, 0, 0)
     assert store.calls == [], "an empty holder list must not hit the transport"
 
 
@@ -160,8 +160,8 @@ def test_an_undatable_holder_verdict_is_unknown_not_absent():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     tree = {
-        "team/fulcra/review/": [{"name": "slug-0", "is_dir": True}],
-        "team/fulcra/review/slug-0/verdicts/": [
+        "team/acme/review/": [{"name": "slug-0", "is_dir": True}],
+        "team/acme/review/slug-0/verdicts/": [
             {"name": "abc--codex-reviewer.md", "mtime": "not a timestamp"},
         ],
     }
@@ -545,16 +545,16 @@ def test_the_scan_reaches_a_recent_review_that_sorts_LAST_alphabetically():
 
     since = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
     tree = {
-        "team/fulcra/review/": [
+        "team/acme/review/": [
             {"name": "aaa-old/", "is_dir": True, "mtime": None},
             {"name": "zzz-recent/", "is_dir": True, "mtime": None},
             {"name": "aaa-old.md", "mtime": "2026-07-01 09:00AM UTC"},
             {"name": "zzz-recent.md", "mtime": "2026-08-07 07:30AM UTC"},
         ],
-        "team/fulcra/review/aaa-old/verdicts/": [
+        "team/acme/review/aaa-old/verdicts/": [
             {"name": "abc--codex-reviewer.md", "mtime": "2026-07-01 09:00AM UTC"},
         ],
-        "team/fulcra/review/zzz-recent/verdicts/": [
+        "team/acme/review/zzz-recent/verdicts/": [
             {"name": "def--codex-reviewer.md", "mtime": "2026-08-07 07:37AM UTC"},
         ],
     }

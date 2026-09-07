@@ -123,8 +123,17 @@ def test_the_pip_fallback_does_not_UPGRADE_a_working_client(tmp_path):
     assert client.exists(), f"the pip fallback removed the client:\n{calls}"
     pip_calls = [c for c in calls.splitlines() if c.startswith("python3")]
     assert pip_calls, f"the pip leg never ran, so this proves nothing:\n{calls}"
-    assert not any("fulcra-api" in c for c in pip_calls), (
-        f"the pip fallback still carried the client in its package list: {pip_calls}")
+    # Narrowed to INSTALL invocations on purpose. The assertion is about what
+    # the pip leg puts in its package list, and the script also shells out to
+    # `python3 -c "importlib.metadata.version('fulcra-api')"` to READ the
+    # installed version for the floor check. That read names the client without
+    # touching it, so matching every python3 call flagged a read as a mutation.
+    # Do not re-broaden this: "mentions fulcra-api" is not the property under
+    # test, "installs or upgrades fulcra-api" is.
+    installs = [c for c in pip_calls if "-m pip" in c]
+    assert installs, f"the pip INSTALL leg never ran, so this proves nothing:\n{calls}"
+    assert not any("fulcra-api" in c for c in installs), (
+        f"the pip fallback still carried the client in its package list: {installs}")
 
 
 def test_an_ABSENT_client_is_still_installed_by_a_fallback(tmp_path):

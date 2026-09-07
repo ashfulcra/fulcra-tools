@@ -89,7 +89,7 @@ def _section_marker(section: str) -> str:
 #: published ``fulcra-agent-roles`` skill calls that file "optional human
 #: courtesy", so anyone following our documentation was silently breaking
 #: their own reconcile publication (found 2026-08-30, after weeks of refusals
-#: in team/fulcra).
+#: on a live team).
 #:
 #: The test is the PATH, not the declared type. The first version of this
 #: predicate also required ``type: RolesIndex``, which left the bug live for

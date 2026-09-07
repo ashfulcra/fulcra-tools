@@ -270,3 +270,138 @@ def test_the_window_can_be_compressed_only_by_explicit_flags(capsys):
     t = FakeTransport({LOG: _log(entries), "team/r/_coord/bus-v4/drill/me.md": "x"})
     assert cli.cmd_cutover_ready(_args(ship_check_rc=0), t) == 1                      # defaults: 24 / 24h
     assert cli.cmd_cutover_ready(_args(ship_check_rc=0, min_run=3, min_hours=2.0), t) == 0
+
+
+# ---------------------------------------------------------------- RULING a0927018: obligation = ASSIGNEE
+
+
+def test_the_old_open_set_keeps_assignee_broadcast_and_held_role_rows_and_drops_owner_only_rows(monkeypatch):
+    """coord-boss blocker a0927018: the seed exported rows the agent merely OWNED (sent and awaited); the old plane
+    counts by ASSIGNEE. Both sides now ask the assignee question."""
+    rows = [
+        {"id": "assigned", "owner": "boss", "assignee": "me", "priority": "P1", "path": "team/r/task/assigned.md"},
+        {"id": "at-assigned", "owner": "boss", "assignee": "@me", "priority": "P1", "path": "team/r/task/at.md"},
+        {"id": "bcast", "owner": "boss", "assignee": "*", "priority": "P2", "path": "team/r/task/bcast.md"},
+        {"id": "role", "owner": "boss", "assignee": "reviewer", "priority": "P1", "path": "team/r/task/role.md"},
+        {"id": "sent", "owner": "me", "assignee": "them", "priority": "P0", "path": "team/r/task/sent.md"},       # OWNER-ONLY: not mine
+        {"id": "human", "owner": "boss", "assignee": "human", "priority": "P1", "path": "team/r/task/human.md"},   # not mine either
+    ]
+    monkeypatch.setattr(cli, "_load_rows_status", lambda transport, team, **kw: (rows, True, ""))
+    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **kw: ({"reviewer"}, set()))
+    monkeypatch.setattr(cli, "_needs_me_rows", lambda transport, team, agent, rows, **kw: list(rows))
+    got, ok, _ = cli._old_open_set(FakeTransport({}), "r", "me")
+    assert ok and sorted(r["id"] for r in got) == ["assigned", "at-assigned", "bcast", "role"]
+
+
+def test_a_reseed_closes_opens_the_correct_set_no_longer_contains(monkeypatch, capsys):
+    """RECONCILE: the agent's checkpoint holds `leaked` (from the old rule) and `gone` (no longer owed); the correct
+    set is {a, b}. A forced re-seed writes opens for a and b and a `close` for each stale open, pointing at the marker."""
+    t = FakeTransport({V4: V4_CFG, CKPT: _ckpt({"a": {"pri": "P1", "ptr": "team/r/task/a.md"},
+                                                "leaked": {"pri": "P1", "ptr": "team/r/task/leaked.md"},
+                                                "gone": {"pri": "P2", "ptr": "team/r/task/gone.md"}})})
+    _old_rows(monkeypatch, ROWS)
+    assert cli.cmd_obligations_export_open(_args(force=True), t) == 0
+    v4 = [r[2] for r in t.records if r[0] == "MomentAnnotation/v4"]
+    assert sorted(e["slug"] for e in v4 if e["kind"] == "open") == ["a", "b"]
+    closes = {e["slug"]: e for e in v4 if e["kind"] == "close"}
+    assert set(closes) == {"leaked", "gone"} and all(e["ptr"] == "team/r/_coord/bus-v4/seeded/me.md" and e["to"] == "me" for e in closes.values())
+    assert "closed 2 stale" in capsys.readouterr().out and "closed_stale: 2" in t.docs["team/r/_coord/bus-v4/seeded/me.md"]
+
+
+def test_a_reseed_with_an_unreadable_checkpoint_is_unknown_not_a_silent_partial_reconcile(monkeypatch, capsys):
+    t = FakeTransport({V4: V4_CFG}, fail={CKPT})
+    _old_rows(monkeypatch, ROWS)
+    assert cli.cmd_obligations_export_open(_args(), t) == 3 and "could not be reconciled" in capsys.readouterr().err
+
+
+def _mirror_cfg_docs():
+    return {"team/fulcra/_coord/bus-v4/records.json": json.dumps({"data_type": "MomentAnnotation/v4", "api_version": "v1alpha1"})}
+
+
+def test_a_directive_whose_task_has_no_assignee_is_not_mirrored_as_an_open():
+    """6f8121fc class B: blocked rows with an empty assignee were mirrored as opens for their OWNER (three on coord-boss)."""
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/nobody.md"] = "---\ntitle: x\nowner: coord-boss\nassignee:\nstatus: blocked\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="linear", to="coord-boss", kind="directive", priority="P2", slug="nobody", ptr="task/nobody.md") is False
+    assert tr.records == []
+
+
+def test_a_directive_whose_task_names_an_assignee_is_mirrored_and_an_unreadable_task_over_captures():
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/mine.md"] = "---\nowner: coord-boss\nassignee: coord-maintainer\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="boss", to="coord-maintainer", kind="directive", priority="P1", slug="mine", ptr="task/mine.md") is True
+    assert len(tr.records) == 1
+    tr2 = FakeTransport(_mirror_cfg_docs())                                           # doc absent: mirror anyway (over-capture, never a silent hole)
+    assert dual_emit.mirror(tr2, "fulcra", sender="boss", to="coord-maintainer", kind="directive", priority="P1", slug="ghost", ptr="task/ghost.md") is True
+
+
+def test_an_fyi_directive_opens_nothing_on_v4_because_it_opens_nothing_on_v3():
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/fyi.md"] = "---\nowner: a\nassignee: b\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="a", to="b", kind="directive", priority="P3", slug="fyi", ptr="task/fyi.md", fyi=True) is False
+    assert tr.records == []
+
+
+def test_a_directive_whose_task_is_already_terminal_at_emit_time_is_not_mirrored_as_an_open():
+    """Class C (24d545b0): DONE reports born done carried an open with no close (three on coord-boss per wake)."""
+    docs = _mirror_cfg_docs(); docs["team/fulcra/task/report.md"] = "---\nowner: coord-maintainer\nassignee: coord-boss\nstatus: done\n---\n"
+    tr = FakeTransport(docs)
+    assert dual_emit.mirror(tr, "fulcra", sender="coord-maintainer", to="coord-boss", kind="directive", priority="P1", slug="report", ptr="task/report.md") is False
+    assert tr.records == []
+    docs["team/fulcra/task/live.md"] = "---\nowner: a\nassignee: coord-boss\nstatus: proposed\n---\n"
+    assert dual_emit.mirror(FakeTransport(docs), "fulcra", sender="a", to="coord-boss", kind="directive", priority="P1", slug="live", ptr="task/live.md") is True
+
+
+def test_the_old_open_set_includes_live_star_rows_for_every_non_owner_until_that_agent_acks_and_never_terminal_ones(monkeypatch):
+    """RULING 1 (f9f5823b): a broadcast is an obligation of every recipient except its sender. needs-me yields no
+    star rows, so the old set adds them from the full row load: open, assignee "*", owner != agent, deduplicated."""
+    rows = [
+        {"id": "bcast-by-boss", "assignee": "*", "owner": "coord-boss", "status": "proposed", "priority": "P0", "path": "task/bcast-by-boss.md"},
+        {"id": "bcast-by-me", "assignee": "*", "owner": "coord-maintainer", "status": "proposed", "priority": "P1", "path": "task/bcast-by-me.md"},
+        {"id": "bcast-done", "assignee": "*", "owner": "coord-boss", "status": "done", "priority": "P1", "path": "task/bcast-done.md"},
+        {"id": "bcast-acked-by-me", "assignee": "*", "owner": "coord-boss", "status": "proposed", "priority": "P1", "path": "task/bcast-acked-by-me.md", "acked_by": ["coord-maintainer"]},
+        {"id": "bcast-ack-doc", "assignee": "*", "owner": "coord-boss", "status": "proposed", "priority": "P1", "path": "task/bcast-ack-doc.md"},
+        {"id": "mine", "assignee": "coord-maintainer", "owner": "coord-boss", "status": "proposed", "priority": "P1", "path": "task/mine.md"},
+        {"id": "bcast-all-spelling", "assignee": "all", "owner": "coord-boss", "status": "active", "priority": "P2", "path": "task/bcast-all-spelling.md"},
+    ]
+    monkeypatch.setattr(cli, "_load_rows_status", lambda transport, team: (rows, True, ""))
+    monkeypatch.setattr(cli, "_held_roles_for_rows", lambda *a, **k: (set(), set()))
+    monkeypatch.setattr(cli, "_needs_me_rows", lambda transport, team, agent, rows, now, held_roles: [r for r in rows if r["id"] == "mine"])   # by id, never by index
+    tr = FakeTransport({cli._ack_path("fulcra", "bcast-ack-doc", "coord-maintainer"): "acked"})   # the engine's own ack path (agent_key is hash-suffixed)
+    got, ok, _ = cli._old_open_set(tr, "fulcra", "coord-maintainer")
+    # RULING 55b1056b (refining 13a58789): the OWNER's terminal status ends the ask for everyone — `bcast-done` opens
+    # for nobody; the two I acked are closed for me only
+    assert ok and sorted(r["id"] for r in got) == ["bcast-all-spelling", "bcast-by-boss", "mine"]
+    got_boss, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-boss")
+    assert sorted(r["id"] for r in got_boss) == ["bcast-by-me"]                    # coord-boss owes MY broadcast, never his own
+    got_other, _, _ = cli._old_open_set(FakeTransport(), "fulcra", "coord-opus-worker")
+    assert "bcast-acked-by-me" in {r["id"] for r in got_other} and "bcast-ack-doc" in {r["id"] for r in got_other}   # my acks close nothing for anyone else
+
+
+def test_export_open_confirms_each_row_against_its_doc_and_skips_a_terminal_one_but_seeds_an_unreadable_one(monkeypatch, capsys):
+    """coord-boss 8a280028 (2026-09-06): the projection lags the doc, so a row closed 45 s earlier was re-exported as
+    open and out-ordered its close on v4. One pointed read per row; terminal doc -> skip; unreadable -> over-capture."""
+    t = FakeTransport({V4: V4_CFG, "team/r/task/a.md": "---\nstatus: done\nowner: boss\nassignee: me\n---\n"}, fail={"team/r/task/b.md"})
+    _old_rows(monkeypatch, ROWS)
+    assert cli.cmd_obligations_export_open(_args(), t) == 0
+    opens = [r for r in t.records if r[0] == "MomentAnnotation/v4"]
+    assert sorted(r[2]["slug"] for r in opens) == ["b"]                       # a: doc already done; b: doc unreadable -> seeded anyway
+    marker = t.docs["team/r/_coord/bus-v4/seeded/me.md"]
+    assert "written: 1" in marker and "skipped_terminal_doc: 1" in marker and "skipped: 0" in marker
+    assert "skipped_terminal_doc 1" in capsys.readouterr().out
+
+
+def test_a_response_on_a_broadcast_mirrors_its_close_to_all_while_the_v3_record_goes_to_the_owner():
+    """Sibling of 55b1056b: a terminal broadcast dropped from the old set for everyone, but the v4 close went to the
+    owner alone, so every other recipient's fold kept the open (coord-maintainer, 05:03Z: only_new=[the pin broadcast])."""
+    tr = FakeTransport(_mirror_cfg_docs())
+    cfg = {"data_type": "MomentAnnotation/v3", "api_version": "v1alpha1"}
+    assert records.emit_event(tr, cfg, sender="coord-opus-worker", to="coord-boss", kind="response", priority="P2",
+                              slug="bcast", ptr="_coord/responses/bcast/x.md", team="fulcra", for_agent="all")
+    v3 = [r for r in tr.records if r[0] == "MomentAnnotation/v3"]; v4 = [r for r in tr.records if r[0] == "MomentAnnotation/v4"]
+    assert len(v3) == 1 and len(v4) == 1
+    assert json.loads(v3[0][2]["note"] if isinstance(v3[0][2], dict) and "note" in v3[0][2] else json.dumps(v3[0][2])).get("to", "coord-boss") == "coord-boss"
+    assert v4[0][2]["kind"] == "close" and v4[0][2]["to"] == "all"
+    tr2 = FakeTransport(_mirror_cfg_docs())
+    records.emit_event(tr2, cfg, sender="me", to="coord-boss", kind="response", priority="P2", slug="d", ptr="x.md", team="fulcra", for_agent="me")
+    assert [r for r in tr2.records if r[0] == "MomentAnnotation/v4"][0][2]["to"] == "coord-boss"      # directed: unchanged

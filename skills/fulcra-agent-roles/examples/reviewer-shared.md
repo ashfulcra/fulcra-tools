@@ -6,7 +6,7 @@ description: "Serves review requests on the team. ADDRESS REVIEW WORK HERE, not 
 policy: shared
 sla_hours: 12
 maintainer: maintainer
-checkpoint_ref: team/<team>/member/reviewer/continuity/role-reviewer/latest.json
+checkpoint_ref: team/<team>/member/<agent>/continuity/role-<role>/latest.json
 ---
 # Duties
 - Poll the role inbox; review PRs/docs addressed to the role.

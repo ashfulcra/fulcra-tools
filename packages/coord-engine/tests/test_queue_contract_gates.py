@@ -50,7 +50,7 @@ from acceptance.contract import (
     cursor_path,
 )
 
-TEAM = "fulcra"
+TEAM = "acme"
 AGENT = "opie"
 
 #: Fixed fixture timestamps. Not a clock pin: every time value the contract sees
@@ -271,11 +271,11 @@ def test_gate_8_obligation_fold_rediscovers_a_lost_wake(store: FakeStore):
     q = ReferenceQueue(store, TEAM, AGENT, records=[])
     assert q.read(T0).state is ReadState.CLEAR
 
-    store.seed("team/fulcra/_coord/obligations/directives.json",
+    store.seed("team/acme/_coord/obligations/directives.json",
                json.dumps({"open": ["respec-s2"]}))
     fold = ObligationFold(store, {
-        "directives": "team/fulcra/_coord/obligations/directives.json",
-        "reviews": "team/fulcra/_coord/obligations/reviews.json",
+        "directives": "team/acme/_coord/obligations/directives.json",
+        "reviews": "team/acme/_coord/obligations/reviews.json",
     })
 
     state, found = fold.owed()
@@ -329,17 +329,17 @@ def test_gate_9_takeover_produces_a_complete_audit_record(queue: ReferenceQueue)
 
 def test_gate_10_unreadable_component_makes_nothing_owed_unsayable(store: FakeStore):
     """Gate 10: one dark component and CLEAR is not available as an answer."""
-    store.seed("team/fulcra/_coord/obligations/directives.json",
+    store.seed("team/acme/_coord/obligations/directives.json",
                json.dumps({"open": []}))
-    store.seed("team/fulcra/_coord/obligations/reviews.json",
+    store.seed("team/acme/_coord/obligations/reviews.json",
                json.dumps({"open": []}))
     fold = ObligationFold(store, {
-        "directives": "team/fulcra/_coord/obligations/directives.json",
-        "reviews": "team/fulcra/_coord/obligations/reviews.json",
+        "directives": "team/acme/_coord/obligations/directives.json",
+        "reviews": "team/acme/_coord/obligations/reviews.json",
     })
     assert fold.owed()[0] is ReadState.CLEAR  # both readable, genuinely clear
 
-    store.break_reads("team/fulcra/_coord/obligations/reviews.json")
+    store.break_reads("team/acme/_coord/obligations/reviews.json")
     state, found = fold.owed()
 
     assert state is ReadState.UNKNOWN

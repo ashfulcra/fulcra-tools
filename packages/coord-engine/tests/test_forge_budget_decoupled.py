@@ -131,3 +131,59 @@ def test_the_two_budgets_are_independent_knobs():
     assert projection.DEFAULT_FORGE_BUDGET != projection.DEFAULT_BUILD_BUDGET
     assert projection.forge_budget() == projection.DEFAULT_FORGE_BUDGET
     assert projection.build_budget() == projection.DEFAULT_BUILD_BUDGET
+
+
+# --- coord-boss ruling 30be1f8e (2026-09-05): forge lists the parent feedback dir once and per-PR only for the PRs
+# that appear there; an empty or failed parent listing falls back to the per-PR loop (a listing cannot prove absence).
+
+def _counting(t):
+    calls = []
+    orig = t.list_dir
+    def list_dir(prefix):
+        calls.append(prefix); return orig(prefix)
+    t.list_dir = list_dir
+    return calls
+
+
+def _rows(*slugs):
+    return [{"artifact": s, "requested_by": "alice"} for s in slugs]
+
+
+def test_forge_lists_only_the_prs_that_have_a_feedback_dir_when_the_parent_listing_names_them():
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/_coord/forge/feedback/o-r-1/f1.md", "---\nauthor: bob\n---\n")
+    t.put(f"team/{TEAM}/_coord/forge/feedback/o-r-3/f2.md", "---\nauthor: carol\n---\n")
+    calls = _counting(t)
+    sec = projection.build_forge_projection(t, TEAM, now=_now(), review_rows=_rows("o-r-1", "o-r-2", "o-r-3", "o-r-4"),
+                                            reviews_complete=True, prior=None, deadline=reconcile.Deadline.open(None))
+    assert sec["complete"] is True and sorted(sec["responsible"]) == ["o-r-1", "o-r-2", "o-r-3", "o-r-4"]
+    assert sorted(sec["feedback"]) == ["o-r-1", "o-r-3"] and sec["feedback"]["o-r-3"][0]["author"] == "carol"
+    fb_calls = [c for c in calls if "/forge/feedback/" in c]
+    assert fb_calls == [f"team/{TEAM}/_coord/forge/feedback/", f"team/{TEAM}/_coord/forge/feedback/o-r-1/",
+                        f"team/{TEAM}/_coord/forge/feedback/o-r-3/"]          # parent once; o-r-2 and o-r-4 never listed
+
+
+def test_an_empty_parent_listing_proves_nothing_so_every_pr_is_still_listed():
+    t = FakeTransport()                                                          # no feedback anywhere
+    calls = _counting(t)
+    sec = projection.build_forge_projection(t, TEAM, now=_now(), review_rows=_rows("o-r-1", "o-r-2"),
+                                            reviews_complete=True, prior=None, deadline=reconcile.Deadline.open(None))
+    assert sec["complete"] is True and sec["feedback"] == {}
+    fb_calls = [c for c in calls if "/forge/feedback/" in c]
+    assert fb_calls == [f"team/{TEAM}/_coord/forge/feedback/", f"team/{TEAM}/_coord/forge/feedback/o-r-1/",
+                        f"team/{TEAM}/_coord/forge/feedback/o-r-2/"]          # fallback: per-PR loop unchanged
+
+
+def test_a_failing_parent_listing_falls_back_to_the_per_pr_loop_and_reports_what_the_loop_reports():
+    t = FakeTransport()
+    t.put(f"team/{TEAM}/_coord/forge/feedback/o-r-1/f1.md", "---\nauthor: bob\n---\n")
+    orig = t.list_dir
+    def list_dir(prefix):
+        if prefix.endswith("/forge/feedback/"):
+            from coord_engine.transport import TransportError
+            raise TransportError("parent boom")
+        return orig(prefix)
+    t.list_dir = list_dir
+    sec = projection.build_forge_projection(t, TEAM, now=_now(), review_rows=_rows("o-r-1", "o-r-2"),
+                                            reviews_complete=True, prior=None, deadline=reconcile.Deadline.open(None))
+    assert sec["complete"] is True and sorted(sec["feedback"]) == ["o-r-1"]   # per-PR listings answered; nothing hidden

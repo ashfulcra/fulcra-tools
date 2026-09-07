@@ -27,7 +27,11 @@ def apply(state: dict[str, Any], ev: dict[str, Any]) -> None:
         return
     slug, kind, rows = ev["slug"], ev["kind"], state["open"]
     if kind == "open":
-        rows[slug] = {"pri": ev["pri"], "from": ev["from"], "ptr": ev["ptr"], "at": ev["at"]}
+        # `to` (coord-boss, 2026-09-05, asked twice): the recipient, so a divergence can be classified from the row
+        # alone (broadcast vs directed) without a document read per slug. ADDITIVE: rows written before it lack the
+        # key and stay valid; SCHEMA_VERSION is unchanged because a bump makes every existing checkpoint load as
+        # "corrupt" and refuses the fleet's next fold.
+        rows[slug] = {"pri": ev["pri"], "from": ev["from"], "to": ev["to"], "ptr": ev["ptr"], "at": ev["at"]}
     elif kind in ("close", "release"):
         rows.pop(slug, None)
     elif kind == "claim" and slug in rows:

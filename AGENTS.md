@@ -188,11 +188,24 @@ under `skills/`, each package with its own README, build, and tests.
 - One command: **`bash scripts/setup.sh`** — installs the right Python + `uv`
   extras + the `fulcra` CLI, then runs the suite to verify (macOS-first; the
   menubar's PyObjC deps are macOS-only).
-- The manual equivalent is **`uv sync --all-packages --all-extras`**. Bare
-  `uv sync` is NOT enough — pytest lives in each package's `dev` extra and
-  PyObjC/rumps in the `macos` extra, so a bare sync fails tests with
-  `Failed to spawn: pytest` and the menu-bar can't import. Any sync must keep
-  `--all-extras` or it prunes pytest + PyObjC back out.
+- The manual equivalent is **OS-dependent, and the difference is silent** —
+  which is the whole reason this bullet is two paragraphs.
+  - **macOS**: `uv sync --all-packages --all-extras`. Bare `uv sync` is NOT
+    enough — pytest lives in each package's `dev` extra and PyObjC/rumps in the
+    `macos` extra, so a bare sync fails tests with `Failed to spawn: pytest` and
+    the menu-bar can't import. Any sync must keep `--all-extras` or it prunes
+    pytest + PyObjC back out.
+  - **Linux**: `uv sync --all-packages`, then select the dev extra at RUN time:
+    `uv run --all-packages --extra dev python -m pytest packages/ -q`. This is
+    what the Linux workflows do (`uv-workspace.yml`, `coord-fold-proof.yml`).
+    Do NOT use `--all-extras` here: it pulls the `macos` extra, whose PyObjC
+    wheels build by shelling out to `/usr/bin/sw_vers`, which does not exist on
+    Linux. The build dies with `FileNotFoundError` and **nothing is installed**.
+    That failure does not look like a failure afterwards: it leaves a `.venv`
+    containing `python` and nothing else, so `ls .venv` succeeds, the venv
+    "exists", and the next thing to run is a test that cannot import anything.
+    Measured here on 2026-09-05 — the macOS line above was followed on a Linux
+    container and produced exactly that.
 - Run tests: `uv run pytest packages/ -q` (a couple of minutes,
   and must NOT hit the network — a network-bound run is the bug, not slowness).
 - Editable install: the `.venv` imports the live workspace source, so a code
@@ -1629,6 +1642,12 @@ Canonical home for the durable facts about `packages/coord-fold` (plan `docs/sup
 
 **Cursor rules (G26, G31).** The cursor is the `recorded_at` of the last OBSERVED record before the first UNAPPLIED RELEVANT event — never `now`, never past a gap. Records that are unparseable, foreign-schema, or addressed to someone else are observed and passed, never re-read. Checkable consequence, made a test: re-running a fold from the stored cursor yields the same open set. Lost-update detection, not CAS (G27): the store has no compare-and-swap; the checkpoint carries `writer` and a monotonic `generation`, the fold re-reads before writing and refuses by name if the generation moved. No compaction, never delete events (G28).
 
+**Relevance rule (RULING 2026-09-05, coord-boss blocker a0927018).** An obligation belongs to its ASSIGNEE. An event applies to an agent's fold when it is addressed to that agent or to `all`, OR when the agent itself sent it and it is a `claim`/`release`/`close` (the assignee's own action on an obligation it holds — those are addressed to the open's sender but performed by the assignee, and the assignee's fold must see them or a closed row would stay open forever). An `open` or `note` the agent SENT never opens for the sender: a sender's waiting is bookkeeping, not an obligation. The earlier rule applied every sender event too, so every seed leaked into its senders' folds (coord-boss saw 54 of coord-maintainer's opens, coord-maintainer 137 of coord-boss's) and no coordinator could ever AGREE. Both sides — the old plane's `obligations`/`compare-to-fold` and coord-fold — ask the question this way. Checkpoint rows carry `to` (the recipient) since 2026-09-05 so a divergence classifies from the row alone; the field is ADDITIVE, rows written before it lack the key and stay valid, and `SCHEMA_VERSION` did not move because a bump makes every existing checkpoint load as corrupt and refuses the fleet's next fold. Two residual edges (coord-boss 6f8121fc, 2026-09-05): a broadcast (`to: all`) opens for every agent EXCEPT its sender; and the mirror turns a v3 `directive` into a v4 `open` only when the task doc it points at names an assignee (read once at write time; an unreadable doc mirrors anyway, over-capture over a silent hole) and never for an FYI, because neither opens an obligation on the old plane. Class C (coord-boss 24d545b0): a row already in a terminal status (`model.TERMINAL_STATUSES`) when its open is emitted — a DONE report born done — opens nothing either, or it would carry an open with no close forever. A checkpoint computed under the old rule is repaired with `coord-fold fold <team> --agent <a> --rebuild`: it replays the whole stream under the current rule (events are never deleted, G28) and keeps the generation/writer so a concurrent writer is still refused (G27).
+
+**Pointer resolution (coord-boss finding 2026-09-05).** Emitters write `ptr` TEAM-RELATIVE (`task/<slug>.md`); the store holds `team/<team>/task/<slug>.md`. The READER resolves: `coord_fold/pointers.py::qualify(team, ptr)` prefixes `team/<team>/` onto a bare pointer and passes an already-qualified one through, and both pointer reads (`fold --verify-pointers`, `close --evidence`) go through it. Read verbatim, every open row came back `absent` (a legitimate answer, so nothing flagged it) and the flag whose job is to prove pointers resolve reported 339 of 339 unreadable. No migration of emitted events; every other consumer of this plane (the Linear bridge already does) must resolve the same way.
+
+**Record write shape (G13 drill finding, 2026-09-05).** coord-fold's writer invokes the real CLI exactly as the engine's `record_write` does: `record <data_type> --api-version <v> --source <sender>` with only `{note, recorded_at}` on stdin. The first cut passed no positional and five stdin keys; the real CLI refused every write (rc 2, `Missing argument 'DATA_TYPE'`) while the proof's fake accepted it, so every `coord-fold emit/claim/release/close` on the live store returned UNKNOWN until the drill tried one. The proof's store server now refuses the same shapes the CLI refuses; a fake that accepts what the real thing rejects proves nothing.
+
 **The four gate files** (CI, `uv-workspace.yml` gates step and `scripts/materialize_plan.py` GATES): `tests/test_structural.py` (ownership manifest, no enumeration, import graph, two-method Protocol, disjoint reader/writer), `tests/test_tripwire.py`, `tests/test_ship_check.py`, `tests/test_ci_wiring.py`; plus `tests/test_file_size_ceiling.py` (G8: 400 lines per `.py` under `coord_fold/`, recursive; the ceiling is documented in `packages/coord-fold/README.md`) and `tests/test_no_degraded_vocabulary.py`.
 
 **The tripwire is demoted (G30).** `tests/test_tripwire.py` is a syntactic scan for enumeration identifiers and modules (`os.listdir`, `iterdir`, `glob`, …). It catches the plain spelling and nothing else — an alias, a `getattr`-built name, or a subprocess escapes it by construction. It is kept because it is cheap and true about what it names; it is NOT the guarantee and a green tripwire proves nothing about behaviour.
@@ -1652,8 +1671,26 @@ acts on today.
   opting in: `directive→open`, `response→close`, `claim→claim`, `verdict→note`, eight-field payload
   `{v, at, from, to, kind, slug, pri, ptr}`. A mirror failure never fails the v3 write.
 - **Seed (Task 12).** `obligations <team> --agent <a> --export-open` writes one bus-v4 `open` per slug the old
-  fold says the agent owes, idempotent via `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). Refuses on an
-  UNKNOWN old fold — a seed from a partial answer would enshrine the gap as absence. Classified as a WRITE.
+  fold says the agent owes AS ASSIGNEE (row assignee is the agent, `@agent`, `*`, or a role the agent holds —
+  rows the agent merely sent are not its obligations; ruling a0927018; RULING f9f5823b 2026-09-05: a broadcast,
+  assignee `*`, is an obligation of EVERY recipient except its owner, so `_old_open_set` adds open star rows whose
+  owner is not the agent — needs-me never lists them — matching the fold's `to == all and from != agent`;
+  RULING 13a58789 2026-09-05: broadcast closes are PER-RECIPIENT — the row's single status is the OWNER's disposition,
+  never a recipient's close, so a broadcast stays open for every non-owner until THAT agent acks it (`acked_by` on the
+  row, or the ack doc at `_coord/acks/<slug>/<agent_key>.md`); an unreadable ack reads as no ack;
+  RULING 55b1056b 2026-09-06: the OWNER's terminal status (`router.TERMINAL_STATUSES`) ends a broadcast for EVERYONE —
+  it is open for nobody, on the old set and on the seed — while a recipient's ack still closes it for that recipient
+  only; `respond` on a broadcast writes the responder's ack record itself. RULING 316ef7ab 2026-09-06: a broadcast's status moves ONLY by its owner — a non-owner's `respond` records the shard, writes its own ack, and closes only its own fold (the first recipient's answer had been flipping the row to done and, under 55b1056b(1), discharging every other recipient). Only the OWNER's terminal transition mirrors its v4 `close` to `all` (the v3 record still goes to the owner): the old plane drops a terminal broadcast for every recipient, so the new plane must close it in every recipient's fold too (measured 2026-09-06 05:03Z: a close addressed to the owner alone left every other fold reading only_new). DUAL-RUN RULE: `coord-fold close` on a
+  broadcast is half a close — coord-fold stays old-plane-free by design, so pair it with
+  `coord-engine inbox <team> --ack <slug> --agent <you>` until cutover, or the old plane reads only_old), idempotent via
+  `_coord/bus-v4/seeded/<agent>.md` (`--force` re-seeds). A re-seed RECONCILES: every slug open in the agent's
+  coord-fold checkpoint that the correct set no longer contains gets a bus-v4 `close` (ptr = the seed marker),
+  so a leaked open is retired on the stream rather than deleted (G28); an unreadable checkpoint makes the whole
+  seed UNKNOWN (rc 3), never a silent partial reconcile. Each row the seed would export is CONFIRMED against the doc its pointer names (one pointed read per row, no
+  enumeration; coord-boss 8a280028, 2026-09-06): the needs-me projection lags the doc until reconcile, so a row closed
+  seconds earlier was re-exported open and out-ordered its own close on v4; a terminal doc skips the row
+  (`skipped_terminal_doc` in the marker), an unreadable doc keeps the projection's answer (over-capture). Refuses on an UNKNOWN old fold — a seed from a partial
+  answer would enshrine the gap as absence. Classified as a WRITE.
 - **Comparator (Task 14).** `compare-to-fold <team> --agent <a>`: the old open set vs the coord-fold checkpoint
   (`team/<team>/member/<agent>/fold/checkpoint.json`) as `(slug, pri, ptr)` tuples; prints `AGREE n=k` or
   `DIVERGE slugs=[…]`; appends one JSON line to `_coord/bus-v4/compare/<agent>.jsonl`. rc 0/2/3 = agree/diverge/
@@ -1663,5 +1700,26 @@ acts on today.
   recovery drill is recorded at `_coord/bus-v4/drill/<agent>.md` (G13), and `--ship-check-rc 0` carries the rc of
   the runbook's `scripts/ship_check.py fulcra <HEAD> --git <abs> --fulcra-api <abs>`. The window flags exist so
   the operator can compress the window deliberately, never silently. A read.
+- **The flip (coord_engine.cutover, 2026-09-06).** `cutover show <team>` / `cutover set <team> --serve fold|files
+  --reason … --agent <a>` read and write ONE switch document, `_coord/bus-v4/cutover.json`
+  (`{"v":1,"serve":"fold"|"files","at","by","reason"}`). `needs-me` and `obligations` read it FIRST, before any
+  file-plane work, on every invocation (nothing is cached). Three states: **absent → files**, today's answer, so
+  the flip cannot happen by accident; **unreadable or malformed → UNKNOWN (rc 3) and nothing is consulted** — a
+  host that cannot read the switch after the flip must not answer from files and report clean (split-brain;
+  codex-reviewer P0, engine-ship-gate-6445cde8); **`serve: fold`** → the agent's coord-fold checkpoint IS the
+  answer and the task index, role resolution and review listing are never invoked (codex-coder P0, same
+  register; sentinel tests prove it); a checkpoint that is absent, unreadable or corrupt is **UNKNOWN (rc 3),
+  never CLEAR** — an identity that has not seeded its fold does not thereby owe nothing. Under fold, `tasks`
+  carries every open, `directives` the non-review ones, `reviews` the review-request rows, `blocks` /
+  `reminders` / `role_duties` are consulted-and-subsumed (their opens are in the fold), and `forge_feedback` is
+  served from the forge PROJECTION section of the summaries document by pointed reads only (one document read,
+  one ack read per item, `changed_slugs` empty so nothing re-lists a feedback directory); a projection that is
+  absent, stale, incomplete or malformed is UNKNOWN, never a raw scan (codex-coder P0, engine-ship-gate-c4a8410a;
+  a `list_dir` sentinel in the tests proves the fold path never enumerates). The checkpoint's own health survives
+  the serving boundary: `unread_events > 0`, a non-empty `unreadable_pointers`, or malformed health fields make
+  both public reads **UNKNOWN (rc 3) with the known rows retained as partial data** (codex-reviewer P0, same
+  register). Rollback is `--serve files`, one write, fleet-wide. `cutover` is MIXED: `show` is a read, `set` is
+  activity.
+- **Forge projection cost (ruling 30be1f8e, 2026-09-05).** `build_forge_projection` lists the parent `_coord/forge/feedback/` ONCE and lists per PR only the PRs that appear there; measured on the live store 125 responsible PRs cost ~77 s of per-PR listings that almost all returned empty, against a sub-second parent listing naming two directories. An EMPTY or FAILED parent listing proves nothing (a listing answers identically for a real empty dir and a bad path) and falls back to the per-PR loop unchanged: the pruning only removes work it has positive evidence for. `COORD_FORGE_BUILD_BUDGET` (default 60 s) is then a ceiling, not a requirement; the reconciling host carries 180 in its launchd plist.
 - **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
   each write (two of those already did while the verb classified as a read).

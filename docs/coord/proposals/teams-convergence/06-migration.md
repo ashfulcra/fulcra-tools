@@ -68,8 +68,8 @@ No mirror. Three phases, each independently safe:
 - Never deletes anything on the incumbent.
 
 ## Test plan (phase 1 acceptance)
-On `team/<team>` with real migrated tasks: reconcile heals index/aggregate at real scale (~140 docs —
-first full reconcile ~2-3 min at ~1s/op, then incremental); board/needs-me/digest match the incumbent's
+On a synthetic test team with migrated tasks: reconcile heals the index and aggregate
+at representative scale using full and incremental passes; board/needs-me/digest match the incumbent's
 view for the migrated set (spot-check N=10); directives round-trip (tell→inbox→ack→respond); briefing +
 park/checkpoint; health fresh; heartbeat + listener installed and self-tested on this host. Rollback
 rehearsal: `--dry-run` + `--no-mark` first on a scratch team.
