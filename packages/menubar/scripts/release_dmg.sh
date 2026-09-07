@@ -60,6 +60,8 @@ OUT_DMG="$REPO/dist/Fulcra Collect.dmg"
 
 echo "=== 1/7  build the unsigned app (wheelhouse + briefcase create/build) ==="
 bash "$MENUBAR/scripts/build_macos_app.sh"
+bash "$MENUBAR/scripts/verify_bundle.sh"
+python3 "$MENUBAR/scripts/sanitize_bundle.py" --check-only "$APP"
 
 echo "=== 2/7  sign the app inside-out via Briefcase (Developer ID, hardened runtime) ==="
 # `package -p zip … --no-notarize` runs Briefcase's signer over every nested
@@ -69,6 +71,7 @@ cd "$MENUBAR"
 PIP_FIND_LINKS="$REPO/wheelhouse" uvx briefcase package macOS \
   -p zip -i "$FULCRA_SIGN_IDENTITY" --no-notarize
 cd "$REPO"
+env PATH=/usr/bin:/bin "$APP/Contents/MacOS/fulcra-collect" --help >/dev/null
 echo "--- verify app signature ---"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=4 "$APP" 2>&1 | grep -iE "Authority|TeamIdentifier|Timestamp|flags" | head
