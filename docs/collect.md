@@ -21,9 +21,11 @@ consolidated (see [History](#history)).
 
 ### Mac app (Apple silicon)
 
-The app installer is awaiting Apple notarization. It is **not yet available for
-download**. When ready, it will appear on the [releases page](https://github.com/ashfulcra/fulcra-tools/releases).
-The installation steps below describe that upcoming release.
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.1-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+
+This beta installer includes Apple Notes. See the
+[release notes](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.1-macos-arm64)
+for requirements and known limitations.
 
 1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
 2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.
@@ -34,7 +36,7 @@ The installation steps below describe that upcoming release.
 
 Requires an Apple silicon Mac running macOS 12 or later. The app includes Python,
 Collect, the Fulcra client, and the plugins; you do not need Terminal or Homebrew.
-The first release will be a beta. Source installation is available for contributors below.
+This is a beta release. Source installation is available for contributors below.
 
 ### From source (contributors)
 
