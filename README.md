@@ -135,7 +135,8 @@ The standalone [Answers bridge](tools/answers-bridge/README.md) records answers
 in a configured Linear project and promotes follow-up cards into bus backlog
 tasks. It requires explicit private account configuration, credentials, and a
 `COORD_TEAM`; its tracked configuration example is synthetic. Local help and
-setup checks work without account access.
+setup checks work without account access. The privacy check rejects its private
+configuration filename and credential files, including copies inside archives.
 
 ## Skill index
 

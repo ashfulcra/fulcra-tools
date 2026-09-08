@@ -12,7 +12,8 @@ cases, replace identifiers and values, and record provenance when a fixture is
 derived from captured output. Redacting a name alone does not make a record
 safe. Check retired as well as current account identifiers, including test
 constants and installer fallbacks. UUID syntax is not evidence of anonymity;
-use deliberately invented values and trace copied fixtures to their source. Capture helpers must sanitize before writing into the checkout. Keep raw
+use deliberately invented values and trace copied fixtures to their source.
+Capture helpers must sanitize before writing into the checkout. Keep raw
 captures and audit evidence outside the repository.
 
 Before publishing, review the complete staged diff and run:
@@ -25,7 +26,10 @@ gitleaks dir /tmp/collect-public-tree --redact --no-banner --max-archive-depth 3
 ```
 
 CI runs these checks on tracked files, including supported archive contents and
-metadata. The guard detects selected high-confidence patterns; manual review
+metadata. The guard also rejects known private configuration filenames (`.env`,
+`linear.env`, and `answers-linear-ids.json`), even inside archives. Keep these
+local and ignored; publish a synthetic `.example` file for setup instructions.
+The guard detects selected high-confidence patterns; manual review
 must cover names, account identifiers, measurements, and fixture provenance.
 Diagnostics must not echo matched private values. Do not disable a detector
 for an entire fixture directory to silence a finding.
