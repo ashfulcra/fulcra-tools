@@ -4,6 +4,11 @@ Collect imports notes, journals, media history, and other data into your
 [Fulcra](https://fulcradynamics.com) account. You choose a source, configure its
 access, and run an import or let Collect check for changes on a schedule.
 
+It is an optional connector host within [Fulcra Tools](../README.md), an
+unofficial, unsupported monorepo. Fulcra's APIs and the agent coordination and
+continuity tools work without it. Use Collect for sources that need access to
+your Mac or for imports you want to configure and run in one place.
+
 The Mac app opens a dashboard in your browser. A background process handles the
 imports and saves progress between runs. This page is the installation guide;
 [the source guide](how-do-i-get-my-data.md) explains each integration.
@@ -80,9 +85,10 @@ have not all been verified against every service or account. The downloadable
 app also includes `fulcra-api` 0.1.41; source installs use their own environment
 and dependency lock.
 
-**In development:** Apple Reminders with a list picker and completion syncing in
-both directions. **Next:** Todoist with project selection and the same completion
-behavior. Neither is available in this release. This does not promise full
+**In development:** [Apple Reminders and Todoist](https://github.com/ashfulcra/fulcra-tools/pull/757)
+with list/project selection and ordinary task completion syncing in both directions.
+Both are implemented in the release candidate and awaiting final validation and release.
+Neither is available in this download. This does not promise full
 bidirectional editing of task titles, dates, or lists.
 
 ## How it fits together
@@ -91,31 +97,27 @@ The app, background process, and plugins share the following packages.
 
 | Package | Role in Collect |
 |---|---|
-| [`packages/collect`](../packages/collect) | **The Collect daemon** — local HTTP server on `127.0.0.1:9292` that hosts every plugin, runs them on schedule, and exposes the wizard + dashboard UI. The hub the rest of the repo plugs into. |
+| [`packages/collect`](../packages/collect) | **The Collect daemon** — local HTTP server on `127.0.0.1:9292` that hosts installed Collect plugins, runs scheduled imports, and exposes the wizard + dashboard UI. |
 | [`packages/web-ui`](../packages/web-ui) | The wizard + dashboard + settings **frontend** the daemon serves. Vanilla Alpine.js, no build step. |
 | [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records Moment annotations and surfaces daemon status. |
-| [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** + cross-plugin definition resolver. Pulled in by every other package. |
+| [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** and definition/record helpers used by the importers. Independent coordination packages have their own clients. |
 
 Notes and selected emails are uploaded as **Fulcra Files**. Event importers
 write moments, durations, and numeric records through the annotations API.
 
-**Writing events:** moments, durations, and numeric records go
-through the **typed endpoint** (`POST /ingest/v1/record/{data_type}`,
-unwrapped payloads, JSONL batches); tombstones stay on the legacy wrapped
-endpoint (their machine-state payload has no typed slot). The typed endpoint
-has three sharp edges, each with a shipped compensation: it does **no
-server-side source-id dedup** (media's claim machinery + labs' pre-post
-existing-check prevent duplicates), it **silently drops** unknown fields and
-bad JSONL lines (media self-heals by unclaiming confirmed-missing events for
-next-run retry; labs refuses to ingest when it cannot verify), and it is
-**async** (~1–2 min to visibility — both writers verify landings by
-re-querying, and `fulcra-collect doctor` has a schema-drift row that fails
-loudly if our wire shape ever diverges from the served schema).
+**Writing events:** record formats and delivery checks differ by importer.
+The typed endpoint does not deduplicate source IDs for callers, so importers
+need their own duplicate checks or claims. A successful upload is not proof that
+every record became visible. Media and labs have landing checks; other paths
+have different limits. See each package README before relying on its delivery
+or retry behavior.
 
-**Reading it back:** everything Collect ingests is readable by any agent or
-tool via the `fulcra` CLI (`get-records`, `data-updates`), the REST API, or
-the official read-only MCP server (`uvx fulcra-context-mcp@latest` / hosted at
-mcp.fulcradynamics.com). Collect is the write side of that pair.
+**Reading it back:** authorized agents can read imported records through the
+Fulcra CLI, REST API, or supported MCP tools. Notes and email bodies are files,
+so use Fulcra Files access for those; `get-records` queries annotations and
+`data-updates` reports changes. [`FULCRA-PRIMITIVES.md`](../FULCRA-PRIMITIVES.md)
+maps the available interfaces and their authentication requirements. Collect
+is one producer of this context, and is not needed by the agents reading it.
 
 ### Plugins (the data sources Collect runs)
 
@@ -143,16 +145,14 @@ first if you're deciding what to wire up.
 
 ## History
 
-Each of these components was its own repository until 2026-05-21. They were
-merged here with `git subtree` — becoming Collect's plugins and supporting
-packages — so the full commit history of every one is preserved
-(`git log packages/<name>` shows it). The original repos
-(`ashfulcra/fulcra-attention`, `ashfulcra/FulcraMediaHelpers`,
-`ashfulcra/fulcra-csv-importer`) are archived read-only.
+Several of the original importers began as separate repositories and were
+brought into this monorepo with their history. The repo has since grown to
+include independent agent coordination, continuity, knowledge, and preference
+tools as well as Collect. See the [package index](../README.md#package-index).
 
 ## Why a monorepo
 
-Collect and its plugins share the Fulcra annotations API, auth, the ingest
-payload shape, and dedup logic. One repo means cross-package changes land in a
-single commit, teammates clone once, and the shared Fulcra-client code lives in
-one common package the daemon and every plugin depend on.
+Many importers share authentication, annotation definitions, and record encoding.
+Keeping that code together lets a cross-package change land with its callers and
+documentation. It does not mean every tool needs the daemon: standalone commands,
+browser extensions, and agent skills have their own entry points.

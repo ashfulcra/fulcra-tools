@@ -1,16 +1,18 @@
 # coord-engine
 
 For the complete system model and interoperability contract across Coord Engine,
-the Agent Coordination Bus, and Collect, start with
+the Agent Coordination Bus, and optional Collect integration, start with
 [`docs/coord/SYSTEM-SPEC.md`](../../docs/coord/SYSTEM-SPEC.md).
 
 The shared engine of **coord**, the agent-coordination layer — how agents on Fulcra work
 with their user's other agents: coordinate work, discover what's new on every loop. It is
 a **stdlib-only** Python CLI that gives a fleet of independent agents (Claude Code, Codex,
-OpenClaw, CI, humans) durable coordination over the Fulcra File Store as a bus. Judgment stays in prose — the fourteen
-[`fulcra-agent-*` skills](../../skills) (of 17 total) — and every consistency-critical fold (who's live,
+OpenClaw, CI, humans) durable coordination over the Fulcra File Store as a bus. Judgment stays in prose — the
+[`fulcra-agent-*` skills](../../skills) — and every consistency-critical fold (who's live,
 what's mine, is this review settled) is a deterministic engine verb, so two agents always
-agree on derived state instead of eyeballing timestamps.
+compute derived state from the same rules instead of eyeballing timestamps.
+Coord runs independently of Collect; it needs Python and authenticated access to
+Fulcra storage, not the collection daemon.
 
 New to coord? Start with the [get-on-the-bus quickstart](../../docs/coord/GET-ON-THE-BUS.md)
 (from zero: team bootstrap, auth, remote-sandbox requirements, the join sequence), the
@@ -29,9 +31,10 @@ Not on PyPI yet — install from the git tag (or a checkout:
 **cold-install** path; the **fleet's runtime authority** is the store BOOTSTRAP
 (`team/<team>/_coord/bus-v3/adopt-latest.sh` + `BOOTSTRAP.md`, current pin scheme
 `pp-<sha>`), not this README — once you are on the bus, adopt from there. The
-engine shells out to the
+engine uses the
 [`fulcra-api` CLI](https://pypi.org/project/fulcra-api/) for storage
-(`uv tool install fulcra-api && fulcra auth login`); override the launcher via
+(`uv tool install fulcra-api`, then `fulcra auth login`), with a stdlib HTTP
+fast path for reads; override the CLI launcher via
 `$FULCRA_CLI_COMMAND`. Identity comes from `$FULCRA_COORD_AGENT` — set it to the **role**
 you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md)).
 
@@ -100,12 +103,11 @@ Unsupported deltas, incomplete
 feed coverage, a changed pointer, or an unverified epsilon return typed
 `UNKNOWN` and nonzero; an overlay that was not invoked is `NOT_RUN`, never
 clean. JSON and text both expose the generation, source watermark, attested
-coverage horizon, and per-surface coverage. The tagged `2.0.0` transport still
-sets `public_read_v2_enabled=true`, so migrated public folds enter the dormant
-candidate and return `UNKNOWN` before reaching canonical handlers. That is an
-adoption blocker until a reviewed exact head disables generation serving while
-preserving generation construction. Epsilon is cancelled and inapplicable; it is
-not a repair for this mismatch.
+coverage horizon, and per-surface coverage. The current transport keeps
+`public_read_v2_enabled=false`: generation construction remains available,
+while public reads use canonical authorities. Generation serving is a separate
+activation; its presence in the code is not evidence that a team has enabled it.
+Epsilon is not a repair for an incomplete or unknown read.
 
 `roles status` now returns one `liveness_fact` that carries lease and presence
 observations plus both store-prefix provenance fields. Fresh holder presence and
@@ -147,13 +149,13 @@ transport bounds.
 
 ## Properties worth knowing
 
-- **Stdlib-only runtime.** No dependencies; transport is a subprocess call. Installs
-  anywhere Python ≥3.10 runs.
+- **Stdlib-only runtime.** No Python runtime dependencies; storage uses the external
+  `fulcra-api` CLI and stdlib HTTP. Requires Python ≥3.10.
 - **Deterministic folds, feed-first.** Views are maintained incrementally from the
   store's `data-updates` change feed (the authoritative ledger — listings are
   eventually-consistent caches), reading only changed shards. Feed doubt or a
-  scheduled drift check rebuilds from the full listing scan; orphaned index entries
-  cannot recur, and role/review/presence status are computed, never inferred by a model.
+  scheduled drift check rebuilds from the full listing scan; role/review/presence status are computed from the available evidence,
+  with incomplete coverage reported explicitly.
 - **Fails loud, never silent.** Unverifiable writes are retried, cached locally, and
   announced; a degraded read fold says so (`review-fold-degraded`, `review-head-degraded`,
   a `queue-error` envelope, or a `raw scan — <reason>` source row)
@@ -171,17 +173,13 @@ transport bounds.
   per-identity cursor fold, because those read the stream forward from a cursor
   and never enumerate files to discover work. A source that does not emit is not
   slow on the channel, it is missing from it, and no cursor advance recovers it.
-  This defect has been fixed three times, each found only after it bit: `tell`
-  (2026-08-06), `review request` (2026-08-14, bitten live on agent-skills
-  pr-176), and `intent` (2026-08-30). The contract every emitting path shares —
-  emit on a VERIFIED FRESH write only (never on a dedupe or an in-place window
-  update, where a second event is indistinguishable from new work), and
-  best-effort, so an unconfigured bus degrades to file-plane-only rather than
-  failing the verb.
+  The contract every emitting path shares: emit on a VERIFIED FRESH write only
+  (never on a dedupe or an in-place window update, where a second event looks
+  like new work). **Emission is best-effort: an unconfigured bus leaves the
+  durable file but provides no queue delivery.**
 
-  Audited 2026-08-30, by reading the call sites rather than assuming:
   `tell`/`_create_directive`, `review request`, `remind` (via the scheduled
-  timer record) and `intent` all emit. `later` is deliberately silent and says
+  timer record), and `intent` emit events. `later` is deliberately silent and says
   so — it captures to `@backlog`, which gets no delivery event. The obligation
   components with **no event source at all** are `forge_feedback` (nothing
   emits) and `role_duties` (implied by holding a lease rather than opened by an
@@ -194,22 +192,26 @@ transport bounds.
 
 ## Environment / tuning
 
-The single reference for every environment variable the engine reads. **Prefix rule:**
+Common transport, identity, and fold settings. Command-specific settings are
+documented with their skills and CLI help. **Prefix rule:**
 `COORD_*` is the engine-native, canonical prefix for all tuning knobs; `FULCRA_COORD_*`
 is the legacy prefix, retained for the identity vars below and **alias-accepted for
 `COORD_RETENTION_DAYS` only** (an operator migrating off the deprecated `fulcra-coord`
 bus keeps working — when both are set, the `COORD_*` form wins). No other tuning knob
 reads a `FULCRA_COORD_*` alias.
 
-**Parse policy (all numeric knobs, one shared parser — `coord_engine/config.py`):** a
+**Parse policy (positive numeric bounds, shared parser —
+[`coord_engine/config.py`](coord_engine/config.py)):** a
 value is **positive-finite**, resolved **flag/constructor arg > env > default**; anything
 unparseable, `NaN`, `inf`, or `≤ 0` falls back to the default — a bad value can never
-disable a bound or make an op hang.
+disable a bound or make an op hang. Retention is the deliberate exception:
+`COORD_RETENTION_DAYS=0` disables archival.
 
 ### Budgets & timeouts
 
 | Variable | Default | Unit | Bounds |
 |---|---|---|---|
+| `COORD_TRANSPORT_HTTP` | `1` | boolean | Set to `0`, `false`, `no`, or `off` to disable the HTTP read fast path and use the CLI. |
 | `COORD_TRANSPORT_TIMEOUT` | `30` | seconds | Hard per-op bound on every `fulcra-api file` subprocess. Constructor arg wins; run it TIGHT on a watcher (e.g. `8`) so the fold budgets buy real responsiveness. |
 | `COORD_REVIEW_FOLD_BUDGET` | `45` | seconds | Aggregate deadline for the pending-review fold (`_pending_reviews_for`) — the RAW-SCAN path; a fresh projection answers the tail in zero ops. |
 | `COORD_PROJECTION_MAX_AGE_HOURS` | `24` | hours | Freshness bound a `reviews`/`forge` projection section must meet before a fold may serve it. Beyond it the fold raw-scans and says `raw scan — <key> projection stale (Xh old, max Yh)`. |
@@ -225,13 +227,13 @@ disable a bound or make an op hang.
 | `COORD_THREADS_INTENT_GRACE_HOURS` | `48` | hours | `threads` intent grace when an intent declares no window (flag `--intent-grace-hours` wins). |
 | `COORD_RECONCILE_FULL_EVERY` | `72` | count | Incremental reconcile passes between forced task-listing drift checks; `1` full-scans every pass. Missing/corrupt cursor state, feed doubt, an unreadable changed shard, or an aggregate older than `MAX_FAST_PATH_HOURS` full-scans regardless. |
 | `COORD_ACKS_FULL_EVERY` | `72` | count | Passes between FORCED full ack folds in `reconcile`. The fold is change-driven (it asks the store what changed and re-folds only those slugs); this bounds how long a change the query never reported can persist, and carries the orphan-shard GC, which only rides the full fold. `1` disables the incremental path (every pass lists every ack dir). Default 72 is roughly daily on a 20-minute heartbeat. Forced full folds cost more than incremental passes; tune this interval to your workload while retaining the correctness backstop. Any doubt — no change query, a query error, no anchor, a changed slug that wouldn't list — full-folds regardless of this knob, and does not advance the fold's anchor (`acks_folded_through`), so the unread change stays in the next pass's window. |
-| `COORD_RETENTION_DAYS` | `14` | days | `reconcile` cold-archives quiet terminal (`done`/`abandoned`) and stale `proposed` tasks after 14 days by default (flag/env overrides). Settled reviews are archived wholesale after 7 days and indexed so hot folds skip their soft-delete tombstones; presence dead over 7 days is pruned; legacy `artifact/` is consolidated into `artifacts/`. Moves are copy-verified and fail closed. Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins). |
+| `COORD_RETENTION_DAYS` | `14` | days | `reconcile` cold-archives quiet terminal (`done`/`abandoned`) and stale `proposed` tasks after 14 days by default (flag/env overrides). Settled reviews are archived wholesale after 7 days and indexed so hot folds skip their soft-delete tombstones; presence dead over 7 days is pruned; legacy `artifact/` is consolidated into `artifacts/`. Set to `0` to disable retention. Moves are copy-verified and fail closed. Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins). |
 
 ### Identity, state & logging
 
 | Variable | Default | Bounds |
 |---|---|---|
-| `FULCRA_COORD_AGENT` | `coord-reconcile:<host>` | Agent identity — set it to the **role** you act as (`--from` overrides per-command). Legacy prefix; still canonical for identity. |
+| `FULCRA_COORD_AGENT` | persisted identity, then `coord-reconcile:<sanitized-host>` | Explicit command identity takes precedence, then this variable, then persisted identity, then the host fallback. Unreadable persisted identity is refused. Set a stable agent identity for each session/role. |
 | `FULCRA_COORD_HUMAN` | `human` | Operator handle for `--on-user` / `asks`. |
 | `COORD_ENGINE_STATE_DIR` | `~/.local/state/coord-engine` | Local state root (write-verify nonce cache, etc.). |
 | `COORD_LOG_LEVEL` | `info` | Structured-log level to stderr (`debug`/`info`/`warn`/`error`). |
@@ -245,9 +247,8 @@ acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
 permission/read doubt, incomplete namespace, or unsupported team path is
 `UNKNOWN`, triggers the named full-scan recovery, and never advances the
 watermark. A record count is only a zero/nonzero detector signal, never a
-cardinality, threshold, diff, or identity. Persistent live pairs of reported
-count to enumerated identities (`2721 -> 9`, `1444 -> 0`, `2737 -> 25`) make
-numeric equality invalid. A positive signal must materialize at least one
+cardinality, threshold, diff, or identity. Counts and enumerated identities need not match; numeric equality is not
+a coverage test. A positive signal must materialize at least one
 immutable identity in one bounded attested cursor read or coverage is
 `UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.
 The outer feed and record cursor must attest one contiguous window: exact
@@ -267,10 +268,10 @@ current-time evaluation on every briefing, so session dormancy can become
 ## Dev
 
 ```bash
-uv run --extra dev pytest       # from packages/coord-engine/
+uv run --package coord-engine --extra dev --no-editable pytest packages/coord-engine/tests -q
 ```
 
-The suite is CI-gated on Linux and macOS; run it locally before pushing (see
+Run from the repository root. The suite is CI-gated on Linux and macOS; run it locally before pushing (see
 [`AGENTS.md`](../../AGENTS.md) → CI section). Design history:
 [`docs/coord/`](../../docs/coord) and [`docs/coord-DESIGN.md`](../../docs/coord-DESIGN.md).
 
@@ -286,15 +287,12 @@ with their bodies, deterministic identity precedence, and distinct empty,
 tombstoned, unreadable, and unknown states. Before the fleet may adopt the
 release, public action surfaces must read canonical authorities directly.
 
-Generation-backed serving is the required dormant state for this release. The
-tagged implementation does not yet satisfy it: `public_read_v2_enabled=true`
-routes migrated folds into generation authority and returns `UNKNOWN` before
-canonical handlers. Adoption therefore remains blocked pending a reviewed
-serving-disable exact head. Epsilon is inapplicable to the `2.0.0` release and
-adoption gate: do not run the cancelled host-one
-measurement, set `public_read_epsilon_verified`, or treat a current generation
-as public authority. Cursor schema 2 is a separate activation and remains
-refused until the fleet version fence and CAS transport are proven.
+The current source keeps generation-backed serving dormant with
+`public_read_v2_enabled=false`. This corrects the earlier `2.0.0` serving
+mismatch; it does not establish which build any live host runs. Epsilon remains
+inapplicable to this release boundary. Cursor schema 2 is a separate activation
+and requires the fleet version fence and CAS transport; the default transport
+currently declares `conditional_writes_supported=false`.
 
 Adoption requires exact released-build identity on every live host within the
 declared SLA, named exclusions with evidence, and functional verification from

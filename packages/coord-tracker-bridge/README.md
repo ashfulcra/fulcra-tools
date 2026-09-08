@@ -3,13 +3,13 @@
 `coord-tracker-bridge` mirrors coord work into an external tracker without
 making that tracker authoritative. Its provider-neutral core defines normalized
 source snapshots, a complete-identity state ledger, a versioned projection
-policy, and a deterministic diff plan. Phase 2 adds a `coord-engine --json`
+policy, and a deterministic diff plan. It includes a `coord-engine --json`
 source adapter, a Linear GraphQL adapter, and explicit operator-controlled run
-phases. Phase 3 adds a lower-fidelity, read-only `teams` source that reads only
+phases. A lower-fidelity, read-only `teams` source reads only
 typed task documents under `team/<team>/task/` and never depends on derived
 coord-engine views.
 
-The package fixes the unsafe shortcuts in the original Linear probe:
+The projection contract:
 
 - identity is `(provider, namespace, item_id)`, never a title marker or short
   suffix;
@@ -44,7 +44,7 @@ from coord_tracker_bridge import BridgeLedger, build_plan, load_policy
 plan = build_plan(snapshot, tracker_records, BridgeLedger.load("state.json"), load_policy())
 ```
 
-The policy bundled at `coord_tracker_bridge/policies/default-v2.json` is an
+The [bundled policy](coord_tracker_bridge/policies/default-v2.json) is an
 explicit allowlist. A lane absent from `included_lanes` is excluded; there is
 no fallback that projects its raw status. The bundled surface contains only
 `active`, `blocked`, `backlog`, `asks`, and `threads-missed`. Engine task rows
@@ -55,7 +55,8 @@ outside the allowlist is closed. Command intake and expectation evaluation
 remain disabled and out of scope.
 
 The engine source accepts both one JSON document and JSONL output from
-`coord-engine --json` folds; `threads` currently uses JSONL. Valid JSONL rows
+`coord-engine --json` folds; current `threads` output is one JSON array.
+JSONL support remains for older engine output. Valid JSONL rows
 survive an interleaved prose degraded-marker line, while the line text is
 bounded into diagnostics and the affected capability remains degraded, so the
 partial read cannot authorize absence-based closes. Embedded degraded
@@ -69,17 +70,31 @@ by default (`EngineSourceAdapter(..., health_timeout=...)`). Its JSON view is
 an object; each entry in `hosts` becomes a health record keyed by the stable
 `host` value, while an invalid hosts collection degrades health fail-closed.
 
+## Install
+
+Requires Python 3.12+ and `httpx`. From the repository root:
+
+```bash
+uv tool install ./packages/coord-tracker-bridge
+coord-tracker-bridge --help
+```
+
+The default source also needs [coord-engine](../coord-engine/README.md) and
+its authenticated Fulcra transport. `--source teams` needs `fulcra-api` directly.
+Collect is not required. `linear-inbox` can read Linear without a coord source;
+assignment delivery additionally needs the engine and a configured team roster.
+
 ## Run phases
 
 Set `LINEAR_API_KEY` and either `LINEAR_TEAM_ID` or `--linear-team-id`. Then use
 the phases in order:
 
 ```bash
-coord-tracker-bridge plan --coord-team fulcra
-coord-tracker-bridge adopt-markers --dry-run --coord-team fulcra
-coord-tracker-bridge adopt-markers --coord-team fulcra
-coord-tracker-bridge apply-resources --coord-team fulcra
-coord-tracker-bridge sync --coord-team fulcra
+coord-tracker-bridge plan --coord-team example-team
+coord-tracker-bridge adopt-markers --dry-run --coord-team example-team
+coord-tracker-bridge adopt-markers --coord-team example-team
+coord-tracker-bridge apply-resources --coord-team example-team
+coord-tracker-bridge sync --coord-team example-team
 ```
 
 Run `adopt-markers --dry-run` first and inspect every provider/source mapping.
@@ -106,9 +121,7 @@ source identity and capability metadata, then atomically persists the ledger
 entry. A crash between the provider update and ledger write converges on retry
 from provider metadata. Re-run `plan` afterward; for a workspace not yet cut
 over, hold cutover until the plan's create set matches the approved projection
-surface. (The `fulcra` team's cutover completed 2026-07-21 — first live sync
-applied 59 changes — so this hold applies only to onboarding a NEW
-workspace/team, not to routine syncs.)
+surface.
 
 Use `--source teams` to read the strict base-teams convention directly. The
 teams source requires `type: Task`, an explicit stable `id`, a title, a valid
@@ -130,7 +143,7 @@ preserves the API response shape.
 
 `coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
 paginated GraphQL read of a Linear team's issues and prints them as a coord
-fold. It is the only verb that runs in the read direction, and it is fenced:
+fold. It is the board reader also used by `linear-assignments`, and it is fenced:
 
 - It builds **no** `BridgeService` — no ledger, no lease, no tracker adapter —
   so there is no write path in scope to reach.
@@ -179,16 +192,16 @@ to the intended bot and requires explicit approval of its proposed changes.
 `linear-inbox` performs no issue creation, state changes, comments, or
 label/assignee mutations.
 
-`tools/capture_inbox.py` stamps a real response with its own measured
+[`tools/capture_inbox.py`](tools/capture_inbox.py) stamps a real response with its own measured
 provenance for the field-name contract test, redacting titles, descriptions,
 URLs and assignee names. It has no offline mode: a hand-written fixture
 labelled "real" is the defect it exists to prevent.
 
-## `linear-assignments` — route board changes to the fleet, still never write
+## `linear-assignments` — read Linear changes and optionally send directives
 
 The assignment reader routes changes in a configured board to the team bus.
 
-`coord-tracker-bridge linear-assignments --linear-team-id <TEAM>` reads the
+`coord-tracker-bridge linear-assignments --linear-team-id <TEAM> --coord-team <COORD_TEAM>` reads the
 board, works out which cards had their **assignee or state** change since a
 durable watermark, and turns each real change into a durable coord directive.
 Any board reconciliation or projection is a separate write workflow requiring
@@ -234,14 +247,18 @@ rather than by intent.
   go out is still owed on the next pass.
 - **A dispatch has three outcomes, not two.** `coord-engine tell` can commit the
   directive and then fail to report it, so a raise is not evidence that nothing
-  was written — this package's own invariant with the labels swapped, and the
-  defect codex-coder found in the first cut. The attempt is written to disk
+  was written. The attempt is written to disk
   *before* the transport runs, and a retry whose fingerprint is still marked
   says **POSSIBLE RE-DELIVERY**: not "new", which under-claims, and not
   "repeat", which over-claims. A confirmed success is what clears the marker.
 - Exit codes extend the `linear-inbox` contract by one: **0** succeeded, **3**
   UNKNOWN (proves nothing — never "no assignments changed"), **2** a deliberate
   refusal.
+
+Set `--sender`, `--coordinator`, and `--roster-path` for your own team before
+using `--deliver`; do not inherit the CLI's built-in agent-name defaults.
+`--seed` writes the local baseline, and `--deliver` sends coord directives and
+updates local delivery state. Neither writes to Linear.
 
 Directives go out via `coord-engine tell`, never a bare bus send: an assignment
 that evaporates when a session ends is not an assignment.

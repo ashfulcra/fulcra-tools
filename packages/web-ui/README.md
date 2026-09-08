@@ -1,8 +1,11 @@
 # fulcra-collect web UI
 
 Browser-based UI for Fulcra Collect. The daemon's HTTP server (in
-packages/collect/fulcra_collect/web.py) serves these static files
+[web.py](../collect/fulcra_collect/web.py)) serves these static files
 from `dist/`.
+
+This is the dashboard for the [monorepo's unsupported local connectors](../../README.md).
+It handles their setup and status; it is not the hosted Fulcra application.
 
 **Setting up Collect?** Follow the [Mac installer guide](../../docs/collect.md#get-started-new-user),
 then use **Sign in with Fulcra** in the dashboard. You do not need to paste a
@@ -20,10 +23,11 @@ Tailwind CSS (CDN) + Lit 3 (CDN, web components). No build step.
 
 ## Local development
 
-The daemon serves this dir automatically when started:
+After [workspace setup](../collect/README.md#running-from-source), the daemon
+serves this directory automatically when started from the repository root:
 
 ```
-fulcra-collect daemon
+uv run --all-packages fulcra-collect daemon
 ```
 
 The web URL is printed in the daemon's logs and written to
@@ -44,7 +48,7 @@ To live-edit: just save files in `dist/`. Reload the browser.
 
 ## URL-param deep-links
 
-The boot path in `dist/static/app.js` (`app.boot()`, around lines 95-133)
+The boot path in [app.js](dist/static/app.js) (`app.boot()`)
 consumes a `?route=...` query param on first load so external launchers
 can land the user on a specific screen rather than the dashboard
 default. The handler was added in SP4 (2026-05-27) to back the
@@ -62,12 +66,11 @@ Supported routes:
 | `/?route=configure&plugin=ID`    | The wizard for plugin `ID` (same flow as the dashboard's Configure button) |
 | `/?route=settings`               | Settings page |
 
-The handler is **gated by `signedIn`**. Unauthenticated users hit the
-onboarding/signin flow first and the param is cleared before auth
-completes — meaning a fresh-install user clicking a deep-link will
-sign in and then land on the dashboard, not the requested route. This
-is a known limitation; revisit if/when there's a real-world need for
-deferred deep-link resolution.
+Route execution is **gated by `signedIn`**. Before clearing the URL, the handler
+stores its query in `sessionStorage` under `fulcra:pending-route`. An
+unauthenticated user sees sign-in first; a later signed-in `boot()` consumes the
+stored route. Storage access is best-effort, so a browser that denies session
+storage can lose the deferred destination.
 
 After consumption the handler calls
 `history.replaceState({}, "", window.location.pathname)` to strip the
@@ -75,9 +78,8 @@ query string so a reload doesn't re-trigger the route. The wizard /
 docs / settings flows then run as if the user had navigated to them
 from the dashboard.
 
-The producer side lives in `packages/menubar/` — see that package's
-README ("Deep-linking into the web UI") for the URLs the menubar emits
-today. If you change the contract here, update both.
+The producer side lives in [menubar](../menubar/README.md#deep-linking-into-the-web-ui).
+If you change the contract here, update both.
 
 ## Setup-step component model
 
@@ -172,14 +174,15 @@ Three steps:
 No `index.html` change is needed — the dispatcher already routes
 every kind via the registry.
 
-### Verification (no JS test runner)
+### Verification
 
-We don't ship a JS test runner. The verification surface for a
-component change is:
+The wizard consent tests use Node's built-in test runner. From the repository
+root, run `node --test packages/web-ui/tests/*.test.cjs` for navigation or
+first-run changes. The rest of the verification surface is:
 
 - `node --check packages/web-ui/dist/static/components/step-<kind>.js`
   catches syntax errors.
-- `cd packages/collect && uv run pytest` confirms the daemon
+- `uv run --package fulcra-collect --extra dev pytest packages/collect/tests/ -q` checks the daemon
   contract (the shape of `SetupStep`) didn't break in a way the
   component depends on.
 - Manual visual walkthrough — open `/` in a browser, walk a plugin

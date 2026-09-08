@@ -1,9 +1,11 @@
 # Apple Notes for Fulcra Collect
 
 Your notes can be useful to an agent without moving your writing out of Apple
-Notes. This plugin copies notes and available attachments from your Mac to your
-Fulcra vault and checks for changes every six hours. Normal import leaves the
-originals unchanged.
+Notes. This macOS Collect plugin copies notes and available attachments into
+your Fulcra vault and checks for changes every six hours. Normal import leaves
+the originals unchanged. It is one of the [monorepo's unsupported
+experiments](../../README.md), with an ordinary one-way import path and a much
+more experimental writeback path.
 
 Apple Notes ships in the [current Mac beta](../../docs/collect.md#plugin-status).
 The setup below enables one-way import. Experimental writeback has separate
@@ -64,7 +66,7 @@ until the source note changes. It does not yet offer a full repair pass.
 
 ## Advanced modes
 
-The supported setup is one-way import. `mode = "reconcile"` in
+The default setup is one-way import. `mode = "reconcile"` in
 `[plugin_settings.apple-notes]` reports changes on either side without writing.
 Reconciliation reads each tracked vault note to detect edits, including those made
 soon after a sync. Large scans save private local progress and stop before the
@@ -94,3 +96,5 @@ uv run --package fulcra-apple-notes --extra dev pytest packages/apple-notes/test
 
 The tests use synthetic Notes stores. Keep personal library sizes, note titles,
 contents, paths, account identifiers, and real exports out of commits and PRs.
+There is no standalone Apple Notes CLI: the `apple-notes` entry point is run by
+Collect. For source installation, use the [Collect workspace instructions](../collect/README.md#running-from-source).

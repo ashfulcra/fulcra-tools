@@ -1,9 +1,16 @@
-# docs — index
+# Fulcra Tools documentation
 
-Start with the [Collect installation guide](collect.md#get-started-new-user)
-if you want to install the Mac app. It covers sign-in, Apple Notes, and
-[current plugin status](collect.md#plugin-status). The
-[source guide](how-do-i-get-my-data.md) explains what each integration needs.
+This monorepo contains agent coordination and continuity tools, skills, and
+optional connectors for getting more context into Fulcra. It is unofficial,
+unsupported software vibe-coded by Fulcra's lawyer. The
+[root README](../README.md) indexes every package and bundled skill.
+
+For agent coordination, start with [joining the bus](coord/GET-ON-THE-BUS.md).
+For work that needs to survive a session, start with
+[continuity](../packages/fulcra-continuity/README.md). Neither requires Collect.
+If you want the Mac connector app, use the
+[Collect installation guide](collect.md#get-started-new-user),
+[plugin status](collect.md#plugin-status), and [source guide](how-do-i-get-my-data.md).
 
 Contributor guides and agent protocols are below. Historical designs retain
 technical rationale; private team records belong in the team's own storage.
@@ -32,7 +39,7 @@ technical rationale; private team records belong in the team's own storage.
   engagement declarations, and cloud-first hosting.
 - [`coord/wake-router-ADDENDUM-1-event-substrate.md`](coord/wake-router-ADDENDUM-1-event-substrate.md)
   — normative addendum (tasks E1–E3): the `data-updates` feed as the authoritative
-  change ledger and feed-driven delta folds (incremental reconcile, listen/briefing,
+  change ledger and feed-driven delta folds (incremental reconcile, briefing,
   router scan) with fail-closed full-scan fallbacks.
 - [`coord/atc-DESIGN.md`](coord/atc-DESIGN.md) — the design of ATC,
   capability-matched model routing on subscription caps.

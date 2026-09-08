@@ -6,6 +6,9 @@ people, decisions, corrections, domain notes, and links between them. It's
 how agents know their user's world beyond the data streams, and the context
 belongs to the user rather than any individual agent.
 
+This is a standalone 0.1.0 CLI and agent skill; Collect is not required.
+It needs an authenticated Fulcra Files account.
+
 The vault uses ordinary markdown files under `vault/`. Notes are compatible
 with Obsidian-style `[[wikilinks]]`, flat Dataview-friendly frontmatter, owned
 sections for agent edits, and append-only logs.
@@ -45,26 +48,37 @@ The package now includes:
 
 Sync (vault sync / local mirror) is still planned work.
 
-## Install For Local Development
+## Install and start a vault
 
-From the repository root:
-
-```bash
-uv pip install -e packages/fulcra-vault
-```
-
-Run the package tests:
+Python 3.11+ and `uv`. From the repository root:
 
 ```bash
-python3 -m compileall -q packages/fulcra-vault/fulcra_vault
-uv run pytest packages/fulcra-vault -q
+uv tool install ./packages/fulcra-vault
+uv tool install fulcra-api
+fulcra-api auth login
+fulcra-vault init
+fulcra-vault read "Projects/Overview"
 ```
 
-Show the CLI surface:
+The package itself uses only the Python standard library. Its remote store shells
+out to `fulcra-api file ...`, so the separate CLI is a runtime requirement for
+Fulcra Files access. `FULCRA_CLI_COMMAND` can select a specific CLI command.
+
+`init` creates a default structure for projects, people, decisions, and domain
+notes. For your own structure, pass `--spec structure.json`; the schema is in
+[docs/SPEC.md](docs/SPEC.md). An initialized vault refuses another scaffold
+unless you supply `--force`.
+
+For session-start context:
 
 ```bash
-uv run fulcra-vault --help
+fulcra-vault install-hooks --platform codex
+# or: fulcra-vault install-hooks --platform claude-code
 ```
+
+The [agent skill](skill/SKILL.md) covers ownership, reads, writes, and the raw-HTTP
+fallback. A local mirror and sync are still planned; the CLI reads and writes
+Fulcra Files directly.
 
 ## Vault Layout
 
@@ -118,49 +132,49 @@ bytes. The shared `## Log` section is append-only.
 Read a note:
 
 ```bash
-uv run fulcra-vault read "Project Alpha"
+fulcra-vault read "Projects/Overview"
 ```
 
 Read a note with backlinks:
 
 ```bash
-uv run fulcra-vault read "Project Alpha" --with-backlinks
+fulcra-vault read "Projects/Overview" --with-backlinks
 ```
 
 Rewrite an owned section:
 
 ```bash
 printf 'New durable context.\n' |
-  uv run fulcra-vault write-section "Project Alpha" \
+  fulcra-vault write-section "Projects/Overview" \
     --section projects \
-    --agent codex-prefs \
+    --agent example-agent \
     --force
 ```
 
 Append to a note log:
 
 ```bash
-uv run fulcra-vault append-log "Project Alpha" \
+fulcra-vault append-log "Projects/Overview" \
   --entry "Captured the current implementation state." \
-  --agent codex-prefs
+  --agent example-agent
 ```
 
 Rebuild the link index:
 
 ```bash
-uv run fulcra-vault reindex --agent codex-prefs
+fulcra-vault reindex --agent example-agent
 ```
 
 Render `MAP.md` and `HOT.md`:
 
 ```bash
-uv run fulcra-vault map --agent codex-prefs
+fulcra-vault map --agent example-agent
 ```
 
 Check rendered map output without writing:
 
 ```bash
-uv run fulcra-vault map --check
+fulcra-vault map --check
 ```
 
 ## Safety Model
@@ -170,14 +184,20 @@ uv run fulcra-vault map --check
 - The markdown vault is the source of truth.
 - Derived files are rebuildable.
 - CLI writes validate frontmatter before and after mutation.
-- Agent writes take advisory locks.
+- Note mutations take advisory locks.
 - A write aborts if the note changes between read and pre-write stat.
-- Every CLI mutation appends one line to `vault/LOG.md`.
+- Note mutations and index/map updates append to `vault/LOG.md`.
 - Excluded paths from `meta.json` refuse writes.
 - Deletes and applied renames are explicit commands, never write side effects.
 
-Locks coordinate agent writes. They do not restrict direct human edits through
-the future local mirror.
+Locks coordinate cooperating agents; they cannot prevent a writer that ignores
+them. Stat checks detect changes observed before a write, but the multi-file
+rename and audit-log updates are not one atomic transaction.
+
+**A missing note is a successful, empty read.** `read` prints a warning on stderr
+and returns 0 when a note is missing or the vault is not onboarded. Check the
+output as well as the exit status. Likewise, session hooks are intended to leave
+a session usable when vault context is unavailable.
 
 ## Data classification
 
@@ -217,3 +237,14 @@ Most modules are pure and dependency-injected:
 
 The implementation plan remains in [`docs/PLAN.md`](docs/PLAN.md). The design
 contract remains in [`docs/SPEC.md`](docs/SPEC.md).
+
+## Testing
+
+From the repository root:
+
+```bash
+uv run --package fulcra-vault --extra dev pytest packages/fulcra-vault/tests -q
+```
+
+Tests use in-memory or stubbed stores for CLI mutations, locks, frontmatter,
+links, indexing, and hook installation. They do not contact a real vault.
