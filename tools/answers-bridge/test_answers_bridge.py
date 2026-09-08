@@ -14,6 +14,7 @@ simulated `later` below enforces exactly that contract, so these tests pin:
   4. both engine success shapes parse to the same slug
 """
 import importlib.util
+import json
 import os
 import types
 
@@ -25,18 +26,29 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 @pytest.fixture()
 def bridge(tmp_path, monkeypatch):
     env = tmp_path / "linear.env"
-    env.write_text("LINEAR_API_KEY=test-key\nLINEAR_TEAM_KEY=BUS\nLINEAR_TEAM_ID=t-1\n")
+    env.write_text("LINEAR_API_KEY=test-key\n")
     monkeypatch.setenv("ANSWERS_LINEAR_ENV", str(env))
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    monkeypatch.setenv("COORD_TEAM", "acme")
+    config = tmp_path / "ids.json"
+    config.write_text(json.dumps({
+        "project_id": "synthetic-project", "team_id": "synthetic-team",
+        "states": {"open": "synthetic-open", "done": "synthetic-done"},
+        "labels": {key: "synthetic-" + key for key in
+                   ("qa-answer", "type:factual", "type:future-work", "type:both", "promote", "filed")},
+        "sender": "operator", "workstream": "answer-followups", "promotion_source": "Operator Answers",
+    }))
     spec = importlib.util.spec_from_file_location(
         "answers_bridge_under_test", os.path.join(HERE, "answers_bridge.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    mod.configure(str(config))
     return mod
 
 
 def _card(identifier, description, labels=()):
     return {"id": f"uuid-{identifier}", "identifier": identifier,
-            "title": "the promoted question", "url": f"https://linear/x/{identifier}",
+            "title": "the promoted question", "url": f"https://example.invalid/linear/{identifier}",
             "description": description,
             "state": {"name": "Todo"},
             "labels": {"nodes": [{"id": f"lid-{n}", "name": n} for n in labels]}}
@@ -52,6 +64,10 @@ class EngineSim:
 
     def run(self, argv, **kw):
         assert argv[0] == "coord-engine" and argv[1] == "later", argv
+        assert argv[2] == "acme"
+        assert argv[argv.index("-w") + 1] == "answer-followups"
+        assert argv[argv.index("--from") + 1] == "operator"
+        assert argv[argv.index("-s") + 1].startswith("Promoted from Operator Answers card ")
         if self.fail:
             return types.SimpleNamespace(returncode=1, stdout="", stderr="transport down")
         key = "\x00".join(argv[2:])
@@ -69,13 +85,16 @@ def test_capture_is_idempotent_by_answer_id(bridge, monkeypatch):
     """Second capture of the same Q/by (same aid) must UPDATE, not create."""
     calls = {"create": 0, "update": 0}
     existing = []
+    shards = []
 
     def fake_gql(query, variables=None):
         if "issueCreate" in query:
+            assert variables["in"]["teamId"] == "synthetic-team"
+            assert variables["in"]["projectId"] == "synthetic-project"
             calls["create"] += 1
             existing.append(_card("BUS-90", variables["in"]["description"]))
             return {"issueCreate": {"issue": {"id": "uuid-BUS-90", "identifier": "BUS-90",
-                                              "url": "https://linear/x/BUS-90"}}}
+                                              "url": "https://example.invalid/linear/BUS-90"}}}
         if "issueUpdate" in query:
             calls["update"] += 1
             return {"issueUpdate": {"success": True}}
@@ -83,7 +102,7 @@ def test_capture_is_idempotent_by_answer_id(bridge, monkeypatch):
                            "pageInfo": {"hasNextPage": False, "endCursor": None}}}
 
     monkeypatch.setattr(bridge, "gql", fake_gql)
-    monkeypatch.setattr(bridge, "bus_write", lambda p, c: True)
+    monkeypatch.setattr(bridge, "bus_write", lambda p, c: shards.append((p, c)) or True)
 
     args = {"q": "what is the retry contract?", "a": "engine dedupe", "by": "coord-boss",
             "type": "factual"}
@@ -91,6 +110,8 @@ def test_capture_is_idempotent_by_answer_id(bridge, monkeypatch):
     assert calls == {"create": 1, "update": 0}
     assert bridge.cmd_capture(dict(args)) == 0
     assert calls == {"create": 1, "update": 1}, "re-run must update, never duplicate"
+    assert len(shards) == 2 and shards[0] == shards[1]
+    assert shards[0][0].startswith("team/acme/answers/")
 
 
 def test_promote_finalize_failure_retry_dedupes_to_one_task(bridge, monkeypatch):

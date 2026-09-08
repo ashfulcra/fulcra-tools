@@ -22,6 +22,7 @@ HOME = re.compile(r'(?<![\w/])(?:file://)?/(?:Users|home)/([A-Za-z][A-Za-z0-9_.-
 EMAIL = re.compile(r'(?<![\w.+-])[\w.+-]+@([\w.-]+\.[A-Za-z]{2,})(?![\w.-])')
 PUBLIC_EMAILS = {'support@fulcradynamics.com'}
 EXAMPLE_DOMAINS = {'example.com', 'example.org', 'example.net', 'localhost.localdomain'}
+PRIVATE_CONFIG_NAMES = {'.env', 'linear.env', 'answers-linear-ids.json'}
 LIMIT = 64 * 1024 * 1024
 
 
@@ -49,6 +50,9 @@ def scan_text(name: str, text: str) -> list[tuple[str, int, str]]:
 
 def scan_blob(name: str, data: bytes, *, depth: int = 0) -> list[tuple[str, int, str]]:
     findings = scan_text(name, name)
+    member = name.rsplit('::', 1)[-1].replace('\\', '/')
+    if member.rsplit('/', 1)[-1] in PRIVATE_CONFIG_NAMES:
+        findings.append((name, 0, 'private account configuration file'))
     if len(data) > LIMIT:
         return [(name, 0, 'file exceeds privacy scan size limit')]
     if name.endswith(('.tar.gz', '.tgz', '.tar', '.zip')):
@@ -110,6 +114,15 @@ def self_test() -> None:
     assert not scan_blob('example.txt', b'user@example.com /Users/example/work')
     assert not scan_blob('example.txt', b'user@shop.example.com icon@2x.png https://example.com/root/home/page')
     assert scan_blob('example.txt', b'file:///Users/' + b'private-person/work')
+    for filename in ('answers-linear-ids.json', 'linear.env', '.env'):
+        assert any(hit[2] == 'private account configuration file'
+                   for hit in scan_blob('tools/example/' + filename, b'{}'))
+    assert not scan_blob('answers-linear-ids.example.json', b'{}')
+    private_archive = io.BytesIO()
+    with zipfile.ZipFile(private_archive, 'w') as archive:
+        archive.writestr('answers-linear-ids.json', b'{}')
+    assert any(hit[2] == 'private account configuration file'
+               for hit in scan_blob('fixture.zip', private_archive.getvalue()))
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w') as archive:
         archive.writestr('nested.txt', bad)
@@ -139,7 +152,7 @@ def main() -> int:
     args = parser.parse_args()
     self_test()
     if args.self_test:
-        print('Privacy self-test passed: planted path, email, and archive findings detected.')
+        print('Privacy self-test passed: planted path, email, private config, and archive findings detected.')
         return 0
     root = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
     if args.export_to:

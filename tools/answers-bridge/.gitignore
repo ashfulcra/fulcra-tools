@@ -1,0 +1,4 @@
+# Account IDs, project URLs, and credentials belong to the local operator.
+answers-linear-ids.json
+*.local.json
+*.env

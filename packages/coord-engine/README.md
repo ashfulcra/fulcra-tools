@@ -267,6 +267,9 @@ current-time evaluation on every briefing, so session dormancy can become
 
 ## Dev
 
+Tests use invented channel, tag, and file-version identifiers. Keep fixture
+values independent of a live account, including examples copied from CLI output.
+
 ```bash
 uv run --package coord-engine --extra dev --no-editable pytest packages/coord-engine/tests -q
 ```

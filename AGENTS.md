@@ -56,6 +56,15 @@ authority-checked bus sender; a failed send must not fall back to a hard-coded
 channel or write its success marker. Passing a pattern scan is not proof that
 all personal information has been removed.
 
+**Answers bridge configuration:** account IDs and project URLs stay private,
+just like credentials. Ship only synthetic examples; the privacy guard rejects
+the private account config and credential filenames even inside archives. Select the config with
+`ANSWERS_LINEAR_CONFIG` or `--config`, require `COORD_TEAM`, and load credentials
+only from `LINEAR_API_KEY` or an explicit `ANSWERS_LINEAR_ENV`. Help and local
+setup checks must not contact services. Preserve the existing sender, workstream,
+and promotion source when migrating an operator's private configuration so a
+pending promotion retry keeps its task identity.
+
 ## Where to start
 
 **Zero state — never installed `coord-engine`, or joining from a fresh / remote /
