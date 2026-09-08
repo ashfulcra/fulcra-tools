@@ -90,7 +90,8 @@ def default_store_path() -> Path:
     return DEFAULT_GROUP_CONTAINER / "NoteStore.sqlite"
 
 
-def snapshot(store: Path, dest_dir: Path) -> Path:
+def snapshot(store: Path, dest_dir: Path, *,
+             timeout: float = SNAPSHOT_TIMEOUT_S) -> Path:
     """Read a transaction-consistent backup, killing a blocked permission probe."""
     import sys
     dest = dest_dir / "NoteStore.sqlite"
@@ -101,7 +102,7 @@ def snapshot(store: Path, dest_dir: Path) -> Path:
         command = [sys.executable, "-m", "fulcra_apple_notes._snapshot"]
     try:
         subprocess.run([*command, str(store), str(dest)], check=True,
-                       timeout=SNAPSHOT_TIMEOUT_S, capture_output=True)
+                       timeout=timeout, capture_output=True)
     except subprocess.TimeoutExpired as exc:
         raise AccessDeniedError(
             "Reading Notes timed out. Check Full Disk Access and retry after Notes finishes syncing."

@@ -123,3 +123,27 @@ def test_unfetched_vault_file_still_reports_an_apple_side_change():
                  apple_modified="2026-05-05T00:00:00+00:00", vault_text=None,
                  state_entry=STATE, assume_vault_unchanged=True)
     assert c.status is Status.APPLE_CHANGED
+
+
+def test_hash_observation_classifies_without_retaining_private_body():
+    from dataclasses import asdict
+    import json
+    from fulcra_apple_notes.reconcile import observe_vault, classify_observation
+
+    observed = observe_vault(vault_file("Private synthetic edited body"))
+    assert "Private synthetic edited body" not in json.dumps(asdict(observed))
+    change = classify_observation(
+        uuid="u1", apple_hash=SYNCED_HASH, apple_modified=STATE["modified"],
+        vault=observed, state_entry=STATE)
+    assert change.status is Status.VAULT_EDITED
+
+
+def test_hash_observation_preserves_missing_file_and_missing_fence_distinction():
+    from fulcra_apple_notes.reconcile import observe_vault, classify_observation
+
+    for text, expected in [(None, Status.MISSING_IN_VAULT),
+                           (vault_file("text", fence=False), Status.VAULT_EDITED)]:
+        change = classify_observation(
+            uuid="u1", apple_hash=SYNCED_HASH, apple_modified=STATE["modified"],
+            vault=observe_vault(text), state_entry=STATE)
+        assert change.status is expected

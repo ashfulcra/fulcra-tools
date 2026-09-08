@@ -17,7 +17,7 @@ import re
 import tempfile
 import time
 
-from . import notestore, reconcile, render, vaultio
+from . import notestore, reconcile, reconcile_checkpoint, render, vaultio
 from .body import BodyDecodeError, decode
 
 STATE_PATH = "/vault/notes/apple/.sync-state.json"
@@ -71,7 +71,7 @@ class SyncStats:
         return d
 
 
-def load_state(*, log) -> dict:
+def load_state(*, log, timeout: float = 60) -> dict:
     """Read sync state, distinguishing 'absent' from 'unreadable'.
 
     A transport failure must NOT be treated as an empty state: that would
@@ -79,7 +79,7 @@ def load_state(*, log) -> dict:
     a successful first run. Absence is proven by MissingFile, nothing else.
     """
     try:
-        raw = vaultio.read_text(STATE_PATH)
+        raw = vaultio.read_text(STATE_PATH, timeout=timeout)
     except vaultio.MissingFile:
         log.info("apple-notes: no sync state yet — treating as first run")
         return {"version": STATE_VERSION, "notes": {}, "attachments": {}}
@@ -436,78 +436,142 @@ def _links_from_state(attachments, state: dict) -> dict[str, str]:
     return links
 
 
+DEFAULT_RECONCILE_CHECKPOINT = (
+    Path.home() / "Library/Logs/fulcra-collect/apple-notes-reconcile-checkpoint.json")
+DEFAULT_RECONCILE_DEADLINE_S = 600
+
+
 def run_reconcile(*, container: Path | None = None, log,
-                  limit: int | None = None,
-                  download_all: bool = False) -> dict:
-    """Classify every note as unchanged / apple-changed / vault-edited /
-    conflict, without writing anything.
+                  limit: int | None = None, download_all: bool = False,
+                  deadline_s: float = DEFAULT_RECONCILE_DEADLINE_S,
+                  checkpoint_path: Path | None = None) -> dict:
+    """Read a bounded portion of a resumable, body-free vault scan.
 
-    Read each tracked vault body before classifying it. Listing timestamps
-    have minute precision and cannot establish content equality with a local
-    sync timestamp, especially for edits made soon after a sync.
-
-    ``download_all`` remains accepted for caller compatibility; every checked
-    note now requires a content read. The returned changes are the complete
-    worklist; callers may cap presentation, but not writeback processing.
+    Only ``complete: true`` returns a full classification. Checkpoints are
+    private local hashes, scoped to the container and sync-state baseline.
+    Apple is freshly snapshotted and classified on every invocation. Complete
+    scans consume the checkpoint, so the next scan observes new vault edits.
+    ``limit`` caps new observations in this invocation, not the returned list.
+    ``download_all`` remains accepted; no coarse-mtime shortcut is used.
     """
+    started = time.monotonic()
+    deadline = started + min(float(deadline_s), DEFAULT_RECONCILE_DEADLINE_S)
+    if limit is not None and limit < 0:
+        raise ValueError("Reconciliation limit must be nonnegative")
     container = container or notestore.DEFAULT_GROUP_CONTAINER
-    state = load_state(log=log)
-    now = datetime.now(timezone.utc)
+    checkpoint_path = Path(checkpoint_path or DEFAULT_RECONCILE_CHECKPOINT)
+    with reconcile_checkpoint.locked(checkpoint_path):
+        return _scan_reconcile(container=container, log=log, limit=limit,
+                               deadline=deadline, checkpoint_path=checkpoint_path)
 
+
+def _scan_reconcile(*, container: Path, log, limit: int | None,
+                    deadline: float, checkpoint_path: Path) -> dict:
+    now = datetime.now(timezone.utc)
+    state = None
+    scope = None
+    observations = {}
+    fetched = 0
+    phase = "state"
+
+    def remaining():
+        return max(0.0, deadline - time.monotonic())
+
+    def result(complete=False, changes=()):
+        total = len(state["notes"]) if state is not None else None
+        pending = total - len(observations) if total is not None else None
+        if scope is not None:
+            if complete:
+                reconcile_checkpoint.clear(checkpoint_path)
+            else:
+                reconcile_checkpoint.save(checkpoint_path, scope, observations)
+        return {
+            "checked_at": now.isoformat(), "complete": complete,
+            "stopped_early": not complete,
+            "notes_in_state": total, "notes_remaining": pending,
+            "vault_files_fetched": fetched,
+            "progress": {"phase": "complete" if complete else phase,
+                         "observed": len(observations), "total": total,
+                         "remaining": pending},
+            "summary": reconcile.summarize(changes),
+            "changes": [c.__dict__ | {"status": c.status.value}
+                        for c in changes if c.status is not reconcile.Status.UNCHANGED],
+        }
+
+    if remaining() <= 0:
+        return result()
+    state = load_state(log=log, timeout=min(60.0, remaining()))
+    scope = reconcile_checkpoint.scope_key(container, state)
+    observations = reconcile_checkpoint.load(checkpoint_path, scope)
+    observations = {uuid: obs for uuid, obs in observations.items() if uuid in state["notes"]}
+    phase = "snapshot"
+    if remaining() <= 0:
+        return result()
     with tempfile.TemporaryDirectory(prefix="apple-notes-rec-") as td:
-        snap = notestore.snapshot(container / "NoteStore.sqlite", Path(td))
+        snap = notestore.snapshot(container / "NoteStore.sqlite", Path(td),
+                                  timeout=min(notestore.SNAPSHOT_TIMEOUT_S, remaining()))
+        if remaining() <= 0:
+            return result()
         with notestore.NoteStore(snap) as store:
             notes = store.notes()
+            if remaining() <= 0:
+                return result()
             attachments = store.attachments()
 
-    by_note: dict[str, list] = {}
+    by_note = {}
     for att in attachments:
         by_note.setdefault(att.note_uuid, []).append(att)
 
-    apple: dict[str, tuple[str, str]] = {}
+    phase = "apple"
+    apple = {}
     for note in notes:
+        if remaining() <= 0:
+            return result()
         try:
             decoded = decode(note.body)
-        except BodyDecodeError:
-            continue
+        except BodyDecodeError as exc:
+            # A failed decode is not evidence that the Apple note was deleted.
+            reconcile_checkpoint.save(checkpoint_path, scope, observations)
+            raise RuntimeError("Could not decode an Apple note during reconciliation") from exc
         links = _links_from_state(by_note.get(note.uuid, []), state)
         body = render.resolve_attachments(decoded.markdown, links)
-        apple[note.uuid] = (
-            render.content_hash(body),
-            note.modified.isoformat() if note.modified else "")
+        apple[note.uuid] = (render.content_hash(body),
+                            note.modified.isoformat() if note.modified else "")
 
-    changes: list[reconcile.Change] = []
-    fetched = 0
-    for uuid, entry in list(state["notes"].items())[:limit or None]:
-        path = entry.get("path", "")
+    phase = "vault"
+    observed_this_run = 0
+    try:
+        for uuid, entry in state["notes"].items():
+            if uuid in observations:
+                continue
+            if remaining() <= 0 or (limit is not None and observed_this_run >= limit):
+                break
+            try:
+                text = vaultio.read_text(f"/vault/{entry.get('path', '')}",
+                                         timeout=min(60.0, remaining()))
+                fetched += 1
+            except vaultio.MissingFile:
+                text = None
+            observations[uuid] = reconcile.observe_vault(text)
+            observed_this_run += 1
+            if observed_this_run % CHECKPOINT_EVERY == 0:
+                reconcile_checkpoint.save(checkpoint_path, scope, observations)
+    except vaultio.VaultIOError:
+        # Keep successful observations, but never authorize a partial worklist.
+        reconcile_checkpoint.save(checkpoint_path, scope, observations)
+        raise
+
+    changes = []
+    for uuid, entry in state["notes"].items():
+        if uuid not in observations:
+            continue
         apple_hash, apple_modified = apple.get(uuid, (None, None))
-
-        try:
-            vault_text = vaultio.read_text(f"/vault/{path}")
-            fetched += 1
-        except vaultio.MissingFile:
-            vault_text = None
-        except vaultio.VaultIOError:
-            # A partial classification cannot safely authorize writeback:
-            # the unreadable note may contain an edit or a conflict.
-            raise
-
-        changes.append(reconcile.classify(
+        changes.append(reconcile.classify_observation(
             uuid=uuid, apple_hash=apple_hash, apple_modified=apple_modified,
-            vault_text=vault_text, state_entry=entry))
-
+            vault=observations[uuid], state_entry=entry))
     for note in notes:
         if note.uuid not in state["notes"]:
-            changes.append(reconcile.Change(
-                uuid=note.uuid, status=reconcile.Status.NEW_IN_APPLE,
-                title=note.title))
-
-    return {
-        "checked_at": now.isoformat(),
-        "notes_in_state": len(state["notes"]),
-        "vault_files_fetched": fetched,
-        "summary": reconcile.summarize(changes),
-        "changes": [c.__dict__ | {"status": c.status.value}
-                    for c in changes
-                    if c.status is not reconcile.Status.UNCHANGED],
-    }
+            changes.append(reconcile.Change(uuid=note.uuid,
+                status=reconcile.Status.NEW_IN_APPLE, title=note.title))
+    complete = len(observations) == len(state["notes"]) and remaining() > 0
+    return result(complete, changes)

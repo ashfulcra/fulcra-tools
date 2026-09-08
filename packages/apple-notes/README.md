@@ -59,9 +59,13 @@ until the source note changes. It does not yet offer a full repair pass.
 The supported setup is one-way import. `mode = "reconcile"` in
 `[plugin_settings.apple-notes]` reports changes on either side without writing.
 Reconciliation reads each tracked vault note to detect edits, including those made
-soon after a sync; large libraries can take time. Reports live in
-`apple-notes-reconcile.json` in the log directory. The report lists up to 200
-changes with the full total; experimental writeback evaluates the complete list.
+soon after a sync. Large scans save private local progress and stop before the
+worker timeout; run again to continue. Reports live in `apple-notes-reconcile.json`
+in the log directory. Check `complete` and `notes_remaining` to distinguish a
+finished scan from a saved checkpoint. The report lists up to 200 changes with
+the full total; experimental writeback requires a complete scan and evaluates
+the complete list. Checkpoints contain content hashes, not note bodies, and are
+cleared after completion so the next scan checks for new edits.
 
 AppleScript writeback is experimental and excluded from the setup wizard.
 It requires `mode = "writeback"` **and** a separate `writeback_enabled = true`;

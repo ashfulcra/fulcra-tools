@@ -543,3 +543,187 @@ def test_reconcile_propagates_unreadable_note_instead_of_returning_partial_workl
     monkeypatch.setattr(vaultio, "read_text", unreadable_target)
     with pytest.raises(vaultio.VaultIOError, match="synthetic transient read failure"):
         sync.run_reconcile(container=notes_db, log=LOG)
+
+
+@pytest.fixture(autouse=True)
+def isolated_reconcile_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "DEFAULT_RECONCILE_CHECKPOINT",
+                       tmp_path / "private" / "reconcile.json", raising=False)
+
+
+def test_reconcile_deadline_counts_state_and_snapshot_and_caps_reads(notes_db, monkeypatch):
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    clock = [0.0]
+    monkeypatch.setattr(sync.time, "monotonic", lambda: clock[0])
+    original_read = vaultio.read_text
+    original_snapshot = sync.notestore.snapshot
+    timeouts = []
+
+    def slow_read(remote, **kwargs):
+        timeouts.append((remote, kwargs.get("timeout")))
+        clock[0] += 290 if remote == sync.STATE_PATH else 21
+        return original_read(remote, **kwargs)
+
+    def slow_snapshot(*args, **kwargs):
+        clock[0] += 290
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(vaultio, "read_text", slow_read)
+    monkeypatch.setattr(sync.notestore, "snapshot", slow_snapshot)
+    result = sync.run_reconcile(container=notes_db, log=LOG)
+    assert result["complete"] is False
+    assert result["notes_remaining"] == 1
+    assert len(timeouts) == 2
+    assert 0 < timeouts[-1][1] <= 20
+
+
+def test_reconcile_limit_resumes_private_hash_checkpoint_and_refreshes_apple(
+        notes_db, monkeypatch):
+    import sqlite3
+    import stat
+    from apple_notes_test_helpers import make_body, make_run
+
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    state = json.loads(vault.files[sync.STATE_PATH])
+    first_uuid, first_entry = next(iter(state["notes"].items()))
+    first_path = f"/vault/{first_entry['path']}"
+    from fulcra_apple_notes import reconcile
+    _, body = reconcile.parse_vault_note(vault.files[first_path])
+    vault.files[first_path] = vault.files[first_path].replace(body, "Private synthetic vault edit")
+    first = sync.run_reconcile(container=notes_db, log=LOG, limit=1)
+    assert first["complete"] is False
+    assert first["stopped_early"] is True
+    assert first["notes_remaining"] == 1
+    checkpoint = sync.DEFAULT_RECONCILE_CHECKPOINT
+    assert stat.S_IMODE(checkpoint.stat().st_mode) == 0o600
+    saved = checkpoint.read_text()
+    assert "Private synthetic vault edit" not in saved
+    assert body not in saved
+    assert first_entry["title"] not in saved
+
+    # The cached vault observation must be reclassified against today's Apple
+    # snapshot, rather than caching yesterday's "vault_edited" decision.
+    with sqlite3.connect(notes_db / "NoteStore.sqlite") as db:
+        db.execute("UPDATE ZICNOTEDATA SET ZDATA=? WHERE Z_PK=10",
+                   (make_body("New Apple body", [make_run(14)]),))
+    second = sync.run_reconcile(container=notes_db, log=LOG, limit=1)
+    assert second["complete"] is True
+    assert second["stopped_early"] is False
+    assert second["notes_remaining"] == 0
+    assert second["vault_files_fetched"] == 1
+    assert [c["status"] for c in second["changes"] if c["uuid"] == first_uuid] == ["conflict"]
+    assert not checkpoint.exists()
+
+    # Completion consumes the checkpoint: the next invocation reads all files.
+    third = sync.run_reconcile(container=notes_db, log=LOG)
+    assert third["complete"] is True
+    assert third["vault_files_fetched"] == 2
+
+
+def test_reconcile_read_failure_saves_progress_for_retry(notes_db, monkeypatch):
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    state = json.loads(vault.files[sync.STATE_PATH])
+    target = f"/vault/{list(state['notes'].values())[1]['path']}"
+    original_read = vaultio.read_text
+
+    def fail_second(remote, **kwargs):
+        if remote == target:
+            raise vaultio.VaultIOError("synthetic failure")
+        return original_read(remote, **kwargs)
+
+    monkeypatch.setattr(vaultio, "read_text", fail_second)
+    with pytest.raises(vaultio.VaultIOError):
+        sync.run_reconcile(container=notes_db, log=LOG)
+    monkeypatch.setattr(vaultio, "read_text", original_read)
+    resumed = sync.run_reconcile(container=notes_db, log=LOG)
+    assert resumed["complete"] is True
+    assert resumed["vault_files_fetched"] == 1
+
+
+@pytest.mark.parametrize("change_scope", ["state", "container"])
+def test_reconcile_checkpoint_does_not_cross_changed_sync_scope(notes_db, monkeypatch, change_scope):
+    import shutil
+    vault = FakeVault().install(monkeypatch)
+    sync.run_sync(container=notes_db, log=LOG)
+    first = sync.run_reconcile(container=notes_db, log=LOG, limit=1)
+    assert first["complete"] is False
+    container = notes_db
+    if change_scope == "state":
+        state = json.loads(vault.files[sync.STATE_PATH])
+        next(iter(state["notes"].values()))["hash"] = "new-synthetic-baseline"
+        vault.files[sync.STATE_PATH] = json.dumps(state)
+    else:
+        container = notes_db.parent / "different-container"
+        shutil.copytree(notes_db, container)
+    result = sync.run_reconcile(container=container, log=LOG)
+    assert result["complete"] is True
+    assert result["vault_files_fetched"] == 2
+
+
+def test_reconcile_exhausted_budget_does_not_start_remote_or_snapshot_work(
+        notes_db, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("exhausted budget must not start I/O")
+
+    monkeypatch.setattr(vaultio, "read_text", forbidden)
+    monkeypatch.setattr(sync.notestore, "snapshot", forbidden)
+    result = sync.run_reconcile(container=notes_db, log=LOG, deadline_s=0)
+    assert result["complete"] is False
+    assert result["notes_remaining"] is None
+    assert result["changes"] == []
+    assert result["progress"]["phase"] == "state"
+
+
+def test_reconcile_state_loading_can_exhaust_budget_before_snapshot(notes_db, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(sync.time, "monotonic", lambda: clock[0])
+
+    def slow_state(remote, **kwargs):
+        assert remote == sync.STATE_PATH
+        assert 0 < kwargs["timeout"] <= 1
+        clock[0] = 1.1
+        return json.dumps({"notes": {"example": {"path": "notes/apple/example.md"}},
+                           "attachments": {}})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("state read consumed the snapshot budget")
+
+    monkeypatch.setattr(vaultio, "read_text", slow_state)
+    monkeypatch.setattr(sync.notestore, "snapshot", forbidden)
+    result = sync.run_reconcile(container=notes_db, log=LOG, deadline_s=1)
+    assert result["complete"] is False
+    assert result["notes_remaining"] == 1
+    assert result["progress"]["phase"] == "snapshot"
+
+
+def test_reconcile_atomic_checkpoint_failure_keeps_previous_private_file(tmp_path, monkeypatch):
+    import stat
+    from fulcra_apple_notes import reconcile_checkpoint, reconcile
+
+    path = tmp_path / "private" / "checkpoint.json"
+    observation = reconcile.VaultObservation(True, True, "0123456789abcdef")
+    reconcile_checkpoint.save(path, "example-scope", {"one": observation})
+    before = path.read_bytes()
+
+    def fail_replace(*args):
+        raise OSError("synthetic interrupted replace")
+
+    monkeypatch.setattr(reconcile_checkpoint.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="synthetic interrupted replace"):
+        reconcile_checkpoint.save(path, "example-scope", {"two": observation})
+    assert path.read_bytes() == before
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_reconcile_rejects_overlapping_checkpoint_scan(tmp_path):
+    from fulcra_apple_notes import reconcile_checkpoint
+
+    path = tmp_path / "checkpoint.json"
+    with reconcile_checkpoint.locked(path):
+        with pytest.raises(RuntimeError, match="already running"):
+            with reconcile_checkpoint.locked(path):
+                pytest.fail("overlapping scan acquired the same checkpoint")

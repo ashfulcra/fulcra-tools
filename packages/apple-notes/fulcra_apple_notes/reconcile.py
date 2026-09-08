@@ -72,16 +72,44 @@ def parse_vault_note(markdown: str) -> tuple[dict, str | None]:
     return fields, (match.group("body") if match else None)
 
 
+@dataclass(frozen=True)
+class VaultObservation:
+    """Enough content evidence to classify later, without storing a note body."""
+    exists: bool
+    has_fence: bool
+    body_hash: str | None
+
+
+def observe_vault(vault_text: str | None) -> VaultObservation:
+    if vault_text is None:
+        return VaultObservation(False, False, None)
+    _fields, body = parse_vault_note(vault_text)
+    return VaultObservation(True, body is not None,
+                            render.content_hash(body) if body is not None else None)
+
+
 def classify(*, uuid: str, apple_hash: str | None, apple_modified: str | None,
              vault_text: str | None, state_entry: dict | None,
              assume_vault_unchanged: bool = False) -> Change:
-    """Decide what happened to one note since the last sync.
+    """Classify current body inputs; listing times never prove content equality.
 
-    ``assume_vault_unchanged`` requires an independently proven content
-    baseline, such as an unchanged server version. A listing timestamp is
-    insufficient. Production reconciliation reads each body and does not
-    enable this shortcut; otherwise an absent body means a missing file.
+    The legacy assumption flag requires independently proven content equality.
+    Resumable reconciliation instead passes explicit hash observations to
+    ``classify_observation``; writeback must reclassify fresh bodies here.
     """
+    if vault_text is None and assume_vault_unchanged and state_entry is not None:
+        observation = VaultObservation(True, True, state_entry.get("hash"))
+    else:
+        observation = observe_vault(vault_text)
+    return classify_observation(uuid=uuid, apple_hash=apple_hash,
+                                apple_modified=apple_modified, vault=observation,
+                                state_entry=state_entry)
+
+
+def classify_observation(*, uuid: str, apple_hash: str | None,
+                         apple_modified: str | None, vault: VaultObservation,
+                         state_entry: dict | None) -> Change:
+    """Classify a prior vault read against the current Apple/state baseline."""
     if state_entry is None:
         return Change(uuid=uuid, status=Status.NEW_IN_APPLE)
 
@@ -93,26 +121,19 @@ def classify(*, uuid: str, apple_hash: str | None, apple_modified: str | None,
     if apple_hash is None:
         return Change(uuid=uuid, status=Status.DELETED_IN_APPLE,
                       path=path, title=title)
-    if vault_text is None and assume_vault_unchanged:
-        apple_moved = (apple_hash != synced_hash) or (apple_modified != synced_modified)
-        return Change(uuid=uuid,
-                      status=Status.APPLE_CHANGED if apple_moved else Status.UNCHANGED,
-                      path=path, title=title)
-    if vault_text is None:
+    if not vault.exists:
         return Change(uuid=uuid, status=Status.MISSING_IN_VAULT,
                       path=path, title=title,
                       detail="the vault file is gone; Apple Notes still has it")
 
-    _fields, body = parse_vault_note(vault_text)
-    if body is None:
+    if not vault.has_fence:
         # No fence: a human restructured the file. Treat as edited, never
         # as unchanged -- overwriting it would discard their restructuring.
         return Change(uuid=uuid, status=Status.VAULT_EDITED, path=path,
                       title=title,
                       detail="owner fence missing; file was restructured by hand")
 
-    vault_hash = render.content_hash(body)
-    vault_moved = vault_hash != synced_hash
+    vault_moved = vault.body_hash != synced_hash
     apple_moved = (apple_hash != synced_hash) or (apple_modified != synced_modified)
 
     if vault_moved and apple_moved:
