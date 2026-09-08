@@ -22,10 +22,10 @@ from coord_engine_test_helpers import FakeTransport
 
 BASE = "00000000-0000-4000-8000-000000000097"
 AGENT = "00000000-0000-4000-8000-000000000003"
-PLATFORM = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
-HARNESS = "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f60"
-MODEL = "3e4f5a6b-7c8d-4e9f-a0b1-2c3d4e5f6071"
-CODER = "7a1f9c2e-4b6d-4c1a-9f0e-2d3b5a6c7e8f"
+PLATFORM = "00000000-0000-4000-8000-000000000201"
+HARNESS = "00000000-0000-4000-8000-000000000202"
+MODEL = "00000000-0000-4000-8000-000000000204"
+CODER = "00000000-0000-4000-8000-000000000207"
 
 TEAM = "r"
 FULL = {"agent": AGENT, "platform": PLATFORM, "harness": HARNESS,
@@ -327,7 +327,7 @@ def test_tag_provision_is_idempotent_for_an_already_registered_identity(capsys):
 
 def test_re_provisioning_a_model_rewrites_only_that_dimension(capsys):
     """A model switch is one cheap command; the other three tags stand."""
-    new_model = "4f5a6b7c-8d9e-4f0a-b1c2-3d4e5f607182"
+    new_model = "00000000-0000-4000-8000-000000000205"
     t = ProvisioningTransport({"model:sonnet-5": new_model})
     t.put(bus_tags.tags_path(TEAM), _registry({"coord-boss": FULL}))
     assert _provision(t, "--model", "sonnet-5") == 0

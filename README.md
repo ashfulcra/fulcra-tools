@@ -134,6 +134,13 @@ is not a requirement to run every piece together.
 The retired `fulcra-coord` and `fulcra-coord-files` implementations remain in
 git history. New coordination work uses the packages above.
 
+The standalone [Answers bridge](tools/answers-bridge/README.md) records answers
+in a configured Linear project and promotes follow-up cards into bus backlog
+tasks. It requires explicit private account configuration, credentials, and a
+`COORD_TEAM`; its tracked configuration example is synthetic. Local help and
+setup checks work without account access. The privacy check rejects its private
+configuration filename and credential files, including copies inside archives.
+
 ## Skill index
 
 Skills are instructions an agent follows. They are useful independently of the

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Ash Answers scratchpad bridge — bus-backed, Linear-viewed.
+"""Answers scratchpad bridge — bus-backed, Linear-viewed.
 
 Directions (each single-purpose, to avoid bidirectional state-sync bugs):
   capture   bus->Linear (one way): record an answer as a durable bus shard AND a
-            Linear card in the "Ash · Answers" project. Idempotent by id.
-  promote   Linear->bus (one way, ash-triggered): cards Ash labeled `promote`
+            Linear card in the configured Answers project. Idempotent by id.
+  promote   Linear->bus (one way, operator-triggered): cards the operator labeled `promote`
             become a bus backlog task via `coord-engine later`; the bus slug is
             commented back and the card gets `filed` + moved to Done.
   list      read-only: open answer cards, for terminal reference.
@@ -12,46 +12,91 @@ Directions (each single-purpose, to avoid bidirectional state-sync bugs):
 Check-off is Linear-only (mark Done) — deliberately NOT synced back, so there is
 no fragile two-way state channel.
 
-IDs from answers-linear-ids.json; creds from linear.env (never on the bus/git).
+Account IDs from --config / ANSWERS_LINEAR_CONFIG; credentials from
+LINEAR_API_KEY or an explicitly selected ANSWERS_LINEAR_ENV file. No setup I/O
+happens at import time. Keep all account configuration outside version control.
 Exit: 0 ok, 2 degraded (stderr says which step).
 """
-import hashlib, json, os, re, ssl, subprocess, sys, urllib.request
+import argparse, hashlib, json, os, re, ssl, subprocess, sys, urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 API = "https://api.linear.app/graphql"
-CA = "/root/.ccr/ca-bundle.crt"
-TEAM = os.environ.get("COORD_TEAM", "fulcra")
-# creds (secret) never live in the repo — read from $ANSWERS_LINEAR_ENV, else the
-# session scratchpad, else next to this script. IDs (non-secret) sit beside it.
-_ENV_CANDIDATES = [
-    os.environ.get("ANSWERS_LINEAR_ENV", ""),
-    "/tmp/claude-0/-home-user-fulcra-tools/a07b97e8-9d5f-59f3-8df6-9ceba3d40af6/scratchpad/linear.env",
-    os.path.join(HERE, "linear.env"),
-]
+KEY = ""
+IDS = {}
+TEAM = ""
+SENDER = "user"
+WORKSTREAM = "answers"
+PROMOTION_SOURCE = "Answers"
 
-def _load_env():
-    p = next((c for c in _ENV_CANDIDATES if c and os.path.exists(c)), None)
-    if not p:
-        raise SystemExit("linear.env not found (set ANSWERS_LINEAR_ENV)")
-    env = {}
-    with open(p) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k] = v
-    return env
 
-ENV = _load_env()
-KEY = ENV.get("LINEAR_API_KEY", "")
-IDS = json.load(open(os.path.join(HERE, "answers-linear-ids.json")))
+class SetupError(ValueError):
+    """An actionable local setup failure, with no private values in its text."""
+
+
+def _load_key():
+    key = os.environ.get("LINEAR_API_KEY", "").strip()
+    if key:
+        return key
+    path = os.environ.get("ANSWERS_LINEAR_ENV", "").strip()
+    if path:
+        try:
+            with open(os.path.expanduser(path), encoding="utf-8") as source:
+                for line in source:
+                    name, sep, value = line.strip().partition("=")
+                    if sep and name.strip() == "LINEAR_API_KEY":
+                        key = value.strip()
+                        if len(key) >= 2 and key[0] == key[-1] and key[0] in ("'", '"'):
+                            key = key[1:-1].strip()
+                        if key:
+                            return key
+        except (OSError, UnicodeError):
+            raise SetupError("Cannot read ANSWERS_LINEAR_ENV; select a readable UTF-8 credential file.") from None
+    raise SetupError("Set LINEAR_API_KEY or select a credential file with ANSWERS_LINEAR_ENV.")
+
+
+def configure(config_path=None):
+    """Load only explicitly selected local files, before any external call."""
+    global IDS, KEY, TEAM, SENDER, WORKSTREAM, PROMOTION_SOURCE
+    path = config_path or os.environ.get("ANSWERS_LINEAR_CONFIG", "").strip()
+    if not path:
+        raise SetupError("Select an account configuration with --config or ANSWERS_LINEAR_CONFIG; see answers-linear-ids.example.json.")
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as source:
+            ids = json.load(source)
+    except (OSError, UnicodeError, ValueError):
+        raise SetupError("Cannot read configuration: select a readable UTF-8 JSON object with --config or ANSWERS_LINEAR_CONFIG.") from None
+    required = {
+        None: ("project_id", "team_id"),
+        "states": ("open", "done"),
+        "labels": ("qa-answer", "type:factual", "type:future-work", "type:both", "promote", "filed"),
+    }
+    if not isinstance(ids, dict):
+        raise SetupError("Account configuration must be a JSON object; see the synthetic example.")
+    for section, keys in required.items():
+        values = ids if section is None else ids.get(section)
+        if not isinstance(values, dict) or any(
+                not isinstance(values.get(k), str) or not values[k].strip() for k in keys):
+            raise SetupError("Account configuration needs nonempty project/team IDs, open/done states, and all six label IDs; see the synthetic example.")
+    sender, workstream = ids.get("sender", "user"), ids.get("workstream", "answers")
+    promotion_source = ids.get("promotion_source", "Answers")
+    team = os.environ.get("COORD_TEAM", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", team):
+        raise SetupError("Set COORD_TEAM to your bus team name (letters, digits, dots, underscores or hyphens).")
+    if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v)
+           for v in (sender, workstream)):
+        raise SetupError("Configuration sender and workstream must be names using letters, digits, dots, underscores or hyphens.")
+    if not isinstance(promotion_source, str) or not promotion_source.strip() or any(
+            ord(c) < 32 for c in promotion_source):
+        raise SetupError("Configuration promotion_source must be nonempty single-line text.")
+    key = _load_key()
+    IDS, KEY, TEAM, SENDER, WORKSTREAM = ids, key, team, sender, workstream
+    PROMOTION_SOURCE = promotion_source
 
 
 def gql(query, variables=None):
     req = urllib.request.Request(
         API, data=json.dumps({"query": query, "variables": variables or {}}).encode(),
         headers={"Content-Type": "application/json", "Authorization": KEY})
-    ctx = ssl.create_default_context(cafile=CA if os.path.exists(CA) else None)
+    ctx = ssl.create_default_context()
     with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
         out = json.load(r)
     if out.get("errors"):
@@ -179,9 +224,9 @@ def cmd_promote(a):
             continue
         title = n["title"]
         cp = subprocess.run(
-            ["coord-engine", "later", TEAM, title[:160], "-w", "ash-answers",
-             "-s", f"Promoted from Ash Answers card {n['identifier']} ({n['url']})",
-             "--from", "ash"],
+            ["coord-engine", "later", TEAM, title[:160], "-w", WORKSTREAM,
+             "-s", f"Promoted from {PROMOTION_SOURCE} card {n['identifier']} ({n['url']})",
+             "--from", SENDER],
             capture_output=True, text=True, timeout=60)
         if cp.returncode != 0:
             print(f"DEGRADED: later failed for {n['identifier']}: {cp.stderr.strip()[-160:]}",
@@ -198,7 +243,7 @@ def cmd_promote(a):
             gql("mutation($i:String!,$in:IssueUpdateInput!){issueUpdate(id:$i,input:$in){success}}",
                 {"i": n["id"], "in": {"labelIds": cur, "stateId": IDS["states"]["done"]}})
             gql("mutation($in:CommentCreateInput!){commentCreate(input:$in){success}}",
-                {"in": {"issueId": n["id"], "body": f"Filed to bus backlog: `{slug or title[:60]}` (workstream ash-answers)."}})
+                {"in": {"issueId": n["id"], "body": f"Filed to bus backlog: `{slug or title[:60]}` (workstream {WORKSTREAM})."}})
         except Exception as e:
             print(f"DEGRADED: Linear finalize failed for {n['identifier']} ({e}); "
                   f"card stays unfiled — next pass re-runs the idempotent file",
@@ -211,27 +256,33 @@ def cmd_promote(a):
     return 2 if degraded else 0
 
 
-def main():
-    if not KEY:
-        print("LINEAR_API_KEY missing", file=sys.stderr); return 2
-    if len(sys.argv) < 2:
-        print("usage: answers_bridge.py {capture|list|promote} ...", file=sys.stderr); return 2
-    cmd = sys.argv[1]
-    if cmd == "capture":
-        # capture --q Q --a A --by WHO --type factual|future|both [--id ID] [--ts TS]
-        args = {}
-        it = iter(sys.argv[2:])
-        for k in it:
-            if k.startswith("--"):
-                args[k[2:]] = next(it, "")
-        if not args.get("q") or not args.get("a"):
-            print("capture needs --q and --a", file=sys.stderr); return 2
-        return cmd_capture(args)
-    if cmd == "list":
-        return cmd_list({})
-    if cmd == "promote":
-        return cmd_promote({})
-    print(f"unknown command {cmd}", file=sys.stderr); return 2
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", help="local account JSON path (or ANSWERS_LINEAR_CONFIG)")
+    commands = parser.add_subparsers(dest="command", required=True)
+    capture = commands.add_parser("capture", help="record an answer on the bus and in Linear")
+    capture.add_argument("--q", required=True)
+    capture.add_argument("--a", required=True)
+    capture.add_argument("--by", default="?")
+    capture.add_argument("--type", choices=tuple(TYPE_LABEL), default="factual")
+    capture.add_argument("--id")
+    capture.add_argument("--ts", default="")
+    commands.add_parser("list", help="list open answer cards")
+    commands.add_parser("promote", help="file promoted cards into the bus backlog")
+    commands.add_parser("check-config", help="validate local setup without contacting either service")
+    args = vars(parser.parse_args(argv))
+    if args["command"] == "capture" and (not args["q"].strip() or not args["a"].strip()):
+        parser.error("capture needs nonempty --q and --a")
+    try:
+        configure(args.pop("config"))
+    except SetupError as exc:
+        print(f"SETUP: {exc}", file=sys.stderr)
+        return 2
+    command = args.pop("command")
+    if command == "check-config":
+        print("Configuration valid locally; no services contacted.")
+        return 0
+    return {"capture": cmd_capture, "list": cmd_list, "promote": cmd_promote}[command](args)
 
 
 if __name__ == "__main__":

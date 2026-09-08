@@ -77,7 +77,7 @@ def test_empty_cursor_write_is_refused(bad):
 
 def test_cursors_are_per_peer_within_a_space():
     reg = peers._empty()
-    other = "315c1b32-5399-40e1-b808-2346da7bf32e"
+    other = "00000000-0000-4000-8000-000000000203"
     peers.set_cursor(reg, "sp1", UID, "r1")
     peers.set_cursor(reg, "sp1", other, "r9")
     assert peers.get_cursor(reg, "sp1", UID) == "r1"

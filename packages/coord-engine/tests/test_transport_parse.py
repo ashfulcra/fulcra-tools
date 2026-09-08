@@ -26,15 +26,15 @@ def test_parse_stat_output():
     text = (
         "/_coord-probe/probe.md (93 bytes)\n"
         "Uploaded: 2026-07-01T16:12:44.623092Z\n"
-        "Version: 75c13308-76c0-4379-837e-8a96b4899535\n"
+        "Version: 00000000-0000-4000-8000-000000000206\n"
         "Previous Versions: 1\n"
-        "- b8b68ea9-0986-4f9b-bb24-4a693d380ba4 2026-07-01T16:12:20.176191Z (81 bytes)"
+        "- 00000000-0000-4000-8000-000000000208 2026-07-01T16:12:20.176191Z (81 bytes)"
     )
     st = transport.parse_stat_output(text)
     assert st["uploaded"] == "2026-07-01T16:12:44.623092Z"
-    assert st["version"] == "75c13308-76c0-4379-837e-8a96b4899535"
+    assert st["version"] == "00000000-0000-4000-8000-000000000206"
     assert st["previous_count"] == 1
-    assert st["previous"][0]["version"] == "b8b68ea9-0986-4f9b-bb24-4a693d380ba4"
+    assert st["previous"][0]["version"] == "00000000-0000-4000-8000-000000000208"
     assert st["path"] == "/_coord-probe/probe.md"
 
 

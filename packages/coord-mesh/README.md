@@ -131,6 +131,9 @@ that reports "no messages" when it could not read is worse than one that fails.
 
 ## Test
 
+Peer and cursor fixtures use invented identifiers; do not copy an account or
+device identifier into a test to make it look realistic.
+
 From the repository root:
 
 ```bash
