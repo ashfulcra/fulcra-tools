@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 
 from .. import config as _config
 from .. import freshness, state
@@ -67,6 +68,32 @@ def _validate_url_setting(key: str, value: object) -> None:
         pass
 
 
+def _validate_multiselect(key: str, value: object, *, required: bool = False) -> None:
+    if (not isinstance(value, list)
+            or any(not isinstance(v, str) or not v.strip() for v in value)
+            or len(set(value)) != len(value)):
+        raise HTTPException(400, f"setting {key!r}: expected unique nonempty string IDs in an array")
+    if required and not value:
+        raise HTTPException(400, f"setting {key!r}: select at least one list before enabling")
+
+
+def _validated_options(value: object) -> list[dict]:
+    """Reject malformed discovery rather than silently losing any choices."""
+    if not isinstance(value, list):
+        raise ValueError("expected option list")
+    seen = set()
+    for item in value:
+        if (not isinstance(item, dict)
+                or set(item) - {"value", "label", "disabled"}
+                or any(not isinstance(item.get(k), str) or not item[k].strip()
+                       for k in ("value", "label"))
+                or ("disabled" in item and type(item["disabled"]) is not bool)
+                or item["value"] in seen):
+            raise ValueError("invalid option")
+        seen.add(item["value"])
+    return value
+
+
 # Cap for /api/plugin/{id}/upload — generous because some takeouts (e.g.
 # Spotify Extended Streaming History) can be multiple GB, but bounded so
 # a buggy client can't fill the disk even though the route is loopback-only.
@@ -122,6 +149,38 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         cfg = _config.load()
         return cfg.plugin_settings.get(plugin_id, {})
 
+    @app.get("/api/plugin/{plugin_id}/setting_options/{key}", dependencies=[Depends(require_token)])
+    def setting_options(plugin_id: str, key: str):
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None:
+            raise HTTPException(404, "Unknown plugin")
+        setting = next((s for s in plugin.required_settings if s.key == key), None)
+        if setting is None or setting.kind != "multiselect" or plugin.setting_options is None:
+            raise HTTPException(404, "No options available for this setting")
+        from .. import credentials as _creds
+        from ..plugin import RunContext
+        try:
+            ctx_credentials = {}
+            for credential in plugin.required_credentials:
+                value = (_creds.get_user_secret(credential.key) if credential.user_level
+                         else _creds.get_secret(plugin_id, credential.key))
+                if value is not None:
+                    ctx_credentials[credential.key] = value
+            run_ctx = RunContext(
+                plugin_id=plugin_id,
+                config=dict(_config.load().plugin_settings.get(plugin_id, {})),
+                credentials=ctx_credentials,
+                state=state.load(plugin_id),
+                log=logging.getLogger(f"fulcra_collect.options.{plugin_id}"),
+                _emit=lambda evt: None,
+            )
+            options = _validated_options(plugin.setting_options(run_ctx, key))
+        except Exception:
+            # Exception text can contain provider payloads or credentials.
+            # A failed discovery must stay distinguishable from an empty list.
+            raise HTTPException(503, "Could not load choices. Check source access and retry.") from None
+        return JSONResponse({"options": options}, headers={"Cache-Control": "no-store"})
+
     @app.put("/api/plugin/{plugin_id}/settings", dependencies=[Depends(require_token)])
     def put_settings(plugin_id: str, body: dict[str, object]):
         plugin = daemon.registry.plugins.get(plugin_id)
@@ -139,6 +198,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             s = declared[k]
             if s.kind == "enum" and s.enum_values and v not in s.enum_values:
                 raise HTTPException(400, f"setting {k!r}: value {v!r} not in {s.enum_values}")
+            if s.kind == "multiselect":
+                _validate_multiselect(k, v)
             if s.kind == "url":
                 _validate_url_setting(k, v)
         # Persist
@@ -324,6 +385,10 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         if plugin_id not in daemon.registry.plugins:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
         cfg = _config.load()
+        for setting in daemon.registry.plugins[plugin_id].required_settings:
+            if setting.kind == "multiselect":
+                value = cfg.plugin_settings.get(plugin_id, {}).get(setting.key, setting.default)
+                _validate_multiselect(setting.key, value, required=setting.required)
         cfg.enable(plugin_id)
         _config.save(cfg)
         daemon.handle_request({"cmd": "reload"})
@@ -403,6 +468,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             ],
             "health_check_available": plugin.health_check is not None,
             "permission_check_available": plugin.permission_check is not None,
+            "permission_request_available": plugin.permission_request is not None,
             "freshness": _freshness_payload(plugin),
         }
 
@@ -507,47 +573,47 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
     # of guessing.
     # ------------------------------------------------------------------
 
-    @app.post("/api/plugin/{plugin_id}/check_permission",
-              dependencies=[Depends(require_token)])
-    def plugin_check_permission(plugin_id: str):
+    def _permission_action(plugin_id: str, *, request: bool):
         plugin = daemon.registry.plugins.get(plugin_id)
         if plugin is None:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
-        if plugin.permission_check is None:
-            raise HTTPException(404, f"plugin {plugin_id!r} has no permission_check")
-        # Build a minimal RunContext, mirroring the health_check route.
-        # We populate ctx.config from the persisted plugin settings so
-        # the check can branch on user choices (e.g. dayone's mode enum).
+        callback = plugin.permission_request if request else plugin.permission_check
+        if callback is None:
+            raise HTTPException(404, "Plugin does not support this permission action")
         from .. import credentials as _creds
-        from .. import state as _state_mod
         from ..plugin import RunContext
-        ctx_credentials = {}
-        for c in plugin.required_credentials:
-            # Read each credential from the scope the plugin uses — see the
-            # health_check route above for the rationale.
-            val = (
-                _creds.get_user_secret(c.key)
-                if getattr(c, "user_level", False)
-                else _creds.get_secret(plugin_id, c.key)
-            )
-            if val is not None:
-                ctx_credentials[c.key] = val
-        cfg = _config.load()
-        run_ctx = RunContext(
-            plugin_id=plugin_id,
-            config=cfg.plugin_settings.get(plugin_id, {}),
-            credentials=ctx_credentials,
-            state=_state_mod.load(plugin_id),
-            log=logging.getLogger(f"fulcra_collect.permission.{plugin_id}"),
-            _emit=lambda evt: None,
-        )
         try:
-            result = plugin.permission_check(run_ctx)
-            granted = bool(result.get("granted", False))
-            hint = result.get("hint")
-            return {"granted": granted, "hint": hint}
-        except Exception as exc:
-            return {
-                "granted": False,
-                "hint": f"{type(exc).__name__}: {exc}",
-            }
+            ctx_credentials = {}
+            for credential in plugin.required_credentials:
+                value = (_creds.get_user_secret(credential.key) if credential.user_level
+                         else _creds.get_secret(plugin_id, credential.key))
+                if value is not None:
+                    ctx_credentials[credential.key] = value
+            run_ctx = RunContext(
+                plugin_id=plugin_id,
+                config=dict(_config.load().plugin_settings.get(plugin_id, {})),
+                credentials=ctx_credentials,
+                state=state.load(plugin_id),
+                log=logging.getLogger(f"fulcra_collect.permission.{plugin_id}"),
+                _emit=lambda evt: None,
+            )
+            result = callback(run_ctx)
+            if (not isinstance(result, dict) or type(result.get("granted")) is not bool
+                    or (result.get("hint") is not None and not isinstance(result["hint"], str))):
+                raise ValueError("Invalid permission result")
+            return {"granted": result["granted"], "hint": result.get("hint")}
+        except Exception:
+            # Exceptions from native providers or Keychain access can include
+            # private data. Keep failure distinct from access being granted.
+            action = "request" if request else "verify"
+            return {"granted": False, "hint": f"Could not {action} access. Check System Settings and retry."}
+
+    @app.post("/api/plugin/{plugin_id}/check_permission",
+              dependencies=[Depends(require_token)])
+    def plugin_check_permission(plugin_id: str):
+        return _permission_action(plugin_id, request=False)
+
+    @app.post("/api/plugin/{plugin_id}/request_permission",
+              dependencies=[Depends(require_token)])
+    def plugin_request_permission(plugin_id: str):
+        return _permission_action(plugin_id, request=True)

@@ -32,6 +32,8 @@ BUNDLED_PLUGINS: tuple[tuple[str, str], ...] = (
     ("generic-csv", "fulcra_media.plugins.generic_csv:PLUGIN"),
     ("media-webhook", "fulcra_media.plugins.media_webhook:PLUGIN"),
     ("apple-notes", "fulcra_apple_notes.collect_plugin:PLUGIN"),
+    ("apple-reminders", "fulcra_apple_reminders.collect_plugin:PLUGIN"),
+    ("todoist", "fulcra_todoist.collect_plugin:PLUGIN"),
     ("dayone", "fulcra_dayone.collect_plugin:PLUGIN"),
     ("attention-relay", "fulcra_attention.collect_plugin:PLUGIN"),
     ("gmail", "fulcra_gmail.collect_plugin:PLUGIN"),

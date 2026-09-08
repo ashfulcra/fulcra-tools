@@ -27,6 +27,18 @@ def test_worker_emits_a_done_result_for_a_successful_run(collect_home: Path):
                           "definition_validated_at": None}
 
 
+def test_worker_captures_epoch_with_settings(collect_home: Path):
+    from fulcra_collect import config
+    cfg = config.load()
+    cfg.plugin_settings['tasks'] = {'selected': ['one']}
+    config.save(cfg)
+    captured = []
+    plugin = Plugin(id='tasks', name='Tasks', kind='manual', collect_mode='historical',
+                    run=lambda ctx: captured.append((ctx.config_epoch, ctx.config)))
+    _run_capturing(plugin, collect_home)
+    assert captured == [(cfg.plugin_epochs['tasks'], {'selected': ['one']})]
+
+
 def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
     def run(ctx):
         ctx.state.watermark = "2026-05-22T12:00:00Z"

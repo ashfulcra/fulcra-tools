@@ -92,6 +92,47 @@ blocks inline in `index.html` — duplicated at two render sites
 After #68 each kind is a Lit 3 web component, registered into a window
 registry, and routed by a `<fulcra-step>` dispatcher.
 
+### Explicit native permission consent
+
+The source wizard keeps permission inspection separate from native permission
+prompts. Step entry and **Verify access** use the read-only `permission_check`
+callback. When the contract sets `permission_request_available`, the shared
+permission component also displays **Allow access**. Only that button calls
+`POST /api/plugin/{id}/request_permission`; initialization, Next, Back, and Skip
+never request native permission. Requests cannot enable or run a plugin, duplicate
+clicks are ignored, and failures leave access ungranted. A plugin without a
+request callback retains the existing **Open System Settings** / **Verify access**
+flow, including Full Disk Access.
+
+The Mac app includes this capability starting with 0.1.2. See the [callback contract](../collect/README.md#native-permission-requests).
+
+### List selection
+
+The shared `input` component renders `Setting.kind="multiselect"` as checkboxes
+for both onboarding and dashboard Configure. The Mac app includes it starting
+with 0.1.2.
+
+Plugins declare `default=[]` and provide a `setting_options(ctx, key)` callback
+through the [Collect plugin contract](../collect/README.md#discovered-multiselect-settings).
+The wizard fetches `/api/plugin/{id}/setting_options/{key}` when the input step
+opens and when the user chooses **Retry loading choices**. It shows loading,
+source-access errors, and successful empty discovery separately. Fetching
+options never starts synchronization or replaces the saved selection.
+
+Selections stay arrays of opaque IDs from the saved settings response through
+the checkbox state and JSON settings writes. No options are selected
+automatically. Renamed lists keep their selection by ID; missing saved IDs stay
+visible with an option to remove them. Disabled choices cannot be newly selected,
+but a disabled saved selection can be removed. Stale discovery responses cannot
+overwrite newer retries.
+
+An empty required selection or unsuccessful discovery blocks Next. A settings
+save failure blocks both advancement and the explicit Enable action, including
+when the user skips the selection step after a failed save. Enable saves the
+current selections again so a skipped edit cannot leave a different scope on
+file. Next, Back, and Skip navigation never enable or run a plugin; the final
+**Enable & start sync** / **Enable & run preview** action grants that consent.
+
 ### Why Lit (not a build step, not Alpine partials)
 
 - **No build step.** Lit ships as an ES module on jsdelivr; the
@@ -172,10 +213,17 @@ Three steps:
 No `index.html` change is needed — the dispatcher already routes
 every kind via the registry.
 
-### Verification (no JS test runner)
+### Verification
 
-We don't ship a JS test runner. The verification surface for a
-component change is:
+Use Node's built-in test runner; no npm dependency installation is required:
+
+```bash
+node --test packages/web-ui/tests/*.test.cjs
+```
+
+The tests cover explicit start and native-permission consent, array persistence, failed discovery and
+retry, missing/disabled selections, stale requests, and the shared component's
+rendered checkbox states. For a component change, also run:
 
 - `node --check packages/web-ui/dist/static/components/step-<kind>.js`
   catches syntax errors.
@@ -205,3 +253,7 @@ dist/static/components/
 ├── step-definition_picker.js      — kind="definition_picker" (the original drift offender)
 └── step-done.js                   — kind="done"
 ```
+
+Permission requests and checks are tied to a specific visit to the setup step.
+Leaving and returning starts a fresh check; a late response from the previous
+visit cannot authorize the new one or unblock another step.

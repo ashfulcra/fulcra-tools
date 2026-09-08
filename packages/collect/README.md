@@ -158,7 +158,8 @@ fulcra_collect/
         _deps.py            RouteContext + Pydantic body models shared across routes
         status.py           /api/status, /api/version, /api/reload
         plugins.py          /api/plugin/{id}/{run,enable,disable,credentials,settings,
-                            contract,health_check,check_permission,upload}
+                            contract,setting_options/{key},health_check,check_permission,
+                            request_permission,upload}
         definitions.py      /api/definitions, /api/plugin/{id}/definition (bind/clear)
         fulcra_auth.py      /api/fulcra/auth/{status,token,cli_status,cli_login}
         oauth.py            /api/oauth/{plugin_id}/{start,callback}
@@ -195,7 +196,7 @@ The object (or callable returning one) is a `Plugin` dataclass
 declaring `id`, `name`, `kind`, the `run(ctx)` callable, plus optional
 `required_credentials`, `required_settings`, `required_permissions`,
 `setup_steps` (the wizard renders these), `health_check`,
-`permission_check`, OAuth callables, a category, and a
+`permission_check`, `permission_request`, `setting_options`, OAuth callables, a category, and a
 `canonical_definition_name`. The daemon builds a `RunContext` for
 every invocation and passes it in; the plugin reaches for its config,
 credentials, state, and the Fulcra def-resolver through the context
@@ -213,6 +214,74 @@ explicit start action. A new plugin needs its setup instructions and limitations
 in its README and the [source guide](../../docs/how-do-i-get-my-data.md) in the
 same PR.
 
+### Native permission requests
+
+Keep `Plugin.permission_check(ctx)` read-only: the wizard may invoke it when a
+permission step opens or the user clicks **Verify access**. Native prompts belong
+in the separate optional `Plugin.permission_request(ctx)` callback, which the
+wizard invokes only after the user clicks **Allow access**. Both callbacks return
+`{"granted": bool, "hint": str | None}` and receive current saved settings and
+correctly scoped Keychain credentials. Permission callbacks must not enable the
+plugin or start synchronization.
+
+The contract exposes `permission_request_available`. The authenticated
+`POST /api/plugin/{id}/request_permission` endpoint calls only that callback;
+`POST /api/plugin/{id}/check_permission` calls only the read-only check.
+Unsupported actions return 404; provider, credential-access, or malformed-result
+failures return `granted: false` with a generic hint, without exception details.
+Full Disk Access continues to use **Open System Settings** and **Verify access**
+when no native request callback is declared. The Mac app includes this contract starting with 0.1.2.
+
+### Discovered multiselect settings
+
+Collect supports a reusable list picker through `Setting(kind="multiselect")`
+and `Plugin.setting_options`. The Mac app includes it starting with 0.1.2.
+
+Declare a setting and include its key in an `input` setup step:
+
+```python
+selected_lists = Setting(
+    key="selected_lists", label="Lists to sync", kind="multiselect",
+    default=[], required=True,
+)
+list_step = SetupStep(
+    kind="input", title="Choose lists", settings_keys=("selected_lists",),
+)
+
+# Attach this callback to Plugin(setting_options=discover_options, ...).
+def discover_options(ctx, key):
+    if key != "selected_lists":
+        raise ValueError("Unsupported setting")
+    provider = make_provider(ctx)  # plugin-owned adapter; reads ctx.credentials
+    return [
+        {"value": item.id, "label": item.name, "disabled": not item.writable}
+        for item in provider.collections()
+    ]
+```
+
+The callback receives a `RunContext` containing saved settings and each declared
+credential from its plugin or user Keychain scope. It must only discover choices,
+use bounded source calls, and raise if source access or a partial read fails.
+It must never enable the plugin, start synchronization, or log credentials.
+The lightweight discovery context does not expose worker KV write callbacks.
+
+`GET /api/plugin/{id}/setting_options/{key}` requires the normal bearer token
+and returns `{"options": [{"value": "opaque-id", "label": "Example list"}]}`
+with `Cache-Control: no-store`. IDs must be unique, nonempty strings; labels
+must be nonempty strings. The only optional option field is `disabled`, a
+boolean. An unsupported plugin, setting, or callback returns 404. Discovery
+failures and malformed callback results return a sanitized 503, while a
+successful discovery with no lists returns `{"options": []}`.
+
+`PUT /api/plugin/{id}/settings` accepts multiselect values only as arrays of
+unique nonempty string IDs. Saving never calls discovery or rejects an ID
+because its list is currently missing. An empty array can be saved to deselect
+all lists, but the HTTP enable route rejects empty required selections. Plugins
+must enforce selection scope in their own run logic as well. Use the wizard or
+JSON settings API for these arrays; the text-oriented CLI is not an array editor.
+The shared wizard preserves selected IDs, displays missing selections for
+removal, and requires an explicit Enable action after configuration.
+
 ## HTTP API surface
 
 All routes except the OAuth callback require a bearer token from
@@ -223,8 +292,8 @@ shapes.
 * **Status / version** (`routes/status.py`) — `GET /api/status`,
   `GET /api/version`, `POST /api/reload`.
 * **Plugin operations** (`routes/plugins.py`) — run, enable/disable,
-  read/write credentials, read/write settings, fetch contract,
-  health-check, permission-check, file upload (multipart, used by the
+  read/write credentials, read/write settings, discover setting options, fetch contract,
+  health-check, permission-check, explicit permission-request, file upload (multipart, used by the
   wizard's `file_upload` step).
 * **Annotation definitions** (`routes/definitions.py`) — list defs on
   the Fulcra account, bind one to a plugin, list a def's recent
@@ -286,5 +355,25 @@ uv run --package fulcra-collect pytest packages/collect/tests/ -q
 The suite covers the daemon's request handlers, the scheduler /
 supervisor, the SQLite migration path, every route module, the
 account-fingerprint pre-flight, and the worker subprocess plumbing.
+`tests/test_setting_options.py` covers synthetic option discovery, scoped
+credentials, malformed responses, saved arrays, and the required-selection
+enable gate. `tests/test_permission_request.py` verifies explicit-only native
+permission requests, authentication, credential scope, and sanitized failures.
 `tests/test_end_to_end.py` exercises a full
 discover → enable → run → state-write loop against a stub plugin.
+
+### Configuration changes cancel pending task writes
+
+Workers receive `RunContext.config_epoch` with their settings snapshot. Collect
+rotates that opaque revision when plugin settings, enablement, or credentials
+change through the app or CLI. The task plugins check it before each write, so
+turning preview on, disabling a plugin, removing a list, or reconnecting an
+account cancels pending work. Returning to an earlier selection starts a fresh
+baseline. Configuration saves serialize across processes and replace the file
+atomically; a concurrent save cannot restore an older revision. Direct edits to
+`config.toml` bypass this lifecycle tracking.
+
+The CLI accepts multiselect values as JSON arrays of unique, nonempty string IDs:
+`fulcra-collect set-setting apple-reminders selected_lists '["example-list-id"]'`.
+Use `[]` to clear the selection; a required empty selection cannot be enabled.
+The dashboard discovers IDs and labels for you, so it is the easier setup path.

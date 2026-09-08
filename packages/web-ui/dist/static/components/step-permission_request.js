@@ -1,7 +1,8 @@
 // packages/web-ui/dist/static/components/step-permission_request.js
 //
 // kind="permission_request" (task #66) — deep-link to System Settings +
-// "Verify access" button when the daemon exposes a permission_check.
+// "Verify access" for a read-only check and explicit "Allow access" when
+// the daemon exposes a permission_request callback.
 // The pre-#66 UX falsely claimed macOS would auto-prompt for Full Disk
 // Access; this kind replaces that lie with a deep-link + verify loop.
 //
@@ -24,6 +25,8 @@ class FulcraStepPermissionRequest extends FulcraStepBase {
     const permId = c?.current_permission_id;
     const deepLink = permId ? c?.permissionDeepLink(permId) : "";
     const checkAvailable = c?.plugin_contract?.permission_check_available;
+    const requestAvailable = c?.plugin_contract?.permission_request_available;
+    const requesting = c?.permissionRequesting;
     const result = c?.permissionResult;
     const checking = c?.permissionChecking;
     return html`
@@ -40,10 +43,18 @@ class FulcraStepPermissionRequest extends FulcraStepBase {
                   Open System Settings →
                 </a>`
             : nothing}
+          ${requestAvailable
+            ? html`
+                <button type="button" @click=${() => c.requestPermission()}
+                        ?disabled=${checking || requesting || result?.granted}
+                        class="px-3 py-1.5 text-sm rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50">
+                  ${requesting ? "Requesting access…" : "Allow access"}
+                </button>`
+            : nothing}
           ${checkAvailable
             ? html`
                 <button @click=${() => c.checkPermission()}
-                        ?disabled=${checking}
+                        ?disabled=${checking || requesting}
                         class="px-3 py-1.5 text-sm rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50">
                   <span>${checking ? "Checking…" : "Verify access"}</span>
                 </button>`
@@ -63,11 +74,13 @@ class FulcraStepPermissionRequest extends FulcraStepBase {
                 ${result.hint
                   ? html`<p class="text-amber-700 mt-1">${result.hint}</p>`
                   : nothing}
-                <p class="mt-2 text-xs">Open System Settings above, grant access, then click Verify access again.</p>
+                <p class="mt-2 text-xs">${requestAvailable
+                  ? "Click Allow access to request permission. If access was denied, enable it in System Settings, then verify again."
+                  : "Open System Settings above, grant access, then click Verify access again."}</p>
               </div>`
           : nothing}
 
-        ${!checkAvailable
+        ${!checkAvailable && !requestAvailable
           ? html`
               <div class="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
                 Follow the steps above, then click Next to continue.

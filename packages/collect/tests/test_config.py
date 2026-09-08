@@ -105,3 +105,174 @@ def test_default_web_port_not_persisted(collect_home: Path):
     toml_path = config.config_dir() / "config.toml"
     raw = toml_path.read_text(encoding="utf-8")
     assert "[daemon]" not in raw and "web_port" not in raw
+
+
+def test_plugin_epoch_survives_noop_and_rotates_on_every_intent_transition(collect_home):
+    cfg = config.load()
+    cfg.plugin_settings['tasks'] = {'selected_lists': ['one'], 'dry_run': False}
+    cfg.enable('tasks')
+    config.save(cfg)
+    epochs = [config.load().plugin_epochs['tasks']]
+    config.save(config.load())
+    assert config.load().plugin_epochs['tasks'] == epochs[-1]
+    for selection in ([], ['one'], ['two'], ['one']):
+        cfg = config.load()
+        cfg.plugin_settings['tasks']['selected_lists'] = selection
+        config.save(cfg)
+        epochs.append(config.load().plugin_epochs['tasks'])
+    for enabled in (False, True):
+        cfg = config.load()
+        (cfg.enable if enabled else cfg.disable)('tasks')
+        config.save(cfg)
+        epochs.append(config.load().plugin_epochs['tasks'])
+    cfg = config.load()
+    cfg.plugin_settings['tasks']['dry_run'] = True
+    config.save(cfg)
+    epochs.append(config.load().plugin_epochs['tasks'])
+    assert len(set(epochs)) == len(epochs)
+
+
+def test_epoch_isolated_from_other_plugin_and_can_rotate_credentials(collect_home):
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    first = config.load().plugin_epochs['tasks']
+    cfg = config.load()
+    cfg.enable('other')
+    config.save(cfg)
+    assert config.load().plugin_epochs['tasks'] == first
+    cfg = config.load()
+    cfg.rotate_plugin_epoch('tasks')
+    config.save(cfg)
+    assert config.load().plugin_epochs['tasks'] != first
+
+
+def test_stale_config_cannot_restore_epoch_after_credential_rotation(collect_home):
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    stale = config.load()
+    config.invalidate_plugin_work('tasks')
+    current = config.load().plugin_epochs['tasks']
+    stale.set_interval('tasks', 600)
+    config.save(stale)
+    assert config.load().plugin_epochs['tasks'] == current
+
+
+def test_overlapping_noop_save_cannot_restore_credential_epoch(collect_home):
+    """Pause a separate saver after its read while another process invalidates work."""
+    import subprocess
+    import sys
+    import time
+
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    original = config.load().plugin_epochs['tasks']
+    paused, release, invalidating = [collect_home / name for name in
+                                     ('save-paused', 'save-release', 'invalidation-started')]
+    env = dict(os.environ)
+    env['PYTHONPATH'] = str(Path(config.__file__).parents[1])
+    saver_code = '''
+import time
+from pathlib import Path
+from fulcra_collect import config
+home = config.config_dir()
+original_dumps = config.tomlkit.dumps
+def paused_dumps(doc):
+    text = original_dumps(doc)
+    (home / "save-paused").touch()
+    limit = time.monotonic() + 10
+    while not (home / "save-release").exists():
+        if time.monotonic() >= limit:
+            raise TimeoutError("synthetic paused saver timeout")
+        time.sleep(0.01)
+    return text
+config.tomlkit.dumps = paused_dumps
+config.save(config.load())
+'''
+    invalidator_code = '''
+from fulcra_collect import config
+(config.config_dir() / "invalidation-started").touch()
+config.invalidate_plugin_work("tasks")
+'''
+    def await_marker(path):
+        deadline = time.monotonic() + 10
+        while not path.exists():
+            assert time.monotonic() < deadline, 'child process failed to reach barrier'
+            time.sleep(0.01)
+    saver = subprocess.Popen([sys.executable, '-c', saver_code], env=env)
+    invalidator = None
+    try:
+        await_marker(paused)
+        invalidator = subprocess.Popen([sys.executable, '-c', invalidator_code], env=env)
+        await_marker(invalidating)
+        try:
+            invalidator.wait(timeout=0.3)
+            invalidator_waited_for_lock = False
+        except subprocess.TimeoutExpired:
+            invalidator_waited_for_lock = True
+        release.touch()
+        assert saver.wait(timeout=10) == 0
+        assert invalidator.wait(timeout=10) == 0
+        assert invalidator_waited_for_lock
+        assert config.load().plugin_epochs['tasks'] != original
+    finally:
+        release.touch()
+        for process in (saver, invalidator):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def test_failed_atomic_replace_preserves_old_configuration_and_removes_temp(collect_home, monkeypatch):
+    import pytest
+
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    path = collect_home / 'config.toml'
+    old_bytes = path.read_bytes()
+    cfg.disable('tasks')
+    def fail_replace(source, destination):
+        assert Path(source).parent == collect_home
+        assert stat.S_IMODE(os.stat(source).st_mode) == 0o600
+        assert config.load().enabled == {'tasks'}
+        raise OSError('synthetic failed replacement')
+    monkeypatch.setattr(config.os, 'replace', fail_replace)
+    with pytest.raises(OSError, match='synthetic failed replacement'):
+        config.save(cfg)
+    assert path.read_bytes() == old_bytes
+    assert not list(collect_home.glob('.config-*.tmp'))
+
+
+def test_config_file_is_owner_private_after_each_save(collect_home):
+    cfg = config.load()
+    config.save(cfg)
+    path = collect_home / 'config.toml'
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    path.chmod(0o644)
+    config.save(cfg)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_failed_temporary_write_keeps_epoch_rotation_retryable(collect_home, monkeypatch):
+    import pytest
+
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    path = collect_home / 'config.toml'
+    old_bytes = path.read_bytes()
+    cfg.rotate_plugin_epoch('tasks')
+    new_epoch = cfg.plugin_epochs['tasks']
+    with monkeypatch.context() as patch:
+        def fail_sync(_):
+            raise OSError('synthetic temporary write failure')
+        patch.setattr(config.os, 'fsync', fail_sync)
+        with pytest.raises(OSError, match='synthetic temporary write failure'):
+            config.save(cfg)
+    assert path.read_bytes() == old_bytes
+    assert not list(collect_home.glob('.config-*.tmp'))
+    config.save(cfg)
+    assert config.load().plugin_epochs['tasks'] == new_epoch

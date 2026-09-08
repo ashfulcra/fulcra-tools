@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-apple-reminders"
+version = "0.1.0"
+description = "Selected Apple Reminders lists and two-way completion for Fulcra Collect."
+requires-python = ">=3.11"
+dependencies = [
+    "fulcra-collect",
+    "fulcra-task-sync",
+    "pyobjc-framework-EventKit>=10; sys_platform == 'darwin'",
+]
+
+[project.entry-points."fulcra_collect.plugins"]
+apple-reminders = "fulcra_apple_reminders.collect_plugin:PLUGIN"
+
+[tool.uv.sources]
+fulcra-collect = { workspace = true }
+fulcra-task-sync = { workspace = true }
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4,<8", "ruff>=0.5"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_apple_reminders"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"

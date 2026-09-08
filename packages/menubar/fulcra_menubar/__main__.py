@@ -17,6 +17,9 @@ def main() -> int:
         from fulcra_apple_notes._snapshot import main as snapshot_main
         snapshot_main(sys.argv[2:])
         return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--reminders-bridge":
+        from fulcra_apple_reminders._bridge import main as reminders_main
+        return reminders_main()
     if len(sys.argv) > 1 and sys.argv[1] in ("--collect", "--fulcra"):
         if sys.argv[1] == "--collect":
             from fulcra_collect.cli import cli

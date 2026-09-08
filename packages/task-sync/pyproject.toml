@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-task-sync"
+version = "0.1.0"
+description = "Selected-list task imports and guarded completion synchronization."
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27,<1", "PyYAML>=6,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4,<8", "ruff>=0.5", "fulcra-collect"]
+
+[tool.uv.sources]
+fulcra-collect = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_task_sync"]

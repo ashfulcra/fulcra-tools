@@ -6,7 +6,11 @@ live in the keychain (see credentials.py).
 """
 from __future__ import annotations
 
+import fcntl
 import os
+import tempfile
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,6 +53,13 @@ class Config:
     # Config rather than nested under plugin_settings because the web server
     # is part of the daemon, not a plugin.
     web_port: int = DEFAULT_WEB_PORT
+    plugin_epochs: dict[str, str] = field(default_factory=dict)
+    _rotated_epochs: set[str] = field(default_factory=set, repr=False)
+
+    def rotate_plugin_epoch(self, plugin_id: str) -> None:
+        """Invalidate pending work after a credential or configuration transition."""
+        self.plugin_epochs[plugin_id] = uuid.uuid4().hex
+        self._rotated_epochs.add(plugin_id)
 
     def enable(self, plugin_id: str) -> None:
         self.enabled.add(plugin_id)
@@ -61,7 +72,12 @@ class Config:
 
 
 def load() -> Config:
-    path = _config_path()
+    # Writers atomically replace the path, so this read observes one complete
+    # old or new document without blocking behind a slow save.
+    return _load_path(_config_path())
+
+
+def _load_path(path: Path) -> Config:
     if not path.exists():
         return Config()
     doc = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -79,11 +95,48 @@ def load() -> Config:
         interval_overrides=dict(doc.get("interval_overrides", {})),
         plugin_settings=dict(doc.get("plugin_settings", {})),
         web_port=web_port,
+        plugin_epochs=dict(doc.get("plugin_epochs", {})),
     )
+
+
+@contextmanager
+def _save_lock(path: Path):
+    # Keep this inode permanently: unlinking a lock file lets overlapping writers
+    # acquire different locks. The owner-private directory and file cover every
+    # process saving this config, including CLI and daemon credential updates.
+    fd = os.open(path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        # Failed writes/replacements must retain the old file and not leave
+        # source settings in a temporary file. Successful replace removed it.
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def save(cfg: Config) -> None:
     path = _config_path()
+    with _save_lock(path):
+        _save_locked(cfg, path)
+
+
+def _save_locked(cfg: Config, path: Path) -> None:
     # Read the existing document to preserve any comments and custom
     # sections the user may have added. If the file doesn't exist yet,
     # start from an empty tomlkit document.
@@ -92,6 +145,18 @@ def save(cfg: Config) -> None:
     else:
         doc = tomlkit.document()
 
+    old_enabled = set(doc.get("enabled", []))
+    old_settings = dict(doc.get("plugin_settings", {}))
+    epochs = dict(doc.get("plugin_epochs", {}))
+    # A long-lived daemon Config may predate a credential change. Only
+    # explicit rotations may replace the newer value already on disk.
+    for plugin_id in cfg._rotated_epochs:
+        epochs[plugin_id] = cfg.plugin_epochs[plugin_id]
+    for plugin_id in old_enabled | cfg.enabled | set(old_settings) | set(cfg.plugin_settings):
+        if ((plugin_id in old_enabled) != (plugin_id in cfg.enabled)
+                or old_settings.get(plugin_id) != cfg.plugin_settings.get(plugin_id)):
+            epochs[plugin_id] = uuid.uuid4().hex
+    doc["plugin_epochs"] = epochs
     doc["enabled"] = sorted(cfg.enabled)
     doc["interval_overrides"] = cfg.interval_overrides
     doc["plugin_settings"] = cfg.plugin_settings
@@ -107,4 +172,15 @@ def save(cfg: Config) -> None:
             doc["daemon"] = daemon_table
         daemon_table["web_port"] = cfg.web_port
 
-    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    _atomic_write(path, tomlkit.dumps(doc))
+    cfg.plugin_epochs = epochs
+    cfg._rotated_epochs.clear()
+
+
+def invalidate_plugin_work(plugin_id: str) -> None:
+    """Persist a credential transition even when settings have not changed."""
+    path = _config_path()
+    with _save_lock(path):
+        cfg = _load_path(path)
+        cfg.rotate_plugin_epoch(plugin_id)
+        _save_locked(cfg, path)

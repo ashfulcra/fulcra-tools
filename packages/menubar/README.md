@@ -11,7 +11,7 @@ from there. Click its menu-bar icon and choose **Install & start daemon** if
 prompted. Open the dashboard and sign in with Fulcra.
 
 The beta is signed, notarized, and built for Apple silicon. It includes its
-Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes. Chrome
+Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. Chrome
 Attention is an optional extension in the disk image with separate setup.
 [Release details and plugin status](../../docs/collect.md#plugin-status).
 
@@ -37,6 +37,13 @@ The pure-model layer (daemon_client, model, polling, notifications)
 runs everywhere — Linux CI included. The view layer (status_item,
 popover, preferences) is exercised by manual smoke; see the checklist
 below.
+
+## Task plugins in 0.1.2
+
+The 0.1.2 app includes [Apple Reminders](../apple-reminders/README.md)
+[Todoist](../todoist/README.md), and the shared task sync engine. It declares both macOS Reminders usage strings
+and dispatches `--reminders-bridge` before importing the GUI. These additions require 0.1.2 or later. Native permission is requested
+only from the setup wizard's **Allow access** button.
 
 ## Build the .app
 

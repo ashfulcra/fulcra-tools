@@ -7,7 +7,7 @@ This is an unofficial, unsupported project.
 
 ## Install Collect on your Mac
 
-**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.1-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.2-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
 1. Open the download and drag **Fulcra Collect** into **Applications**.
 2. Open it from Applications and click its icon in the menu bar.
@@ -33,9 +33,10 @@ Apple Notes copies notes and available attachments to your Fulcra vault.
 Normal setup leaves the originals alone. Advanced writeback is experimental
 and has separate controls.
 
-Apple Reminders sync is in development; Todoist follows it. The intended
-behavior is list/project selection and completion in either direction. Neither
-plugin is in the current installer.
+Collect 0.1.2 adds [Apple Reminders](packages/apple-reminders/README.md)
+and [Todoist](packages/todoist/README.md). Choose the lists or projects to sync;
+ordinary task completion syncs in either direction. Both start in preview mode.
+Recurring tasks must be completed in their source app.
 
 ## Why you'd want this
 
@@ -145,7 +146,7 @@ coordination, and tools for building on that context:
 | **coord** | The agent-coordination layer: judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenCode, OpenClaw, CI — coordinate durable work over one Fulcra account: events on typed records ([bus v3](docs/coord/BUS-V3.md)), documents on Fulcra Files, role-based identity with leases, and a review handshake whose obligation persists until the verdict file exists (no ack can clear it). The `fulcra-agent-*` skills under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [bus v3](docs/coord/BUS-V3.md) · [`README.md`](packages/coord-engine/README.md) · [design](docs/coord-DESIGN.md) |
 | **coord tracker bridge** *(alpha)* | Mirrors coord work into external trackers without making the tracker authoritative: normalized snapshots, full source-identity state, versioned policy, pure diff planning, `coord-engine --json` and strict read-only teams sources, plus a paginated/retrying Linear adapter with explicit `plan` / `apply-resources` / `sync` phases. | [`README.md`](packages/coord-tracker-bridge/README.md) |
 | **ATC** *(alpha)* | Air-traffic control for a fleet running on subscription caps — capability-matched model routing. A versioned capability map ships in the engine (current Claude/GPT/Gemini/Grok lineups + the local OSS tier); `coord-engine route <team> --needs code,long-context` ranks the cheapest capable model on the account with headroom, agents log usage and outcomes after each dispatch (`usage log`), and three bad outcomes demote a model for that kind of work. `coord-engine atc init` gets a solo operator from zero to routed dispatch in one command — no team concepts required; `atc report` and `atc dash` (localhost) show the tier mix and estimated frontier-cap days preserved. | [`SKILL.md`](skills/fulcra-agent-atc/SKILL.md) · [design](docs/coord/atc-DESIGN.md) |
-| **Fulcra Collect** | The Mac app and background process that import notes, journals, media history, email, and sensor readings into Fulcra. Plugins share scheduling, Keychain storage, and a setup dashboard. Apple Notes is included in the current beta; Reminders and Todoist are still in development. | [install](docs/collect.md#get-started-new-user) · [plugin status](docs/collect.md#plugin-status) · [daemon](packages/collect/README.md) |
+| **Fulcra Collect** | The Mac app and background process that import notes, journals, media history, email, and sensor readings into Fulcra. Plugins share scheduling, Keychain storage, and a setup dashboard. Apple Notes, selected Reminders lists, and selected Todoist projects are included in the current beta. | [install](docs/collect.md#get-started-new-user) · [plugin status](docs/collect.md#plugin-status) · [daemon](packages/collect/README.md) |
 | **Fulcra Attention** | A Chrome (MV3) extension that captures what you read while browsing — foreground-tab attention, with title and time-on-page — and posts it directly to the Fulcra API after a browser sign-in. No daemon involved: the Python half of the package is just the Collect pointer plugin that tells you to install the extension. Three privacy tiers (param-strip, categorize, ignore) are built in. | [`README.md`](packages/attention/README.md) |
 | **Fulcra Continuity** | Turns a long-running agent task into a structured checkpoint (objective, decisions, artifacts, open questions, next actions) that another session or agent can resume from without guessing. A standalone library + CLI (`checkpoint` / `resume`) that pairs with coord without depending on it: `coord-engine continuity resume/snapshot/park` read and write the same shape, and the [continuity skill](skills/fulcra-agent-continuity/SKILL.md) carries the cross-harness lifecycle contract (resume on wake, snapshot on change, park before context loss) with installers for each harness. | [`README.md`](packages/fulcra-continuity/README.md) |
 | **Durable agent state** | The pattern that lets agents survive their machines: ephemeral compute (rollback-prone cloud containers, sleepy desktops) plus a durable per-agent stash on the Fulcra File Store — local disk is a cache, the store is the truth. Restore on wake, push on change, and a fail-closed secrets rule: nothing credential-shaped ever enters a shared team path (secrets ride in environment config or the OS keychain instead). The `coord-engine stash` verb (push/pull/list) is the deterministic bookkeeping: a per-file sha256 manifest, loud checksum-drift detection on restore, and the fail-closed secrets guard enforced at push; plain `fulcra-api file` commands remain the no-engine fallback. | [`SKILL.md`](skills/fulcra-agent-durable-state/SKILL.md) |

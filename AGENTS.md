@@ -34,6 +34,19 @@ baseline. Reconciliation reads tracked vault bodies so edits near a sync are not
 missed; retain the complete internal change list and cap only report presentation.
 Partial AppleScript write failures must produce a failed report and failed run.
 
+**Selected-list task sync:** Reminders uses EventKit, with separate read-only
+permission checks and explicit permission requests. No lists are selected by
+default. Import and source completion must re-check live selection, enabled
+state, and preview mode before each write. Task status is `open` or `resolved`;
+identity and generation fields bind a completion to the source task. Read all
+unseen Fulcra file versions so a concurrent bot edit survives an importer write.
+Missing source tasks are never completion evidence. Recurring writeback is
+unsupported until the provider can atomically protect the intended occurrence.
+Capture `RunContext.config_epoch` with settings and pass it into the task engine;
+check it in the live selection callback. Configuration and credential transitions
+must invalidate pending journals even when no sync runs between the changes.
+Save configuration under a cross-process lock and publish it atomically.
+
 ## Public repository privacy
 
 All packages, plugins, skills, examples, and release artifacts must be reusable
