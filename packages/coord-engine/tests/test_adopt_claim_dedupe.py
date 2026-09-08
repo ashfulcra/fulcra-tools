@@ -111,7 +111,7 @@ def test_a_totally_failed_send_leaves_NO_marker(tmp_path):
 
 
 def test_failed_authority_checked_send_cannot_bypass_it_with_a_raw_record(tmp_path):
-    """A failed canonical send may mean unreadable authority or a version fence.
+    """A failed canonical send may mean unreadable channel configuration.
 
     Sending to a cached channel would bypass that refusal and a marker would
     suppress the later retry. Even a working raw-record CLI must stay unused.

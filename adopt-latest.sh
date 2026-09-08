@@ -571,8 +571,8 @@ echo "---       proof of no work, and \`tell\` dispatch does not appear on the e
 # slug says `-steps<N>` and a reader can tell a clean adoption from a rescued one.
 #
 # The engine's bus-v3 sender resolves the team's current channel from its
-# authority and applies its writer checks. Do not fall back to a raw record:
-# an authority or version-fence refusal must not be bypassed with a cached ID.
+# configuration. Do not fall back to a raw record: a failed or refused send
+# must not be bypassed with a cached channel ID.
 SLUG="adopted-${VER}-${A}-rc${rc}"
 [ "$STEP_FAILS" -gt 0 ] && SLUG="${SLUG}-steps${STEP_FAILS}"
 
