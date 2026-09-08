@@ -1,47 +1,54 @@
 # Fulcra Tools
 
-Tools for importing context into Fulcra and coordinating agents through shared,
-user-owned records and files. This is an unofficial, unsupported project.
+Collect brings notes, journals, media history, and other context into your
+[Fulcra](https://fulcradynamics.com) account. The other tools in this repo let
+agents share work, review changes, and pick up where a previous session stopped.
+This is an unofficial, unsupported project.
 
-**[Install Collect for Mac and set up Apple Notes](docs/collect.md#get-started-new-user)**
+## Install Collect on your Mac
 
-Collect imports data from supported sources into your Fulcra account. The
-coordination tools let agents exchange work, record decisions, review changes,
-and resume tasks across supported platforms. Each team configures its own
-identities, storage, credentials, and notification preferences.
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.1-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+
+1. Open the download and drag **Fulcra Collect** into **Applications**.
+2. Open it from Applications and click its icon in the menu bar.
+3. Choose **Install & start daemon** if prompted. This starts the background
+   process that runs your imports. Open the dashboard and **Sign in with Fulcra**.
+4. Choose a source and follow **Set up**.
+
+The [Collect guide](docs/collect.md#get-started-new-user) covers Mac requirements,
+what the installer includes, and setup. You don't need Terminal, Python, or
+Homebrew. If you want your notes, start with
+[Apple Notes](packages/apple-notes/README.md): grant access, verify it, then
+choose **Enable & start sync**. Opening the setup wizard does not start a Notes import.
+
+## Collect and plugins today
+
+The Mac beta includes Apple Notes, Day One, Gmail, PurpleAir, and the media
+importers. Some read local apps, some poll a service, and some need an export
+file. The [source guide](docs/how-do-i-get-my-data.md) explains what each one
+needs; [the Collect guide](docs/collect.md#plugin-status) distinguishes the
+released installer from work in progress.
+
+Apple Notes copies notes and available attachments to your Fulcra vault.
+Normal setup leaves the originals alone. Advanced writeback is experimental
+and has separate controls.
+
+Apple Reminders sync is in development; Todoist follows it. The intended
+behavior is list/project selection and completion in either direction. Neither
+plugin is in the current installer.
 
 ## Why you'd want this
 
-[Fulcra](https://fulcradynamics.com) is the user-owned context backend for AI
-agents: one place where every agent you use — any vendor, any harness — can
-know you, know what's happening in your world, work with your other agents,
-and get more helpful over time, because the context they build outlives every
-session, container, and model switch. Context, not models, makes the agent.
-Rent the reasoning; own the context.
+An agent can do more useful work when it has the notes, records, and decisions
+that explain what you're doing. Collect imports that material into your account,
+where authorized agents can read it through Fulcra. Each source still needs its
+own setup and permissions.
 
-The packages in this repo let agents hand each other work, review changes,
-survive container resets, and record what happened through a Fulcra account.
-The coordination protocol uses Fulcra records and files without a separate
-broker or coordination server.
-
-Two layers do the work, and they're designed as a pair:
-
-- **coord** is how agents work *with each other*: a shared bus of typed
-  events and versioned documents — tasks, roles, reviews, presence — so any
-  agent can see what the fleet owes and is owed.
-- **continuity** is how any one agent's work survives *itself*: park a
-  session into a checkpoint — objective, decisions, open questions, next
-  actions — and resume it later in a different session, on a different
-  machine, on a different model or vendor entirely. Parking never closes out
-  the agent's obligations on the bus; resuming re-reads them. So the
-  checkpoint carries the agent's own thread, coord carries what it owes
-  others, and nothing falls between the two.
-
-Together they're why the fleet doesn't start over: an agent that stops
-mid-task parks; whoever picks it up — the same agent tomorrow, a different
-one on another platform, after a container reset — resumes from the
-checkpoint and the bus, not from zero. Everything in this repo is
-inspectable, and that loop is the thing to inspect first.
+The coordination tools address what happens next. **coord** tracks shared tasks,
+roles, reviews, and replies in Fulcra records and files. **continuity** saves an
+agent's objective, decisions, open questions, and next actions so another session
+can resume the work. The checkpoint holds the working context; the bus holds the
+obligations to other agents. Resuming checks both.
 
 ## The demo: point two agents at this repo
 
@@ -130,17 +137,15 @@ between reading about Fulcra and running it on your own context.
 
 ## The packages
 
-Ordered from the coordination layer your agents run on, down to the data it
-works on top of. **coord** is the killer feature; **Collect** shows the promise
-underneath it — give agents context, not credentials: your agents work from
-the real-world data you stream in, without ever logging in as you:
+Collect handles imports. The other packages provide shared storage, agent
+coordination, and tools for building on that context:
 
 | Project | What it is | Start here |
 |---|---|---|
 | **coord** | The agent-coordination layer: judgment stays in prose (skills), bookkeeping is deterministic stdlib-only code ([`packages/coord-engine`](packages/coord-engine)). Independent agents — Claude Code, Codex, OpenCode, OpenClaw, CI — coordinate durable work over one Fulcra account: events on typed records ([bus v3](docs/coord/BUS-V3.md)), documents on Fulcra Files, role-based identity with leases, and a review handshake whose obligation persists until the verdict file exists (no ack can clear it). The `fulcra-agent-*` skills under [`skills/`](skills) are how an agent actually uses it. | [quickstart](docs/coord/GET-ON-THE-BUS.md) (from zero) · [bus v3](docs/coord/BUS-V3.md) · [`README.md`](packages/coord-engine/README.md) · [design](docs/coord-DESIGN.md) |
 | **coord tracker bridge** *(alpha)* | Mirrors coord work into external trackers without making the tracker authoritative: normalized snapshots, full source-identity state, versioned policy, pure diff planning, `coord-engine --json` and strict read-only teams sources, plus a paginated/retrying Linear adapter with explicit `plan` / `apply-resources` / `sync` phases. | [`README.md`](packages/coord-tracker-bridge/README.md) |
 | **ATC** *(alpha)* | Air-traffic control for a fleet running on subscription caps — capability-matched model routing. A versioned capability map ships in the engine (current Claude/GPT/Gemini/Grok lineups + the local OSS tier); `coord-engine route <team> --needs code,long-context` ranks the cheapest capable model on the account with headroom, agents log usage and outcomes after each dispatch (`usage log`), and three bad outcomes demote a model for that kind of work. `coord-engine atc init` gets a solo operator from zero to routed dispatch in one command — no team concepts required; `atc report` and `atc dash` (localhost) show the tier mix and estimated frontier-cap days preserved. | [`SKILL.md`](skills/fulcra-agent-atc/SKILL.md) · [design](docs/coord/atc-DESIGN.md) |
-| **Fulcra Collect** | A local daemon that imports your real-world data streams into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md)) hosts every importer plugin, runs them on schedule in worker subprocesses, stores secrets in the OS keychain, and serves the onboarding wizard + dashboard at `127.0.0.1:9292` ([`packages/web-ui`](packages/web-ui/README.md)). [`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the shared API client + ingest pipeline every importer builds against; and [`packages/dayone`](packages/dayone/README.md), [`packages/csv-importer`](packages/csv-importer/README.md), and [`packages/media-helpers`](packages/media-helpers/README.md) are data-source importers (Day One journals, arbitrary CSVs, and watched/listened/read history from ~13 services). | [`docs/collect.md`](docs/collect.md) |
+| **Fulcra Collect** | The Mac app and background process that import notes, journals, media history, email, and sensor readings into Fulcra. Plugins share scheduling, Keychain storage, and a setup dashboard. Apple Notes is included in the current beta; Reminders and Todoist are still in development. | [install](docs/collect.md#get-started-new-user) · [plugin status](docs/collect.md#plugin-status) · [daemon](packages/collect/README.md) |
 | **Fulcra Attention** | A Chrome (MV3) extension that captures what you read while browsing — foreground-tab attention, with title and time-on-page — and posts it directly to the Fulcra API after a browser sign-in. No daemon involved: the Python half of the package is just the Collect pointer plugin that tells you to install the extension. Three privacy tiers (param-strip, categorize, ignore) are built in. | [`README.md`](packages/attention/README.md) |
 | **Fulcra Continuity** | Turns a long-running agent task into a structured checkpoint (objective, decisions, artifacts, open questions, next actions) that another session or agent can resume from without guessing. A standalone library + CLI (`checkpoint` / `resume`) that pairs with coord without depending on it: `coord-engine continuity resume/snapshot/park` read and write the same shape, and the [continuity skill](skills/fulcra-agent-continuity/SKILL.md) carries the cross-harness lifecycle contract (resume on wake, snapshot on change, park before context loss) with installers for each harness. | [`README.md`](packages/fulcra-continuity/README.md) |
 | **Durable agent state** | The pattern that lets agents survive their machines: ephemeral compute (rollback-prone cloud containers, sleepy desktops) plus a durable per-agent stash on the Fulcra File Store — local disk is a cache, the store is the truth. Restore on wake, push on change, and a fail-closed secrets rule: nothing credential-shaped ever enters a shared team path (secrets ride in environment config or the OS keychain instead). The `coord-engine stash` verb (push/pull/list) is the deterministic bookkeeping: a per-file sha256 manifest, loud checksum-drift detection on restore, and the fail-closed secrets guard enforced at push; plain `fulcra-api file` commands remain the no-engine fallback. | [`SKILL.md`](skills/fulcra-agent-durable-state/SKILL.md) |
@@ -156,8 +161,9 @@ coord.
 
 ## Getting started
 
-Everything here sits on a Fulcra account and the `fulcra` CLI, which covers
-auth, data queries, custom data types, tags, and files:
+For Collect on a Mac, use the [installer above](#install-collect-on-your-mac).
+The following commands are for contributors and people installing the standalone
+agent tools. Those tools use a Fulcra account and the `fulcra` CLI:
 
 ```bash
 uv tool install fulcra-api   # installs the `fulcra` CLI
@@ -220,6 +226,17 @@ backend — start from the [fulcra-fde skill](skills/fulcra-fde/SKILL.md): it
 runs the whole engagement (interview → architecture → prototype → build) with
 resumable state in the user's own file store, instead of improvising a
 one-off build.
+
+## Keeping the docs current
+
+Every change to Fulcra Tools includes an update to the relevant READMEs in the
+same PR. Describe what changed, how to use it, and any limits. Update the root
+README when installation, available tools, or release status changes. Keep
+planned features clearly separate from shipped behavior.
+
+Examples and fixtures must be synthetic. Personal notes, account details, and
+local diagnostic reports belong outside the public repository. See the
+[privacy rules](docs/PRIVACY.md) before publishing code, docs, or artifacts.
 
 ## Review conventions
 

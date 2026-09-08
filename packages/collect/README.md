@@ -1,16 +1,18 @@
 # fulcra-collect
 
-For the complete system model and interoperability contract across Collect,
-Coord Engine, and the Agent Coordination Bus, start with
-[`docs/coord/SYSTEM-SPEC.md`](../../docs/coord/SYSTEM-SPEC.md).
+The background process behind Fulcra Collect. It runs imports, keeps their
+progress, and serves the setup wizard and dashboard.
 
-The **alpha Collect app**: the capture side of Fulcra — how agents know
-what's happening in their user's world — for streams no platform hands you:
-media plays, browsing attention, mail-derived signals, landing in the one
-Fulcra store you own, alongside the health/location/calendar data the
-Context App captures.
+**Using Collect?** Start with the [Mac installer and setup guide](../../docs/collect.md#get-started-new-user).
+Apple Notes is included. You do not need to install this Python package separately.
+The [plugin status](../../docs/collect.md#plugin-status) lists what's available
+and what's still being built.
 
-Mechanically, a local daemon at the centre of Fulcra's helper tools. It hosts
+The rest of this README is for contributors and source installations. The
+[system specification](../../docs/coord/SYSTEM-SPEC.md) covers the contract
+between Collect, Coord Engine, and the agent bus.
+
+The daemon hosts
 every Fulcra Collect *plugin* — the periodic importers, the long-lived
 webhook receivers, the pointer plugins — under one
 process, supervises them, exposes their state over a JSON API plus a
@@ -53,7 +55,11 @@ plumbing for free.
   installed, so the user always has a visible status indicator
   without remembering a second command.
 
-## Running it
+## Running from source
+
+The Mac installer includes the daemon, runtime, and bundled plugins. A source
+installation discovers only the plugin packages installed in its Python
+environment. Installing `packages/collect` alone does not install them all.
 
 From a checkout of this monorepo:
 
@@ -74,9 +80,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fulcra.collect.plist
 On Linux, `install` writes a `~/.config/systemd/user/fulcra-collect.service`
 unit file instead, and you'd `systemctl --user enable --now fulcra-collect`.
 
-The menubar app (when installed via `uv tool install fulcra-menubar`)
-exposes "Open at Login" as a user-friendly equivalent of the launchctl
-dance above; either path lands at the same plist.
+For the macOS UI, follow the [menubar development instructions](../menubar/README.md#run-in-dev-mode).
+The downloadable app handles background-service installation from its menu.
 
 ### CLI
 
@@ -168,12 +173,11 @@ fulcra_collect/
     service_manager.py      launchd plist / systemd unit installer
 ```
 
-`web.py` is now a 319-line orchestrator (it was 1 831 lines before
-today's split). It owns the FastAPI app construction, the auth-token
-boostrapping (`~/.config/fulcra-collect/web-token`), the Fulcra HTTP
-client factory closure, and the static-frontend mount — then hands a
-shared `RouteContext` to each `routes/*.py` module's `register()`
-function. The route modules import `httpx` through `fulcra_collect.web`
+`web.py` constructs the FastAPI app, bootstraps its local auth token
+(`~/.config/fulcra-collect/web-token`), creates the Fulcra HTTP client factory,
+and mounts the frontend. It passes a shared `RouteContext` to each
+`routes/*.py` module's `register()` function. The route modules import `httpx`
+through `fulcra_collect.web`
 deliberately so the existing `monkeypatch.setattr(web, "httpx", …)`
 test idiom keeps working.
 
@@ -203,10 +207,11 @@ plugin-isolated JSON (64 KiB per value; 256 UTF-8 bytes per key) in `state.db`.
 Use `kv_update` for a quick, side-effect-free atomic read/modify/write when
 multiple worker processes may touch the same key.
 
-`packages/dayone/` is the smallest reference plugin —
-`fulcra_dayone/collect_plugin.py` defines its `PLUGIN` object in
-about 150 lines and exercises every part of the contract worth
-copying.
+For examples, read [Day One](../dayone/README.md) for scheduled imports and
+[Apple Notes](../apple-notes/README.md) for vault files, access checks, and an
+explicit start action. A new plugin needs its setup instructions and limitations
+in its README and the [source guide](../../docs/how-do-i-get-my-data.md) in the
+same PR.
 
 ## HTTP API surface
 
@@ -276,7 +281,6 @@ supports).
 
 ```bash
 uv run --package fulcra-collect pytest packages/collect/tests/ -q
-# → 359 passed
 ```
 
 The suite covers the daemon's request handlers, the scheduler /

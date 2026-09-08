@@ -1,7 +1,13 @@
 # Apple Notes for Fulcra Collect
 
-Copy Apple Notes and available attachments from your Mac to your Fulcra vault.
-Collect checks for changes every six hours. Your originals remain in Apple Notes.
+Your notes can be useful to an agent without moving your writing out of Apple
+Notes. This plugin copies notes and available attachments from your Mac to your
+Fulcra vault and checks for changes every six hours. Normal import leaves the
+originals unchanged.
+
+Apple Notes ships in the [current Mac beta](../../docs/collect.md#plugin-status).
+The setup below enables one-way import. Experimental writeback has separate
+controls and is described under [Advanced modes](#advanced-modes).
 
 ## Set up
 
@@ -17,6 +23,8 @@ Collect checks for changes every six hours. Your originals remain in Apple Notes
 Find your copies in `vault/notes/apple/` in your Fulcra account. Large libraries
 can need several runs. Each run saves progress before stopping; **Run Now** resumes.
 Apple Notes is included in the Mac app; no separate plugin installation is needed.
+The wizard's **Next**, **Back**, and **Skip** buttons do not start an import.
+Only the explicit enable action starts the chosen sync or preview mode.
 
 ## What is preserved
 
