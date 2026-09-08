@@ -1,7 +1,9 @@
 # Fulcra Continuity
 
 Fulcra Continuity turns a long-running agent task into a structured checkpoint
-that another session or agent can resume from without guessing.
+that another session or agent can resume from without guessing. The standalone
+CLI writes local JSON and Markdown files; it needs Python 3.11+, no runtime
+dependencies, and no Fulcra account or Collect installation.
 
 The first use case is the **Context Cliff Rescue** demo: before compaction or a
 handoff, capture the task objective, decisions, artifacts, open questions, next
@@ -9,21 +11,32 @@ actions, and memory writes. After compaction, render a resume brief that gives
 the next session an inspectable operating state.
 
 Fulcra Continuity pairs with the current coordination layer without depending
-on it: **`coord-engine`** is the operational ledger for task lifecycle
+on it: **[coord-engine](../coord-engine/README.md)** is the operational ledger for task lifecycle
 (`coord-engine task …`), and `coord-engine continuity snapshot|checkpoint|park|resume`
-is the engine-native way most agents carry session state today. This package
-stores the durable "how to pick this work back up" snapshot for setups that
-want it as a standalone library. When both are used, checkpoints can carry the
-same workstream, agent, and task identity so another session can find the bus
-task and import the latest same-agent continuity snapshot. For cross-agent
-handoff, include the producer's checkpoint path or JSON as a portable artifact
-so the receiver can load it directly before writing its own pickup checkpoint.
+is its engine-native session-state interface. This package provides a separate
+checkpoint schema and renderer for standalone use. Remote persistence and
+automatic lifecycle hooks belong to the surrounding integration, not this CLI.
+
+When using both systems, carry the coord task and agent identities as metadata.
+Resume a standalone checkpoint by passing its path to `fulcra-continuity resume`;
+the CLI does not discover a latest checkpoint or import engine snapshots.
+For cross-agent handoff, supply the checkpoint JSON or an accessible path so the
+receiver can read it before writing its own pickup checkpoint.
 
 **Legacy note:** the original pairing target, `fulcra-coord`, was the retired
 first-generation layer. Its implementation and handoff model remain available
 in git history; don't build new work against it.
 
-## Install in the workspace
+## Install
+
+From the repository root:
+
+```bash
+uv tool install ./packages/fulcra-continuity
+fulcra-continuity --help
+```
+
+Or run directly in the workspace:
 
 ```bash
 uv run --package fulcra-continuity fulcra-continuity --help
@@ -34,17 +47,25 @@ uv run --package fulcra-continuity fulcra-continuity --help
 ```bash
 uv run --package fulcra-continuity fulcra-continuity checkpoint \
   --task-id TASK-123 \
-  --title "Migrate daily check-ins" \
-  --objective "Move spreadsheet parsing onto coord without noise" \
-  --workstream-id openclaw:discord:main-comms \
-  --agent-id arc \
+  --title "Migrate the example parser" \
+  --objective "Replace the example parser while preserving its output" \
+  --workstream-id example-project:parser \
+  --agent-id agent-a \
   --coord-task-id TASK-123 \
-  --coord-owner-agent openclaw:discord:main-comms \
-  --decision "Use lifecycle updates instead of channel broadcasts" \
-  --artifact packages/coord-engine/README.md \
+  --coord-owner-agent agent-a \
+  --decision "Keep the existing output format" \
+  --artifact "repo=OWNER/REPO ref=BRANCH path=docs/parser.md" \
+  --open-question "Which legacy inputs still need coverage?" \
+  --session-context "The replacement is designed; implementation has not started" \
   --next "Audit current parser inputs" \
   --out /tmp/checkpoint.json
 ```
+
+`--coord-task-id` and `--coord-owner-agent` are optional: omit them for a
+standalone task. Repeat `--decision`, `--artifact`, `--open-question`, `--next`,
+and `--memory` to carry more context. `--resume-brief PATH` writes a Markdown
+brief alongside the JSON. Memory writes are recorded intentions; this command
+does not update a separate memory store.
 
 ## Coord pairing model
 
@@ -89,3 +110,11 @@ uv run --package fulcra-continuity fulcra-continuity demo --out-dir /tmp/context
 ```
 
 This writes a sample checkpoint JSON and a human-readable resume brief.
+
+## Test
+
+From the repository root:
+
+```bash
+uv run --package fulcra-continuity --extra dev --no-editable pytest packages/fulcra-continuity/tests -q
+```

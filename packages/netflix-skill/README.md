@@ -11,15 +11,17 @@ import script that any agent runs with `uv run`. The Python package wrapper
 exists so the monorepo's pytest tooling covers the script; end users never
 install it.
 
-Status: **both halves are built and tested** — the importer CLI and the
-conversational `SKILL.md` (onboard → export → import → share) have landed.
-The one remaining gap is cosmetic: the SHARE state still walks the user
-through Context Web's manual sharing UI by hand, because `fulcra-api-python`
-has no share-create command yet. When upstream PR #47 lands, that manual
-walkthrough swaps for a CLI call — see the `TODO(share-cli)` marker in
-[skills/fulcra-netflix/SKILL.md](skills/fulcra-netflix/SKILL.md). See
-[docs/design.md](docs/design.md) for the full spec (flow, record schema,
-error handling, what's deferred).
+The importer and conversation flow are implemented and covered by synthetic
+parser, wire, API, and CLI tests. This is an experimental standalone skill;
+Collect is not required.
+
+**Sharing is manual and broader than Netflix.** The checked-in skill walks the
+user through Context Web, where its described share includes all annotation data,
+not just Watched records. The user chooses the recipient and whether to share at
+all. The `TODO(share-cli)` marks an unimplemented replacement for that walkthrough;
+it is not evidence of current upstream CLI availability. Read the
+[skill's sharing step](skills/fulcra-netflix/SKILL.md#state-5--share) before using it.
+See [docs/design.md](docs/design.md) for the original design and deferred work.
 
 ## Why this exists
 
@@ -46,13 +48,20 @@ Both the importer script (parsing, wire encoding, auth, batch POST, readback
 verification, the CLI entry point below) and the conversational `SKILL.md`
 (the onboard → export → import → share state machine that walks a
 brand-new user through getting a CSV and invoking this script) are built.
-The only deferred piece is the CLI-share swap noted above.
+Sharing retains the manual flow and scope limitation described above.
 
 ## Running the importer
 
+From the repository root (Python 3.11+ and `uv`):
+
 ```sh
-uv run skills/fulcra-netflix/scripts/netflix_import.py <csv-path> [--json] [--check-only] [--no-verify]
+uv run packages/netflix-skill/skills/fulcra-netflix/scripts/netflix_import.py viewing-history.csv --check-only --json
+# After reviewing the parsed result, remove --check-only to import.
 ```
+
+When installing only the [skill folder](skills/fulcra-netflix/), run
+`scripts/netflix_import.py` relative to that folder. Load
+[SKILL.md](skills/fulcra-netflix/SKILL.md) in your agent for the guided workflow.
 
 The script is a self-contained PEP 723 file — `uv run` fetches its one
 dependency (`httpx`) automatically, no separate install step needed. Both
@@ -168,7 +177,7 @@ any failure, with `errors[0].stage` telling the caller which phase broke.
 ## Testing
 
 ```sh
-uv run --package fulcra-netflix-skill pytest packages/netflix-skill/tests/ -q
+uv run --package fulcra-netflix-skill --extra dev pytest packages/netflix-skill/tests/ -q
 ```
 
 The suite covers: parsing (both variants, including row-context

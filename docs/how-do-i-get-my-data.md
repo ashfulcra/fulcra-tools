@@ -1,10 +1,12 @@
 # How do I get my data into Fulcra?
 
-This page lists every data source Fulcra Collect can pull from today and
-the pathways that exist for each one. Use it as a lookup: find the source
+This page lists the data sources covered by this repo's connectors and importers,
+with pathways for each one. Use it as a lookup: find the source
 you care about, then pick the pathway that matches your setup.
 
-New to Collect? [Install the Mac app](collect.md#get-started-new-user) first.
+For a dashboard and scheduled imports, [install Collect](collect.md#get-started-new-user).
+Some importers also run as standalone commands; browser extensions send directly
+to Fulcra. The [package index](../README.md#package-index) links each tool's setup.
 [Plugin status](collect.md#plugin-status) distinguishes the current installer
 from unfinished work. Apple Notes is included; Reminders and Todoist are not
 available yet.

@@ -1,7 +1,13 @@
 # fulcra-collect
 
-The background process behind Fulcra Collect. It runs imports, keeps their
-progress, and serves the setup wizard and dashboard.
+The background process behind Fulcra Collect. It runs local and source-specific
+connectors, keeps their progress, and serves the setup wizard and dashboard.
+Use it when a source needs something running on your machine. Fulcra's API,
+agent tools, and the Attention browser extension can work without it.
+
+This is part of the [unsupported, vibe-coded monorepo](../../README.md), put
+together by Fulcra's lawyer. A scheduler and a settings page make these
+experiments easier to run; they don't turn them into a support commitment.
 
 **Using Collect?** Start with the [Mac installer and setup guide](../../docs/collect.md#get-started-new-user).
 Apple Notes is included. You do not need to install this Python package separately.
@@ -19,13 +25,11 @@ process, supervises them, exposes their state over a JSON API plus a
 web UI on `127.0.0.1:9292`, and stores per-plugin state in a single
 SQLite database at `~/.config/fulcra-collect/state.db`.
 
-The daemon, the menubar app (`packages/menubar`), the web UI
-(`packages/web-ui`), and every helper that publishes data to Fulcra
-(`packages/media-helpers`, `packages/attention`, `packages/dayone`,
-…) all sit on this package. Anything new that wants to import a data
-source into a Fulcra account becomes a `fulcra-collect` plugin and gets
-the scheduler, credential storage, dashboard, wizard, and OAuth
-plumbing for free.
+The [menubar app](../menubar/README.md) and [web UI](../web-ui/README.md)
+control this daemon. Packages such as [media-helpers](../media-helpers/README.md)
+and [Day One](../dayone/README.md) expose plugin entry points for it; some also
+have standalone CLIs. A connector can adopt the plugin contract to reuse
+scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
 
 ## What it does
 
@@ -36,8 +40,8 @@ plumbing for free.
   (a long-running process the daemon supervises with restart-back-off),
   or `manual` (only fires when the user clicks Run).
 * **Runs them in worker subprocesses.** Each scheduled or manual run
-  spawns a fresh `fulcra-collect _worker <id>` process, so a crashing
-  importer can never take down the hub. The worker streams structured
+  spawns a fresh `fulcra-collect _worker <id>` process, isolating ordinary
+  importer crashes from the daemon. The worker streams structured
   progress and annotation events back to the parent over a pipe; the
   parent records them in the unified state store and in an in-memory
   ring buffer that powers the dashboard's "Recently" feed.
@@ -61,24 +65,32 @@ The Mac installer includes the daemon, runtime, and bundled plugins. A source
 installation discovers only the plugin packages installed in its Python
 environment. Installing `packages/collect` alone does not install them all.
 
-From a checkout of this monorepo:
+From the repository root, first install the workspace dependencies. On macOS:
 
 ```bash
-uv run --directory packages/collect fulcra-collect daemon
+uv sync --all-packages --all-extras
+uv run --all-packages --all-extras fulcra-collect daemon
 # → web UI at http://127.0.0.1:9292
 ```
 
-Or install it as a standalone tool plus a launchd user agent that
-brings it up on login:
+On Linux, use `uv sync --all-packages` and
+`uv run --all-packages fulcra-collect daemon`; the macOS extras require Apple
+frameworks. See [source setup and testing](../../docs/TESTING.md) for details.
+
+For a macOS login service backed by this checkout's environment:
 
 ```bash
-uv tool install --force --editable packages/collect
-fulcra-collect install         # writes ~/Library/LaunchAgents/com.fulcra.collect.plist
+uv run --all-packages --all-extras fulcra-collect install
+# Writes ~/Library/LaunchAgents/com.fulcra.collect.plist.
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fulcra.collect.plist
 ```
 
-On Linux, `install` writes a `~/.config/systemd/user/fulcra-collect.service`
-unit file instead, and you'd `systemctl --user enable --now fulcra-collect`.
+On Linux, `uv run --all-packages fulcra-collect install` writes
+`~/.config/systemd/user/fulcra-collect.service`; start it with
+`systemctl --user enable --now fulcra-collect`. Keep the checkout and its
+environment in place while the service uses them. A bare `uv tool install
+packages/collect` does not resolve this monorepo's sibling packages or install
+the connector roster.
 
 For the macOS UI, follow the [menubar development instructions](../menubar/README.md#run-in-dev-mode).
 The downloadable app handles background-service installation from its menu.
@@ -89,6 +101,7 @@ The downloadable app handles background-service installation from its menu.
 fulcra-collect daemon                       run the hub in the foreground
 fulcra-collect install                      install the launchd/systemd user agent
 fulcra-collect status                       list every plugin: kind, enabled, last run
+fulcra-collect doctor                       diagnose local installation and auth
 fulcra-collect enable  <plugin-id>          enable a plugin
 fulcra-collect disable <plugin-id>          disable it
 fulcra-collect run     <plugin-id>          trigger one run now (via the running daemon)
@@ -120,9 +133,11 @@ of those writes succeeds silently and then is never read by anything.
 $ fulcra-collect set-credential purpleair api_key   # prompts, hidden
 $ fulcra-collect set-setting purpleair mode api
 purpleair: mode = 'api'
-$ fulcra-collect set-setting purpleair sensor_index 142559
-purpleair: sensor_index = '142559'
+$ fulcra-collect set-setting purpleair sensor_index 123456
+purpleair: sensor_index = '123456'
 ```
+
+The sensor number above is synthetic; use your own sensor's index.
 
 ## Module layout
 
@@ -215,10 +230,12 @@ same PR.
 
 ## HTTP API surface
 
-All routes except the OAuth callback require a bearer token from
-`~/.config/fulcra-collect/web-token` (seeded into a cookie by the
-HTML root). Grouped by concern; see `routes/*.py` for the exact
-shapes.
+Protected JSON routes require a bearer token from
+`~/.config/fulcra-collect/web-token`, seeded into a cookie by the HTML root.
+The frontend copies that local token into its Authorization header. It is
+separate from the Fulcra account token. HTML/static resources and OAuth
+callbacks have their own access paths; see [web.py](fulcra_collect/web.py) and
+[routes/](fulcra_collect/routes/) for exact guards and request shapes.
 
 * **Status / version** (`routes/status.py`) — `GET /api/status`,
   `GET /api/version`, `POST /api/reload`.
@@ -233,8 +250,8 @@ shapes.
   bearer token, probe the `fulcra` CLI as a fallback source.
 * **OAuth** (`routes/oauth.py`) — `POST /api/oauth/{plugin_id}/start`
   and `GET /api/oauth/{plugin_id}/callback`. PKCE state lives in
-  `oauth.py`; the callback is the only unauthenticated route because
-  the provider redirects the browser to it.
+  `oauth.py`; callbacks accept the provider's browser redirect without the
+  local bearer header and validate OAuth state instead.
 * **Quick-record** (`routes/annotations.py` + `routes/activity.py`) —
   `POST /api/annotations` writes a Moment or Duration directly;
   `DELETE /api/annotations/{source_id}` writes a tombstone (Fulcra
@@ -264,23 +281,25 @@ Everything lives under `~/.config/fulcra-collect/` (override via
 | Path | Purpose |
 |---|---|
 | `config.toml`                  | Per-plugin enabled flag + interval overrides + `[daemon] web_port`. |
-| `state.db`                     | SQLite (WAL mode) — single source of truth for per-plugin run state and plugin-scoped JSON/KV. Schema migrations live in `db.py`; current version is 6. |
+| `state.db`                     | SQLite (WAL mode) — per-plugin run state, dedup claims, and plugin-scoped JSON/KV. Schema migrations and their current version live in [db.py](fulcra_collect/db.py). |
 | `control.sock`                 | Unix-domain socket the CLI talks to. |
 | `web-token`                    | Random bearer token (0600) seeded on first boot, mounted into the web UI as a cookie. |
 | `web-url`                      | The currently-bound web URL — read by the menubar and ad-hoc tools. |
-| `auth-fingerprint`             | SHA-256 prefix of the bearer token at last boot. Drives the account-switch pre-flight that invalidates cached `def_id`s when the user re-auths to a different Fulcra account. |
+| `auth-fingerprint`             | SHA-256 prefix of the stable account identity (JWT `sub`; token-based fallback for opaque tokens). Detects account changes and invalidates cached definition IDs without treating routine token refresh as an account switch. |
 | `quick_record_favorites.json`  | The user's pinned annotation defs for the menubar popover. |
 | `state/<plugin-id>.json.migrated` | Leftovers from the JSON → SQLite migration in `db.py:_migration_002`. Safe to delete once the soak period is over. |
 
-Credentials never touch the config directory — they go to the OS
-keychain via `credentials.py` (Keychain on macOS, Secret Service on
-Linux, Windows Credential Manager on Windows; everything `keyring`
-supports).
+Plugin credentials managed by Collect go to the OS keychain via
+[credentials.py](fulcra_collect/credentials.py) (Keychain on macOS, a configured
+`keyring` backend elsewhere). The local web token is a secret file in the
+config directory, and standalone helper CLIs may have their own credential
+files. Plugin-specific reports, uploads, and ledgers can also contain private
+data; this table is not a complete inventory of everything a connector stores.
 
 ## Tests
 
 ```bash
-uv run --package fulcra-collect pytest packages/collect/tests/ -q
+uv run --package fulcra-collect --extra dev pytest packages/collect/tests/ -q
 ```
 
 The suite covers the daemon's request handlers, the scheduler /

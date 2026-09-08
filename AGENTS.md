@@ -8,6 +8,16 @@ you can't infer from the source; the [`README.md`](README.md) tells the
 top-level story (what each package is, how to install the pieces) and this
 file does not repeat it.
 
+**Keep the monorepo framing.** These are unofficial, unsupported tools and skills
+vibe-coded by Fulcra's lawyer to work with Fulcra. Coordination and continuity
+work independently of Collect. Collect is an optional host for local/source
+connectors, not a prerequisite for using Fulcra. The root README indexes every
+package and bundled skill; retain the human introduction and verify release claims.
+
+Record each new actionable user request as an owned bus task, or update the
+matching task. Keep its scope, status, prerequisites, next action, and completion
+evidence current. A continuity checkpoint is not a substitute for the task backlog.
+
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
 fixes, plugins, installers, commands, and workflows. If a package has no README,
