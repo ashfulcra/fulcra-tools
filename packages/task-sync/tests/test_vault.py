@@ -3,7 +3,8 @@ import httpx
 import pytest
 
 
-def test_history_contract_and_signed_upload_never_forward_auth():
+@pytest.mark.parametrize('path', ['vault/tasks/todoist/a.md', '/vault/tasks/todoist/a.md'])
+def test_history_contract_and_signed_upload_never_forward_auth(path):
     from fulcra_task_sync.vault import FulcraVault
     calls = []
     def handle(request):
@@ -15,18 +16,20 @@ def test_history_contract_and_signed_upload_never_forward_auth():
         if request.url.path.endswith('/info'):
             return httpx.Response(200, json={'userid': 'synthetic-user'})
         if request.method == 'POST':
-            assert json.loads(request.content)['path'] == 'vault/tasks/todoist'
+            assert json.loads(request.content)['path'] == '/vault/tasks/todoist'
             return httpx.Response(200, json={'url': 'https://storage.example/upload', 'file': {'id': 'v2'}})
         if request.url.path.endswith('/download'):
             return httpx.Response(302, headers={'location': 'https://storage.example/download'})
         assert request.url.params['state'] == 'uploaded,archived'
+        assert request.url.params['path'] == '/vault/tasks/todoist'
+        assert request.url.params['name'] == 'a.md'
         return httpx.Response(200, json={'files': [
             {'id': 'v1', 'state': 'uploaded', 'uploaded_at': '2026-01-01T00:00:00Z'}]})
     with FulcraVault('synthetic-token', transport=httpx.MockTransport(handle)) as vault:
         assert vault.namespace == 'synthetic-user'
-        assert vault.versions('vault/tasks/todoist/a.md') == ['v1']
+        assert vault.versions(path) == ['v1']
         assert vault.read_version('v1') == 'body'
-        assert vault.write('vault/tasks/todoist/a.md', 'synthetic body') == 'v2'
+        assert vault.write(path, 'synthetic body') == 'v2'
     assert len(calls) == 6
 
 

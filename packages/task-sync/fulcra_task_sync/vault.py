@@ -89,7 +89,7 @@ class FulcraVault:
         return self._namespace
 
     def versions(self, path):
-        p = PurePosixPath(path)
+        p = PurePosixPath('/' + path.lstrip('/'))
         result = self._json('GET', '/input/v1/file_upload', params={
             'path': str(p.parent), 'name': p.name, 'state': 'uploaded,archived'})
         rows = result.get('files')
@@ -124,7 +124,7 @@ class FulcraVault:
         data = text.encode('utf-8')
         if len(data) > MAX_BYTES:
             raise VaultError('oversized task')
-        p = PurePosixPath(path)
+        p = PurePosixPath('/' + path.lstrip('/'))
         content_type = 'text/markdown; charset=utf-8'
         result = self._json('POST', '/input/v1/file_upload', json={
             'content_length': len(data), 'content_type': content_type,

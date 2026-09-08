@@ -48,7 +48,8 @@ Partial AppleScript write failures must produce a failed report and failed run.
 permission checks and explicit permission requests. No lists are selected by
 default. Import and source completion must re-check live selection, enabled
 state, and preview mode before each write. Task status is `open` or `resolved`;
-identity and generation fields bind a completion to the source task. Read all
+identity and generation fields bind a completion to the source task. Normalize task paths to absolute Fulcra paths at the Files adapter boundary
+for both history lookup and upload; the API rejects relative upload paths. Read all
 unseen Fulcra file versions so a concurrent bot edit survives an importer write.
 Missing source tasks are never completion evidence. Recurring writeback is
 unsupported until the provider can atomically protect the intended occurrence.

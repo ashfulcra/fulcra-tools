@@ -151,13 +151,17 @@ The engine cannot guarantee merging arbitrary concurrent prose edits.
 transport=None)` provides `versions(path)` (newest first), `read_version(id)`,
 `write(path,text)` (confirmed upload version ID), `namespace`, `close()` and context
 manager cleanup. Without an explicit namespace it reads `/user/v1alpha1/info` for
-the authenticated `userid`. Routes and upload shapes follow installed
+the authenticated `userid`. Routes and upload shapes follow the bundled
 `fulcra-api` **0.1.41**: `GET/POST /input/v1/file_upload` and
 `GET /input/v1/file_upload/{id}/download`. History requests include both uploaded
-and archived versions. Signed storage uploads use POST, as the installed client
+and archived versions. Signed storage uploads use POST, as the bundled client
 does, with no Fulcra Authorization header. Downloads follow at most one secure
 redirect using a separate anonymous client. TLS and bounded response bodies are
 required; raw upstream errors are not included in sync reports.
+
+The Files adapter converts task paths to absolute Fulcra paths for both version
+lookup and upload. The API requires a leading slash; a relative upload path is
+rejected, and a relative lookup does not find the existing task history.
 
 Runs stop scheduling I/O at 600 seconds (or an earlier requested deadline).
 Snapshots and the complete tracking index each cap at 10,000 tasks; collections
