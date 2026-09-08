@@ -58,7 +58,7 @@ def _run(tmp_path, *, send_ok: bool, record_ok: bool):
         f'          upload) echo "$4" >> "{tmp_path}/uploads.txt"; exit 0 ;;\n'  # $4 = DESTINATION
 
         '        esac ;;\n'
-        "  record) exit %d ;;\n" % (0 if record_ok else 1) +
+        f'  record) echo called >> "{tmp_path}/raw-records.txt"; exit %d ;;\n' % (0 if record_ok else 1) +
         "esac\nexit 0\n")
     for f in bin_dir.iterdir():
         f.chmod(0o755)
@@ -74,7 +74,7 @@ def _run(tmp_path, *, send_ok: bool, record_ok: bool):
     # environment before this block runs. They are preconditions, not
     # decoration: under `set -u` an undefined one kills the fragment at line 1
     # and every assertion below then reports the wrong cause.
-    script = (f'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\nTYPE=t\n'
+    script = (f'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\n'
               f'TEAM=acme\nCOORD=team-coordinator\nWHO=team-coordinator\n'
               f'{_claim_block()}\necho BLOCK-COMPLETED\n')
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
@@ -110,12 +110,16 @@ def test_a_totally_failed_send_leaves_NO_marker(tmp_path):
     _assert_ran_to_completion(proc)
 
 
-def test_the_fallback_path_still_records(tmp_path):
-    """The canonical send fails, the raw fallback succeeds — that IS delivery,
-    so the marker is right and the next wake should stay quiet."""
+def test_failed_authority_checked_send_cannot_bypass_it_with_a_raw_record(tmp_path):
+    """A failed canonical send may mean unreadable authority or a version fence.
+
+    Sending to a cached channel would bypass that refusal and a marker would
+    suppress the later retry. Even a working raw-record CLI must stay unused.
+    """
     proc, uploads = _run(tmp_path, send_ok=False, record_ok=True)
-    assert "RAW FALLBACK" in proc.stdout
-    assert "adopted-x" in uploads
+    assert not (tmp_path / "raw-records.txt").exists()
+    assert uploads == ""
+    assert "failed to send" in proc.stdout
     _assert_ran_to_completion(proc)
 
 
@@ -174,7 +178,7 @@ def test_an_unconfigured_host_skips_the_claim_instead_of_filing_it_nowhere(tmp_p
         f.chmod(0o755)
 
     script = (
-        'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\nTYPE=t\n'
+        'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\n'
         'TEAM=\nCOORD=\nWHO="your coordinator"\n'
         f'{_guarded_claim_block()}\necho BLOCK-COMPLETED\n')
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}

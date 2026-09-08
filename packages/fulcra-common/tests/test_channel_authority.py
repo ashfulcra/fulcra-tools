@@ -18,8 +18,9 @@ import subprocess
 import fulcra_common.annotations as annotations
 import pytest
 
+# Invented identifiers: neither value comes from a Fulcra account.
 LIVE = "00000000-0000-4000-8000-000000000102"
-SUPERSEDED = "ea49d0d3-acb7-49c6-93b6-bee81d126c92"
+SUPERSEDED = "00000000-0000-4000-8000-000000000103"
 
 
 @pytest.fixture(autouse=True)

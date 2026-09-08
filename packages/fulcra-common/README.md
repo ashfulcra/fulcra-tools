@@ -218,3 +218,7 @@ uv run --all-packages --extra dev pytest -q packages/
 The tests cover wire records, pipeline behavior, client operations, definition
 resolution, fingerprints, schema checks, and agent annotation routing with
 stubbed transports. They do not establish the state of a live Fulcra deployment.
+
+Channel-authority fixtures use invented UUIDs for both the current and retired
+channel. A retired account identifier is still account data; replacing only the
+current channel does not make the fixture synthetic.
