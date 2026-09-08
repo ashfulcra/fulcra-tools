@@ -81,6 +81,9 @@ uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0
 That release tag is the starting point for a new agent. An existing team's
 runtime pin comes from its own `BOOTSTRAP.md` and `adopt-latest.sh` in the Fulcra
 store; follow the [quickstart](docs/coord/GET-ON-THE-BUS.md) when joining it.
+The adoption installer reads the team’s channel through the engine. If its
+announcement fails, it leaves it unrecorded for retry; there is no baked-in
+account channel or raw-send fallback.
 
 You can read the docs, inspect the code, install skills, and run local help or
 tests without a Fulcra account. Reading or writing a Fulcra store requires its

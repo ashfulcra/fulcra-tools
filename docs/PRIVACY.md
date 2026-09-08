@@ -10,7 +10,9 @@ or authenticated account. Do not use a maintainer's account as a default.
 Fixtures must be deliberately synthetic. Preserve the protocol shape and edge
 cases, replace identifiers and values, and record provenance when a fixture is
 derived from captured output. Redacting a name alone does not make a record
-safe. Capture helpers must sanitize before writing into the checkout. Keep raw
+safe. Check retired as well as current account identifiers, including test
+constants and installer fallbacks. UUID syntax is not evidence of anonymity;
+use deliberately invented values and trace copied fixtures to their source. Capture helpers must sanitize before writing into the checkout. Keep raw
 captures and audit evidence outside the repository.
 
 Before publishing, review the complete staged diff and run:
