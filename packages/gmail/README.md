@@ -2,13 +2,18 @@
 
 The local **Gmail relay** for Fulcra. It runs on the operator's machine, polls
 their authorized Gmail accounts read-only, and for each email that matches a
-local filter rule it does two things: writes the selected email to the
-operator's Fulcra Files, and — when the rule asks for it — posts a pointer to
-that email on the operator's coord bus so an agent can act on it. Nothing leaves
-the machine except the emails the operator's own rules select.
+local filter rule it performs the configured actions. The usual rule writes
+the selected email to the operator's Fulcra Files and optionally posts a pointer to
+that email on the operator's coord bus so an agent can act on it. Gmail queries
+and authentication necessarily contact Google; selected message content is
+uploaded to Fulcra, and optional AI rule suggestions have a separate opt-in.
 
 Access is read-only (`gmail.readonly`); the relay never sends, modifies, or
 deletes mail.
+
+This is an [unsupported monorepo experiment](../../README.md). Read-only Gmail
+access protects the mailbox from modification; it does not make a rule that
+uploads too much mail a good rule.
 
 
 ## Use with Collect
@@ -34,6 +39,8 @@ authorized account against every applicable rule and, per pair:
 4. **Relay.** If the rule's actions include `relay`, posts a coord-bus directive
    naming the match — after the file step, so the pointer always resolves.
 
+The first poll searches the last seven days by default; a rule's `backfill`
+setting can widen that window. Later polls overlap the cursor by 24 hours.
 The cursor advances only through the contiguous run of fully-processed messages,
 so a crash or a transient failure re-processes the affected message on the next
 poll rather than skipping it. Files writes are idempotent by path; relay
@@ -54,10 +61,14 @@ External** and application type **Desktop app**, then publish the app and add th
 `gmail.readonly` scope. Two choices matter:
 
 - **External**, not Internal, so both Workspace and personal `@gmail.com`
-  accounts can authorize. Publish it (status → In production) and leave it
-  **unverified**. Users then see a bypassable "Google hasn't verified this app"
-  warning, and up to **100 accounts (lifetime)** can connect before Google
-  verification plus the annual CASA restricted-scope assessment is required.
+  accounts can authorize. For a personal-use client, the wizard describes
+  publishing to **In production** while unverified. Google shows an unverified
+  app warning and imposes a **100-new-user cap**. That is a limit, not blanket
+  permission to distribute an unverified app: review Google's
+  [audience rules](https://support.google.com/cloud/answer/15549945?hl=en) and
+  [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification)
+  for your deployment. Security-assessment requirements depend on how restricted
+  data is accessed, stored, and transmitted.
 - **Desktop app**, not Web application, because the relay is a local desktop
   program. A Desktop client has **no redirect URI to register** — Google
   auto-allows the loopback `http://127.0.0.1:9292/api/oauth/callback` the relay
@@ -97,8 +108,10 @@ from the Collect dashboard's Gmail plugin). The builder is example-first:
    and your ✗ examples don't — sender, sender domain, mailing-list id, a shared
    subject keyword, whether all have attachments — and offers them as editable
    chips. (An optional **Suggest with AI** button proposes a rule from the
-   labeled examples; it is the only step that sends anything off the machine, is
-   opt-in, and shows exactly what it will send.)
+   labeled examples; it is opt-in and shows what it sends to the model: sender,
+   subject, and snippet
+   from the labeled examples. It needs the optional `ai` dependency and a
+   configured model backend.)
 4. Read the preview: how many recent messages the draft matches, whether your ✓
    examples are caught, and whether any ✗ examples slip through. Tighten the
    chips until it reads clean.
@@ -108,7 +121,8 @@ from the Collect dashboard's Gmail plugin). The builder is example-first:
 Saved rules appear in a list on the same page; edit, duplicate, enable, disable,
 and delete them there. The relay polls on its own from then on. Editing a rule's
 matching criteria bumps its version and starts a fresh processed set, so the
-change applies going forward without re-processing history.
+new version starts with the rule's first-run backfill window. Previously filed
+messages in that window can be processed again under the new version.
 
 ### Route matches to an agent (relay)
 
@@ -120,24 +134,27 @@ a new match lands. To turn it on:
 2. On the rule, add `relay` to its actions and set `relay_to` to the recipient
    agent's identity.
 
-For example, to route the Otter rule to the `openclaw:arc:insights` agent, set
-`relay_team = "insights"` and give the rule `actions = ["file", "relay"]` with
-`relay_to = "openclaw:arc:insights"`. The agent then finds each match in its
-coord inbox.
+For a synthetic example, set `relay_team = "example-team"` and give a rule
+`actions = ["file", "relay"]` with `relay_to = "example-assistant"`. Replace
+both names with your own team and recipient. The recipient finds the pointer
+in its coord inbox. Keep `file` in the action list when the agent needs the
+selected-email artifact.
 
-Relay is **forward-looking**: turning it on emits directives for matches from
-the next poll onward, not for emails already filed. A directive is delivered the
-moment its poll runs, but it becomes visible on the recipient's coord inbox only
-after the bus's normal propagation and index refresh (up to one reconcile
-period), so expect a short lag between filing and the agent seeing it. The
-relay holds the message's cursor position until it has confirmed the directive
-is readable, then advances — so a match is never marked done before its pointer
-resolves.
+Relay runs during polling. Adding the action can relay already-filed messages
+encountered in the overlap window; changing matching criteria starts a fresh
+rule version and backfill window. It is not a full historical replay command.
+The pipeline reads back the directive before marking its relay action complete,
+but the recipient still needs its normal queue read and reconciliation to act
+on it. **A required relay with no working backend remains incomplete and holds
+the cursor**; set `relay_team` and install/configure coord-engine, or use a
+file-only rule.
 
 ### Privacy
 
-Search, derive, and preview are read-only and on-device; email content is
-rendered only in your local browser and produces no stored artifact. The
+Search and preview fetch messages from Google; filtering and deterministic rule
+derivation happen locally. The builder does not write those previews to Fulcra.
+Optional AI suggestions send the consented example fields to the configured
+model provider. The
 plugin's own logs carry only opaque ids, rule ids, and decision reason-codes —
 never an email subject, address, or body. The selected-email JSON written to
 Fulcra Files is stored **in clear** (readable JSON) in your own Fulcra account;
@@ -159,7 +176,8 @@ Files:
 /collect/gmail/<account_id>/<yyyy-mm>/<message_id>.json
 ```
 
-`<yyyy-mm>` is derived from the message's own timestamp, not the poll time. Any
+`<yyyy-mm>` is derived from the message's own timestamp, not the poll time;
+missing or unparseable dates use `undated`. Any
 agent authorized to the operator's Fulcra account can list and read these:
 
 ```
@@ -167,7 +185,7 @@ fulcra-api file list      /collect/gmail/<account_id>/<yyyy-mm>
 fulcra-api file download  /collect/gmail/<account_id>/<yyyy-mm>/<message_id>.json  out.json
 ```
 
-Each file is the selected email as JSON:
+With a `file` action, each file is the selected email as JSON:
 
 ```json
 {
@@ -227,12 +245,15 @@ To wire it up, an operator sets the plugin's `relay_team` and adds `relay` +
 ## Develop
 
 ```
-uv sync --all-packages --all-extras
-uv run pytest packages/gmail -q
-uv run ruff check packages/gmail
+# From the repository root after workspace setup:
+uv run --package fulcra-gmail --extra dev pytest packages/gmail/tests/ -q
+uv run --package fulcra-gmail --extra dev ruff check packages/gmail
 ```
 
 Tests use synthetic ids, emails, and tokens with a fake httpx transport and a
 fake keychain — no network, no real secrets, PII-grep clean. The operator setup
 prose here, the wizard click path, and the `AGENTS.md` entry must agree; this is
-asserted by `tests/test_operator_docs_agree.py`.
+asserted by [test_operator_docs_agree.py](tests/test_operator_docs_agree.py).
+Use the [Collect source setup](../collect/README.md#running-from-source) for
+workspace installation. The package registers the `gmail` plugin; it has no
+standalone Gmail CLI.

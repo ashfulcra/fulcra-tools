@@ -402,6 +402,33 @@ def test_a_response_on_a_broadcast_mirrors_its_close_to_all_while_the_v3_record_
     assert len(v3) == 1 and len(v4) == 1
     assert json.loads(v3[0][2]["note"] if isinstance(v3[0][2], dict) and "note" in v3[0][2] else json.dumps(v3[0][2])).get("to", "coord-boss") == "coord-boss"
     assert v4[0][2]["kind"] == "close" and v4[0][2]["to"] == "all"
+    # DIRECTED, and it moved: the v4 close goes to `for_agent` (the ASSIGNEE, whose channel holds the open), not to
+    # `to` (the OWNER being notified). This line used to assert "coord-boss" and that assertion WAS the bug — see
+    # test_a_directed_close_is_mirrored_to_the_assignee_whose_fold_holds_the_open below for the live measurement.
     tr2 = FakeTransport(_mirror_cfg_docs())
     records.emit_event(tr2, cfg, sender="me", to="coord-boss", kind="response", priority="P2", slug="d", ptr="x.md", team="fulcra", for_agent="me")
-    assert [r for r in tr2.records if r[0] == "MomentAnnotation/v4"][0][2]["to"] == "coord-boss"      # directed: unchanged
+    assert [r for r in tr2.records if r[0] == "MomentAnnotation/v4"][0][2]["to"] == "me"
+
+
+def test_a_directed_close_is_mirrored_to_the_assignee_whose_fold_holds_the_open():
+    """The directed half of 55b1056b, missed when the broadcast half was fixed.
+
+    A v3 response addresses `to` = the OWNER (the asker), falling back to the responder when they are the same
+    identity. The v4 open lives in the ASSIGNEE's channel. So mirroring a directed close to `to` files it in a
+    channel with no such open, and the assignee's fold owes the row forever.
+
+    Measured 2026-09-08 on the live team: collect-maintainer closed ten review-request rows for PR 753/754 at
+    09:55:48Z (owner == responder == collect-maintainer, assignee codex-reviewer). codex-reviewer's checkpoint at
+    cursor 10:19:17Z, unread_events 0, still held all ten open — the fold had read past the close and never saw it.
+    """
+    tr = FakeTransport(_mirror_cfg_docs())
+    cfg = {"data_type": "MomentAnnotation/v3", "api_version": "v1alpha1"}
+
+    assert records.emit_event(tr, cfg, sender="collect-maintainer", to="collect-maintainer", kind="response",
+                              priority="P2", slug="review-request-pr-753-11a25098",
+                              ptr="task/review-request-pr-753-11a25098.md", team="fulcra",
+                              for_agent="codex-reviewer")
+
+    v4 = [r for r in tr.records if r[0] == "MomentAnnotation/v4"]
+    assert len(v4) == 1 and v4[0][2]["kind"] == "close"
+    assert v4[0][2]["to"] == "codex-reviewer", v4[0][2]          # the fold that owes it, not the asker

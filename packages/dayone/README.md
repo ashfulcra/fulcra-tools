@@ -2,9 +2,25 @@
 
 Import selected [Day One](https://dayoneapp.com) journal entries into your
 Fulcra account as annotations. Each imported entry becomes an
-InstantAnnotation under a "Journal" definition, carrying the entry text,
+`MomentAnnotation` under a "Journal" definition, carrying the entry text,
 its Day One tags, and lightweight metadata (journal, location, word and
 photo counts).
+
+## Standalone setup
+
+Python 3.11+ and `uv`. From the repository root:
+
+```bash
+uv sync --package fulcra-dayone
+source .venv/bin/activate
+fulcra auth login
+fulcra-dayone --help
+```
+
+The package depends on `fulcra-common`, `fulcra-csv-importer`, and
+`fulcra-collect` for its shared client and plugin interface. Running the CLI
+does not require a Collect daemon. JSON exports can be read off macOS; reading
+the local app database requires the Mac that has that database.
 
 ## Use with Collect
 
@@ -41,14 +57,17 @@ fulcra-dayone import --local-db --tag fulcra
 fulcra-dayone import ~/Downloads/Export.zip --all --dry-run
 ```
 
-Filters (`--tag`, `--journal`, `--since`, `--until`, `--starred`) combine
-with AND. With no filter, `--all` is required — a guard against an
+Filter categories (`--tag`, `--journal`, `--since`, `--until`, `--starred`)
+combine with AND; repeated tags or journals match any value within that category.
+Date boundaries are inclusive UTC dates. With no filter, `--all` is required — a guard against an
 accidental full import. Re-running is safe: entries dedup on a stable
-`source_id` derived from the Day One entry uuid.
+`source_id` derived from the Day One entry uuid. This is not update sync:
+edits to an entry already imported with that UUID are skipped. Photos and
+attachments are not uploaded; only text and metadata are imported.
+`--db-path` overrides the database location when paired with `--local-db`.
 
 ## Develop
 
 ```bash
-uv sync --all-extras
-uv run --package fulcra-dayone pytest packages/dayone
+uv run --package fulcra-dayone --extra dev pytest packages/dayone/tests -q
 ```

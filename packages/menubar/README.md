@@ -2,6 +2,8 @@
 
 The Mac app for Fulcra Collect. It lives in the menu bar, shows import status,
 and opens the dashboard for setup and settings.
+It is the optional local connector UI in this [unsupported monorepo](../../README.md).
+Fulcra itself and tools that call its API directly do not need the menu-bar app.
 
 If a setting changes elsewhere while you are editing it, Collect keeps the saved
 value and asks you to review it before retrying. Native enable and interval controls
@@ -24,29 +26,30 @@ The commands below are for development.
 ## Run in dev mode
 
     cd path/to/fulcra-tools
-    uv sync --extra macos --package fulcra-menubar
-    uv run --package fulcra-menubar python -m fulcra_menubar
+    uv sync --all-packages --all-extras
+    uv run --all-packages --all-extras python -m fulcra_menubar
 
-The daemon must be running (`fulcra-collect install` to set up the
-launchd/systemd user agent, or `fulcra-collect daemon` in a foreground
-terminal for dev). The
-menubar icon appears in the top-right of the screen; click for the
+Run the daemon in a second terminal with
+`uv run --all-packages --all-extras fulcra-collect daemon`, or follow the
+[source service setup](../collect/README.md#running-from-source). Launch the
+menu-bar app from a logged-in macOS GUI session; SSH alone will not show it.
+The menubar icon appears in the top-right of the screen; click for the
 rumps menu, then "Open Fulcra Collect" for the popover.
 
 ## Tests
 
-    uv run pytest packages/menubar/tests/ -q
+    uv run --package fulcra-menubar --extra dev pytest packages/menubar/tests/ -q
 
 The pure-model layer (daemon_client, model, polling, notifications)
 runs everywhere — Linux CI included. The view layer (status_item,
 popover, preferences) is exercised by manual smoke; see the checklist
 below.
 
-## Task plugins in 0.1.2
+## Task plugins in the unreleased 0.1.2 candidate
 
-The 0.1.2 app includes [Apple Reminders](../apple-reminders/README.md)
+The 0.1.2 candidate bundles [Apple Reminders](../apple-reminders/README.md),
 [Todoist](../todoist/README.md), and the shared task sync engine. It declares both macOS Reminders usage strings
-and dispatches `--reminders-bridge` before importing the GUI. These additions require 0.1.2 or later. Native permission is requested
+and dispatches `--reminders-bridge` before importing the GUI. These additions are awaiting final validation and release. Native permission is requested
 only from the setup wizard's **Allow access** button.
 
 ## Build the .app
@@ -151,12 +154,11 @@ add a new deep-link emission site here, route it through `daemon_url`
 rather than hardcoding the URL — otherwise the port-override path
 silently breaks.
 
-The consumer side lives in `packages/web-ui/dist/static/app.js`'s
-`boot()` handler — see that package's README ("URL-param deep-links")
-for the full list of supported routes and the auth-gate caveat (the
-web UI must be signed in for the deep-link to land on the requested
-route; unauth users see signin first and lose the param). If you add
-a new deep-link here, update the contract there too.
+The consumer is [app.js](../web-ui/dist/static/app.js)'s `boot()` handler;
+the [web UI README](../web-ui/README.md#url-param-deep-links) lists the routes.
+An unsigned-in visit stashes its destination in session storage and replays it
+on a later signed-in boot. Browsers that deny session storage can lose that
+destination. If you add a new deep-link here, update the contract there too.
 
 ## Implementation
 

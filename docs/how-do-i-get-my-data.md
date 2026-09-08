@@ -1,13 +1,15 @@
 # How do I get my data into Fulcra?
 
-This page lists every data source Fulcra Collect can pull from today and
-the pathways that exist for each one. Use it as a lookup: find the source
+This page lists the data sources covered by this repo's connectors and importers,
+with pathways for each one. Use it as a lookup: find the source
 you care about, then pick the pathway that matches your setup.
 
-New to Collect? [Install the Mac app](collect.md#get-started-new-user) first.
+For a dashboard and scheduled imports, [install Collect](collect.md#get-started-new-user).
+Some importers also run as standalone commands; browser extensions send directly
+to Fulcra. The [package index](../README.md#package-index) links each tool's setup.
 [Plugin status](collect.md#plugin-status) distinguishes the current installer
-from unfinished work. The 0.1.2 download includes Apple Notes, Reminders, and
-Todoist.
+from unfinished work. The current 0.1.1 download includes Apple Notes. Reminders and Todoist
+are in the unreleased 0.1.2 candidate.
 
 Pathways fall into three rough buckets:
 
@@ -32,7 +34,7 @@ worth a look when nothing else matches.
 
 ## Apple Reminders
 
-The `apple-reminders` plugin is included in Collect 0.1.2. It reads selected lists through EventKit and synchronizes
+The `apple-reminders` plugin is in the unreleased Collect 0.1.2 candidate. It reads selected lists through EventKit and synchronizes
 ordinary task completion with Fulcra task files. Recurring tasks are imported
 but must be completed in Reminders. No lists are selected by default; permission,
 selection, preview, and sync are separate steps.
@@ -40,7 +42,7 @@ selection, preview, and sync are separate steps.
 
 ## Todoist
 
-The `todoist` plugin is included in Collect 0.1.2. Connect with your Todoist API token, select projects, and
+The `todoist` plugin is in the unreleased Collect 0.1.2 candidate. Connect with your Todoist API token, select projects, and
 run a preview. Ordinary task completion syncs in both directions; titles, dates,
 and project membership stay managed in Todoist. Recurring tasks must be completed
 in Todoist. Polling checks 30 days of completion history, so longer offline gaps

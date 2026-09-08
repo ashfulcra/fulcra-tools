@@ -875,7 +875,22 @@ def emit_event(transport: Any, config: dict[str, str], *, sender: str, to: str,
     # old plane drops it for every recipient (owner disposition ends the ask), but the mirrored close was addressed to
     # the owner alone, so every other recipient's fold kept the open and read only_new. A response on a broadcast
     # (for_agent is the broadcast token) mirrors its close to `all`; the v3 record still goes to the owner.
-    mirror_to = BROADCAST if (kind == "response" and for_agent == BROADCAST) else to
+    # THE CLOSE MUST REACH THE FOLD THAT OWES THE ROW, and `to` is not that fold.
+    # The broadcast half of this was fixed above; the DIRECTED half had the same
+    # flaw and was missed. A v3 response addresses `to` = the OWNER (the asker),
+    # falling back to the responder when they are the same identity — but the v4
+    # open lives in the ASSIGNEE's channel, and `for_agent` is the assignee. So a
+    # directed close mirrored to `to` lands in the wrong channel and the
+    # assignee's fold owes the row forever.
+    # Measured 2026-09-08 on codex-reviewer: ten review-request rows for PR 753
+    # and 754, closed on the file plane by collect-maintainer (owner == responder,
+    # so `to` was collect-maintainer) at 09:55Z, still open in codex-reviewer's
+    # checkpoint at cursor 10:19Z with unread_events 0 — the fold had read past
+    # the close and never saw it. `for_agent` is set on every response
+    # (it defaults to the responder), so this is total over the response kind and
+    # subsumes the broadcast case: for a broadcast, `for_agent` IS the broadcast
+    # token. The v3 record still goes to `to`; only the mirror is re-addressed.
+    mirror_to = for_agent if (kind == "response" and for_agent) else to
     dual_emit.mirror(transport, team, sender=sender, to=mirror_to, kind=kind, priority=priority, slug=slug,
                      ptr=ptr, recorded_at=recorded_at, fyi=fyi)
     return ok

@@ -1,8 +1,9 @@
 # fulcra-common
 
-Shared core for every package in the fulcra-tools monorepo: the base
-Fulcra REST API client, the wire-format module, the
-annotation-definition resolver, and the unified ingest pipeline.
+Shared Python plumbing for the importers and agent tools: Fulcra API access,
+annotation definitions, record encoding, ingest, and media fingerprints.
+This is a library, with no CLI or Collect daemon to run. Other packages use
+it without needing the Collect app.
 
 If you're adding a new importer or extending an existing one, this is
 the package whose surface you build against — never re-invent any of
@@ -11,26 +12,30 @@ Fulcra wire-format change is a one-place change here.
 
 ## Package layout
 
-```
-fulcra_common/
-├─ client.py        BaseFulcraClient — auth + event readback over
-│                    httpx; tag + annotation-definition CRUD via the
-│                    fulcra_api lib (get_tag_by_name/create_tag,
-│                    annotations_catalog/delete_annotation). Subclass it.
-├─ definitions.py   resolve_definition_id — adopt-or-create flow
-│                    for annotation definitions with schema mismatch
-│                    detection (DefinitionSchemaMismatch).
-├─ ingest.py        IngestableEvent + IngestPipeline — the SINGLE
-│                    ingest path that owns wire.build_record,
-│                    data-payload construction, and POST to
-│                    /ingest/v1/record/batch. Refactor #69.
-└─ wire.py          The wire format — record envelope, recorded_at
-                     union, source array, JSONL batching, definition
-                     payloads. Used by IngestPipeline; no production
-                     callsite outside ingest.py uses it directly.
+| Module | What it owns |
+|---|---|
+| [client.py](fulcra_common/client.py) | `BaseFulcraClient`: auth, HTTP transport, record reads, tags, and definition CRUD; subclasses supply importer behavior. |
+| [definitions.py](fulcra_common/definitions.py) | `resolve_definition_id`: adopt or create a definition, rejecting incompatible schemas with `DefinitionSchemaMismatch`. |
+| [ingest.py](fulcra_common/ingest.py) | Event dataclasses and `IngestPipeline`, including wrapped and typed ingest paths. |
+| [wire.py](fulcra_common/wire.py) | Wrapped envelopes, unwrapped typed records, source arrays, and definition payloads. |
+| [cross_source_fingerprint.py](fulcra_common/cross_source_fingerprint.py) | Shared fingerprints for music, podcasts, movies, and TV episodes. |
+| [schema_check.py](fulcra_common/schema_check.py) | Fetch the server's record schema and check payload fields against it. |
+| [annotations.py](fulcra_common/annotations.py) | Agent lifecycle, needs-user, projection, and digest annotations. |
+
+## Install
+
+Python 3.11+. From the repository root:
+
+```bash
+uv sync --package fulcra-common
 ```
 
-## Ingest pipeline (refactor #69)
+The runtime dependencies are `httpx` and `fulcra-api`; the latter supplies
+library operations and the auth CLI. Pure record construction needs no account.
+API calls require an authenticated Fulcra account (`uv run --package fulcra-common
+fulcra auth login`).
+
+## Ingest pipeline
 
 ### Why it exists
 
@@ -52,7 +57,8 @@ path. Each one had to know about:
 
 The pipeline collapses all of that into one place. Importers now
 build a typed `IngestableEvent` (declarative — just the fields) and
-hand it to the pipeline. Future wire-format changes touch one file.
+hand it to the pipeline. Importers share the encoding logic; callers still own deduplication, retries,
+and verification that accepted records became visible.
 
 ### The IngestableEvent contract
 
@@ -90,35 +96,57 @@ properties on `IngestableEvent` rather than being routed through
 - **Tombstone** (`superseded_by`, `supersedes_source_id`) — set by
   `_delete_annotation` only.
 
-The pipeline emits each of these only when the importer populates
-them — no leakage into wire payloads from other importers.
+Except for the explicit attention opt-in, optional fields are emitted only
+when populated.
 
 ### IngestPipeline interface
 
 ```python
+from datetime import datetime, timezone
 from fulcra_common.ingest import IngestPipeline, DurationEvent
 
-pipeline = IngestPipeline(client=my_fulcra_client)
+event = DurationEvent(
+    definition_id="11111111-2222-3333-4444-555555555555",
+    source_id="example.duration.1",
+    start=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+    end=datetime(2026, 1, 1, 13, tzinfo=timezone.utc),
+    note="Synthetic example",
+)
+pipeline = IngestPipeline(client=None)
 
 # Build a wire record without I/O. Useful for tests + the csv-importer
 # which does post-build mutations.
 record: dict = pipeline.build_record(event)
 
-# POST a single event.
-pipeline.ingest_one(event)
-
-# POST a batch as JSONL to /ingest/v1/record/batch.
-pipeline.ingest_batch(events)
+# Supply your BaseFulcraClient subclass to post.
+# IngestPipeline(client=my_client).ingest_one(event)
+# IngestPipeline(client=my_client).ingest_batch([event])
 ```
 
-`build_record` is pure (`client=None` is fine). `ingest_one` /
-`ingest_batch` need a `BaseFulcraClient` for the auth + HTTP transport.
+`build_record` is pure (`client=None` is fine). `ingest_one` posts to
+`/ingest/v1/record`, falling back to the batch endpoint only on HTTP 404/405.
+`ingest_batch` posts JSONL to `/ingest/v1/record/batch`. Both need a client;
+other HTTP errors propagate to the caller.
+
+### Typed records
+
+`wire.build_typed_record(...)` builds the unwrapped schema used by
+`IngestPipeline.ingest_typed(base_type, records)`. This is the path used by
+[labs](../labs/README.md): `/ingest/v1/record/NumericAnnotation`, with one
+record sent as JSON or several as JSONL. It is separate from the wrapped
+`MomentEvent` / `DurationEvent` path above.
+
+**An accepted typed upload is not a verified import.** The caller must check
+existing source IDs before posting and verify visibility afterward. The code
+accounts for asynchronous processing, missing server deduplication, dropped
+invalid lines, and stripped unknown fields; `ingest_typed` itself only checks
+the HTTP response. See [the labs storage flow](../labs/README.md#storage).
 
 ### Adding a new event kind
 
 You shouldn't need a new IngestableEvent subclass for typical
-importers — `DurationEvent` and `MomentEvent` cover every shape in
-the codebase today. If you genuinely need a new kind (e.g. a third
+importers — `DurationEvent` and `MomentEvent` cover the wrapped
+annotation events modeled here; typed numeric records use the separate path above. If you genuinely need a new kind (e.g. a third
 recorded_at variant Fulcra adds in the future):
 
 1. Add the subclass + `__post_init__` validation in `ingest.py`.
@@ -144,34 +172,20 @@ data key the pipeline doesn't model:
   decision is the canonical example). Document why in the field's
   docstring.
 
-## Cutover history (refactor #69)
+## Callers and boundaries
 
-The four primary callsites that previously held inline
-`wire.build_record` + `httpx.post` blocks are now thin wrappers around
-`IngestPipeline`:
+[Media helpers](../media-helpers/README.md) convert normalized events into
+`DurationEvent`s. [CSV importer](../csv-importer/README.md) uses that path
+for duration annotations, then merges CSV-specific fields; its instant and
+built-in-type records use `wire.build_record` directly. Collect's quick-record
+and tombstone helpers use `ingest_one`. Labs builds typed records.
 
-- `packages/media-helpers/fulcra_media/fulcra.py:ingest_batch` →
-  loops `NormalizedEvent.to_duration_event(...)` → pipeline.
-- `packages/attention/fulcra_attention/ingest.py:build_attention_event`
-  returned a `DurationEvent` for the daemon relay route. That route and
-  the relay-era backend are gone: browsing-attention capture is now fully
-  relayless — the Chrome extension signs in via an Auth0 device flow and
-  POSTs records straight to the Fulcra API
-  (`https://api.fulcradynamics.com/ingest/v1/record/batch`), building the
-  same wire shape in TypeScript (`packages/attention/chrome/src/relayless/wire.ts`).
-  This bullet documents the historical Python callsite at the time of
-  refactor #69.
-- `packages/csv-importer/fulcra_csv/fulcra.py:_build_record` builds a
-  `DurationEvent` and post-merges csv-specific top-level data keys
-  (`value`, `tag` echo, `data_fields`) into the built record. Instant
-  events stay on the legacy path — their `InstantAnnotation` data_type
-  is semantically distinct from `MomentAnnotation`.
-- `packages/collect/fulcra_collect/daemon.py:_record_annotation` and
-  `_delete_annotation` both use a module-level `_QuickRecordClient`
-  (BaseFulcraClient subclass with the legacy 10s timeout) +
-  `IngestPipeline.ingest_one`.
+The browser extensions encode their records in TypeScript, and the
+[Netflix skill](../netflix-skill/README.md) deliberately vendors its importer.
+A wire change therefore still needs a caller audit; this Python library does
+not control every writer in the repository.
 
-## Wire format invariants the pipeline owns
+## Wrapped wire format invariants
 
 - `specversion: 1`
 - `data` is a sorted-key JSON string of the inner payload
@@ -188,18 +202,19 @@ The four primary callsites that previously held inline
   POSTed to `/ingest/v1/record/batch` with
   `Content-Type: application/x-jsonl`
 
-A change to any of these is a change to `wire.py` + `ingest.py` only.
+These describe the wrapped event path. Typed records have a different schema;
+see [`wire.build_typed_record`](fulcra_common/wire.py).
 
 ## Testing
 
 ```bash
 # Per-package
-uv run --directory packages/fulcra-common pytest -q
+uv run --package fulcra-common --extra dev pytest packages/fulcra-common/tests -q
 
 # Full workspace
-uv run --all-packages pytest -q packages/
+uv run --all-packages --extra dev pytest -q packages/
 ```
 
-`tests/test_ingest.py` covers the dataclasses + pipeline unit-level.
-The four importer cutover commits each carry their own assertions
-against the post-cutover wire shape via `IngestPipeline.build_record`.
+The tests cover wire records, pipeline behavior, client operations, definition
+resolution, fingerprints, schema checks, and agent annotation routing with
+stubbed transports. They do not establish the state of a live Fulcra deployment.
