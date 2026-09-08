@@ -276,3 +276,18 @@ def test_failed_temporary_write_keeps_epoch_rotation_retryable(collect_home, mon
     assert not list(collect_home.glob('.config-*.tmp'))
     config.save(cfg)
     assert config.load().plugin_epochs['tasks'] == new_epoch
+
+
+def test_fulcra_account_change_invalidates_every_known_plugin(collect_home):
+    cfg = config.load()
+    cfg.enable('tasks-enabled')
+    cfg.plugin_settings['tasks-configured'] = {'selected_lists': ['synthetic-list']}
+    cfg.rotate_plugin_epoch('tasks-previous')
+    config.save(cfg)
+    before = config.load()
+    config.invalidate_all_plugin_work()
+    after = config.load()
+    assert set(after.plugin_epochs) == {'tasks-enabled', 'tasks-configured', 'tasks-previous'}
+    assert all(after.plugin_epochs[plugin] != epoch for plugin, epoch in before.plugin_epochs.items())
+    assert after.enabled == before.enabled
+    assert after.plugin_settings == before.plugin_settings

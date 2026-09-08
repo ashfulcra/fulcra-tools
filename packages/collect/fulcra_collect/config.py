@@ -184,3 +184,13 @@ def invalidate_plugin_work(plugin_id: str) -> None:
         cfg = _load_path(path)
         cfg.rotate_plugin_epoch(plugin_id)
         _save_locked(cfg, path)
+
+
+def invalidate_all_plugin_work() -> None:
+    """Revoke pending plugin work before an interactive Fulcra account change."""
+    path = _config_path()
+    with _save_lock(path):
+        cfg = _load_path(path)
+        for plugin_id in cfg.enabled | set(cfg.plugin_settings) | set(cfg.plugin_epochs):
+            cfg.rotate_plugin_epoch(plugin_id)
+        _save_locked(cfg, path)
