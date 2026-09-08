@@ -7,7 +7,7 @@ Two layers, per the plan's Task 1:
     (mode 1). Overlap + follow-up-suppression contracts are pinned here.
   * The bus ADAPTER + `threads` verb in cli.py — summaries + freshness overlay
     filtered to principal items, per-candidate reads for the signals summaries
-    lack (intent_by window, ash-activity attribution), budget + `threads-degraded`
+    lack (intent_by window, user-activity attribution), budget + `threads-degraded`
     on any failure. Never crash, never silence.
 """
 
@@ -59,7 +59,7 @@ class _FailReadTransport(FakeTransport):
 def _row(**over):
     """A neutral adapter row with inert defaults; override the signals a test
     exercises. Defaults describe an item that classifies to NOTHING (a fresh,
-    ash-owned, non-intent, non-blocked item), so every mode a test asserts comes
+    user-owned, non-intent, non-blocked item), so every mode a test asserts comes
     from the override, not the scaffolding."""
     row = {
         "id": over.get("id", "t1"),
@@ -71,9 +71,9 @@ def _row(**over):
         "blocked_signal": "",
         "parked": False,
         "not_before": None,
-        "ash_activity_ts": NOW,          # fresh by default
-        "ash_activity_attributed": True,
-        "ash_activity_source": "ack shard",
+        "principal_activity_ts": NOW,          # fresh by default
+        "principal_activity_attributed": True,
+        "principal_activity_source": "ack shard",
         "declared_window": None,
         "captured_ts": NOW,
         "followup": {"status": "proposed", "responded": False, "followup_ref": None},
@@ -102,8 +102,8 @@ def _iso_hours_ago(hours, base=NOW):
 # --------------------------------------------------------------------------
 
 def test_mode1_silent_owned_ages_in():
-    # ash-owned, non-intent, last activity 5d ago, silence window 3d -> dropped.
-    out = _classify([_row(ash_activity_ts=_iso_days_ago(5))])
+    # user-owned, non-intent, last activity 5d ago, silence window 3d -> dropped.
+    out = _classify([_row(principal_activity_ts=_iso_days_ago(5))])
     assert len(out) == 1
     assert out[0]["mode"] == 1
     assert out[0]["age"] >= 5.0 - 0.01
@@ -111,13 +111,13 @@ def test_mode1_silent_owned_ages_in():
 
 def test_mode1_fresh_owned_absent():
     # last activity 1d ago, silence 3d -> not yet dropped.
-    assert _classify([_row(ash_activity_ts=_iso_days_ago(1))]) == []
+    assert _classify([_row(principal_activity_ts=_iso_days_ago(1))]) == []
 
 
-def test_mode2_blocked_on_ash_immediate_no_aging():
-    # blocked-on-ash surfaces immediately, regardless of a fresh activity ts.
-    out = _classify([_row(blocked_on_principal=True, blocked_signal="assignee: ash",
-                          ash_activity_ts=NOW)])
+def test_mode2_blocked_on_principal_immediate_no_aging():
+    # blocked-on-user surfaces immediately, regardless of a fresh activity ts.
+    out = _classify([_row(blocked_on_principal=True, blocked_signal="assignee: user",
+                          principal_activity_ts=NOW)])
     assert len(out) == 1 and out[0]["mode"] == 2
 
 
@@ -129,9 +129,9 @@ def test_mode3_intent_past_window():
 
 
 def test_parked_backlog_and_not_before_excluded():
-    parked = _row(id="p", parked=True, ash_activity_ts=_iso_days_ago(9))
+    parked = _row(id="p", parked=True, principal_activity_ts=_iso_days_ago(9))
     gated = _row(id="g", not_before="2999-01-01T00:00:00Z",
-                 ash_activity_ts=_iso_days_ago(9))
+                 principal_activity_ts=_iso_days_ago(9))
     assert _classify([parked, gated]) == []
 
 
@@ -145,7 +145,7 @@ def test_overlap_fresh_intent_absent_entirely():
     r = _row(intent=True, status="proposed",
              declared_window="2999-01-01T00:00:00Z",  # window not yet reached
              blocked_on_principal=True,
-             ash_activity_ts=_iso_days_ago(30))
+             principal_activity_ts=_iso_days_ago(30))
     assert _classify([r]) == []
 
 
@@ -153,15 +153,15 @@ def test_overlap_ripe_intent_mode3_only():
     r = _row(intent=True, status="proposed",
              declared_window=_iso_days_ago(2),
              blocked_on_principal=True,           # would be mode 2 if not carved out
-             ash_activity_ts=_iso_days_ago(30))   # would be mode 1 if not carved out
+             principal_activity_ts=_iso_days_ago(30))   # would be mode 1 if not carved out
     out = _classify([r])
     assert len(out) == 1 and out[0]["mode"] == 3
 
 
-def test_overlap_ash_assigned_nonintent_aged_is_mode2_with_age():
-    # blocked-on-ash dominates aged silence; the age is reported in evidence.
-    r = _row(blocked_on_principal=True, blocked_signal="assignee: ash",
-             ash_activity_ts=_iso_days_ago(10))
+def test_overlap_principal_assigned_nonintent_aged_is_mode2_with_age():
+    # blocked-on-user dominates aged silence; the age is reported in evidence.
+    r = _row(blocked_on_principal=True, blocked_signal="assignee: user",
+             principal_activity_ts=_iso_days_ago(10))
     out = _classify([r])
     assert len(out) == 1 and out[0]["mode"] == 2
     assert "10.0d" in out[0]["evidence"] or "10d" in out[0]["evidence"]
@@ -212,7 +212,7 @@ def test_followup_none_present_stays_mode3():
 
 def test_silence_days_window_boundary():
     # 2d-old owned item: dropped at silence=1, fresh at silence=3.
-    r = _row(ash_activity_ts=_iso_days_ago(2))
+    r = _row(principal_activity_ts=_iso_days_ago(2))
     assert [o["mode"] for o in _classify([r], silence_days=1)] == [1]
     assert _classify([r], silence_days=3) == []
 
@@ -227,8 +227,8 @@ def test_intent_grace_hours_when_window_undeclared():
 
 
 def test_mode1_timestamp_fallback_flagged_in_evidence():
-    r = _row(ash_activity_ts=_iso_days_ago(6), ash_activity_attributed=False,
-             ash_activity_source="item timestamp")
+    r = _row(principal_activity_ts=_iso_days_ago(6), principal_activity_attributed=False,
+             principal_activity_source="item timestamp")
     out = _classify([r])
     assert out[0]["mode"] == 1
     assert "timestamp" in out[0]["evidence"].lower()
@@ -236,10 +236,10 @@ def test_mode1_timestamp_fallback_flagged_in_evidence():
 
 def test_classify_grouped_and_oldest_first():
     rows = [
-        _row(id="m2", blocked_on_principal=True, blocked_signal="assignee: ash",
-             ash_activity_ts=NOW),
-        _row(id="m1old", ash_activity_ts=_iso_days_ago(9)),
-        _row(id="m1new", ash_activity_ts=_iso_days_ago(4)),
+        _row(id="m2", blocked_on_principal=True, blocked_signal="assignee: user",
+             principal_activity_ts=NOW),
+        _row(id="m1old", principal_activity_ts=_iso_days_ago(9)),
+        _row(id="m1new", principal_activity_ts=_iso_days_ago(4)),
         _row(id="m3", intent=True, status="proposed",
              declared_window=_iso_days_ago(1)),
     ]
@@ -282,7 +282,7 @@ def _reconcile(t):
 
 def _run_threads(t, capsys, *extra):
     capsys.readouterr()  # drain any prior reconcile output
-    rc = cli.main(["threads", "x", "--for", "ash", "--json", *extra], transport=t)
+    rc = cli.main(["threads", "x", "--for", "user", "--json", *extra], transport=t)
     out = capsys.readouterr().out
     return rc, out
 
@@ -302,7 +302,7 @@ def _json_objs(out):
 
 def test_verb_mode1_owned_aged(capsys):
     t = FakeTransport()
-    _put_task(t, "old", owner="ash", timestamp=_ancient())
+    _put_task(t, "old", owner="user", timestamp=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
     assert rc == 0
@@ -313,7 +313,7 @@ def test_verb_mode1_owned_aged(capsys):
 
 def test_verb_mode2_blocked_on_ash(capsys):
     t = FakeTransport()
-    _put_task(t, "blk", assignee="ash", timestamp=NOW)
+    _put_task(t, "blk", assignee="user", timestamp=NOW)
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
     objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
@@ -322,7 +322,7 @@ def test_verb_mode2_blocked_on_ash(capsys):
 
 def test_verb_mode3_ripe_intent(capsys):
     t = FakeTransport()
-    _put_task(t, "later", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "later", assignee="user", tags=["intent:user"],
               status="proposed", intent_by=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -333,7 +333,7 @@ def test_verb_mode3_ripe_intent(capsys):
 
 def test_verb_unripe_intent_absent(capsys):
     t = FakeTransport()
-    _put_task(t, "future", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "future", assignee="user", tags=["intent:user"],
               status="proposed", intent_by="2999-01-01T00:00:00Z")
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -343,7 +343,7 @@ def test_verb_unripe_intent_absent(capsys):
 
 def test_verb_intent_suppressed_by_status_advanced(capsys):
     t = FakeTransport()
-    _put_task(t, "started", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "started", assignee="user", tags=["intent:user"],
               status="active", intent_by=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -353,7 +353,7 @@ def test_verb_intent_suppressed_by_status_advanced(capsys):
 
 def test_verb_intent_suppressed_by_response_shard(capsys):
     t = FakeTransport()
-    _put_task(t, "spoke", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "spoke", assignee="user", tags=["intent:user"],
               status="proposed", intent_by=_ancient())
     t.put("team/x/_coord/responses/spoke/20260710-x.md",
           "---\ntype: Response\nagent: helper\noutcome: done\n"
@@ -366,8 +366,8 @@ def test_verb_intent_suppressed_by_response_shard(capsys):
 
 def test_verb_intent_suppressed_by_followed_up_by_tag(capsys):
     t = FakeTransport()
-    _put_task(t, "tagged", assignee="ash",
-              tags=["intent:ash", "followed-up-by:the-pr"],
+    _put_task(t, "tagged", assignee="user",
+              tags=["intent:user", "followed-up-by:the-pr"],
               status="proposed", intent_by=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -376,13 +376,13 @@ def test_verb_intent_suppressed_by_followed_up_by_tag(capsys):
 
 
 def test_verb_activity_from_shard_overrides_stale_doc_ts(capsys):
-    # An ancient doc ts but a RECENT ash ack shard -> attributed activity is
-    # fresh -> NOT dropped. Proves ash-activity attribution reads the shards.
+    # An ancient doc ts but a RECENT user ack shard -> attributed activity is
+    # fresh -> NOT dropped. Proves user-activity attribution reads the shards.
     t = FakeTransport()
-    _put_task(t, "touched", owner="ash", timestamp=_ancient())
-    ack_key = cli.tasks.agent_key("ash")
+    _put_task(t, "touched", owner="user", timestamp=_ancient())
+    ack_key = cli.tasks.agent_key("user")
     t.put(f"team/x/_coord/acks/touched/{ack_key}.md",
-          f"---\ntype: Ack\nagent: ash\ntimestamp: {NOW}\n---\nacked\n")
+          f"---\ntype: Ack\nagent: user\ntimestamp: {NOW}\n---\nacked\n")
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
     objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
@@ -391,7 +391,7 @@ def test_verb_activity_from_shard_overrides_stale_doc_ts(capsys):
 
 def test_verb_mode1_timestamp_fallback_flagged(capsys):
     t = FakeTransport()
-    _put_task(t, "nostamp", owner="ash", timestamp=_ancient())
+    _put_task(t, "nostamp", owner="user", timestamp=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
     objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
@@ -410,7 +410,7 @@ def test_verb_non_principal_items_ignored(capsys):
 
 def test_verb_json_shape_pinned(capsys):
     t = FakeTransport()
-    _put_task(t, "old", owner="ash", timestamp=_ancient())
+    _put_task(t, "old", owner="user", timestamp=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
     objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
@@ -424,10 +424,10 @@ def test_verb_degraded_on_summaries_failure(capsys):
     # index is UNKNOWN (not confirmed-empty). A `threads-degraded` row surfaces;
     # never a silent empty, never a crash.
     t = FakeTransport()
-    _put_task(t, "old", owner="ash", timestamp=_ancient())
+    _put_task(t, "old", owner="user", timestamp=_ancient())
     t.store["team/x/_coord/summaries.json"] = "{ this is not json"
     t.fail_list = True
-    rc = cli.main(["threads", "x", "--for", "ash", "--json"], transport=t)
+    rc = cli.main(["threads", "x", "--for", "user", "--json"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0  # never crash
     assert any(o.get("type") == "threads-degraded" for o in _json_objs(out))
@@ -435,10 +435,10 @@ def test_verb_degraded_on_summaries_failure(capsys):
 
 def test_verb_text_render_grouped(capsys):
     t = FakeTransport()
-    _put_task(t, "old", owner="ash", timestamp=_ancient())
-    _put_task(t, "blk", assignee="ash", timestamp=NOW)
+    _put_task(t, "old", owner="user", timestamp=_ancient())
+    _put_task(t, "blk", assignee="user", timestamp=NOW)
     _reconcile(t)
-    rc = cli.main(["threads", "x", "--for", "ash"], transport=t)
+    rc = cli.main(["threads", "x", "--for", "user"], transport=t)
     out = capsys.readouterr().out
     assert rc == 0
     assert "old" in out and "blk" in out
@@ -459,7 +459,7 @@ def test_verb_intent_window_read_raises_degraded_not_surfaced(capsys):
     # the missing window silently falls back to capture+grace and the ancient
     # capture ts surfaces it as mode 3 with no degraded row.
     t = _FailReadTransport()
-    _put_task(t, "future", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "future", assignee="user", tags=["intent:user"],
               status="proposed", timestamp=_ancient(),
               intent_by="2999-01-01T00:00:00Z")
     _reconcile(t)
@@ -483,7 +483,7 @@ def test_verb_intent_window_read_none_degraded_then_recovers(capsys):
     # UNKNOWN -> excluded + degraded. On recovery the REAL (past) window makes
     # it mode 3.
     t = FakeTransport()
-    _put_task(t, "later", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "later", assignee="user", tags=["intent:user"],
               status="proposed", timestamp=_ancient(), intent_by=_ancient())
     _reconcile(t)
     doc = t.store.pop("team/x/task/later.md")
@@ -506,7 +506,7 @@ def test_verb_intent_genuinely_undeclared_window_grace_fallback_stands(capsys):
     # A doc that READS FINE but lacks intent_by is legitimately undeclared:
     # capture+grace fallback stands (ancient capture -> ripe -> mode 3, clean).
     t = FakeTransport()
-    _put_task(t, "nodate", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "nodate", assignee="user", tags=["intent:user"],
               status="proposed", timestamp=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -522,17 +522,17 @@ def test_verb_intent_genuinely_undeclared_window_grace_fallback_stands(capsys):
 def test_classify_terminal_status_excluded():
     # (1a) pure layer: a closed item is never a dropped thread — not mode 1
     # (aged silence) and not mode 2 (blocked signals on a done/abandoned item).
-    aged_done = _row(id="d", status="done", ash_activity_ts=_iso_days_ago(30))
+    aged_done = _row(id="d", status="done", principal_activity_ts=_iso_days_ago(30))
     blocked_abandoned = _row(id="a", status="abandoned", blocked_on_principal=True,
-                             blocked_signal="assignee: ash")
+                             blocked_signal="assignee: user")
     assert _classify([aged_done, blocked_abandoned]) == []
 
 
 def test_verb_terminal_status_excluded(capsys):
     # (1b) adapter layer: same exclusion end-to-end.
     t = FakeTransport()
-    _put_task(t, "shipped", owner="ash", status="done", timestamp=_ancient())
-    _put_task(t, "dropped-for-good", assignee="ash", status="abandoned",
+    _put_task(t, "shipped", owner="user", status="done", timestamp=_ancient())
+    _put_task(t, "dropped-for-good", assignee="user", status="abandoned",
               timestamp=_ancient())
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -541,7 +541,7 @@ def test_verb_terminal_status_excluded(capsys):
 
 def test_verb_terminal_directive_stale_summary_excluded(capsys):
     # (1c) THE LIVE LEAK (`acceptance-ping`, first day of the threads feature): a
-    # kind:directive OWNED by ash (assignee an agent), RESPONDED and status:done in
+    # kind:directive OWNED by user (assignee an agent), RESPONDED and status:done in
     # its own doc since 7/02 — yet surfaced as a mode-1 "started-then-silent 9.7d"
     # via the item-timestamp fallback. Root cause (suspect 3): the SUMMARIES row was
     # STALE 'proposed' because the close (`respond`) landed in the SAME mtime-minute
@@ -555,13 +555,13 @@ def test_verb_terminal_directive_stale_summary_excluded(capsys):
     # rewrite-to-done keeps the doc's mtime-minute — exactly the same-minute close
     # that defeats reuse, so the second reconcile serves the stale 'proposed' row.
     t = FakeTransport()
-    _put_task(t, "acceptance-ping", title="Acceptance ping", owner="ash",
-              assignee="claude-code:Ashs-MBP-Work:fulcra-tools",
+    _put_task(t, "acceptance-ping", title="Acceptance ping", owner="user",
+              assignee="claude-code:Example-Laptop:fulcra-tools",
               status="proposed", tags=["kind:directive"], timestamp=_ancient())
     _reconcile(t)
     assert cli.main(["respond", "x", "acceptance-ping", "--outcome", "done",
                      "--evidence", "acceptance recorded", "--agent",
-                     "claude-code:Ashs-MBP-Work:fulcra-tools"], transport=t) == 0
+                     "claude-code:Example-Laptop:fulcra-tools"], transport=t) == 0
     # Model the documented stale-summary incident: the downstream feed missed
     # this same-minute rewrite, so reconcile must defend against its old row.
     task_path = "team/x/task/acceptance-ping.md"
@@ -583,11 +583,11 @@ def test_verb_text_degraded_on_stderr_list_on_stdout(capsys):
     # (2) text-mode degraded output pinned: the notice goes to STDERR, stdout
     # stays the clean thread list (here the empty-state line).
     t = FakeTransport()
-    _put_task(t, "old", owner="ash", timestamp=_ancient())
+    _put_task(t, "old", owner="user", timestamp=_ancient())
     t.store["team/x/_coord/summaries.json"] = "{ this is not json"
     t.fail_list = True
     capsys.readouterr()
-    rc = cli.main(["threads", "x", "--for", "ash"], transport=t)
+    rc = cli.main(["threads", "x", "--for", "user"], transport=t)
     cap = capsys.readouterr()
     assert rc == 0
     assert "threads degraded" in cap.err
@@ -601,7 +601,7 @@ def test_verb_fresh_intent_visible_via_overlay(capsys):
     t = FakeTransport()
     _put_task(t, "seed", owner="bob", assignee="bob")
     _reconcile(t)
-    _put_task(t, "fresh-intent", assignee="ash", tags=["intent:ash"],
+    _put_task(t, "fresh-intent", assignee="user", tags=["intent:user"],
               status="proposed", timestamp=_ancient(), intent_by=_ancient())
     rc, out = _run_threads(t, capsys)
     objs = [o for o in _json_objs(out) if o.get("type") != "threads-degraded"]
@@ -611,7 +611,7 @@ def test_verb_fresh_intent_visible_via_overlay(capsys):
 def test_verb_needs_human_block_is_mode2(capsys):
     # (4) the needs:human + principal signal (spec mode 2, third signal) pinned.
     t = FakeTransport()
-    _put_task(t, "ask", owner="ash", status="blocked", tags=["needs:human"],
+    _put_task(t, "ask", owner="user", status="blocked", tags=["needs:human"],
               timestamp=NOW)
     _reconcile(t)
     rc, out = _run_threads(t, capsys)
@@ -623,7 +623,7 @@ def test_verb_needs_human_block_is_mode2(capsys):
 def test_verb_silence_days_flag_and_env(capsys, monkeypatch):
     t = FakeTransport()
     two_days = (PINNED_NOW - timedelta(days=2)).isoformat().replace("+00:00", "Z")
-    _put_task(t, "recent", owner="ash", timestamp=two_days)
+    _put_task(t, "recent", owner="user", timestamp=two_days)
     _reconcile(t)
     # default silence 3d -> a 2d-old item is fresh -> absent.
     _, out = _run_threads(t, capsys)
@@ -666,7 +666,7 @@ class _BlindReadTransport(FakeTransport):
         return None
 
 
-def _intent(t, text, *extra, principal="ash"):
+def _intent(t, text, *extra, principal="user"):
     return cli.main(["intent", "x", text, "--for", principal, *extra], transport=t)
 
 
@@ -687,8 +687,8 @@ def test_intent_capture_round_trip(capsys):
     docs = _task_docs(t)
     assert len(docs) == 1
     doc = t.store[docs[0]]
-    assert "intent:ash" in doc
-    assert "assignee: ash" in doc
+    assert "intent:user" in doc
+    assert "assignee: user" in doc
     assert f"intent_by: {PAST}" in doc
     capsys.readouterr()
     _reconcile(t)

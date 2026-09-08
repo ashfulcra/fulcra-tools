@@ -92,7 +92,7 @@ def test_book_fingerprint_without_year_when_missing():
 
 
 def test_book_title_strip_helper_handles_legacy_review_prefix():
-    """Some Goodreads accounts return title as 'User's review of Book Title'.
+    """Some Goodreads accounts return title as 'the user's review of Book Title'.
 
     We strip that wrapper if present so external_ids["book_title"] is clean.
     """

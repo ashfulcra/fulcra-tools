@@ -168,12 +168,12 @@ def test_provider_metadata_round_trip_uses_full_identity_not_title():
     description = append_source_metadata(
         "operator-visible body",
         source,
-        {"policy_version": "2", "owner": "ash"},
+        {"policy_version": "2", "owner": "user"},
         capability="asks",
     )
 
     assert parse_source_metadata(description) == source
-    assert parse_bridge_metadata(description)["fields"] == {"policy_version": "2", "owner": "ash"}
+    assert parse_bridge_metadata(description)["fields"] == {"policy_version": "2", "owner": "user"}
     assert parse_bridge_metadata(description)["capability"] == "asks"
     assert strip_source_metadata(description) == "operator-visible body"
     assert "alpha-12345678" not in description

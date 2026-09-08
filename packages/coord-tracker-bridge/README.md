@@ -122,20 +122,11 @@ downloads run concurrently under one whole-snapshot deadline (30 seconds by
 default); an incomplete batch degrades tasks instead of authorizing mutations
 from a partial enumeration.
 
-## `linear-inbox` — read Ash's board, never touch it
+## `linear-inbox` — read a board without modifying it
 
-> **STATUS: VERIFIED against the live API, 2026-08-19.** First live read
-> rendered 124 issues from team BUS at rc 0. The fail-closed path proved itself
-> first and by accident: an expired token produced `UNKNOWN — this is not an
-> empty board`, rc 3, exactly as designed — the verb refused to report an empty
-> board for an authentication failure. `tests/fixtures/real_linear_issues.json`
-> is the stamped capture from that read (100 nodes, payload fields redacted),
-> and the field-name contract test runs against it rather than being skipped.
->
-> Nine review rounds found seven real defects before it ever met the API. What
-> "reviewed" bought was that the first live read worked; what "verified" adds is
-> that the shapes it was reasoned about are the shapes Linear actually sends.
-
+The command renders a complete issue snapshot and reports authentication or
+transport failures as UNKNOWN. Contract tests use a synthetic fixture that
+preserves the API response shape.
 
 `coord-tracker-bridge linear-inbox --linear-team-id <TEAM>` performs one
 paginated GraphQL read of a Linear team's issues and prints them as a coord
@@ -182,19 +173,11 @@ fold. It is the only verb that runs in the read direction, and it is fenced:
   read", and rc 0 during an outage would report the first while meaning the
   second.
 
-**WRITES NEED A BOT ACTOR, NOT JUST A KEY** (Ash, 2026-08-19, binding). The
-original setup used an OAuth *bot* token deliberately, so Linear actions are not
-attributed to Ash personally. A personal API key is fine for READS — nothing is
-attributed — and that is what this verb uses. Any future write plan requires the
-refreshed bot-actor OAuth setup first. This is a design constraint, not a
-preference: shipping writes on a personal key would silently rewrite the
-authorship of every action on the board.
-
-The standing rail on this lane: **zero Linear writes of any kind** — no issue
-creation, no state changes, no comments, no label/assignee mutations — until
-Ash approves a write plan explicitly. The reason is a near-miss, not caution: an
-earlier cutover plan would have pushed ~503 creates into a 55-issue curated
-board.
+**Writes require an authorized bot actor.** A read-only integration may use a
+personal API key. A write integration must use credentials that attribute actions
+to the intended bot and requires explicit approval of its proposed changes.
+`linear-inbox` performs no issue creation, state changes, comments, or
+label/assignee mutations.
 
 `tools/capture_inbox.py` stamps a real response with its own measured
 provenance for the field-name contract test, redacting titles, descriptions,
@@ -203,14 +186,13 @@ labelled "real" is the defect it exists to prevent.
 
 ## `linear-assignments` — route board changes to the fleet, still never write
 
-Phase 1 of the Linear integration design (`_coord/agents/coord-boss/reports/
-2026-08-19-linear-integration-design.md`, approved by Ash 2026-08-19).
+The assignment reader routes changes in a configured board to the team bus.
+
 `coord-tracker-bridge linear-assignments --linear-team-id <TEAM>` reads the
 board, works out which cards had their **assignee or state** change since a
 durable watermark, and turns each real change into a durable coord directive.
-Phases 2 and 3 — the one-time board reconcile and the two-tier projection — are
-separately gated on Ash GO'ing a printed plan plus a bot-actor token, and
-nothing in this verb anticipates them.
+Any board reconciliation or projection is a separate write workflow requiring
+an approved preview and authorized bot credentials.
 
 It reaches Linear only through `linear-inbox`'s read path, `ReadOnlyTransport`
 and all, and builds no `BridgeService`: **zero Linear writes**, by construction
@@ -222,7 +204,7 @@ rather than by intent.
   contract. The watermark is applied after the rows have been read faithfully.
 - **A watermark selects candidates, not changes.** Linear bumps `updatedAt` for
   any edit, so routing on the watermark alone would dispatch a directive every
-  time Ash fixes a typo — and the design names noise as a defect in its own
+  time the operator fixes a typo — and the design names noise as a defect in its own
   right. Durable state remembers the `(assignee, state)` pair last observed per
   card; only a pair that actually differs is routed.
 - **`updatedAt` is optional in `linear-inbox` and required here**, which is what
@@ -237,13 +219,12 @@ rather than by intent.
   more than one identity, or names an external mesh peer — which the roster
   states is not reachable via `coord-engine tell` — goes to the coordinator for
   triage. A roster that fails to load is **UNKNOWN, not "nobody resolves"**: the
-  second files a confident triage verdict on every card in Ash's board on the
+  second files a confident triage verdict on every card in the operator's board on the
   strength of a failed read.
 - **Preview is the default.** `--deliver` is both the flag that dispatches and
   the flag that advances the watermark, so a run that shows you the plan can
   never consume it. A **cold start refuses to deliver at all** — with no
-  baseline every card reads as a change, which is the ~503-creates shape again
-  with the fleet bus as the target — and `--seed` adopts the board as the
+  baseline every card would appear changed — and `--seed` adopts the board as the
   baseline without sending anything. A run that would exceed `--delivery-cap`
   (default 25) refuses whole rather than flooding partway.
 - **The watermark may repeat; it may never skip.** Delivery is at-least-once,

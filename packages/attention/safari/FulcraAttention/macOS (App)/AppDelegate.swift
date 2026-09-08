@@ -2,7 +2,7 @@
 //  AppDelegate.swift
 //  macOS (App)
 //
-//  Created by Ash Kalb on 6/7/26.
+//  Fulcra Attention contributors.
 //
 
 import Cocoa

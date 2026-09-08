@@ -7,7 +7,7 @@ import pytest
 
 from coord_mesh import peers
 
-UID = "a24a9667-c2c6-4bbf-9a0f-36ea0afcb521"
+UID = "00000000-0000-4000-8000-000000000075"
 
 
 def test_missing_file_is_an_empty_registry(tmp_path):

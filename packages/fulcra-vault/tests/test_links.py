@@ -13,11 +13,11 @@ from fulcra_vault.links import (
 
 def test_extract_wikilinks_handles_aliases_headings_and_duplicates():
     markdown = (
-        "See [[People/Ash|Ash]], [[Project Alpha#Decision]], "
-        "[[People/Ash]], and [plain](Project.md)."
+        "See [[People/User|User]], [[Project Alpha#Decision]], "
+        "[[People/User]], and [plain](Project.md)."
     )
 
-    assert extract_wikilinks(markdown) == ["People/Ash.md", "Project Alpha.md"]
+    assert extract_wikilinks(markdown) == ["People/User.md", "Project Alpha.md"]
 
 
 def test_extract_wikilinks_skips_invalid_free_text_targets():

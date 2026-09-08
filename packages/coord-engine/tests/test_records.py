@@ -184,10 +184,10 @@ def test_blocked_is_a_control_plane_kind():
 
 def test_a_blocked_event_carries_what_it_waits_on_and_which_way_it_went():
     parsed = records.parse_payload(_payload(
-        to="ash", kind="blocked", priority="P1", slug="409a",
-        ptr="task/409a.md", on="user:ash", state="blocked"))
+        to="user", kind="blocked", priority="P1", slug="409a",
+        ptr="task/409a.md", on="user:user", state="blocked"))
     assert parsed["kind"] == "blocked"
-    assert parsed["on"] == "user:ash"
+    assert parsed["on"] == "user:user"
     assert parsed["state"] == "blocked"
 
 
@@ -195,20 +195,20 @@ def test_the_clear_is_carried_too():
     """A block announced but never retracted leaves every downstream queue
     growing forever, and a queue that only grows stops being read."""
     parsed = records.parse_payload(_payload(
-        to="ash", kind="blocked", priority="P1", slug="409a",
-        on="user:ash", state="cleared"))
+        to="user", kind="blocked", priority="P1", slug="409a",
+        on="user:user", state="cleared"))
     assert parsed["state"] == "cleared"
 
 
 def test_an_unknown_state_fails_at_the_write():
     with pytest.raises(ValueError):
-        _payload(to="ash", kind="blocked", priority="P1", slug="x", state="maybe")
+        _payload(to="user", kind="blocked", priority="P1", slug="x", state="maybe")
 
 
 def test_the_raw_blocked_on_value_is_preserved_not_classified():
     """Carried verbatim so a consumer applies its own classifier rather than
     inheriting ours — an agent name and a role must survive as written."""
-    for raw in ("codex-coder", "role:build-lane", "user:ash"):
+    for raw in ("codex-coder", "role:build-lane", "user:user"):
         parsed = records.parse_payload(_payload(
             to="x", kind="blocked", priority="P2", slug="s", on=raw, state="blocked"))
         assert parsed["on"] == raw
@@ -219,8 +219,8 @@ def test_an_older_reader_skips_a_blocked_event_rather_than_poisoning_on_it():
     returns None for a kind it does not know, and None means 'not a
     control-plane event — skip silently'. Simulated by parsing against a KINDS
     tuple that predates this change."""
-    note = _payload(to="ash", kind="blocked", priority="P1", slug="409a",
-                    on="user:ash", state="blocked")
+    note = _payload(to="user", kind="blocked", priority="P1", slug="409a",
+                    on="user:user", state="blocked")
     original = records.KINDS
     try:
         records.KINDS = ("directive", "response", "verdict", "claim")

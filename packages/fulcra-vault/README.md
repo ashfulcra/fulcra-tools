@@ -81,7 +81,7 @@ vault/
   .locks/
     <note>.md.lock
   Project Alpha.md
-  People/Ash.md
+  People/Example Person.md
 ```
 
 `meta.json` stores the structure spec and exclusions. `MAP.md` is the

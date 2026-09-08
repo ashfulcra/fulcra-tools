@@ -60,7 +60,7 @@ def test_role_names_match_EXACTLY_not_by_prefix():
 def test_unrelated_titles_are_ignored():
     assert roles.vacancy_already_open(
         ["REVIEW REQUEST: pr-682 (codex-reviewer)",
-         "OBLIGATION (Ash-ordered 2026-08-30): something"],
+         "OBLIGATION (User-ordered 2026-08-30): something"],
         "codex-reviewer") is False
 
 

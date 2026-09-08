@@ -402,7 +402,7 @@ describe("createAttentionDestination", () => {
 describe("slugifyIdentity", () => {
   test("lowercases and replaces runs of non-[a-z0-9] with single -", () => {
     expect(slugifyIdentity("Work MBP — Chrome")).toBe("work-mbp-chrome");
-    expect(slugifyIdentity("ash@fulcra's laptop!!")).toBe("ash-fulcra-s-laptop");
+    expect(slugifyIdentity("user@example's laptop!!")).toBe("user-example-s-laptop");
   });
 
   test("trims leading/trailing separators and collapses repeats", () => {

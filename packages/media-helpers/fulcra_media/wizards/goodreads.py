@@ -18,7 +18,7 @@ Goodreads setup
      URL looks like:
        https://www.goodreads.com/user/show/<USER_ID>-<slug>
      The number between /show/ and the first hyphen is your user_id.
-     (Example: in `.../user/show/12345-ash`, the user_id is `12345`.)
+     (Example: in `.../user/show/12345-user`, the user_id is `12345`.)
 
   2. Verify your 'read' shelf RSS feed is accessible. In a browser, open:
        https://www.goodreads.com/review/list_rss/<USER_ID>?shelf=read

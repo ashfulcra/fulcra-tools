@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../../.."                 # repo root
 APPP="$PWD/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app/Contents/Resources/app_packages"
 test -d "$APPP" || { echo "FAIL: build first (build_macos_app.sh)"; exit 1; }
 
-PYTHONPATH="$APPP" uv run python -S - <<'PY'
+PYTHONPATH="$APPP" uv run python -B -S - <<'PY'
 from fulcra_collect import registry, _resources
 assert "app_packages" in registry.__file__, "not loading from the bundle"
 assert _resources.is_frozen(), "bundle should report frozen"

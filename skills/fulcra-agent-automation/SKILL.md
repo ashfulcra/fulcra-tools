@@ -83,7 +83,7 @@ it consumes the structured `pending.json` transitions reconcile just wrote (the 
 feed the fold — they carry no task_id/kind/ts), emits one annotation per new transition (deterministic
 id + cursor, so a re-run or mid-run crash never double-writes), and advances the cursor. Off or absent
 ⇒ the step no-ops. The heartbeat chain then finishes with `coord-engine digest <team> --store
---emit-timeline`, which keeps the operator's twice-daily digest alive on both surfaces (bus copy +
+--emit-timeline`, which keeps the configured digest alive on both surfaces (bus copy +
 the 'Agent Tasks — Digest' timeline track) — see the health skill for its semantics.
 
 Multi-host is safe: the typed ingest endpoint **upserts on an explicit record id** (live-verified
@@ -170,9 +170,9 @@ directives before reporting, never conclude "no work" off a degraded read.
 For push-capable harnesses and the fleet security contract, see
 [`docs/coord/EVENT-DRIVEN-WAKE.md`](../../docs/coord/EVENT-DRIVEN-WAKE.md). The bundled
 `wake/openclaw.sh` and `wake/codex.sh` adapters were removed with the listener stack (cleanup
-slice 1). Directed wakes via the optional wake router are **shipped but unproven in deployment**
-(the reference deployment was evaluated and retired, 2026-08 — see
-[`BUS-V3.md`](../../docs/coord/BUS-V3.md) "Latency, and the router"); scheduled wakes + queue
+slice 1). Directed wakes via the optional wake router require deployment-specific
+acceptance — see
+[`BUS-V3.md`](../../docs/coord/BUS-V3.md) "Latency, and the router"; scheduled wakes + queue
 reads are the standing pattern. Where a router IS deployed, its adapters are host-local
 (`$COORD_WAKE_ADAPTER_DIR/<adapter>.sh`, registered per agent in `_coord/router/config.json`),
 and `wake/macos-notify.sh` remains in-repo as an adapter example.

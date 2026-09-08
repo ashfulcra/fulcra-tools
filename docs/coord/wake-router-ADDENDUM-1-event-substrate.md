@@ -94,16 +94,14 @@ webhooks ship, the receiver replaces the feed poll and nothing downstream moves.
 |---|---|---|---|
 | E1 | **Incremental reconcile.** Feed-cursor incremental fold maintaining `summaries.json` + settled index; full scan as fail-closed fallback AND scheduled drift self-check (loud divergence ⇒ rebuild). Red-first tests: feed-unavailable ⇒ full pass; corrupt cursor ⇒ full pass; incremental result equals full-scan result on a fixture window; drift detection triggers rebuild loudly. | this addendum | coord-opus-worker |
 | E2 | **Delta-driven listen/briefing.** Per §3.2. | this addendum (parallel with E1) | codex-coder |
-| E3 | **Router feed swap.** Per §3.3. | this addendum, W5 | Fabio |
+| E3 | **Router feed swap.** Per §3.3. | this addendum, W5 | implementation agent |
 
 E1/E2 are parallel and independent; neither blocks the W-track. W10's gates are unchanged.
-Each E-task is dual-green (codex-reviewer + coord-boss) at exact head, red-first, AGENTS.md
+Each E-task is dual-green (reviewer + coordinator) at exact head, red-first, AGENTS.md
 ship-gate.
 
 ## 5. Non-goals
 
-Store migration off shards; a coordination-owned typed data type (cut — §2.4; the record
-service's sanctioned-fields probe evidence lives in bus shard `546b2445` for whoever revisits);
-webhook receiver before Fulcra ships webhooks (E3 builds the socket); removing any full-scan
-fallback or W8 budget; per-team server-side feed filtering (client-side path filter is
-sufficient at current volume — ~420 account-wide changes/2h measured 2026-07-23); ATC coupling.
+Store migration off shards; a coordination-owned typed data type; webhook receiver
+before the platform supports webhooks; removing any full-scan fallback or W8 budget;
+per-team server-side feed filtering; ATC coupling.

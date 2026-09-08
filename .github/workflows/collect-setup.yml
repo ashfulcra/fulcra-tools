@@ -1,0 +1,22 @@
+name: Collect setup consent
+
+on:
+  pull_request:
+    paths:
+      - packages/web-ui/**
+      - .github/workflows/collect-setup.yml
+  push:
+    branches: [main]
+    paths:
+      - packages/web-ui/**
+      - .github/workflows/collect-setup.yml
+
+jobs:
+  wizard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test packages/web-ui/tests/*.test.cjs

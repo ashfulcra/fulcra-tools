@@ -68,14 +68,19 @@ def capture_help():
     if proc.returncode != 0:
         raise SystemExit(f"capture failed rc={proc.returncode}: {proc.stderr[:400]}")
     version, path = measure_distribution_version(_fulcra_cmd()[0])
+    command = _fulcra_cmd()[0]
+    executable_name = os.path.basename(command)
+    help_text = proc.stdout.replace(command, executable_name)
+    if path:
+        help_text = help_text.replace(path, os.path.basename(path))
     return {
-        "captured_from": _fulcra_cmd()[0],
-        "executable_path": path,
+        "captured_from": executable_name,
+        "executable_path": os.path.basename(path) if path else None,
         # MEASURED, not typed. None means "could not establish" and the tests
         # treat that as a failure rather than as an unversioned pass.
         "distribution_version": version,
         "surface": "fulcra-api share create --help",
-        "help": proc.stdout,
+        "help": help_text,
     }
 
 

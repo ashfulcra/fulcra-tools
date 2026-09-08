@@ -49,7 +49,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 }
 
 /** Pull a human display label out of a decoded JWT payload, if present.
- * Prefers `name` (most readable — e.g. "Ash Kalb"), then `email`, then the
+ * Prefers `name` (most readable — e.g. "Example User"), then `email`, then the
  * Fulcra-namespaced email claim. Intended to run against the OIDC id_token,
  * which (unlike the API-audience access token) carries name/email. */
 function labelFromClaims(claims: Record<string, unknown>): string | null {

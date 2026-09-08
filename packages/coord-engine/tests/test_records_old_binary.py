@@ -1,7 +1,8 @@
 """Side-by-side isolation gate against the actual coord-engine v1.7.2 source.
 
-The fixture is a byte-stable ``git archive`` of the signed repository tag
-``coord-engine-v1.7.2``.  It runs in a separate interpreter with only that
+The fixture is derived from repository tag ``coord-engine-v1.7.2`` with
+personal operator labels replaced by generic labels and archive owner metadata
+removed. Cursor logic is unchanged; it is not a byte-identical signed-tag archive.  It runs in a separate interpreter with only that
 archive on ``PYTHONPATH``; this is not the new engine pretending its version is
 old.  The injected filesystem transport replaces only the network/store edge.
 """
@@ -21,7 +22,7 @@ FIXTURE = (
     Path(__file__).parent / "fixtures" /
     "coord-engine-v1.7.2-source.tar.gz"
 )
-FIXTURE_SHA256 = "18813ea216572ab9586e6fd9a623a5478cc94db233b77df93109402212b6b3c7"
+FIXTURE_SHA256 = "b363ddb734c61f3b0927a503bd8017449accc966387b389b28fb841db2785ecc"
 
 
 OLD_ENGINE_RUNNER = r"""

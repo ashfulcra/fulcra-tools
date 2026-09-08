@@ -72,10 +72,10 @@ def test_subprocess_env_puts_fulcra_api_on_path_under_launchd(monkeypatch):
     coord-engine's own child processes (fulcra-api) resolve.
     """
     monkeypatch.setenv("PATH", _LAUNCHD_PATH)  # what the daemon gets
-    env = _subprocess_env("/Users/someone/.local/bin/coord-engine")
+    env = _subprocess_env("/Users/example/.local/bin/coord-engine")
     parts = env["PATH"].split(":")
     # The resolved binary's own dir is present (fulcra-api installs beside it).
-    assert "/Users/someone/.local/bin" in parts
+    assert "/Users/example/.local/bin" in parts
     # The known install dirs are present.
     assert os.path.expanduser("~/.local/bin") in parts
     # The daemon's original PATH is preserved (system tools still resolve).

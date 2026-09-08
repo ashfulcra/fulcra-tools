@@ -256,7 +256,7 @@ recorded on the bus (review verdict rounds) — two joins make ATC learn from th
 without self-reporting:
 
 - **`team/<team>/atc/bindings.json`** — the declared agent/role -> account join:
-  `{"bindings": [{"agent": "codex-reviewer", "account": "openai-codex",
+  `{"bindings": [{"agent": "reviewer", "account": "openai-codex",
   "tier": "standard", "model": "gpt-x", "task_class": "code"}]}`. `agent`,
   `account`, `tier` are required; `model`/`task_class` give harvest full
   demotion-fold attribution. Malformed entries are dropped and reported; the

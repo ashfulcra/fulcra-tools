@@ -110,6 +110,10 @@ def find_menubar_command() -> list[str] | None:
     """
     if not is_supported():
         return None
+    app_bin = Path(sys.executable).parent
+    if app_bin.name == "MacOS" and app_bin.parent.name == "Contents":
+        # LaunchServices reuses the existing GUI instance after daemon restarts.
+        return ["/usr/bin/open", str(app_bin.parent.parent)]
     direct = shutil.which("fulcra-menubar")
     if direct:
         return [direct]

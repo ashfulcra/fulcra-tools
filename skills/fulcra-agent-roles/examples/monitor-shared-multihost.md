@@ -10,7 +10,7 @@ title: fleet-monitor
 description: Watches presence, open loops, and role SLAs across the team; surfaces blockers and dropped threads; runs the daily escalate sweep. May run concurrently from several hosts.
 policy: shared
 sla_hours: 24
-maintainer: ash
+maintainer: user
 ---
 # Duties
 - Periodic active sweep: `coord-engine escalate <team>` (idempotent per day) and

@@ -470,7 +470,7 @@ def _fold(
 #
 # The pure fold above is I/O-free. These helpers are the thin, never-raising
 # transport seam the CLI (`annotate resolution/status/project`) and the reconcile
-# heartbeat share. They live on the BUS (not local disk) on purpose — per Ash's
+# heartbeat share. They live on the BUS (not local disk) on purpose — per the user's
 # binding decision the RESOLUTION level is stored on the team's store so ANY
 # host's heartbeat reads the same opt-in, unlike the writer's machine-local
 # on/off config. All take a duck-typed transport (``read``/``write``) and

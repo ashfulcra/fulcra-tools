@@ -1,6 +1,6 @@
 """`obligations --stream` — follow the signal to the doc, never scan the corpus.
 
-Ash's design, asked for over six weeks before it was built: the bus payload has
+the user's design, asked for over six weeks before it was built: the bus payload has
 always carried `ptr`, so the signal already names the document an obligation
 lives in. The default path ignores it and folds the whole fleet, which is why it
 degrades — measured on the live store 2026-08-29: 111.0s rc 3 with 5 of 7 probes
@@ -154,9 +154,9 @@ def test_the_gap_before_the_window_is_never_silent_without_a_checkpoint(capsys):
 
 def test_blocked_on_is_carried_onto_the_owed_row(capsys):
     t = StreamTransport([_event()])
-    t.put(f"team/{TEAM}/task/a-thing.md", _doc(blocked_on="user:ash"))
+    t.put(f"team/{TEAM}/task/a-thing.md", _doc(blocked_on="user:user"))
     rc, out = _run(t, capsys)
-    assert "blocked_on=user:ash" in out.out
+    assert "blocked_on=user:user" in out.out
 
 
 # --- the checkpoint: completeness, not just speed ----------------------------

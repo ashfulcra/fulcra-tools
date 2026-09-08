@@ -1,7 +1,7 @@
 """`_host()` must never mint an unusable fleet identity.
 
 One host has been registered in this fleet as ``coord-reconcile: <control
-chars>`` since at least 2026-07-16 (v1.3.0, 238 tasks written, 241h stale). The
+chars>`` in an earlier version. The
 id built from a hostname is the KEY for presence, health, roles and leases, so a
 hostname the OS hands back unvalidated becomes a permanent hole in a shared
 keyspace: unmatched by any fold that keys on name, impossible to `tell`,
@@ -24,9 +24,9 @@ def _no_explicit_identity(monkeypatch):
 
 
 @pytest.mark.parametrize("hostname", [
-    "Ashs-MBP-Work",
+    "Example-Laptop",
     "MacBookPro.localdomain",
-    "DeskBookPro",
+    "Example-Desktop",
     "host_1.example.com",
     "arc-bot.local",
 ])
@@ -134,6 +134,6 @@ def test_the_digest_is_derived_from_the_RAW_name_not_the_collapsed_one():
 def test_an_unchanged_hostname_never_gains_a_suffix():
     """The no-regression property, restated against the digest: a live hostname
     must not acquire a suffix and fork its own history."""
-    for h in ("Ashs-MBP-Work", "MacBookPro.localdomain", "host_1.example.com"):
+    for h in ("Example-Laptop", "MacBookPro.localdomain", "host_1.example.com"):
         safe, rewritten = cli._sanitize_hostname(h)
         assert (safe, rewritten) == (h, False)

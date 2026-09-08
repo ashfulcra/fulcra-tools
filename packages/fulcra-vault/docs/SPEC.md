@@ -1,10 +1,6 @@
 # fulcra-vault — validated design spec (2026-06-11)
 
-Status: design locked with Ash in-session 2026-06-11, then amended after a
-deep-research pass over field practice (OpenClaw memory-wiki, claude-obsidian
-~6.5k stars, obsidian-claude-code-mcp, mcpvault; 10 adversarially-verified
-findings — see Research notes at bottom). Pre-implementation review artifact
-for Arc code review.
+Status: validated design (2026-06-11); see Research notes for design references.
 
 ## What this is
 

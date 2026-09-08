@@ -1,6 +1,6 @@
 ---
 name: fulcra-netflix
-description: "Walk a user from zero to their Netflix viewing history stored in their own Fulcra account as a Watched annotation, then shared to the movie-night pool. Auth (device flow) → export walkthrough → import via the bundled script → share."
+description: "Walk a user from zero to their Netflix viewing history stored in their own Fulcra account as a Watched annotation, then shared to a group the user chooses. Auth (device flow) → export walkthrough → import via the bundled script → share."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
@@ -9,7 +9,7 @@ metadata: { "openclaw": { "emoji": "🍿" } }
 
 # fulcra-netflix — Netflix history into the user's own Fulcra account
 
-This skill walks a brand-new user from "I just messaged this skill to my bot" to "my Netflix viewing history lives in my own Fulcra account as a Watched annotation, shared (if they choose) with the movie-night pool." You — the agent — drive the whole thing over chat: authenticate the user with Fulcra's device flow, walk them through downloading their viewing history from Netflix, import it with the bundled `scripts/netflix_import.py`, and offer the pool share at the end.
+This skill walks a brand-new user from "I just messaged this skill to my bot" to "my Netflix viewing history lives in my own Fulcra account as a Watched annotation, shared (if they choose) with a group the user chooses." You — the agent — drive the whole thing over chat: authenticate the user with Fulcra's device flow, walk them through downloading their viewing history from Netflix, import it with the bundled `scripts/netflix_import.py`, and offer the pool share at the end.
 
 **Runtime-agnostic.** The only contract is: (1) you can run a shell subprocess, and (2) you can relay messages to and from a human. Everything else is plain shell I/O — no Claude-Code-specific tools. This skill works identically in Claude Code, OpenClaw, Hermes, Codex, or any other runtime that can execute a subprocess and hold a conversation.
 
@@ -28,7 +28,7 @@ Before sending anything, probe how far this user already got. Enter at the **fir
 | Authed? | `fulcra-api user-info` | exits 0 and prints valid JSON | **AUTH** (send HELLO first if this user has never seen the pitch/consent message) |
 | Watched def exists? | `fulcra-api catalog -n Watched` | some line's `description` is exactly `com.fulcradynamics.annotation.media.watched` | **EXPORT** (they're authed but never imported) |
 | Records exist? | `fulcra-api get-records "DurationAnnotation/<def-uuid>" "2007-01-01T00:00:00Z" "2035-01-01T00:00:00Z" \| head -1` (def-uuid from the catalog line above) | non-empty output | **IMPORT** (def exists but empty — ask for the CSV again) |
-| Share confirmed? | none — the share happens in Fulcra's web UI, there is no CLI probe | the user has previously told you they completed (or explicitly skipped) the share | **SHARE** |
+| Optional share resolved? | no CLI probe | no recipient was selected, or the user confirmed completion or skipped sharing | **SHARE**, only for a user-selected recipient |
 
 All four pass → done; congratulate them and point at [Context Web](https://context.fulcradynamics.com) to browse their data. A brand-new user fails the first probe: send HELLO, then proceed through the states in order.
 
@@ -36,11 +36,16 @@ All four pass → done; congratulate them and point at [Context Web](https://con
 
 ## State 1 — HELLO
 
+Sharing has no default recipient. Only offer a group share if the user wants one;
+obtain and confirm the intended recipient's Fulcra ID with the user before giving
+recipient-specific instructions. Replace `<recipient-fulcra-id>` with that confirmed
+value. If no recipient is selected, finish after import and skip SHARE.
+
 The first message the user sees. It must contain the pitch, the **full share disclosure** (consent comes *before* auth, so the user knows what they're signing up for), and the step list. Send this, adapted naturally to the conversation but keeping every substantive element:
 
-> Hi! I can import your Netflix viewing history into your own Fulcra account — a personal data store that you control — and, if you want, share it into the movie-night pool so group-recommendation agents can find things everyone would enjoy. The whole thing takes about 5 minutes of your time, and at the end your complete watch history is queryable data you own.
+> Hi! I can import your Netflix viewing history into your own Fulcra account — a personal data store that you control — and, if you want, share it into a group the user chooses so group-recommendation agents can find things everyone would enjoy. The whole thing takes about 5 minutes of your time, and at the end your complete watch history is queryable data you own.
 >
-> One thing to know up front, so you can decide with eyes open: at the end I'll invite you to share your data with the pool owner (Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521`). Fulcra's sharing page currently shares **all of your annotation data, not just the Netflix history** — it has no way to share only one kind of annotation yet.
+> One thing to know up front, so you can decide with eyes open: at the end I'll invite you to share your data with the recipient you choose (Fulcra ID confirmed with you). Fulcra's sharing page currently shares **all of your annotation data, not just the Netflix history** — it has no way to share only one kind of annotation yet.
 > <!-- The bolded all-annotations sentence above must survive verbatim or near-verbatim in whatever adaptation you send — it is the load-bearing consent line. Paraphrase the pitch freely; never soften this sentence. -->
 > If that's more than you're comfortable with, you can simply skip the share and still keep your imported history for yourself. Nothing gets shared unless you do it yourself, in your own browser, at `https://context.fulcradynamics.com/sharing?type=sending` at the end.
 >
@@ -48,7 +53,7 @@ The first message the user sees. It must contain the pitch, the **full share dis
 > 1. **Sign in** to Fulcra (or create a free account) — I'll send you a link.
 > 2. **Download** your viewing history from Netflix — about 2 minutes, I'll walk you through it.
 > 3. **Import** — I run a small bundled script that writes the history into *your* account.
-> 4. **Share** (optional) — you decide whether to share with the movie-night pool.
+> 4. **Share** (optional) — you decide whether to share with a group the user chooses.
 >
 > Ready?
 
@@ -119,14 +124,14 @@ It prints exactly one line of JSON. **Interpret the envelope; never parse human-
 
 ## State 5 — SHARE
 
-Immediately after a verified import, offer the pool share — restating the disclosure, because consent given ten minutes ago at HELLO is not a substitute for informed action now:
+After a verified import, if the user selected and confirmed a recipient, offer the share — restating the disclosure, because consent given ten minutes ago at HELLO is not a substitute for informed action now:
 
-> Last step, and it's optional. To join the movie-night pool, you'd share your Fulcra annotation data with the pool owner. Heads-up again: Fulcra's sharing page shares **all of your annotation data, not just the Netflix history** — there's no narrower option yet. Totally fine to skip; your imported history stays yours either way.
+> Last step, and it's optional. To join a group the user chooses, you'd share your Fulcra annotation data with the recipient you choose. Heads-up again: Fulcra's sharing page shares **all of your annotation data, not just the Netflix history** — there's no narrower option yet. Totally fine to skip; your imported history stays yours either way.
 >
 > If you're in:
 > 1. Open [context.fulcradynamics.com/sharing?type=sending](https://context.fulcradynamics.com/sharing?type=sending).
 > 2. Log in with the same account you just signed in with.
-> 3. Create a share to recipient Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521`, making sure annotations are included.
+> 3. Create a share to the confirmed recipient Fulcra ID, making sure annotations are included.
 > 4. Tell me when it's done (or that you're skipping).
 
 When they confirm the share, congratulate them and point them at [Context Web](https://context.fulcradynamics.com) to browse their own imported history. If they skip, respect it without pushback — they're fully onboarded either way, and they can share later by re-running this state.

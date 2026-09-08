@@ -61,11 +61,11 @@ def test_render_frontmatter_roundtrips_multiline_scalars_and_comma_lists():
 def test_new_task_doc():
     slug, content = tasks.new_task_doc(
         "Wire up L2", now=NOW, workstream="coord", priority="P1",
-        status="active", summary="typed lifecycle", assignee="ash", kind="feature")
+        status="active", summary="typed lifecycle", assignee="user", kind="feature")
     assert slug == "wire-up-l2"
     fm = okf.parse_frontmatter(content)
     assert fm["type"] == "Task" and fm["status"] == "active" and fm["priority"] == "P1"
-    assert fm["assignee"] == "ash"
+    assert fm["assignee"] == "user"
     assert "workstream:coord" in fm["tags"] and "kind:feature" in fm["tags"]
 
 

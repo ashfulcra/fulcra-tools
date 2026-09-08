@@ -977,7 +977,7 @@ def test_a_synthetic_unparseable_success_refuses_instead_of_reading_as_no_acl(mo
 
 def test_the_real_ls_led_shapes_parse_and_only_those(monkeypatch):
     monkeypatch.setattr(ship_check.sys, "platform", "darwin")
-    header = "drwx------  3 ash  staff  96 Sep  6 10:00 /tmp/x"
+    header = "drwx------  3 user  staff  96 Sep  6 10:00 /tmp/x"
     monkeypatch.setattr(ship_check.subprocess, "run", lambda *a, **k: _Done(0, header + "\n"))
     assert ship_check.acl_entries("/tmp/x") == []                                    # header only: no ACL, proven by shape
     body = header + "+\n 0: group:everyone allow write,delete\n 1: user:_spotlight deny delete\n"

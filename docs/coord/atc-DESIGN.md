@@ -4,7 +4,7 @@
 [`skills/fulcra-agent-atc/SKILL.md`](../../skills/fulcra-agent-atc/SKILL.md)
 and the engine carries `usage`, `headroom`, `route`, `atc`, and `dash`. This
 document is the design record; the skill is the operational truth.
-**Name:** working name **ATC** (air-traffic control) — skill `fulcra-agent-atc`. Alternatives Ash floated: Dispatcher, Traffic Cop. "ATC" wins on metaphor fit (assign the right runway/tier, keep traffic inside capacity) and doesn't collide with directives' tell/dispatch vocabulary. One-word rename possible at any time before upstream pitch.
+**Name:** ATC (air-traffic control), exposed through `fulcra-agent-atc`.
 
 ## Problem
 
@@ -12,7 +12,7 @@ Subscription power users (Claude Max, OpenAI/Codex plans, multi-harness fleets) 
 
 ## Users
 
-v1: agent-fleet operators on subscriptions — concretely, this fleet (Claude Code CLI + Cowork + Codex app + OpenClaw + Hermes sandboxes on one coord bus). Presentable to: ClawHub/OpenClaw community (the existing Fulcra-adjacent install base), then the agent-skills upstream audience once proven here.
+v1 serves agent-fleet operators running supported subscription accounts and harnesses.
 
 ## Architecture — three layers (topology 3: hybrid)
 
@@ -59,10 +59,11 @@ Fold: window math, multi-window accounts, throttle-zeroing + expiry, unknown acc
 - Enterprise policy/governance (B-layer pricing, data-routing rules) — sequenced last per A→C→B.
 - Cost-in-dollars; v1 optimizes cap headroom, not spend.
 
-## Open questions for Ash (non-blocking, defaulted)
+## Deployment configuration
 
-1. **Name:** shipping as ATC/`fulcra-agent-atc` unless renamed.
-2. **Real cap numbers:** accounts.json ships with placeholder windows for your Anthropic + OpenAI subscriptions; correct the caps when awake (throttle events will calibrate regardless).
+Set `accounts.json` to your own providers, accounts, and subscription windows.
+Placeholder cap values must be updated from your subscription; throttle events
+provide additional calibration.
 
 ## v2 — smart dispatch (2026-07-08)
 

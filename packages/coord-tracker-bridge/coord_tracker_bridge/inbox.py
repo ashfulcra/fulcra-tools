@@ -1,18 +1,15 @@
-"""`linear-inbox` — read Ash's Linear board into a coord fold. Never writes.
+"""`linear-inbox` — read the user's Linear board into a coord fold. Never writes.
 
-STATUS: VERIFIED against the live API on 2026-08-19 — first live read rendered
-124 issues at rc 0, and the fail-closed path proved itself first when an expired
-token produced UNKNOWN rather than an empty board. The field-name contract test
-now runs against a stamped capture instead of being skipped.
+The field-name contract test uses a captured schema with synthetic values.
+An expired token produces UNKNOWN rather than an empty board.
 
-WRITES NEED A BOT ACTOR (Ash, binding): a personal key is fine for reads because
+WRITES NEED A BOT ACTOR (operator requirement): a personal key is fine for reads because
 nothing is attributed, but any write plan requires the refreshed bot-actor OAuth
-setup — otherwise every action on the board is authored as Ash personally.
+setup — otherwise every action on the board is authored as the user personally.
 
 THE RAIL IS IN THE CODE, NOT IN THE INTENT. coord-boss's order is that this
-lane performs zero Linear writes of any kind until Ash approves a write plan in
-his own words, and the reason it is non-negotiable is a near-miss: an earlier
-cutover plan would have pushed ~503 creates into a 55-issue curated board.
+lane performs zero Linear writes of any kind until the user approves a write plan in
+his own words, and the reason it is non-negotiable is the need to preserve an existing curated board during a cutover.
 
 A verb that merely *declines* to call a mutation is one hurried edit away from
 calling one, so `ReadOnlyTransport` inspects the GraphQL document that is about
@@ -22,7 +19,7 @@ on what the caller meant.
 
 Read failure is UNKNOWN, never an empty board. `LinearClient.paginate` already
 raises on a missing page or a stalled cursor; this module keeps that and adds a
-`Result` whose state a caller cannot mistake for "Ash has no work".
+`Result` whose state a caller cannot mistake for "User has no work".
 """
 
 from __future__ import annotations
@@ -62,7 +59,7 @@ class ReadOnlyTransport:
         if _MUTATION.search(query) or _SUBSCRIPTION.search(query):
             raise WriteRefused(
                 "read-only transport refused a non-query GraphQL document: the "
-                "linear-inbox lane performs zero writes until Ash approves a "
+                "linear-inbox lane performs zero writes until the user approves a "
                 "write plan explicitly"
             )
         return self._inner.post(payload)
@@ -70,7 +67,7 @@ class ReadOnlyTransport:
 
 #: Deliberately narrower than the bridge's ISSUES_QUERY: this verb renders a
 #: board, so it asks for what a reader needs and nothing else. Fewer fields is
-#: also less of Ash's workspace pulled into a coord document.
+#: also less of the user's workspace pulled into a coord document.
 INBOX_QUERY = (
     "query CoordInbox($team:ID!,$after:String)"
     "{issues(filter:{team:{id:{eq:$team}}},first:100,after:$after)"

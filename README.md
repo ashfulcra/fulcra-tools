@@ -1,53 +1,14 @@
-# Ash's Fulcra Tools
+# Fulcra Tools
 
-Vibe-coded by Fulcra's lawyer on Fulcra's own primitives — unofficial,
-unsupported, and a genuinely useful thing to point your agents at.
+Tools for importing context into Fulcra and coordinating agents through shared,
+user-owned records and files. This is an unofficial, unsupported project.
 
-## Note from the human: this is how I use Fulcra
+**[Install Collect for Mac and set up Apple Notes](docs/collect.md#get-started-new-user)**
 
-I use Fulcra to build stuff and get stuff done by coordinating long-running
-agents across multiple platforms — Claude Code (desktop and cloud), Claude
-Cowork, OpenClaw, ChatGPT, and Codex. That includes having long-running
-coding-agent sessions capture my ideas, plan together, assign work to each
-other, and review each other's changes across model vendors (my review loop
-requires author and approver to be different models).
-
-The agents [coordinate](COORDINATION-PROTOCOL.md) all of that over
-[Fulcra](https://fulcradynamics.com) — a user-owned context backend that my
-agents and I use as a shared bus of typed events and documents — capturing
-what they're doing and
-[session checkpoints](skills/fulcra-agent-continuity/SKILL.md) along the way.
-Which means I can do things like review everything all the bots did over the
-past few days from my Fulcra dashboard, ask any of the bots what the others
-have done, or park a Claude Code cloud session midstream and pick it up in
-the Codex app.
-
-Storing their state and work to Fulcra on every wake is what turned Claude
-Code cloud sessions into very long-running agents
-[that behave a lot like](skills/fulcra-agent-cloud-coordinator/SKILL.md)
-OpenClaw or Hermes agents. And none of this needed anything but an ordinary
-Fulcra account: the bus is just custom data types and files in my own
-account — no coordination server, no broker, just reads and writes and some
-scaffolding the agents run in their sessions.
-
-I'm letting the bots run wild, so I max out multiple foundation-model
-subscriptions' weekly limits — and the agents use Fulcra to load-balance
-across accounts ([ATC](skills/fulcra-agent-atc/SKILL.md), figuring this
-out). When something needs me, the fleet's watchdog sends a notification to
-my phone.
-
-Those bots also built me a [desktop app](packages/collect) that gathers a
-ton of [hard-to-capture contextual data](docs/how-do-i-get-my-data.md) about
-my life and work, which pairs well with the Context app. Meeting briefings,
-recaps, and CRM updates are table stakes — but because the knowledge is
-stored with Fulcra, agents do all of it without ever logging in as me, and
-every agent can see any knowledge any other agent produced or enriched.
-
-Some of that output benefits my Fulcra cofounders and their agents too, via
-scoped data shares. Not to mention we've shared our Netflix histories so our
-agents can team up and pick our next watch together.
-
-More on the agents teaming up soon. It's pretty cool.
+Collect imports data from supported sources into your Fulcra account. The
+coordination tools let agents exchange work, record decisions, review changes,
+and resume tasks across supported platforms. Each team configures its own
+identities, storage, credentials, and notification preferences.
 
 ## Why you'd want this
 
@@ -58,11 +19,10 @@ and get more helpful over time, because the context they build outlives every
 session, container, and model switch. Context, not models, makes the agent.
 Rent the reasoning; own the context.
 
-This repo is what that looks like in practice. **A dozen agents across five
-vendors run on it daily**: they hand each other work, review each other's
-changes, survive container resets, and record what happened — coordinating
-through one Fulcra account and nothing else. No broker, no queue, no
-coordination server.
+The packages in this repo let agents hand each other work, review changes,
+survive container resets, and record what happened through a Fulcra account.
+The coordination protocol uses Fulcra records and files without a separate
+broker or coordination server.
 
 Two layers do the work, and they're designed as a pair:
 
@@ -156,12 +116,10 @@ honestly separated:
 - The [`coord-engine`](packages/coord-engine) is stdlib-only and installs
   with no account (see [Getting started](#getting-started));
   `coord-engine --help` prints the full verb surface offline. (An optional
-  always-on **wake router** ships in the engine but is **unproven in
-  deployment**: the reference deployment was evaluated and retired — measured
-  across its life, it never delivered a wake listener cadence didn't already
-  cover — see [`docs/coord/wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md)
-  and the status note in [`BUS-V3.md`](docs/coord/BUS-V3.md); true push
-  wake-up is an upstream platform ask.)
+  always-on **wake router** ships in the engine; evaluate its latency and isolation
+  for your deployment. See [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md)
+  and [`BUS-V3.md`](docs/coord/BUS-V3.md). Scheduled wakes and queue reads
+  remain the baseline.)
 
 **Needs your Fulcra token:** any touch of a store — every read and every
 write — `fulcra` CLI queries, `coord-engine doctor`/`briefing`/…, the

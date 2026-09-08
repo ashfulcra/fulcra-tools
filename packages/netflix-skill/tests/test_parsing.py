@@ -100,8 +100,8 @@ def test_parse_rich_real_times_and_duration(ni, fixtures_dir):
 
 
 def test_rich_det_id_matches_fulcra_media_scheme(ni):
-    h = hashlib.sha256("Ash|2024-03-01 21:00:00|Dune: Part Two".encode()).hexdigest()
-    assert ni.det_id_rich("Ash", "2024-03-01 21:00:00", "Dune: Part Two") == \
+    h = hashlib.sha256("User|2024-03-01 21:00:00|Dune: Part Two".encode()).hexdigest()
+    assert ni.det_id_rich("User", "2024-03-01 21:00:00", "Dune: Part Two") == \
         f"com.fulcra.media.netflix-rich.{h[:16]}"
 
 
@@ -120,7 +120,7 @@ def test_parse_rich_bad_start_time_raises_with_row_context(ni, tmp_path):
     p = tmp_path / "bad_start.csv"
     p.write_text(
         header +
-        "Ash,NOT-A-TIME,0:41:30,,BEEF: Season 1: Episode 1,,Apple TV,0:41:30,0:41:30,US (United States)\n"
+        "User,NOT-A-TIME,0:41:30,,BEEF: Season 1: Episode 1,,Apple TV,0:41:30,0:41:30,US (United States)\n"
     )
     with pytest.raises(ValueError, match=r"row 2 \('BEEF: Season 1: Episode 1'\)"):
         list(ni.parse_rich(p))
@@ -132,7 +132,7 @@ def test_parse_rich_bad_duration_raises_with_row_context(ni, tmp_path):
     p = tmp_path / "bad_duration.csv"
     p.write_text(
         header +
-        "Ash,2023-04-12 20:15:57,bogus,,BEEF: Season 1: Episode 1,,Apple TV,0:41:30,0:41:30,US (United States)\n"
+        "User,2023-04-12 20:15:57,bogus,,BEEF: Season 1: Episode 1,,Apple TV,0:41:30,0:41:30,US (United States)\n"
     )
     with pytest.raises(ValueError, match=r"row 2 \('BEEF: Season 1: Episode 1'\)"):
         list(ni.parse_rich(p))

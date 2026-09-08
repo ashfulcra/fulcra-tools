@@ -10,9 +10,7 @@ the machine except the emails the operator's own rules select.
 Access is read-only (`gmail.readonly`); the relay never sends, modifies, or
 deletes mail.
 
-> Credit: the original design is **ArcBot's** (openclaw). Its June MVP was
-> unrecoverable; this is a clean-room rebuild on current `main` that preserves
-> ArcBot's architecture.
+
 
 ## How it works
 

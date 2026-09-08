@@ -1,13 +1,11 @@
-<!-- Example role doc: an EXCLUSIVE role — one holder at a time; a second fresh lease
-     surfaces as CONTESTED. Upload as team/<team>/roles/<name>.md. Modeled on the
-     coord-maintainer role running on the reference deployment. -->
+<!-- Synthetic role example. Adapt identity and checkpoint paths to your team. -->
 ---
 type: Role
-title: coord-maintainer
+title: maintainer
 description: Maintains the coord layer — engine, skills, bus hygiene, migrations, operator loop orchestration.
 policy: exclusive
 sla_hours: 24
-maintainer: ash
+maintainer: user
 checkpoint_ref: team/<team>/member/<agent>/continuity/role-<role>/latest.json
 ---
 # Duties

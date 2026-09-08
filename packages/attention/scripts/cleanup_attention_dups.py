@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Clean up the attention duplicate-record storm residue.
 
-Background, measured on a live account during the 2026-06 audit:
-the pre-relayless attention pipeline ingested the SAME visit record up to
-2,729 times — 144,664 of 149,789 attention records (97%) in the Apr 10 –
-Jun 1 2026 window are exact identical-timestamp clones of 5,125 real
-visits. The current v3 relayless path is clean; this is bounded legacy
-residue.
+The pre-relayless attention pipeline could ingest identical-timestamp
+clones of the same visit. This tool identifies and removes duplicate
+records in an explicitly selected date window.
 
 This tool:
   1. fetches DurationAnnotation records over the residue window (chunked),
@@ -51,6 +48,7 @@ Safety rails:
 Usage:
   # 1. dry-run: build + review the manifest
   uv run --project packages/attention python packages/attention/scripts/cleanup_attention_dups.py \
+      --start 2024-01-01T00:00:00Z --end 2024-02-01T00:00:00Z \
       --manifest /tmp/attention-dups.json
 
   # 2. execute via the CLI delete (after the branch folds into main)
@@ -86,15 +84,8 @@ API_BASE = "https://api.fulcradynamics.com"
 EVENT_PATH = "/data/v1alpha1/event/DurationAnnotation"
 ATTENTION_PREFIX = "com.fulcra.attention."
 
-# Residue bounds from the audit (no attention records exist before April;
-# the storm stopped at the 2026-06-01/02 relayless cutover). A margin on
-# both sides costs little and catches stragglers.
-DEFAULT_START = "2026-04-01T00:00:00Z"
-DEFAULT_END = "2026-06-05T00:00:00Z"
-
-# The event endpoint has an undocumented pagination ceiling (~4k records,
-# no cursor). Storm days carry ~20k records, so chunk small and treat a
-# suspiciously-round chunk as possibly truncated.
+# The event endpoint may truncate large windows without a pagination cursor.
+# Use small chunks and detect suspiciously round response sizes.
 CHUNK_DAYS = 1
 TRUNCATION_SUSPECT = 4000
 
@@ -418,8 +409,8 @@ def summarize(plan: Plan) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--start", default=DEFAULT_START)
-    ap.add_argument("--end", default=DEFAULT_END)
+    ap.add_argument("--start", required=True, help="inclusive window start (ISO 8601)")
+    ap.add_argument("--end", required=True, help="exclusive window end (ISO 8601)")
     ap.add_argument("--chunk-days", type=int, default=CHUNK_DAYS)
     ap.add_argument("--manifest", type=Path,
                     default=Path("/tmp/attention-dups.json"))

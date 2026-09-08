@@ -32,7 +32,7 @@ def test_cache_populated_after_successful_high_conf_import(isolated_env, monkeyp
     csv.write_text(
         "Profile Name,Start Time,Duration,Attributes,Title,Supplemental Video Type,"
         "Device Type,Bookmark,Latest Bookmark,Country\n"
-        "Ash,2026-05-12 20:32:15,01:42:30,,Dune: Part Two,,Apple TV 4K,01:42:30,01:42:30,US\n"
+        "User,2026-05-12 20:32:15,01:42:30,,Dune: Part Two,,Apple TV 4K,01:42:30,01:42:30,US\n"
     )
 
     monkeypatch.setattr(

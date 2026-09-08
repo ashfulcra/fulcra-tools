@@ -112,7 +112,7 @@ private func makeEnsure(_ api: FakeApi, token: FakeToken = FakeToken(normal: "AC
 final class SlugifyTests: XCTestCase {
     func testGoldenCases() {
         XCTAssertEqual(slugifyIdentity("Work MBP — Chrome"), "work-mbp-chrome")
-        XCTAssertEqual(slugifyIdentity("ash@fulcra's laptop!!"), "ash-fulcra-s-laptop")
+        XCTAssertEqual(slugifyIdentity("user@example's laptop!!"), "user-example-s-laptop")
         XCTAssertEqual(slugifyIdentity("  ---Hello___World---  "), "hello-world")
         XCTAssertEqual(slugifyIdentity("a   b"), "a-b")
         XCTAssertEqual(slugifyIdentity(""), "browser")

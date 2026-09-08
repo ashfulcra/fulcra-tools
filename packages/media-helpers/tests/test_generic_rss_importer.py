@@ -48,8 +48,8 @@ def test_normalize_entry_rss_happy_path():
     assert ev.timestamp_confidence == "high"
     assert ev.deterministic_id.startswith("com.fulcra.media.letterboxd.v1.")
     # external_ids carries feed/entry context
-    assert ev.external_ids["feed_title"] == "ash's Letterboxd diary"
-    assert ev.external_ids["entry_url"] == "https://letterboxd.com/ash/film/sigur-ros-live-2026/"
+    assert ev.external_ids["feed_title"] == "user's Letterboxd diary"
+    assert ev.external_ids["entry_url"] == "https://letterboxd.com/user/film/sigur-ros-live-2026/"
     assert ev.external_ids["guid"] == "letterboxd-watch-99001"
 
 
@@ -135,7 +135,7 @@ def test_normalize_entry_deterministic_id_includes_feed_url():
     entry = feed.entries[0]
     a = normalize_entry(
         entry, feed_meta=feed.feed, service="letterboxd", category="watched",
-        importer_name="letterboxd", feed_url="https://letterboxd.com/ash/rss/",
+        importer_name="letterboxd", feed_url="https://letterboxd.com/user/rss/",
     )
     b = normalize_entry(
         entry, feed_meta=feed.feed, service="letterboxd", category="watched",
@@ -228,7 +228,7 @@ def test_normalize_feed_passes_kwargs_to_normalize_entry():
     def handler(request):
         return httpx.Response(200, content=raw)
     events = list(normalize_feed(
-        "https://letterboxd.com/ash/rss/",
+        "https://letterboxd.com/user/rss/",
         service="letterboxd",
         category="watched",
         importer_name="letterboxd",
@@ -250,12 +250,12 @@ def test_fetch_feed_uses_transport_and_returns_parsed():
                               headers={"content-type": "application/rss+xml"})
 
     parsed = fetch_feed(
-        "https://letterboxd.com/ash/rss/",
+        "https://letterboxd.com/user/rss/",
         transport=httpx.MockTransport(handler),
     )
-    assert parsed.feed.title == "ash's Letterboxd diary"
+    assert parsed.feed.title == "user's Letterboxd diary"
     assert len(parsed.entries) == 4
-    assert captured == ["https://letterboxd.com/ash/rss/"]
+    assert captured == ["https://letterboxd.com/user/rss/"]
 
 
 def test_fetch_feed_http_error_raises():

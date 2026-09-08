@@ -27,7 +27,7 @@ SPEC = StructureSpec.from_dict({
             "slug": "people",
             "title": "People",
             "description": "Durable people notes",
-            "seed_notes": ["People/Ash"],
+            "seed_notes": ["People/User"],
         },
     ],
     "map_highlights": ["Project Alpha"],
@@ -46,7 +46,7 @@ tags:
 # Project Alpha
 
 Alpha first line.
-See [[People/Ash]].
+See [[People/User]].
 
 ## Log
 - 2026-06-12T12:00:00+00:00 codex: decided the alpha shape
@@ -61,14 +61,14 @@ updated_at: 2026-06-10T12:00:00+00:00
 
 Beta first line.
 """,
-    "People/Ash.md": """---
-title: Ash
+    "People/User.md": """---
+title: User
 updated_at: 2026-06-11T12:00:00+00:00
 ---
 
-# Ash
+# User
 
-Ash first line.
+User first line.
 See [[Project Alpha]].
 """,
 }
@@ -76,8 +76,8 @@ See [[Project Alpha]].
 
 def test_render_map_is_deterministic_and_preserves_section_order():
     links = build_index({
-        "Project Alpha.md": "[[People/Ash]]",
-        "People/Ash.md": "[[Project Alpha]]",
+        "Project Alpha.md": "[[People/User]]",
+        "People/User.md": "[[Project Alpha]]",
     })
 
     rendered = render_map(SPEC, NOTES, links)
@@ -87,20 +87,20 @@ def test_render_map_is_deterministic_and_preserves_section_order():
     assert rendered.index("## Projects") < rendered.index("## People")
     assert "- [[Project Alpha|Project Alpha]] — Alpha first line. (hot, 1 link, 1 backlink)" in rendered
     assert "- [[Project Beta|Project Beta]] — Beta first line." in rendered
-    assert "- [[People/Ash|Ash]] — Ash first line. (1 link, 1 backlink)" in rendered
+    assert "- [[People/User|User]] — User first line. (1 link, 1 backlink)" in rendered
 
 
 def test_select_hot_items_prioritizes_active_corrections_and_recent_decisions():
     links = build_index({
-        "Project Alpha.md": "[[People/Ash]]",
-        "People/Ash.md": "[[Project Alpha]]",
+        "Project Alpha.md": "[[People/User]]",
+        "People/User.md": "[[Project Alpha]]",
     })
 
     items = select_hot_items(NOTES, links, datetime(2026, 6, 13, tzinfo=timezone.utc))
 
     assert [item.path for item in items] == [
         "Project Alpha.md",
-        "People/Ash.md",
+        "People/User.md",
         "Project Beta.md",
     ]
     assert items[0].reasons == ("active", "standing-correction", "recent-decision")

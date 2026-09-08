@@ -2,19 +2,12 @@
 
 **STATUS: DRAFT for cross-model review.** Authored 2026-08-13 under P1 operator
 order. Gate: normal dual-green cross-model review; workstream ratification by
-coord-boss.
+coordinator.
 
-**Authorization and trigger.** Operator, 2026-08-13, on discovering a cron
-reconciler running on a personal laptop (the MBP): *"The fact that that exists
-is an utter failure. Is that script an architecture requirement for the current
-coord to work? If so the current coord is trash. What if I wanted to use it
-with only cloud agents. Why can't you use a combination of annotations /
-metrics, files and the data updates command to make this work right without
-something outside the sessions doing cleanup."* The operator killed the MBP
-daemon the same day. A second operator-specified mechanism is folded in as a
-requirement, not an option: *"why don't you just have an extra channel for
-fleet directives like version updates. Data updates against it on every tick
-checks if there is something to catch up on."*
+**Requirement.** Coordination must work with cloud agents alone. A dedicated
+personal machine or external cleanup daemon must not be a correctness requirement.
+Agents discover durable directives, including version updates, through a channel
+checked with `data-updates` on each wake.
 
 **Amends:** extends `wake-router-ADDENDUM-1-event-substrate.md` §2 (feed-first
 principles, adopted here wholesale) from the read path to the whole
@@ -40,7 +33,7 @@ spec re-homes the duties and retires the host class.
 1. **No out-of-session writers.** Every write to the coordination store
    happens inside an accountable agent session — one with an identity, a
    presence beat, and a directive trail. The janitor CLASS is retired, not
-   just the MBP instance: no cron, launchd job, CI schedule, or resident
+   just one host instance: no cron, launchd job, CI schedule, or resident
    daemon may hold `FULCRA_COORD_AGENT` and write.
 2. **Cloud-only is the baseline, not a degraded mode.** The fleet must be
    fully functional — folds fresh, retention running, versions distributed —
@@ -81,7 +74,7 @@ spec re-homes the duties and retires the host class.
 - **Retention becomes a bounded in-session duty.** The `reconcile`
   retention sweep (archive quiet terminal tasks, settled orphan reviews)
   runs as a capped batch inside a designated role's normal wake —
-  coord-boss's tick is the natural home; any session MAY run a batch, the
+  coordinator's tick is the natural home; any session MAY run a batch, the
   role guarantees liveness. Same code path, session-hosted, budget-capped,
   presence-attributed.
 - **Health shards** are written by sessions about themselves (wake
@@ -130,7 +123,7 @@ spec re-homes the duties and retires the host class.
   canonical origin, fails to parse, or names an invalid pin (abbreviated
   SHA, branch name, foreign repo), the agent KEEPS its current
   pin/fence/config, surfaces the refusal loudly in its fold's degraded line
-  and its next claim to coord-boss, and never substitutes a cached or
+  and its next claim to coordinator, and never substitutes a cached or
   third-party copy of the manifest — unfetchable means hold state, not
   downgrade.
 - **Bootstrap:** a NEW agent fetches the same manifest from canonical
@@ -166,9 +159,7 @@ spec re-homes the duties and retires the host class.
 
 ## 5. Retirement of the `coord-reconcile:*` class
 
-Known members: the MBP cron reconciler — **killed by the operator
-2026-08-13**; no `coord-reconcile:<host>` identity currently beats presence.
-Steps, in order:
+Retire any deployment-specific external reconciler in this order:
 
 1. Purge cron/daemon install instructions from `packages/coord-engine/README.md`
    and any host docs; the `reconcile` verb remains as a **manually invoked,
@@ -183,7 +174,7 @@ Steps, in order:
 ## 6. Phases and acceptance (machine-checkable)
 
 - **Phase 1 — converge the parked event-read cutover.** The read-mode flip
-  coord-maintainer soaked is this spec's §2 read path; adopt it as the first
+  maintainer soaked is this spec's §2 read path; adopt it as the first
   execution step. *Acceptance:* folds run feed-first on the flipped mode for
   7 days with zero fail-closed fallbacks attributable to the flip (degraded
   lines quote the feed cursor, not listing staleness). Operator flips per
@@ -201,7 +192,7 @@ Steps, in order:
 - **Phase 3 — janitor retirement.** §5 steps 1–3. *Acceptance:* 14 days
   with zero store writes from any non-session identity (auditable from
   shard `agent`/authorship fields + presence absence), retention batch
-  demonstrably running in-session (batch evidence in coord-boss tick
+  demonstrably running in-session (batch evidence in coordinator tick
   claims), and folds' degraded-line rate no worse than the Phase-1 baseline.
 
 ## 7. What this kills, what it deliberately keeps
@@ -221,7 +212,7 @@ hints point at live in the manifest, not in any record).
 
 ## 8. Open questions for review
 
-1. Retention-actor liveness: is coord-boss's tick a sufficient guarantee, or
+1. Retention-actor liveness: is coordinator's tick a sufficient guarantee, or
    should the duty rotate (any wake runs a batch when the last batch is
    older than N hours)?
 2. Feed retention horizon vs cold-start: addendum-1's revisit trigger
@@ -251,7 +242,7 @@ re-litigated:
   (2) the ordering the spec assigned to `data-updates` does not exist — the
   command returns an aggregate summary, not a per-record server sequence, so
   latest-by-kind could not be established from data readers actually have.
-- **Resolution (r3, ruled by coord-boss 2026-08-14):** move ALL authority
+- **Resolution (r3, ruled by coordinator 2026-08-14):** move ALL authority
   out of the records and into the review-gated repo manifest; the channel
   is a wake hint. Both P1s dissolve — publisher trust becomes the merge
   gate (already server-authenticated), and ordering becomes git history.

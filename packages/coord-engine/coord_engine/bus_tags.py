@@ -22,7 +22,7 @@ DURABLE ON THE BUS, one small document per team:
     team/<team>/_coord/bus-v3/tags.json
 
     {"schema": "coord.bus-tags.v2",
-     "base": "cb951ecb-f21c-4aee-826e-2cb0b12517d6",
+     "base": "00000000-0000-4000-8000-000000000097",
      "agents": {"coord-boss": {"agent": "0913d5df-…", "platform": "…",
                                "harness": "…", "model": "…"}}}
 

@@ -6804,7 +6804,7 @@ def _old_open_set(transport: Any, team: str, agent: str) -> tuple[list[dict[str,
     # made every coordinator diverge forever. Keep only rows assigned to this agent, to everyone, or to a role it holds.
     mine = {agent, "@" + agent, "*"} | {r for r in (held_roles or set())} | {"@" + r for r in (held_roles or set())}
     got = [r for r in got if str(r.get("assignee") or "") in mine]
-    # RULING 1 (coord-boss f9f5823b, 2026-09-05, corollary of Ash's assignee ruling): a broadcast (assignee "*") is an
+    # RULING 1 (coord-boss f9f5823b, 2026-09-05, corollary of the user's assignee ruling): a broadcast (assignee "*") is an
     # obligation of EVERY recipient except its sender, until that recipient closes it. needs-me never lists star rows
     # for an agent, so without this every broadcast diverged once for every non-sender (measured on three identities
     # 20:24Z-22:23Z) and a --force re-seed closed it. The fold already keeps to==all for every agent except from
@@ -7105,7 +7105,7 @@ def cmd_obligations_dispatch(args: argparse.Namespace, transport: Any) -> int:
 def cmd_obligations_stream(args: argparse.Namespace, transport: Any) -> int:
     """`obligations --stream`: follow the signal to the doc, never scan the corpus.
 
-    THE POINT, and it is Ash's, repeated for six weeks before it was built: the
+    THE POINT, and it is the user's, repeated for six weeks before it was built: the
     bus payload has ALWAYS carried ``ptr``. The signal already names the exact
     document an obligation lives in. The default obligations path ignores it —
     it loads a reconcile-built summaries index and folds the whole fleet, so its
@@ -10770,7 +10770,7 @@ def cmd_router_shadow_report(args: argparse.Namespace, transport: Any) -> int:
 # only its own adapters' wakes — visibly, in the durable queue (plan §2.5).
 # Delivery is at-least-once and safe by `router.adapter_invocation`'s keyed-nudge
 # content rule; deployment (wiring the real adapter scripts, scheduling the
-# poller on a host) is a separate Ash-gated step — this command wakes nothing.
+# poller on a host) is a separate user-approved step — this command wakes nothing.
 
 def _default_host_adapter_invoke(inv: dict[str, Any]) -> "tuple[str, str]":
     """Default host-local adapter invoker → (status, detail), status one of
@@ -13489,7 +13489,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_directive_flags(lt); lt.set_defaults(func=cmd_later)
     it = sub.add_parser("intent", help="capture a spoken commitment (intent:<principal>); restatement never forks, a new --by updates the window in place")
     it.add_argument("team"); it.add_argument("title", help="the commitment text")
-    it.add_argument("--for", dest="principal", required=True, help="the principal who owes the commitment (e.g. ash)")
+    it.add_argument("--for", dest="principal", required=True, help="the principal who owes the commitment (e.g. user)")
     it.add_argument("--by", help="declared window (ISO or 5d/36h/10m); absent = undeclared -> fold uses capture+grace")
     it.add_argument("--from", dest="sender", help="capturing agent (records ownership)")
     it.add_argument("--priority", "-p", default="P2")
@@ -13561,7 +13561,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     th = sub.add_parser("threads", help="dropped work-in-progress for a principal (started-then-silent / blocked-on / intent-never-started)")
     th.add_argument("team")
-    th.add_argument("--for", dest="principal", required=True, help="the principal (e.g. ash)")
+    th.add_argument("--for", dest="principal", required=True, help="the principal (e.g. user)")
     th.add_argument("--silence-days", dest="silence_days", type=float,
                     help="mode-1 silence window in days (default 3; env COORD_THREADS_SILENCE_DAYS)")
     th.add_argument("--intent-grace-hours", dest="intent_grace_hours", type=float,
@@ -14590,7 +14590,7 @@ _threads_fold_budget = commands_threads._threads_fold_budget
 _threads_window = commands_threads._threads_window
 _threads_is_principal = commands_threads._threads_is_principal
 _threads_blocked_signal = commands_threads._threads_blocked_signal
-_threads_ash_activity = commands_threads._threads_ash_activity
+_threads_principal_activity = commands_threads._threads_principal_activity
 _threads_candidate_rows = commands_threads._threads_candidate_rows
 cmd_threads = commands_threads.cmd_threads
 

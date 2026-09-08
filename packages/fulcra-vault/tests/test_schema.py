@@ -55,10 +55,10 @@ def test_structure_spec_rejects_invalid_inputs(raw):
 
 
 def test_note_path_helpers_normalize_without_escaping_vault():
-    assert normalize_note_path("People/Ash") == "People/Ash.md"
-    assert normalize_note_path("vault/People/Ash.md") == "People/Ash.md"
-    assert vault_relative_path("People/Ash") == "vault/People/Ash.md"
-    assert fulcra_absolute_path("People/Ash") == "/vault/People/Ash.md"
+    assert normalize_note_path("People/User") == "People/User.md"
+    assert normalize_note_path("vault/People/User.md") == "People/User.md"
+    assert vault_relative_path("People/User") == "vault/People/User.md"
+    assert fulcra_absolute_path("People/User") == "/vault/People/User.md"
 
 
 @pytest.mark.parametrize("name", ["", "/abs.md", "../x.md", "x/../y.md", "x.txt", "vault"])

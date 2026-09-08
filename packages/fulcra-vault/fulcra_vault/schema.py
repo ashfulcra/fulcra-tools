@@ -133,7 +133,7 @@ def validate_slug(slug: str, *, label: str = "slug") -> None:
 
 
 def normalize_note_path(name: str) -> str:
-    """Return a vault-relative markdown path such as ``people/Ash.md``."""
+    """Return a vault-relative markdown path such as ``people/User.md``."""
     if not isinstance(name, str) or not name.strip():
         raise SchemaError("note path must be a non-empty string")
     raw = name.strip().replace("\\", "/")

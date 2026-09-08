@@ -60,15 +60,24 @@ OUT_DMG="$REPO/dist/Fulcra Collect.dmg"
 
 echo "=== 1/7  build the unsigned app (wheelhouse + briefcase create/build) ==="
 bash "$MENUBAR/scripts/build_macos_app.sh"
+bash "$MENUBAR/scripts/verify_bundle.sh"
+python3 "$MENUBAR/scripts/sanitize_bundle.py" --check-only "$APP"
 
 echo "=== 2/7  sign the app inside-out via Briefcase (Developer ID, hardened runtime) ==="
 # `package -p zip … --no-notarize` runs Briefcase's signer over every nested
 # Mach-O with the macOS template's Python entitlements, then zips the signed
 # app. We only want the side effect: build/…/Fulcra Collect.app signed in place.
+# Briefcase signs its app stub and dependencies, but does not discover these
+# extra command executables in Contents/MacOS. Sign them before sealing the app.
+for launcher in fulcra-collect fulcra fulcra-api; do
+  codesign --force --timestamp --options runtime -s "$FULCRA_SIGN_IDENTITY" \
+    "$APP/Contents/MacOS/$launcher"
+done
 cd "$MENUBAR"
 PIP_FIND_LINKS="$REPO/wheelhouse" uvx briefcase package macOS \
   -p zip -i "$FULCRA_SIGN_IDENTITY" --no-notarize
 cd "$REPO"
+env PATH=/usr/bin:/bin "$APP/Contents/MacOS/fulcra-collect" --help >/dev/null
 echo "--- verify app signature ---"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=4 "$APP" 2>&1 | grep -iE "Authority|TeamIdentifier|Timestamp|flags" | head

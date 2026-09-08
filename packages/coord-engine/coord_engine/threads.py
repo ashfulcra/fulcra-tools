@@ -1,7 +1,7 @@
 """Dropped-threads classification — the PURE fold (no transport).
 
 Design: the 2026-07-11 dropped-threads design (codex-APPROVED; the spec was
-never committed to this repo — it lives in the review thread, not under docs/). Answers "what work-in-progress has Ash dropped?" over a NEUTRAL row
+never committed to this repo — it lives in the review thread, not under docs/). Answers "what work-in-progress has the user dropped?" over a NEUTRAL row
 shape a single bus adapter (in cli.py) produces — so adding a GitHub/fulcra-pm
 source later is a new adapter emitting the same rows, never a rewrite.
 
@@ -17,12 +17,12 @@ one mode per thread, FIRST MATCH WINS:
      a response shard exists; a ``followed-up-by:<slug>`` tag is present. Carried
      on the row as ``followup: {status, responded, followup_ref}``.
   2. **blocked-on-principal (mode 2)** — a NON-intent item whose progress waits on
-     the principal (``assignee: ash``, ``blocked-on:ash`` tag, or a ``needs:human``
+     the principal (``assignee: user``, ``blocked-on:user`` tag, or a ``needs:human``
      block naming him). Surfaced IMMEDIATELY, no aging; being awaited-now dominates
      aged silence. ``evidence`` notes the age when it ALSO exceeds the silence
      window.
   3. **started-then-silent (mode 1)** — a remaining principal item (owns / last
-     touched) whose ash-activity is older than the silence window. Deliberately
+     touched) whose user-activity is older than the silence window. Deliberately
      parked items (``@backlog`` audience, a future ``not_before``) are excluded by
      construction.
 
@@ -152,10 +152,10 @@ def classify(
         # --- Non-intent (terminal already refused by the belt above) ----------
         # Mode 2: blocked-on-principal dominates aged silence, no aging.
         if row.get("blocked_on_principal"):
-            signal = str(row.get("blocked_signal") or "blocked on ash")
-            act = _parse(row.get("ash_activity_ts"))
+            signal = str(row.get("blocked_signal") or "blocked on user")
+            act = _parse(row.get("principal_activity_ts"))
             age = _age_days(act, now_dt) if act is not None else None
-            evidence = f"blocked on ash ({signal})"
+            evidence = f"blocked on user ({signal})"
             if age is not None and (now_dt - act) >= silence:
                 evidence += (f"; also silent {_fmt_num(age)}d "
                              f"(exceeds {_fmt_num(silence_days)}d window)")
@@ -167,17 +167,17 @@ def classify(
             continue
 
         # Mode 1: remaining principal items age into silence.
-        act = _parse(row.get("ash_activity_ts"))
+        act = _parse(row.get("principal_activity_ts"))
         if act is None:
             continue  # no usable activity ts -> cannot prove staleness; no false drop
         if (now_dt - act) < silence:
             continue  # still fresh -> not dropped
         age = _age_days(act, now_dt)
-        if row.get("ash_activity_attributed", True):
-            source = str(row.get("ash_activity_source") or "ash activity")
+        if row.get("principal_activity_attributed", True):
+            source = str(row.get("principal_activity_source") or "user activity")
             attribution = f"attributed via {source}"
         else:
-            attribution = "no ash-attributable event — item timestamp fallback"
+            attribution = "no user-attributable event — item timestamp fallback"
         out.append({
             "mode": 1, "id": rid, "title": title,
             "age": round(age, 2), "window": _iso(act + silence),

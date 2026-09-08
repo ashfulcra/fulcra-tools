@@ -1,12 +1,12 @@
 # fulcra-netflix skill — design
 
 **Date:** 2026-07-03
-**Status:** APPROVED — coord review `netflix-skill-design`: CHANGES round (share scope, occurrence-index dedup, namespace contract) folded 2026-07-03; share-scope open question resolved 2026-07-04 (Context Web shares all annotations — honest-disclosure wording is live; per-def scoping arrives with CLI sharing); re-affirmed approve by Ashs-MBP-Work:Codex-Review-Workbook 2026-07-04 at 4df70f0
+**Status:** implementation design; sharing is optional and requires a user-selected recipient.
 **Location:** `packages/netflix-skill/` in ashfulcra/fulcra-tools — the shippable skill lives at `packages/netflix-skill/skills/fulcra-netflix/` (same package-wraps-skill convention as `media-helpers`/`fulcra-media`), agent-skills folder layout inside so it can be PR'd upstream to `fulcradynamics/agent-skills` later
 
 ## What this is
 
-A runtime-agnostic agent skill that takes a brand-new user from "I messaged a skill link to my bot" to "my Netflix viewing history lives in my Fulcra account as a Watched annotation, shared with the movie-night pool owner." It is the flagship concrete demo of Fulcra-as-context-layer: onboarding → export → import → share, driven entirely by the user's own agent over chat.
+A runtime-agnostic agent skill that takes a brand-new user from "I messaged a skill link to my bot" to "my Netflix viewing history lives in my Fulcra account as a Watched annotation, optionally shared with a recipient the user chooses." It is the flagship concrete demo of Fulcra-as-context-layer: onboarding → export → import → share, driven entirely by the user's own agent over chat.
 
 The skill composes three existing pieces rather than reinventing them:
 
@@ -31,7 +31,7 @@ The SKILL.md is written as a state machine. Each state defines: the message to s
 ### 1. HELLO
 First message to the human. Contains, in order:
 - One-paragraph pitch (what will happen, ~5 minutes of their time, what they get).
-- **The share disclosure + instructions, up front** (Ash 2026-07-03): after import, they'll be invited to share with the pool owner — Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521` — by visiting `https://context.fulcradynamics.com/sharing?type=sending`, logging in with the same account they auth in step 2, and creating an annotation share. The disclosure states plainly that this shares **all their annotation data, not just Netflix** (the UI has no per-definition scoping — see the share-scope rule in step 5), and that they can skip sharing. Stated here so consent precedes auth, and so the consent wording never promises less sharing than actually happens.
+- **The share disclosure + instructions, up front**: after import, they'll be invited to share with the selected recipient — user-confirmed Fulcra ID `<recipient-fulcra-id>` — by visiting `https://context.fulcradynamics.com/sharing?type=sending`, logging in with the same account they auth in step 2, and creating an annotation share. The disclosure states plainly that this shares **all their annotation data, not just Netflix** (the UI has no per-definition scoping — see the share-scope rule in step 5), and that they can skip sharing. Stated here so consent precedes auth, and so the consent wording never promises less sharing than actually happens.
 - The step list so they know where they are throughout.
 
 ### 2. AUTH
@@ -72,10 +72,10 @@ Re-runs are safe: deterministic IDs make re-imports no-ops server-side.
 Immediately after import verification, walk the user through the manual share (same instructions as HELLO, now actionable):
 1. Open `https://context.fulcradynamics.com/sharing?type=sending`.
 2. Log in with the same account used in step 2.
-3. Create a share to recipient Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521` that includes annotations.
+3. Create a share to recipient user-confirmed Fulcra ID `<recipient-fulcra-id>` that includes annotations.
 4. Confirm back to the agent; agent congratulates and points at Context Web to browse their data.
 
-**Share-scope rule (review finding #1 — resolved 2026-07-03)**: the Context Web sharing UI shares **all annotations** — it has no per-definition scoping (confirmed by Ash). So the v1 manual flow uses the honest-disclosure wording, everywhere sharing is mentioned (HELLO and SHARE): the share gives the pool owner the user's annotation data **including but not limited to** the Netflix Watched history, stated plainly before the user consents, with skipping the share offered as an explicit alternative. The skill MUST NOT describe the v1 share as Netflix-only. Per-definition scoping arrives with CLI sharing: the `fulcra-api share create` swap (PR #47) must scope the share to the Watched definition, and the skill's wording tightens to Netflix-only at that point.
+**Share-scope rule (review finding #1 — resolved 2026-07-03)**: the Context Web sharing UI shares **all annotations** — it has no per-definition scoping. So the v1 manual flow uses the honest-disclosure wording, everywhere sharing is mentioned (HELLO and SHARE): the share gives the selected recipient the user's annotation data **including but not limited to** the Netflix Watched history, stated plainly before the user consents, with skipping the share offered as an explicit alternative. The skill MUST NOT describe the v1 share as Netflix-only. Per-definition scoping arrives with CLI sharing: the `fulcra-api share create` swap (PR #47) must scope the share to the Watched definition, and the skill's wording tightens to Netflix-only at that point.
 
 `TODO(share-cli)`: when fulcra-api-python PR #47 (`share create/list-outgoing/…`) merges, replace the manual steps with the agent running `fulcra-api share create` itself and verifying via `share list-outgoing`. The skill carries this marked block so the swap is a one-file edit.
 
@@ -121,7 +121,7 @@ SKILL.md follows the agent-skills conventions (frontmatter with name/description
 ## Testing
 
 - pytest over `netflix_import.py`: slim + GDPR fixture CSVs (synthetic, fixture-shaped like fulcra-media's tests — no personal data), UUID determinism, variant auto-detection, envelope schema, def-resolution idempotency (HTTP mocked).
-- Live smoke: 3-row synthetic CSV against Ash's account, verified by readback, then removed via `DeletedRecord` tombstones.
+- Optional integration smoke: use a synthetic CSV in a designated test account, verify readback, then remove the test records.
 
 ## Out of scope (v1)
 

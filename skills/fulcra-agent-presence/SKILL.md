@@ -55,7 +55,7 @@ GC covers ack and health shards only). A stale agent reappears by simply beating
 
 ## Pick your identity by ROLE, not by folder
 
-Set `FULCRA_COORD_AGENT` to the role you are acting as (`coord-maintainer`, `prefs-maintainer`,
+Set `FULCRA_COORD_AGENT` to the role you are acting as (`maintainer`, `preferences-maintainer`,
 `release-reviewer`), not a host/cwd-derived string. Folder-derived ids collide the moment two sessions
 share a directory (shared inbox, clobbered presence, ambiguous acks) and rot when a hostname or checkout
 path changes; a role-based id survives both and is what teammates actually want to address. Two rules

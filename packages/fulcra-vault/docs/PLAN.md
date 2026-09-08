@@ -486,7 +486,7 @@ Tests:
    determinism, CLI ergonomics, and non-developer breakage.
 8. Run the env-gated live smoke against real Fulcra Files.
 9. Route PRs to Arc reviewers first, using
-   `claude-code:ArcBot:Arc-Code-Review` while live; if a reviewer pushes
+   `claude-code:example-host:review` while live; if a reviewer pushes
    fixes, require author or second-reviewer sign-off before merge.
 
 ## Review focus for this plan

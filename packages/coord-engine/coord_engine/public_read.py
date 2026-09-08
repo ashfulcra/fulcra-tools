@@ -130,7 +130,7 @@ class SealedGenerationTransport:
         #
         # and `peer_parks` then sees `status != "error"` with `existing is None`
         # and writes its stub over a live role doc. Incomplete sections are a
-        # live condition on this fleet: reconcile on Ashs-MBP-Work reports
+        # live condition on this fleet: reconcile on Example-Laptop reports
         # "publication refused: incomplete required section(s)" every pass.
         #
         # An unsealed prefix reading the real store is correct-but-slower. A

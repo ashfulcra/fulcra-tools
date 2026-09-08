@@ -6,7 +6,7 @@
 //      around the title block; this component owns its own title)
 //   2. body markdown
 //   3. first-run status banner — driven by ctx.firstRunStatus, which is
-//      auto-triggered for non-service plugins on done-step entry (see
+//      triggered by the explicit start action for non-service plugins (see
 //      wizard.js _triggerFirstRun). Four sub-states:
 //        running → spinner + "Running first import…"
 //        done    → emerald banner + summary + optional timeline deep-link

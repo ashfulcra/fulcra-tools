@@ -41,9 +41,9 @@ def test_plain_done_still_respects_the_status_machine():
 
 def test_unlock_field_written():
     out = tasks.apply_update(_doc("active"), now=NOW, status="blocked",
-                             blocked_on="ash", unlock="merge PR 999")
+                             blocked_on="user", unlock="merge PR 999")
     assert "unlock: merge PR 999" in out
-    assert "blocked_on: ash" in out
+    assert "blocked_on: user" in out
 
 
 # --- cmd level --------------------------------------------------------------
@@ -68,17 +68,17 @@ def _args(**kw):
 
 
 def test_cmd_block_requires_unlock(capsys):
-    rc = cli.cmd_task_block(_args(blocked_on="ash", on_user=None, unlock=None), T(_doc("active")))
+    rc = cli.cmd_task_block(_args(blocked_on="user", on_user=None, unlock=None), T(_doc("active")))
     assert rc == 1
     assert "--unlock" in capsys.readouterr().err
 
 
 def test_cmd_block_with_unlock_writes_field(capsys):
     t = T(_doc("active"))
-    rc = cli.cmd_task_block(_args(blocked_on="ash", on_user=None,
-                                  unlock="Ash merges PR 999"), t)
+    rc = cli.cmd_task_block(_args(blocked_on="user", on_user=None,
+                                  unlock="User merges PR 999"), t)
     assert rc == 0
-    assert "unlock: Ash merges PR 999" in t.written
+    assert "unlock: User merges PR 999" in t.written
 
 
 def test_cmd_supersede(capsys):

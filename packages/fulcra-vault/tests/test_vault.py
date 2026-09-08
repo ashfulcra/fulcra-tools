@@ -127,7 +127,7 @@ def test_plan_restructure_is_additive_only():
             {
                 "slug": "people",
                 "title": "People",
-                "seed_notes": ["People/Ash"],
+                "seed_notes": ["People/User"],
             },
         ]
     })
@@ -143,7 +143,7 @@ def test_plan_restructure_is_additive_only():
         "/vault/meta.json",
         "/vault/MAP.md",
         "/vault/LOG.md",
-        "/vault/People/Ash.md",
+        "/vault/People/User.md",
     ]
     assert all("Project Beta.md" not in op.path for op in ops)
 

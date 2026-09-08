@@ -37,7 +37,7 @@ from coord_engine_test_helpers import FakeTransport
 
 TEAM = "t"
 SLUG = "please-stop-the-thing-abc123"
-CFG = {"data_type": "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041",
+CFG = {"data_type": "MomentAnnotation/00000000-0000-4000-8000-000000000102",
        "api_version": "v1alpha1"}
 
 

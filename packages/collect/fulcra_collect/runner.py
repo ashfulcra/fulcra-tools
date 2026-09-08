@@ -23,6 +23,11 @@ def worker_command(plugin_id: str) -> list[str]:
     """The command that runs the worker for `plugin_id`. Uses the current
     interpreter via `-m` so it works under a launchd/systemd minimal PATH."""
     import sys
+    from pathlib import Path
+    app_bin = Path(sys.executable).parent
+    launcher = app_bin / "fulcra-collect"
+    if app_bin.name == "MacOS" and app_bin.parent.name == "Contents" and launcher.is_file():
+        return [str(launcher), "_worker", plugin_id]
     return [sys.executable, "-m", "fulcra_collect", "_worker", plugin_id]
 
 

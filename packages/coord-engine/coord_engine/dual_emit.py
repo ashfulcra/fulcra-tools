@@ -46,7 +46,7 @@ def payload(*, at: str, sender: str, to: str, kind: str, slug: str, pri: str, pt
 
 
 def _opens_an_obligation(transport: Any, team: str, ptr: Optional[str]) -> bool:
-    """RULING (Ash 2026-09-05, coord-boss 6f8121fc class B): an obligation belongs to its ASSIGNEE, and a task with
+    """RULING (operator 2026-09-05, coord-boss 6f8121fc class B): an obligation belongs to its ASSIGNEE, and a task with
     no assignee is nobody's. A v3 `directive` is mirrored as a v4 `open` only when the task doc it points at names
     an assignee. The doc is read once, at write time. An unreadable or absent doc mirrors anyway: over-capture
     beats a silent hole, and the assignee filter on the old plane will show the divergence rather than hide it."""

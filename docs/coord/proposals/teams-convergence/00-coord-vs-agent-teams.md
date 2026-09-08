@@ -6,7 +6,7 @@
 > not for runnable commands; current setup is in
 > [`docs/coord/GET-ON-THE-BUS.md`](../../GET-ON-THE-BUS.md).
 
-> Grounding: coord side reversed from `/Users/ashkalb/Developer/fulcra-tools-coord/packages/fulcra-coord`
+> Grounding: coord side reversed from `packages/fulcra-coord`
 > (v0.15.16) as it runs today. Official side from a fresh clone of `fulcradynamics/agent-skills`
 > (`skills/fulcra-agent-teams/SKILL.md` + `references/fulcra-agent-teams-cli.md` + README).
 
@@ -30,7 +30,7 @@ derived **views** that all reads hit.
   ~15–18 concurrent — a hard no-more-concurrency constraint). Everything is best-effort / never-raise.
 
 ### 1.3 Identity, workstreams, roles
-- Identity string `claude-code:<Host>:<workstream>` (e.g. `claude-code:Ashs-MBP-Work:fulcra-tools`),
+- Identity string `claude-code:<Host>:<workstream>` (e.g. `claude-code:example-host:fulcra-tools`),
   derived from tool + stable hostname + cwd/workstream, env-overridable.
 - **Workstream** = a lane of work an agent declares presence in. **Role** = a durable named function
   with a resume/checkpoint registry (`checkpoint` reads/writes a role's durable resume point).

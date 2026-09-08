@@ -141,12 +141,12 @@ def test_safe_exc_message_scrubs_access_token():
 
 def test_safe_exc_message_scrubs_api_key():
     exc = RuntimeError(
-        "GET https://ws.audioscrobbler.com/2.0/?api_key=k1234567890abcdef&user=ash failed"
+        "GET https://ws.audioscrobbler.com/2.0/?api_key=k1234567890abcdef&user=user failed"
     )
     msg = safe_exc_message(exc)
     assert "k1234567890abcdef" not in msg
     assert "api_key=REDACTED" in msg
-    assert "user=ash" in msg
+    assert "user=user" in msg
 
 
 def test_safe_exc_message_scrubs_multiple_secrets():

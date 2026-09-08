@@ -31,9 +31,9 @@ import pytest
 
 from coord_mesh import cli, envelope
 
-UID = "a24a9667-c2c6-4bbf-9a0f-36ea0afcb521"
-MINE = "d64bbe9b-4902-42e9-a607-7db51ebc6379"
-CH = "MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
+UID = "00000000-0000-4000-8000-000000000075"
+MINE = "00000000-0000-4000-8000-000000000108"
+CH = "MomentAnnotation/00000000-0000-4000-8000-000000000102"
 
 
 def _row(rid, slug, when):

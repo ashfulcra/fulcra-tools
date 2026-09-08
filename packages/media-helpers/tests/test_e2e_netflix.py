@@ -28,9 +28,9 @@ def fake_token(mocker):
 
 @pytest.mark.skipif(not REAL_CSV.exists(), reason="real Netflix takeout not present")
 def test_real_netflix_csv_full_pipeline(recording_transport):
-    # All 6,456 rows produce distinct deterministic IDs
+    # Every row produces a distinct deterministic ID
     events = list(parse_slim(REAL_CSV))
-    assert len(events) >= 6000, f"expected at least 6000 events, got {len(events)}"
+    assert events, "expected a nonempty local export"
     ids = [e.deterministic_id for e in events]
     assert len(ids) == len(set(ids)), "deterministic IDs collided — rewatch dedup is broken"
 

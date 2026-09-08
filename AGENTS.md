@@ -21,6 +21,20 @@ incident and fix it upstream at the surface that produced it, not with a
 defensive patch at the consumer. The models reading these surfaces are smart;
 what they need from us is surfaces that are durable.
 
+**Apple Notes reconciliation/writeback:** listing timestamps are not a content
+baseline. Reconciliation reads tracked vault bodies so edits near a sync are not
+missed; retain the complete internal change list and cap only report presentation.
+Partial AppleScript write failures must produce a failed report and failed run.
+
+## Public repository privacy
+
+All packages, plugins, skills, examples, and release artifacts must be reusable
+without personal accounts or machine-specific values. Follow
+[`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree
+privacy guard and credential scan; also review fixture provenance, public
+messages, and generated artifacts. Passing a pattern scan is not proof that
+all personal information has been removed.
+
 ## Where to start
 
 **Zero state — never installed `coord-engine`, or joining from a fresh / remote /
@@ -107,6 +121,11 @@ under `skills/`, each package with its own README, build, and tests.
   logic belongs in the **macOS app target** even when only the extension uses
   it at runtime — that is what makes it reachable by `@testable import
   FulcraAttention`.
+- **Sign the native command launchers explicitly.** Briefcase does not discover
+  the extra `fulcra-collect`, `fulcra`, and `fulcra-api` executables in
+  `Contents/MacOS`. The release script signs each with Developer ID, a secure
+  timestamp, and hardened runtime before Briefcase seals the outer app. A valid
+  outer resource seal alone does not establish notarization eligibility.
 - **Shipping a new plugin in the frozen macOS app** — the menubar Briefcase
   `requires` is the ONLY list you edit, but it is not sufficient on its own: a
   monorepo package isn't on PyPI, so the release build must also build a local
@@ -272,11 +291,9 @@ under `skills/`, each package with its own README, build, and tests.
   by `tests/test_clock_pin_convention.py`.
 - `escalate` never addresses a role's vacancy notice to the party who lapsed.
   When a role's registered `maintainer:` is also one of its own lease holders,
-  the alarm lands in the absent one's bucket with no exit — observed live as
-  daily ROLE VACANT directives nobody could receive. The notice is still
-  written and counted; it is REPORTED (stderr + directive body) and never
-  rerouted (rerouting was tried and moved a notice off a real operator onto
-  the bare `human` default — fix the role doc's `maintainer:` field instead).
+  the alarm cannot reach a supervising identity. The notice is still written
+  and counted; it is REPORTED (stderr + directive body) and never rerouted.
+  Fix the role doc's `maintainer:` field instead.
   The undelivered count is recomputed on EVERY sweep, the daily marker is a
   SUPPRESSOR and is never written for a notice that reached nobody, a
   closed-loop role re-surfaces every sweep, `escalate` reports
@@ -285,14 +302,13 @@ under `skills/`, each package with its own README, build, and tests.
   vacancy title embeds the date, so the slug differs every day and the
   per-slug existence check on `dst` (a classified `read_classified(dst)` since
   PR 694; a bare `read(dst) is None` before it) can never match across days; the daily
-  marker suppresses only WITHIN a day. Measured result: 117 open ROLE VACANT
-  rows carrying 12 distinct facts, growing 2-6/day fleetwide. A state-change
+  marker suppresses only WITHIN a day. A state-change
   guard (`roles.vacancy_already_open`) now skips minting while a row for that
   role is open, and prints `ALREADY OPEN` when it fires — a suppressor that
   says nothing is indistinguishable from a sweep that never ran. Three
   properties are load-bearing and must survive any edit:
   - **Role matching is EXACT, never a prefix.** A prefix test would let
-    `codex-reviewer` suppress `codex-reviewer-2`; an identity transform used to
+    `reviewer` suppress `reviewer-2`; an identity transform used to
     suppress an alarm has to be injective or it hides what it was not asked to.
   - **An unreadable listing does NOT suppress.** UNKNOWN silencing an alarm is
     worse than a duplicate row, so the guard falls through to minting and says
@@ -351,8 +367,7 @@ skills. Subagent-only work stays OFF the bus.
 **IF YOUR MESSAGE ASKS FOR NOTHING, SEND IT `--fyi`.** `tell` mints a `proposed`
 row that only the RECIPIENT can close, so a report, an ack or an FYI becomes a
 permanent open obligation its assignee cannot discharge — there is nothing to do.
-Measured at fleet scale, virtually the entire proposed pile was delivered
-messages, not proposals. It is a ratchet, not a hygiene failure: a reply sent
+A reply sent
 with `--closes` closes its parent AND mints a fresh open row back at the sender,
 so two agents who both behave perfectly still net one open row per exchange.
 `--fyi` delivers identically — same durable ptr doc, same companion event, same
@@ -376,17 +391,14 @@ it (not on PyPI).
 - **Named identities**: personas are a convention for human legibility only;
   bus routing always uses the functional id, and the roster lives on the
   team's store.
-- **Wake router — ships in the engine, unproven in deployment.** The one
-  reference deployment was evaluated and retired (2026-08); scheduled wakes +
-  queue reads are the standing pattern (status notes: [`README.md`](README.md)
+- **Wake router — ships in the engine; evaluate acceptance per deployment.**
+  Scheduled wakes + queue reads are the standing pattern (status notes: [`README.md`](README.md)
   and [`docs/coord/BUS-V3.md`](docs/coord/BUS-V3.md)). The contract, should
   you deploy one, is [`wake-router-SPEC.md`](docs/coord/wake-router-SPEC.md) +
   [`wake-router-PLAN.md`](docs/coord/wake-router-PLAN.md); deployment
   (provisioning adapter scripts, scheduling a poller on a host) is a separate,
-  operator-gated step. One telemetry shape holds at any scale: serial
-  queue-entry reads cost ~7x prefetched (measured at fleet scale), so a reader
-  whose pass time scales with fleet-wide queue depth overruns its own
-  cadence — bound and prefetch. Two pieces of doctrine outlive any deployment:
+  operator-gated step. Bound and prefetch queue-entry reads so a growing
+  queue does not make the reader exceed its wake cadence. Two pieces of doctrine outlive any deployment:
   - **AN ADAPTER'S SUCCESS PROVES THE ADAPTER RAN — never that the AGENT
     ran.** Axis 1, what success proves: a DIRECT adapter re-enters the model
     session by its contract; an INDIRECT (queued/alignment) adapter only
@@ -548,7 +560,7 @@ it (not on PyPI).
   describing, and where it cannot, it says so rather than asserting.** The tell
   is a success message whose text was decided before the command ran.
 
-  The mechanics, verified on this fleet's shell rather than recalled:
+  The shell mechanics:
 
   - `rc=$?` after a pipeline captures the **last stage only** — `false | true`
     and `false | cat` both yield `0`, so the failure is invisible. Same for
@@ -819,10 +831,8 @@ it (not on PyPI).
   budgets) or `_JSON_EXEMPT` with a stated reason — `_JSON_EXEMPT` is empty today, pinned paths must
   print SOMETHING, and the widened sweep immediately found a live leak (`headroom --json` printed
   prose on its no-accounts early return).
-- **A finished review does not close its request row unless something closes it.** 198 open
-  `REVIEW REQUEST:` rows were live on one team with 156 already behind a terminal marker: the
-  review store and the task board had diverged and only the store was kept honest. Two halves fix
-  it. The DECISION verbs (`review close`, `review conclude`) close their own rows at settle time —
+- **A finished review does not close its request row unless something closes it.**
+  The review store and task board need explicit closure propagation. The DECISION verbs (`review close`, `review conclude`) close their own rows at settle time —
   best-effort and loud, because the marker is durable truth and bookkeeping must not fail a verified
   closure, but a silent skip rebuilds the backlog. The `review residue` verb (DRY RUN by default)
   closes the rest on a schedule. It is **permanent infrastructure, not a backfill**: a review that
@@ -864,10 +874,9 @@ it (not on PyPI).
   far larger than the budget, so **coverage is always partial by design**: the stderr envelope
   reports `attendance=N/M` rather than alarming, and **rc 3 is reserved for a WALL-CLOCK cut** — a
   real anomaly.
-- **PRIOR FRESHNESS IS LOAD-BEARING: a stale prior costs ~3x.** Measured on a live store, a
-  CONVERGED prior folds the review register in a third of the ops and completes; a STALE one triples
-  the cost and cuts short — and because forge completeness follows the review fold's, one host's
-  staleness denies forge to every consumer of that aggregate. A SMALL unknown remainder is retried
+- **Prior freshness affects fold cost.** A STALE prior requires additional reads
+  and may exhaust the budget. Because forge completeness follows the review fold,
+  a stale prior can leave both aggregates incomplete. A SMALL unknown remainder is retried
   once inside the same pass (`RETRY_UNKNOWN_MAX`, bounded by the SAME deadline object); a tolerance
   that calls one-short complete was explicitly REJECTED — it manufactures the false-clear this file
   keeps warning about. A fold "stuck" at n-1 of n is usually a transient, not a broken record.
@@ -880,7 +889,7 @@ it (not on PyPI).
   fold's.
 - **A DELIVERY path may never lose coverage to a FORMATTING failure.** A queue renderer that raised
   on a malformed event once skipped the cursor save, wedging the cursor on the same poison event
-  forever with no error path that said so (measured live). Two layers, because the field fix alone
+  forever without an error report. Two layers, because the field fix alone
   guards the instance and leaves the class: rendering is PER EVENT and cannot raise — poison renders
   as an explicit, COUNTED POISON line (trading a crash for a disappearance is the worse bug) — and
   **the cursor save lives in a `finally`**: once a window has been READ, coverage is a fact about
@@ -983,8 +992,8 @@ it (not on PyPI).
   absence there is indistinguishable from "this agent is not working". Many write verbs had drifted
   outside it (`review close`, `escalate`, `continuity snapshot`/`park`, `roles claim`/`release`,
   `answer`, `bus-v3 send`, `stash push` …), so an agent whose job IS reviewing rendered `stale — nudge`
-  while working: measured live, a reviewer showed `stale 6d` having filed a verdict hours earlier,
-  and the roster attaches an imperative to that judgement, so it dispatches people, not just labels them.
+  while working. Roster liveness can trigger follow-up work, so active writers
+  must not be omitted from coverage.
   **The work axis.** Verb coverage alone cannot see work that never passes through a verb (report
   docs are written straight to the store), so `presence.liveness` also takes `work_ts` (newest
   work-artifact time, read-derived by the caller) plus a **three-valued** `work_scan`
@@ -1066,9 +1075,9 @@ it (not on PyPI).
   superseder — same minute or unknown fails closed; a bare legacy name needs the same mtime proof.
   The verb quotes the content digest of each prior it can list AND read; a prior it cannot read is
   not named; on a degraded listing it names NOTHING (if you cannot enumerate the priors you cannot
-  claim to supersede them — coord-boss 1bce3da9). The random `nonce:` now also sits in the shard NAME
+  claim to supersede them). The random `nonce:` now also sits in the shard NAME
   so identical same-second filings cannot collide. **Invalid edges:** a shard can never resolve
-  ITSELF (a self-link let a CHANGES erase its own withdrawal — codex-reviewer, r5); self-links and names
+  ITSELF (a self-link let a CHANGES erase its own withdrawal); self-links and names
   that resolve nothing are reported in the tally as `malformed_supersedes`, never folded around silently;
   a cycle fails closed to CHANGES; a forward edge cannot be forged (the name embeds a content digest).
   This amends
@@ -1221,8 +1230,7 @@ it (not on PyPI).
 - **park's rc 2 proves only that NO FRESH HELD ROLE WAS FOUND — nothing more.**
   That one exit code covers two opposite situations and the fix differs: an
   assigned/expected role whose lease lapsed → `roles claim` (left unfixed the
-  role sits VACANT past SLA and role-routed work reaches no holder — observed
-  live when an agent read rc 2 as a fact about itself rather than its lease);
+  role sits VACANT past SLA and role-routed work reaches no holder);
   intentionally role-less (the steady state for most workers) → use
   `continuity snapshot` for progress saves, and **do NOT fabricate a role
   merely to make `park` succeed**. Check `roles status <team> <role>` before
@@ -1379,8 +1387,8 @@ commit on your own branch over `git stash` entirely.
 ## Commits
 
 End the commit message with the trailer
-`Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
-`Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
+`Co-Authored-By: <your model> <user@example.com>` (e.g.
+`Co-Authored-By: Claude Opus 4.8 (1M context) <user@example.com>`).
 
 ## Credential custody (bot tokens)
 
@@ -1400,6 +1408,11 @@ team-store material, not repo material. The generic doctrine:
   history, a repo file, a scheduler plist, a log, or a chat transcript.
 
 ## Documentation rules (standing, operator-set)
+
+Public documentation uses synthetic identities, account IDs, host names, and data.
+Keep personal content, team rosters, live measurements, deployment incident records,
+and private approval history in the team's own storage. Examples must let a new
+user configure their own team and recipients without inheriting a live account.
 
 The docs' primary reader is an **agent**; the showcase test is the goal: a
 founder drops this repo's link to their agent asking "anything useful here?"
@@ -1429,7 +1442,7 @@ earned by an incident:
 
 ### Writing for upstream (issues & PRs to fulcradynamics/*)
 
-Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14).
+Upstream reports must be understandable without reading this repository.
 
 - **Succinct.** First sentence states the bug. Repro, expected, actual, one
   self-contained piece of evidence (a curl, a traceback). Ten lines.
@@ -1454,8 +1467,7 @@ Upstream engineers read none of this repo (operator-relayed feedback, 2026-07-14
 - **Name the access level before promising delivery.** Report what the API says
   — pull/push/maintain/admin — and which of file, merge, approve-CI it permits.
   Filing from a fork needs read; merging needs write. "I have access" is not an
-  answer. (`fulcra-context-mcp#17`: authored, forked, and approved by three
-  agents, mergeable by none of them.)
+  answer.
 
 ## CI and workspace membership
 
@@ -1512,6 +1524,26 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   different ids and was removed after causing duplicate-record proliferation.
 
 ## The daemon (Collect)
+
+- **Apple Notes:** included in the macOS bundle and registry fallback. Use the
+  [wizard](packages/apple-notes/README.md) for Full Disk Access verification and
+  one-way import. Snapshots use a bounded SQLite online-backup subprocess;
+  entity IDs are resolved from Z_PRIMARYKEY. Preserve unowned Markdown and
+  refuse missing/ambiguous fences. Keep real library metrics and source data
+  out of public code, tests, commits, and reports.
+- **Bundled runtime:** the Briefcase app supports --collect and --fulcra CLI
+  dispatch plus an internal --notes-snapshot worker. Build-generated sibling
+  launchers supply fulcra-collect, fulcra, and fulcra-api without a developer
+  venv. Workers must use the bundled launcher, never Python -m flags on the
+  native app executable. The build installs these before signing.
+- **AppleScript writeback is experimental:** it additionally requires explicit
+  writeback_enabled = true and refuses all attachment types. Do not enable it
+  as part of ordinary Notes setup.
+- **Setup does not imply sync consent:** entering the final wizard step must
+  never enable or run a plugin. Use its explicit start action, persist the
+  displayed preview mode before enabling, and fail closed if settings cannot
+  be saved. Run `node --test packages/web-ui/tests/*.test.cjs` when changing
+  wizard navigation or first-run behavior.
 
 - Run it durably as a **launchd** agent, NOT a backgrounded shell process — a
   foreground/`&` daemon dies when its terminal or session ends. Install + load:

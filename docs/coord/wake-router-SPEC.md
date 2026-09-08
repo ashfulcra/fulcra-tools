@@ -1,34 +1,20 @@
 # Wake Router + Engagement Model — build spec (stage 1: consolidated brainstorm → spec)
 
-> **STATUS (2026-07-24): IMPLEMENTED — awaiting shadow acceptance.** Everything this spec
-> proposes is built and merged: engagement model W1–W3, router core W4, cloud execution W5,
-> host executor W5.5, proposed-adapter legs W6, shadow instrumentation + report W7, listen
-> fix W8, and the feed-first read path (Addendum 1, E1–E3). The first live wake delivered
-> 2026-07-24 14:11Z (55 s dispatch-to-notification). The ≥48 h shadow window opened
-> 2026-07-24T12:11:11Z; W10 listener drawdown gates on its acceptance report. W9 (fleet
-> credential custody) is executing. This document remains the design rationale; current
-> operational truth lives in the engine (`coord-engine --help`) and the delivery/evidence
-> records under `_coord/router/`.
+> **Historical implementation specification.** The router and engagement model
+> are implemented; deployment acceptance must be evaluated for each team.
+> Current command behavior is documented by `coord-engine --help`.
 
-**Owner:** Tycho (`coord-boss`). **Implementers:** `coord-maintainer`, Fabio (`coord-fable-worker`).
-**Review gate:** `codex-reviewer` + owner, dual-green at every stage (spec → plan → each SDD task).
-**Authorization:** Ash 2026-07-21 (proposal `4c8f6f02`), ownership directive relayed 2026-07-22
-(`04828838`). Sequencing prerequisites shipped in PR #441 (`5be9564`): head-of-line un-starve +
-blocked-on-human-first fold. **ATC is untouched by this build.**
+**Review gate:** independent reviewer plus component owner at each stage.
+**Scope:** ATC is unchanged by this design.
 
 ## 1. Problem
 
-Three incidents, one cause — the fleet has no wake policy, only per-agent listeners:
+A fleet needs a shared wake policy:
 
-- **Token burn without work:** every agent runs its own poll loop whether or not its workstream is
-  active ("I don't wanna waste tokens on agents looping forever" — Ash). N listeners each doing
-  O(fold) transport per tick is the fleet's largest idle cost.
-- **Unwakeable agents:** desktop/occasional agents (no loop) miss directed work for days; the only
-  current fix is a human remembering to open the app.
-- **False liveness:** a host-side beat kept ticking for 2.5h after its session died
-  (coord-maintainer incident, 2026-07-22). Presence said live; nobody was home. The inverse also
-  holds: my cloud session works for hours between beats and reads stale. Liveness derived from
-  beats alone is wrong in both directions.
+- **Idle polling:** independent listeners can repeat expensive folds with no work.
+- **Unreachable agents:** occasional sessions need explicit delivery or visible deferral.
+- **Misleading liveness:** a host heartbeat may outlive its session, while an active
+  session may work between beats. Engagement and observed activity must inform liveness.
 
 ## 2. Shape of the fix
 
@@ -38,9 +24,8 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
 
 ### Part A — Wake Router
 
-- **One watcher, whole fleet:** a single model-free process — **cloud-hosted per operator
-  decision (Ash, 2026-07-22): the decision plane runs in a cloud session environment (designated:
-  `coord-fable-worker`), never mandatorily on resident hardware** — polls the store at a fixed
+- **One watcher, whole fleet:** a single model-free process — **the decision plane
+  runs in a configured cloud environment, with no mandatory resident hardware** — polls the store at a fixed
   60s interval while its container lives (setup-script re-arm at creation; hourly Routine floor
   after reclaim; duty-cycle gated at acceptance) and evaluates every agent's wake policy. Per-agent listeners drop to a 30–60 min
   safety-net cadence (defense in depth, not the primary path).
@@ -62,14 +47,14 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
     scheduled-routine leg** for Claude Code web/cloud — which has **no documented exact-session
     inbound wake**; the router must NOT substitute a different Managed Agents session. For cloud
     agents the router only aligns work to the agent's own self-armed Routine cadence (as
-    coord-boss and coord-fable-worker run today) or queues for it; it never creates sessions.
+    coordinator and cloud-worker run today) or queues for it; it never creates sessions.
   - *Fail-visible unroutable lane:* an agent whose harness offers no supported adapter is marked
     `wake: unroutable` in router output and its pending items batch to the digest + surface in the
     blocked-on-human-style fold — never silently dropped. The mixed-fleet gate (§3.4) counts an
     unroutable agent as NOT covered; listener drawdown for it is forbidden.
 - **Webhook-swappable by construction:** when Fulcra webhooks ship, the poll leg is replaced by a
   webhook receiver feeding *the same router*; policy and adapters do not change. The interim build
-  is therefore not throwaway — this is the pseudo-webhook infrastructure Ash asked to brainstorm,
+  is therefore not throwaway — this is the pseudo-webhook infrastructure the operator asked to brainstorm,
   built so the real webhooks drop in.
 
 ### Part B — Engagement model
@@ -86,7 +71,7 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
     only when told** — an explicit operator/park directive (or the agent's own park before
     context loss). The host tick (zero model tokens) marks the lapse and aligns future wakes to
     the reduced cadence; it never parks anyone. This is the structural fix for the false-liveness
-    incident and the direct answer to coord-maintainer's DECIDE-WITH-ME liveness-substrate
+    incident and the direct answer to maintainer's DECIDE-WITH-ME liveness-substrate
     question: liveness = engagement-aware fold over (beats + activity), not beats alone.
   - `occasional` — **occasional model, resident host:** a desktop agent holds a role with *no loop
     at all*; the router's host-side legs cover it (resume-with-app-closed, human notification,
@@ -94,36 +79,20 @@ path, and presence gains an **engagement declaration** so vacancy/escalation log
     items for a dormant identity instead of waking it (existing vacancy-claim machinery).
 - **Vacancy/escalation reads engagement.** Escalation fires on *unexplained* absence only. This is
   the condition for re-arming the fleet's disarmed escalate sweeps.
-- **Activity-implies-liveness is consumed here** (coord-maintainer's routed P1, both constraints
+- **Activity-implies-liveness is consumed here** (maintainer's routed P1, both constraints
   honored): every engine bus write refreshes the actor's presence beat, throttled to once per beat
   interval per process (burst of writes = one beat write), and a refresh failure never makes a
   succeeding write fail. The engagement fold treats recent *activity* as liveness proof — a busy
   agent needs no separate beat.
 
-### Part C — Agent external identity (RESOLVED by operator rule, 2026-07-22)
+### Part C — Agent external identity
 
-Ash's standing rule decides this leg: **the operator sits outside core engineering spaces and
-lobs contributions in** — he will not install an App or place a machine user in `fulcradynamics`
-org repos. The identity design follows from that boundary:
-
-- **Inside the operator's boundary (`ashfulcra/*` repos): a DEDICATED fleet machine account,
-  to be created (operator decision 2026-07-22: `FulcraBot` is reserved for Fulcra-side repos —
-  e.g. the `fulcrabot`-owned website work — and is NOT the identity for the operator's
-  fulcra-tools fleet).** Until the new account exists, the interim is the status quo (operator
-  credentials inside the operator's own boundary). Once created: fine-grained per-repo PAT,
-  rotation cadence, router as token custodian, and attribution conventions so audit reads
-  unambiguously as fleet activity — the W9 custody design is unchanged, only the account it
-  guards.
-- **Upstream (`fulcradynamics` and any org the operator doesn't own): the contributor pattern IS
-  the design, permanently.** Agents fork, prepare, and lob the PR over the wall; the merge click
-  belongs to an upstream maintainer. The blocked-on-human fold models "awaiting upstream
-  maintainer" as a first-class visible state — it is the intended terminal hand-off, not a gap.
-- **The GitHub App proposal is a shelf artifact, not a dependency.** A per-repo-scoped,
-  short-lived-token App design (contents + pull_requests write only) stays documented here so the
-  `fulcradynamics` core team can *choose to install it themselves* if they ever want agent-driven
-  merges on their side. Nothing in this build waits on it, and no one on our side will install it.
-
-No decision remains open on this leg.
+Use a dedicated, scoped machine account or GitHub App for authorized project
+writes. Keep credentials in a secret store and document rotation and attribution.
+For repositories outside the team's control, agents contribute through forks and
+pull requests; upstream maintainers retain merge authority. Represent that handoff
+as a visible waiting state. No integration assumes permission to install an App
+or create an account in another organization.
 
 ## 3. Restated CONCUR conditions (from the vacancy-consults-presence concurrence; they bind here)
 
@@ -141,8 +110,8 @@ No decision remains open on this leg.
 ## 4. Hard constraints
 
 - **Never spawn working sessions:** the router wakes *existing* sessions via their own adapters or
-  queues for human-opened ones; it never creates a new working session unilaterally (Ash's rule).
-  Any adapter that would need to violate this surfaces to Ash instead.
+  queues for human-opened ones; it never creates a new working session unilaterally (the operator's rule).
+  Any adapter that would need to violate this surfaces to the operator instead.
 - **Zero model tokens in the router:** watcher, policy evaluation, TTL lapse-marking, and wake fan-out
   are pure host-side code. Model tokens are spent only by the *woken* agent on real work.
 - **Fail-closed secrets:** adapter credentials and the external-identity credential — in this
@@ -171,7 +140,7 @@ No decision remains open on this leg.
   degradation). Restart/failover: state is in the store, not host memory — a replacement router
   process resumes from `cursor.json`; while no router runs, the safety-net listener cadence is the
   backstop. No agent-owned shard is ever written by a router component (the engine sweep's two-field exception above is the only agent-shard writer outside the agent itself).
-- **Read-path amendment (Addendum 1, Ash-authorized 2026-07-23).** Directory listings are
+- **Read-path amendment (Addendum 1, operator-approved 2026-07-23).** Directory listings are
   eventually-consistent caches; the store's `data-updates` feed is the authoritative change
   ledger. Reconcile, the engine's hot folds, and the router's candidate scan move to
   feed-driven delta sources with the full listing scan retained as the fail-closed fallback
@@ -183,9 +152,9 @@ No decision remains open on this leg.
 
 | Stage | Artifact | Gate |
 |---|---|---|
-| 1 (this doc) | Consolidated spec | dual-green: codex-reviewer + coord-boss |
+| 1 (this doc) | Consolidated spec | dual-green: reviewer + coordinator |
 | 2 | Implementation plan: task DAG, schema diffs (presence `engagement`, router config file format, wake-queue shard shape), rollout order honoring the mixed-fleet gate, test plan (red-first for every fold change) | dual-green |
-| 3+ | SDD execution — tasks assigned explicitly on the bus to coord-maintainer / coord-fable-worker; per-task review by codex-reviewer; engine changes land behind the mixed-fleet gate | dual-green per task |
+| 3+ | SDD execution — tasks assigned explicitly on the bus to maintainer / cloud-worker; per-task review by reviewer; engine changes land behind the mixed-fleet gate | dual-green per task |
 
 Rollout sketch (detail belongs to stage 2): schema + folds first (engagement read/write, inert),
 then router read-only shadow mode (logs what it *would* wake — measured against live listener
@@ -199,15 +168,10 @@ listeners entirely (safety-net cadence stays), tracker-bridge changes, any ATC c
 receiver implementation before Fulcra ships webhooks (we build the socket it plugs into, not the
 plug).
 
-## 7. Open decisions (blocked-on-Ash ledger, led per standing rule)
+## 7. Deployment choices
 
-1. ~~External identity: App vs machine user~~ — **RESOLVED 2026-07-22 by operator rule** (see
-   Part C): a dedicated fleet machine account inside the operator's boundary (FulcraBot is
-   reserved for Fulcra-side repos), contributor pattern upstream, App proposal
-   shelved for the upstream org to adopt or not.
-2. ~~Router host designation~~ — **RESOLVED 2026-07-22 (Ash): cloud-first.** Decision plane in
-   the `coord-fable-worker` cloud environment; host-local adapters execute via a thin, policy-free
-   host executor whose failure mode is visibly-queued wakes (plan §2.5 / W5.5). No mandatory
-   component may require resident hardware.
-3. ~~TTL defaults~~ — **RESOLVED 2026-07-22 (Ash): `join + 8h` default; expiry ⇒ LAPSED
-   indefinite reduced-cadence check-in (default 6h); park explicit-only** (see Part B).
+1. Use a dedicated machine account with scoped credentials for authorized forge writes.
+2. Run the decision plane in a cloud environment; host-local adapters execute
+   through a thin executor. Executor failure leaves wakes visibly queued.
+3. Session TTL defaults to `join + 8h`. Expiry means LAPSED with indefinite
+   reduced-cadence check-in (default 6h); parking remains explicit.

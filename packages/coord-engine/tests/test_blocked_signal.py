@@ -72,11 +72,11 @@ def _args(**kw):
 
 def test_blocking_on_the_operator_emits_a_bus_event():
     t = _transport()
-    assert cli.cmd_task_update(_args(blocked_on="user:ash"), t) == 0
+    assert cli.cmd_task_update(_args(blocked_on="user:user"), t) == 0
     events = t.blocked_events()
     assert len(events) == 1, events
-    assert events[0]["to"] == "ash"          # addressed to the BLOCKER
-    assert events[0]["on"] == "user:ash"     # raw, unclassified
+    assert events[0]["to"] == "user"          # addressed to the BLOCKER
+    assert events[0]["on"] == "user:user"     # raw, unclassified
     assert events[0]["state"] == "blocked"
     assert events[0]["slug"] == "a-thing"
     assert events[0]["ptr"] == "task/a-thing.md"
@@ -87,11 +87,11 @@ def test_clearing_the_block_emits_the_other_half():
     """A block announced but never retracted leaves every downstream queue
     growing forever, and a queue that only grows stops being read."""
     t = _transport()
-    cli.cmd_task_update(_args(blocked_on="user:ash"), t)
+    cli.cmd_task_update(_args(blocked_on="user:user"), t)
     cli.cmd_task_update(_args(blocked_on=""), t)
     events = t.blocked_events()
     assert [e["state"] for e in events] == ["blocked", "cleared"]
-    assert events[1]["to"] == "ash"  # the clear reaches whoever was holding it
+    assert events[1]["to"] == "user"  # the clear reaches whoever was holding it
 
 
 def test_an_agent_block_is_a_signal_too_not_just_a_human_one():
@@ -106,7 +106,7 @@ def test_an_unchanged_blocked_on_emits_nothing():
     """NEGATIVE CONTROL. Every task update would otherwise re-announce the same
     block, and a signal that fires on every touch is noise, not a signal."""
     t = _transport()
-    cli.cmd_task_update(_args(blocked_on="user:ash"), t)
+    cli.cmd_task_update(_args(blocked_on="user:user"), t)
     cli.cmd_task_update(_args(summary="unrelated edit"), t)
     assert [e["state"] for e in t.blocked_events()] == ["blocked"]
 
@@ -126,12 +126,12 @@ def test_a_bus_that_is_down_does_not_fail_the_update():
         raise RuntimeError("bus down")
 
     t.record_write = boom
-    assert cli.cmd_task_update(_args(blocked_on="user:ash"), t) == 0
-    assert "blocked_on: user:ash" in t.store[f"team/{TEAM}/task/a-thing.md"]
+    assert cli.cmd_task_update(_args(blocked_on="user:user"), t) == 0
+    assert "blocked_on: user:user" in t.store[f"team/{TEAM}/task/a-thing.md"]
 
 
 def test_no_bus_config_is_not_an_error_either():
     t = RecordingTransport()
     t.put(f"team/{TEAM}/task/a-thing.md", DOC)
-    assert cli.cmd_task_update(_args(blocked_on="user:ash"), t) == 0
+    assert cli.cmd_task_update(_args(blocked_on="user:user"), t) == 0
     assert t.blocked_events() == []

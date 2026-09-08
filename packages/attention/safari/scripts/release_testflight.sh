@@ -75,7 +75,7 @@ xcrun --find altool >/dev/null 2>&1 || die "altool not found — install/select 
 if ! security find-identity -v -p codesigning | grep -q "Apple Distribution"; then
   die "no 'Apple Distribution' certificate in the keychain.
 
-  This is the single hard blocker and it needs Ash's Apple ID.
+  This is the single hard blocker and it needs the user's Apple ID.
   In Xcode: Settings -> Accounts -> (Apple ID) -> Manage Certificates
             -> + -> Apple Distribution.
   'Developer ID Application' is NOT a substitute: that one signs a notarised

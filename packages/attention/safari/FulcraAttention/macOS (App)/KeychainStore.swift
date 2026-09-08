@@ -9,7 +9,7 @@
 //  sharing). The access group is OPT-IN via `init(accessGroup:)`; the default
 //  (nil) preserves the original app-private behavior, so existing call sites and
 //  the current signed build are unaffected until the keychain-access-groups
-//  entitlement is registered (Ash's one-time Xcode capability step). Pass
+//  entitlement is registered (the user's one-time Xcode capability step). Pass
 //  `Sharing.keychainAccessGroup` once the entitlement is live.
 //
 

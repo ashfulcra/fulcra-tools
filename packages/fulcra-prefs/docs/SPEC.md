@@ -1,7 +1,6 @@
 # fulcra-prefs — validated design spec (2026-06-10)
 
-Status: design approved by Ash in-session 2026-06-10 (storage approach "A"
-locked); sent for adversarial review to Ashs-MBP-Work:Codex-Review-Workbook.
+Status: validated storage design (2026-06-10).
 Supersedes the v0 sketch in `packages/fulcra-prefs/docs/DESIGN.md` where they
 differ.
 

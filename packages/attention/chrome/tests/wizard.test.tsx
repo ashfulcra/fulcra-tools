@@ -218,15 +218,15 @@ describe("Wizard destination step — relayless", () => {
   });
 
   test("prefills the name from a human NAME label (whoami via id_token)", async () => {
-    // With the id_token carrying a `name` claim, whoami returns "Ash Kalb".
+    // With the id_token carrying a `name` claim, whoami returns "Example User".
     // A name (has a space, not a bare UUID) is a real human label, so it
     // should prefill "<name> browser" just like an email does.
-    whoamiImpl.whoami.mockResolvedValue({ label: "Ash Kalb" });
+    whoamiImpl.whoami.mockResolvedValue({ label: "Example User" });
     ensureImpl.listAttentionDestinations.mockResolvedValue([]);
     const { container } = await gotoDestinationStep();
 
     const input = container.querySelector<HTMLInputElement>('input[type="text"]');
-    expect(input?.value).toBe("Ash Kalb browser");
+    expect(input?.value).toBe("Example User browser");
   });
 
   test("resolves the prefill label via the stored id_token, not the access token", async () => {
@@ -234,7 +234,7 @@ describe("Wizard destination step — relayless", () => {
     // name/email claims), preferring it over the access token.
     tokenImpl.getIdToken.mockResolvedValue("ID-TOKEN");
     tokenImpl.getValidAccessToken.mockResolvedValue("ACCESS-TOKEN");
-    whoamiImpl.whoami.mockResolvedValue({ label: "Ash Kalb" });
+    whoamiImpl.whoami.mockResolvedValue({ label: "Example User" });
     ensureImpl.listAttentionDestinations.mockResolvedValue([]);
     await gotoDestinationStep();
 

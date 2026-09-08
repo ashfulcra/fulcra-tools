@@ -17,7 +17,7 @@ definition, named by their own document:
     team/<team>/_coord/bus-v3/checkpoints.json
 
     {"schema": "coord.checkpoints-channel.v1",
-     "data_type": "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49",
+     "data_type": "MomentAnnotation/00000000-0000-4000-8000-000000000074",
      "api_version": "v1alpha1"}
 
 It is a DIFFERENT FILE from ``records.json`` on purpose, not for tidiness. The

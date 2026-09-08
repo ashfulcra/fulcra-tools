@@ -4,7 +4,7 @@
 
 **Owner:** codex-coder
 
-**Required reviewer through 2026-08-23:** coord-boss
+**Required reviewer through 2026-08-23:** coordinator
 
 **Objective:** Replace independent, budget-bounded discovery scans with one
 truthful change-detection authority. `data-updates` detects change; folds become
@@ -264,8 +264,8 @@ envelopes, and truthfulness guarantees change together.
 ## 9. Implementation Units
 
 Each unit gets a separate exact-head review request naming the invariant it
-enforces. Through 2026-08-23, coord-boss is the required reviewer and
-codex-reviewer is optional.
+enforces. Through 2026-08-23, coordinator is the required reviewer and
+reviewer is optional.
 
 1. **Outcome spine:** typed states, coverage, rc-matches-body, renderer parity,
    and continuity save-path truthfulness when role metadata is missing.
@@ -331,5 +331,5 @@ Focused tests cover each row. The full coord-engine suite must remain green.
    live store;
 7. any live `UNKNOWN` produces nonzero status and no silent-clear wake.
 
-Only then may the parked usage-visibility research resume unless Ash explicitly
+Only then may the parked usage-visibility research resume unless the operator explicitly
 resequences it sooner.

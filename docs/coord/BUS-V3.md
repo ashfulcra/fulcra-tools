@@ -145,7 +145,7 @@ moment-annotation channels, not one:
 | **Agent Checkpoint** | one moment per successful continuity save | `_coord/bus-v3/checkpoints.json` | humans, in the timeline explorer |
 
 They share the tag taxonomy (step 3) and the same `tags.json` registry, so a
-filter on `agent:coord-boss` shows that agent's events *and* its checkpoints
+filter on `agent:coordinator` shows that agent's events *and* its checkpoints
 side by side. They do **not** share a config document, and that is deliberate —
 see [step 5](#5-seed-the-checkpoint-channel-config). Build the events channel
 first (steps 1–4), then repeat steps 1–2 for the checkpoint definition and
@@ -171,7 +171,7 @@ spec-less channel that was invisible in the Fulcra timeline visual explorer.
 
 Any of the three surfaces works — the Fulcra app, the MCP `create_data_type`
 tool, or `POST /user/v1alpha1/annotation`. Give it a **fresh, human name** you
-have not used before (ours: "Agent Coordination Bus"); the explorer lists
+have not used before (for example, "Agent Coordination Bus"); the explorer lists
 channels by name, and reusing a retired one invites reading old traffic as new.
 
 ```bash
@@ -226,7 +226,7 @@ one-click timeline filter:
 | dimension | tag name | answers |
 | --- | --- | --- |
 | *(base)* | `agent-coordination-bus` | everything on the bus |
-| `agent` | `agent:coord-boss` | one identity's traffic |
+| `agent` | `agent:coordinator` | one identity's traffic |
 | `platform` | `platform:claude-code` | everything from one platform |
 | `harness` | `harness:ccr` | everything under one harness |
 | `model` | `model:opus-5` | everything a given model produced |
@@ -248,6 +248,8 @@ the ingest endpoint validates them as uuids and rejects a name outright.
 
 ### 4. Seed the tag registry
 
+UUIDs in the examples below are synthetic. Use IDs provisioned in your own account.
+
 The engine will not call the tag API on the write path (a round trip per event,
 to answer a question that changes only when a human provisions). It reads one
 durable document instead:
@@ -257,10 +259,10 @@ durable document instead:
 ```json
 {
   "schema": "coord.bus-tags.v2",
-  "base": "cb951ecb-f21c-4aee-826e-2cb0b12517d6",
+  "base": "00000000-0000-4000-8000-000000000097",
   "agents": {
-    "coord-boss": {
-      "agent": "0913d5df-830c-458e-b40a-0a04eafaa5cd",
+    "coordinator": {
+      "agent": "00000000-0000-4000-8000-000000000003",
       "platform": "<uuid>", "harness": "<uuid>", "model": "<uuid>"
     }
   }
@@ -273,11 +275,11 @@ field-by-field table. Upload it once (with `"agents": {}` is fine); after that
 each agent registers itself, declaring all four dimensions:
 
 ```bash
-coord-engine bus-v3 tag-provision <team> --agent coord-boss \
+coord-engine bus-v3 tag-provision <team> --agent coordinator \
   --platform claude-code --harness ccr --model opus-5
 # no raw tag capability here? it prints a per-dimension curl recipe; create the
 # tags by hand (step 3), then record the uuids it hands back:
-coord-engine bus-v3 tag-provision <team> --agent coord-boss \
+coord-engine bus-v3 tag-provision <team> --agent coordinator \
   --tag-id-platform <uuid> --tag-id-model <uuid>
 ```
 
@@ -290,7 +292,7 @@ mislabels every event that agent sends. Treat a wrong one as a
 presence-integrity bug: **a model switch is a re-provision**, and it is cheap —
 
 ```bash
-coord-engine bus-v3 tag-provision <team> --agent coord-boss --model sonnet-5
+coord-engine bus-v3 tag-provision <team> --agent coordinator --model sonnet-5
 ```
 
 rewrites only `model` and leaves the other three dimensions alone.
@@ -307,7 +309,7 @@ The registry states, none of which may ever cost a write:
 ### 5. Seed the checkpoint-channel config
 
 The second definition. Create it exactly like the first — **step 1** with a
-fresh human name (ours: "Agent Checkpoint"), then **step 2**, the PUT-303 spec
+fresh human name (for example, "Agent Checkpoint"), then **step 2**, the PUT-303 spec
 dance, verified by re-GET. A spec-less checkpoint channel is invisible in the
 explorer, which defeats its entire purpose. Skip step 3: the taxonomy is the
 same four dimensions, reusing the same tags and the same `tags.json`, so a
@@ -322,7 +324,7 @@ Then record the id in its **own** document:
 ```json
 {
   "schema": "coord.checkpoints-channel.v1",
-  "data_type": "MomentAnnotation/a09350b2-e245-4348-ae63-bfb35c712c49",
+  "data_type": "MomentAnnotation/00000000-0000-4000-8000-000000000074",
   "api_version": "v1alpha1"
 }
 ```
@@ -585,9 +587,8 @@ is not an event — skip it. Two hard rules learned live:
 The sender is the bare (non reverse-DNS) entry in `sources`. If the event has
 a `ptr`, fetch the document: `fulcra-api file download "team/<team>/<ptr>" ./body.md`.
 
-Measured on a live account: a record is readable ~20s after write (single
-observation). That is why no agent needs a polling loop — the read is cheap
-enough to ride every wake the agent already has, and fast enough to act on.
+Record visibility may lag ingestion. Read the queue on each scheduled wake and
+use the documented overlap and cursor rules to handle delayed visibility.
 
 **A wake source is still required.** "No polling loop" kills resident watcher
 *processes*, not schedules. Every agent must keep or arm one harness-native
@@ -787,14 +788,10 @@ plane; records are the control plane. What ended: walking the file tree to
 Pull is the floor: any agent on any harness reads its queue at its next wake
 with nothing installed beyond the CLI. The wake router
 ([`wake-router-SPEC.md`](wake-router-SPEC.md)) is an optional always-on
-process intended to turn next-wake latency into seconds. **Status: shipped
-but unproven in deployment** — the one reference deployment was evaluated
-and retired (2026-08): measured across its whole deployed life it never
-delivered a wake that listener cadence didn't already cover, and the
-evaluation concluded that without a store-side push primitive any router is
-polling with extra steps. The bus works without it, and scheduled wakes +
-queue reads are the standing pattern; deploy a router only if your fleet has
-a measured wake-the-dead need and the isolation the spec requires.
+process intended to reduce next-wake latency. It ships in the engine; acceptance
+must be measured for each deployment. The bus works without it. Scheduled wakes
+and queue reads remain the baseline; deploy a router only when its latency benefit
+and isolation satisfy the specification.
 
 ## Coord-engine 2.0 truthfulness boundary
 

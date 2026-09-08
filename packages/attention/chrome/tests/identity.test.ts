@@ -13,9 +13,9 @@ describe("getChromeIdentity", () => {
   test("returns Google account email when signed in", async () => {
     // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
     vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => {
-      cb({ email: "redacted@users.noreply.github.com", id: "google-id-123" });
+      cb({ email: "user@example.com", id: "google-id-123" });
     });
-    expect(await getChromeIdentity()).toBe("redacted@users.noreply.github.com");
+    expect(await getChromeIdentity()).toBe("user@example.com");
   });
 
   test("returns popup-set label when not signed in to Google", async () => {
@@ -38,7 +38,7 @@ describe("getChromeIdentity", () => {
   test("popup label overrides Google email when both set", async () => {
     // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
     vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => {
-      cb({ email: "redacted@users.noreply.github.com", id: "google-id" });
+      cb({ email: "user@example.com", id: "google-id" });
     });
     await saveSettings({ ...DEFAULT_SETTINGS, identityLabel: "Custom Label" });
     expect(await getChromeIdentity()).toBe("Custom Label");

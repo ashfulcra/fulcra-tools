@@ -10,13 +10,12 @@
 launchd fleet) to coord (`team/<t>/` markdown + coord-engine), and test on a real team.
 
 ## Constraints that shape the choice
-- **The fleet is machine-gated.** ArcBot / Mac / Workbook / codex hosts run incumbent listeners,
-  heartbeats, and the review workbook — they can only be migrated when someone touches those machines.
-  Any plan requiring simultaneous fleet cutover is dead on arrival.
+- **Hosts migrate independently.** A deployment may include desktop and cloud
+  agents with different availability. Avoid requiring simultaneous fleet cutover.
 - **Same physical store.** Both systems live on the one Fulcra File Store (`/coordination/` vs `team/`),
   so "migration" is a data mapping + habit change, not a platform move.
 - **Doc 01's C4 rule:** no long-lived shadow store / dual-truth. Any bridge must be short-lived or absent.
-- History: the incumbent holds ~350 task records (~140 open), full event/audit history, review loops.
+- Preserve incumbent task, event, audit, and review history.
 
 ## Approaches compared
 
@@ -69,8 +68,8 @@ No mirror. Three phases, each independently safe:
 - Never deletes anything on the incumbent.
 
 ## Test plan (phase 1 acceptance)
-On a real team space with migrated tasks: reconcile heals index/aggregate at real scale (~140 docs —
-first full reconcile ~2-3 min at ~1s/op, then incremental); board/needs-me/digest match the incumbent's
+On a synthetic test team with migrated tasks: reconcile heals the index and aggregate
+at representative scale using full and incremental passes; board/needs-me/digest match the incumbent's
 view for the migrated set (spot-check N=10); directives round-trip (tell→inbox→ack→respond); briefing +
 park/checkpoint; health fresh; heartbeat + listener installed and self-tested on this host. Rollback
 rehearsal: `--dry-run` + `--no-mark` first on a scratch team.
@@ -101,32 +100,26 @@ rehearsal: `--dry-run` + `--no-mark` first on a scratch team.
    writes only the file store, not the event store).
 6. **Acceptance additions:** identity-inbox assertion; dual-listing NEGATIVE test on the incumbent board;
    partial-failure recovery (kill between write and mark → re-run → no dual-truth); shard-GC clean at
-   ~140 docs; exporter is sequential (no concurrency-ceiling collision).
+   a representative synthetic corpus; exporter is sequential (no concurrency-ceiling collision).
 7. **Phase-3 gate additions:** no open review loop on the incumbent; forge/verdict pollers stopped;
    "active host" freshness window > slowest machine-gated host cadence.
 
 ---
 
-## Phase 1 — EXECUTED 2026-07-02 ✅
-- Rehearsal (scratch, 3 tasks, --no-mark): field fidelity verified, incumbent untouched.
-- Dry-run: 139-task plan (surfaced + fixed a slug-length bug before live).
-- **LIVE: 139/139 migrated, 139/139 terminalized on the incumbent, 0 errors** (12 min sequential).
-- First reconcile: 139 tasks, 0 warnings. Status counts match the incumbent structure exactly.
-- Acceptance: identity-inbox ✅ (same-id policy works), dual-listing NEGATIVE ✅ (only review-loop items
-  remain open on the incumbent — carve-out intact), directive round-trip ✅, presence/briefing/digest/
-  health ✅. Heartbeat (20m) + listener (10m) installed on Ashs-MBP-Work, install self-tests OK.
-- Incumbent automation on this host left RUNNING (review loops + fleet still live there).
+## Phase 1 — rehearsal
 
-## Phase 2 — per-host adoption checklist (operator-gated, run when touching each machine)
-For each of: Mac, Workbook (Codex review), ArcBot, codex hosts:
-1. `git clone https://github.com/ashfulcra/coord2 && cd coord2 && scripts/coord2-setup.sh --yes`
-2. `coord-engine doctor fulcra` (must be healthy; fulcra-api auth if not)
-3. `scripts/install-heartbeat.sh --yes fulcra 20` + `scripts/install-listener.sh --yes fulcra <agent-id> 10`
-4. `coord-engine presence beat fulcra -a <agent-id>` (join the roster)
-5. Retire that host's incumbent launchd jobs (com.fulcra.coord.*) ONLY once its open review loops close.
-6. Workbook (reviewer) last: its verdict flow drains the remaining incumbent review loops first.
+Use a synthetic team to verify field fidelity, stable task IDs, migration marking,
+and recovery from partial failure. Confirm status counts and review-loop handling
+before planning a deployment migration. Keep live run logs outside this repository.
+
+## Phase 2 — per-host adoption checklist
+
+For each host, use the current [`setup guide`](../../GET-ON-THE-BUS.md), verify
+`coord-engine doctor <team>`, and register presence under its configured identity.
+Retire incumbent jobs only once the host's open review loops have closed. Migrate
+the review host last if it is still draining legacy review work.
 
 ## Phase 3 — retirement gate (from Resolution §7)
-All active hosts fresh in `coord-engine health fulcra`; incumbent board has NO open work AND no open
+All active hosts fresh in `coord-engine health <team>`; incumbent board has NO open work AND no open
 review loops; forge/verdict pollers stopped; final incumbent broadcast + freeze; /coordination/ kept as
 cold read-only history.

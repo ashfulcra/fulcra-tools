@@ -1,0 +1,36 @@
+name: Public tree privacy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check generalized examples and export tracked files only
+        run: |
+          python3 scripts/privacy_guard.py --self-test
+          python3 scripts/privacy_guard.py --export-to "$RUNNER_TEMP/public-tree"
+      - name: Install checksum-verified Gitleaks
+        run: |
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          curl --fail --silent --show-error --location \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks"
+      - name: Prove credential detection and scan the public tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/credential-control"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out "$RUNNER_TEMP/credential-control/unused-test.key" 2>/dev/null
+          set +e
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir "$RUNNER_TEMP/credential-control" --redact --no-banner
+          result=$?
+          set -e
+          test "$result" -eq 1
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir "$RUNNER_TEMP/public-tree" \
+            --redact --no-banner --max-archive-depth 3

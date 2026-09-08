@@ -15,27 +15,27 @@ function jwt(payload: Record<string, unknown>): string {
 describe("whoami", () => {
   test("prefers the name claim over email in the id_token JWT (no network)", async () => {
     const f = mockFetch(async () => new Response("{}", { status: 200 }));
-    const r = await whoami(jwt({ name: "Ash Kalb", email: "a@b.com", sub: "x" }), {
+    const r = await whoami(jwt({ name: "Example User", email: "user@example.com", sub: "x" }), {
       fetch: f,
     });
-    expect(r.label).toBe("Ash Kalb");
+    expect(r.label).toBe("Example User");
     expect(f).not.toHaveBeenCalled();
   });
 
   test("reads the email claim when there is no name claim (no network)", async () => {
     const f = mockFetch(async () => new Response("{}", { status: 200 }));
-    const r = await whoami(jwt({ email: "a@b.com", sub: "x" }), { fetch: f });
-    expect(r.label).toBe("a@b.com");
+    const r = await whoami(jwt({ email: "user@example.com", sub: "x" }), { fetch: f });
+    expect(r.label).toBe("user@example.com");
     expect(f).not.toHaveBeenCalled();
   });
 
   test("falls back to the namespaced email claim when name/email absent", async () => {
     const f = mockFetch(async () => new Response("{}", { status: 200 }));
     const r = await whoami(
-      jwt({ "https://fulcradynamics.com/email": "ns@b.com", sub: "x" }),
+      jwt({ "https://fulcradynamics.com/email": "namespaced@example.com", sub: "x" }),
       { fetch: f },
     );
-    expect(r.label).toBe("ns@b.com");
+    expect(r.label).toBe("namespaced@example.com");
     expect(f).not.toHaveBeenCalled();
   });
 
