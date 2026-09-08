@@ -52,8 +52,6 @@ PIN="d187e546c1dfcccfc240ccc4fabebdb725d92643"   # coord-engine at d187e546. NIN
 # suppressed their 2.0.4 claims (codex-reviewer, 681 r1). Deriving it removes
 # the hand-edit step that produced that, rather than correcting one instance.
 VER="pp-$(printf %.8s "$PIN")"
-# TYPE mirrors the CURRENT channel in _coord/bus-v3/records.json — when the authority moves, update BOTH (2026-08-04 cutover lesson: this line silently pinned the OLD channel)
-TYPE="MomentAnnotation/d04f357e-b556-4298-ad1e-4ce307d54041"
 
 A="${1:-${FULCRA_COORD_AGENT:-}}"
 if [ -z "$A" ]; then
@@ -572,15 +570,9 @@ echo "---       proof of no work, and \`tell\` dispatch does not appear on the e
 # STEP_FAILS means some installer step failed and a later one rescued it, so the
 # slug says `-steps<N>` and a reader can tell a clean adoption from a rescued one.
 #
-# Adoption claim rides the ENGINE's tagged chokepoint, not a raw record pipe:
-# raw-pipe claims carry no identity TAGS, so they are invisible to tag-keyed
-# timeline views (2026-08-05 finding — most bus traffic was untagged). To be
-# precise, since "untagged" has been misread as "unattributed": the raw path DOES
-# preserve sender attribution — the bare agent name lands in `sources` and
-# recipients can route on it (verified by a peer agent 2026-08-06). Only
-# the four-dimension identity tags are missing. The engine we JUST installed
-# always has bus-v3 send; raw pipe remains only as the fallback if the engine
-# send itself fails — and it is the ONLY path on a pre-bus-v3 engine.
+# The engine's bus-v3 sender resolves the team's current channel from its
+# configuration. Do not fall back to a raw record: a failed or refused send
+# must not be bypassed with a cached channel ID.
 SLUG="adopted-${VER}-${A}-rc${rc}"
 [ "$STEP_FAILS" -gt 0 ] && SLUG="${SLUG}-steps${STEP_FAILS}"
 
@@ -622,10 +614,6 @@ if FULCRA_COORD_AGENT="$A" coord-engine bus-v3 send "$TEAM" --to "$COORD" --kind
      --slug "$SLUG" --priority P2; then
   SENT=1
   echo "adoption claim sent (tagged) to ${WHO} (slug ${SLUG})"
-elif printf '{"note":"{\\"v\\":1,\\"to\\":\\"%s\\",\\"kind\\":\\"claim\\",\\"pri\\":\\"P2\\",\\"slug\\":\\"%s\\"}"}' "$COORD" "$SLUG" | \
-       fulcra-api record "$TYPE" --api-version v1alpha1 --source="$A"; then
-  SENT=1
-  echo "adoption claim sent via RAW FALLBACK (tags missing, attribution intact) — report to ${WHO}"
 else
   echo "WARN: adoption claim failed to send — report this verbatim to ${WHO}"
 fi

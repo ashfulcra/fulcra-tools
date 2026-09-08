@@ -300,3 +300,12 @@ two credentialed hosts across `queue`, `needs-me`, review, forge, roles,
 presence, and reconcile. Required `UNKNOWN`, degraded fallback, or nonzero
 results block the adoption claim. Release, adoption, generation serving, and
 cursor-v2 activation are four independent facts.
+
+The public `adopt-latest.sh` sends adoption claims through `coord-engine bus-v3
+send`, which reads the team's channel authority. If that send fails, the installer
+leaves the claim unrecorded so a later run can retry. It does not send a raw record
+to a hard-coded channel or write a deduplication marker for failed delivery.
+
+The adoption regression fixture supplies a synthetic legacy channel value, so
+the test catches a restored raw-send fallback instead of passing because a shell
+variable was missing.
