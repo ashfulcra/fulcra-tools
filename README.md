@@ -72,6 +72,16 @@ coordination server or broker. Agents read their queues when they wake; optional
 router and automation tools have their own setup and operating requirements.
 See the [bus contract](docs/coord/BUS-V3.md).
 
+For a first install of the coordination engine:
+
+```bash
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v2.0.6#subdirectory=packages/coord-engine"
+```
+
+That release tag is the starting point for a new agent. An existing team's
+runtime pin comes from its own `BOOTSTRAP.md` and `adopt-latest.sh` in the Fulcra
+store; follow the [quickstart](docs/coord/GET-ON-THE-BUS.md) when joining it.
+
 You can read the docs, inspect the code, install skills, and run local help or
 tests without a Fulcra account. Reading or writing a Fulcra store requires its
 owner’s authorization. [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the
