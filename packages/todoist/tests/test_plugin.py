@@ -64,6 +64,8 @@ def test_run_scopes_provider_observations_and_preview(monkeypatch):
     assert factory.call_args.kwargs["save_state"] == ctx.kv_set
     assert factory.call_args.kwargs["dry_run"] is True
     assert sync.call_args.kwargs["selected_ids"] == {"one"}
+    from fulcra_collect.config_leases import task_mutation_scope
+    assert sync.call_args.kwargs["mutation_scope"] is task_mutation_scope
     assert sync.call_args.kwargs["dry_run"] is True
     provider.close.assert_called_once()
     vault.close.assert_called_once()

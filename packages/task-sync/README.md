@@ -23,6 +23,7 @@ occurrence. Source recurrence changes still import and rotate the generation.
 ```python
 from fulcra_task_sync.engine import run_sync
 from fulcra_task_sync.vault import FulcraVault
+from fulcra_collect.config_leases import task_mutation_scope
 
 with FulcraVault(token) as vault:
     result = run_sync(
@@ -32,6 +33,7 @@ with FulcraVault(token) as vault:
         still_selected=lambda: current_selected_ids(),
         deadline_s=600,
         selection_epoch=saved_configuration_epoch,
+        mutation_scope=task_mutation_scope,
     )
 ```
 
@@ -66,6 +68,26 @@ writes and every KV write, including immutable chunks. An already-started networ
 or EventKit operation cannot be recalled. Preview performs reads and planning
 without source/file writes, checkpoint changes or advancing the active epoch.
 No selection performs no I/O, including no checkpoint or epoch writes.
+
+`mutation_scope` is a no-argument context-manager factory covering each source
+completion or vault upload. The engine checks consent again **inside** that scope
+and holds it until the external call returns. Collect passes
+`fulcra_collect.config_leases.task_mutation_scope`, which acquires shared locks on
+the account-transition lock and configuration lock, in that order. Account and
+settings changes acquire the corresponding exclusive locks: a transition that
+wins first makes the inner guard reject the write; a write that wins first finishes
+its call before the transition can proceed. This closes the gap between checking
+consent and initiating the external mutation. Lease acquisition waits at most 30
+seconds and fails without writing if the locks remain unavailable.
+
+Local KV checkpoints remain outside the external-mutation lease: an epoch change
+can leave a stale local journal, but the protected final guard rejects its external
+write and the next active epoch invalidates that journal. With `mutation_scope`
+omitted, the engine uses a no-op context and offers only the earlier callback
+checks; other integrations must supply a scope coordinated with their consent
+changes to obtain the same guarantee. A remote operation with an uncertain timeout
+may still finish remotely after its client call returns; a local lease cannot
+cancel an already-submitted request.
 
 Schema 2 stores each task separately using compact source hashes/booleans; titles
 and note bodies never enter checkpoints. Explicit seen version IDs and hashes of
@@ -139,7 +161,8 @@ bytes, and each response/document at 1 MB. Each task retains at most 500 explici
 seen version IDs and 500 trusted baseline hashes. List chunks target 24 KB, so even
 a maximum-sized tracking index and 500 long version IDs fit the KV record limits.
 HTTP timeouts are bounded by the remaining run budget; a blocking provider call
-may overrun by its own timeout. Exceeding a cap fails closed and is reported,
+may overrun by its own timeout, and lease acquisition by its bounded wait.
+Exceeding a cap fails closed and is reported,
 never treated as complete history. A completion/upload requiring another version
 is blocked before source mutation when the history budget is full. Explicit seen
 IDs are retained rather than compacted by timestamp. Long-lived files at the cap
@@ -161,5 +184,6 @@ validators check large notes, 200-task imports, maximum-sized indexes/history, a
 failed manifest recovery. Selection/epoch round trips and superseded generations
 cannot revive journals. Slow missing/moved lookups under a short run budget still
 allow later tasks to progress, without checkpoints after deadline or deselection.
-No live data is needed.
+Real configuration locks verify source/vault call ordering against account
+transitions, settings-write exclusion and bounded lease cleanup. No live data is needed.
 This package has not performed live reminder completion or production rollout.

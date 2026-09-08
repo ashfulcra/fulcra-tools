@@ -3,6 +3,10 @@
 The Mac app for Fulcra Collect. It lives in the menu bar, shows import status,
 and opens the dashboard for setup and settings.
 
+If a setting changes elsewhere while you are editing it, Collect keeps the saved
+value and asks you to review it before retrying. Native enable and interval controls
+restore the current value when that happens.
+
 ## Install
 
 Use the [Mac download and setup guide](../../docs/collect.md#get-started-new-user).

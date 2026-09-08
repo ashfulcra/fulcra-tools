@@ -5,7 +5,167 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
+
 from fulcra_collect import config
+
+
+def test_stale_disjoint_plugin_saves_merge(collect_home):
+    alpha, beta = config.load(), config.load()
+    alpha.enable('alpha')
+    alpha.plugin_settings['alpha'] = {'lists': ['a']}
+    alpha.set_interval('alpha', 60)
+    config.save(alpha)
+    beta.enable('beta')
+    beta.plugin_settings['beta'] = {'lists': ['b']}
+    beta.set_interval('beta', 120)
+    config.save(beta)
+    result = config.load()
+    assert result.enabled == {'alpha', 'beta'}
+    assert result.plugin_settings == {'alpha': {'lists': ['a']}, 'beta': {'lists': ['b']}}
+    assert result.interval_overrides == {'alpha': 60, 'beta': 120}
+    assert beta.enabled == result.enabled
+    assert beta.plugin_settings == result.plugin_settings
+
+
+def test_stale_setting_save_cannot_undo_disable_and_merges_other_keys(collect_home):
+    seed = config.load()
+    seed.enable('tasks')
+    seed.plugin_settings['tasks'] = {'lists': ['a'], 'dry_run': False}
+    config.save(seed)
+    first, stale = config.load(), config.load()
+    first.disable('tasks')
+    first.plugin_settings['tasks']['dry_run'] = True
+    config.save(first)
+    stale.plugin_settings['tasks']['lists'].append('b')
+    config.save(stale)
+    assert config.load().enabled == set()
+    assert config.load().plugin_settings['tasks'] == {'lists': ['a', 'b'], 'dry_run': True}
+
+
+@pytest.mark.parametrize('field', ['setting', 'interval', 'web_port', 'delete'])
+def test_conflicting_stale_change_fails_without_writing(collect_home, field):
+    seed = config.load()
+    seed.plugin_settings['tasks'] = {'lists': ['a']}
+    seed.set_interval('tasks', 60)
+    config.save(seed)
+    first, stale = config.load(), config.load()
+    if field in {'setting', 'delete'}:
+        first.plugin_settings['tasks']['lists'] = ['b']
+        if field == 'delete':
+            del stale.plugin_settings['tasks']['lists']
+        else:
+            stale.plugin_settings['tasks']['lists'] = ['c']
+    elif field == 'interval':
+        first.set_interval('tasks', 120)
+        stale.set_interval('tasks', 180)
+    else:
+        first.web_port = 9595
+        stale.web_port = 9696
+    config.save(first)
+    before = (collect_home / 'config.toml').read_bytes()
+    with pytest.raises(RuntimeError, match='changed.*reload'):
+        config.save(stale)
+    assert (collect_home / 'config.toml').read_bytes() == before
+
+
+def test_merged_save_refreshes_detached_baseline_for_subsequent_edits(collect_home):
+    first, reused = config.load(), config.load()
+    first.plugin_settings['tasks'] = {'lists': ['a']}
+    config.save(first)
+    reused.set_interval('other', 60)
+    config.save(reused)
+    assert reused.plugin_settings == {'tasks': {'lists': ['a']}}
+    concurrent = config.load()
+    concurrent.plugin_settings['tasks']['lists'].append('b')
+    config.save(concurrent)
+    reused.plugin_settings['tasks']['lists'].append('c')
+    with pytest.raises(RuntimeError, match='changed.*reload'):
+        config.save(reused)
+    assert config.load().plugin_settings['tasks']['lists'] == ['a', 'b']
+
+
+def test_same_concurrent_change_is_idempotent_and_preserves_epoch(collect_home):
+    first, second = config.load(), config.load()
+    first.plugin_settings['tasks'] = {'lists': ['a']}
+    second.plugin_settings['tasks'] = {'lists': ['a']}
+    config.save(first)
+    epoch = config.load().plugin_epochs['tasks']
+    config.save(second)
+    assert config.load().plugin_epochs['tasks'] == epoch
+
+
+@pytest.mark.parametrize('initial_enabled', [False, True])
+def test_explicit_stale_membership_action_is_not_silently_ignored(collect_home, initial_enabled):
+    seed = config.load()
+    if initial_enabled:
+        seed.enable('tasks')
+    config.save(seed)
+    stale, changed = config.load(), config.load()
+    (changed.disable if initial_enabled else changed.enable)('tasks')
+    config.save(changed)
+    # Although this action matches the stale baseline, the user explicitly
+    # requested it after another caller saved the opposite membership.
+    (stale.enable if initial_enabled else stale.disable)('tasks')
+    before = (collect_home / 'config.toml').read_bytes()
+    with pytest.raises(config.ConfigConflictError, match='enabled.tasks'):
+        config.save(stale)
+    assert (collect_home / 'config.toml').read_bytes() == before
+
+
+def test_explicit_stale_interval_setter_is_not_silently_ignored(collect_home):
+    seed = config.load()
+    seed.set_interval('tasks', 60)
+    config.save(seed)
+    stale, changed = config.load(), config.load()
+    changed.set_interval('tasks', 120)
+    config.save(changed)
+    stale.set_interval('tasks', 60)
+    with pytest.raises(config.ConfigConflictError, match='interval_overrides.tasks'):
+        config.save(stale)
+    assert config.load().interval_overrides['tasks'] == 120
+
+
+def test_explicit_stale_preview_update_cannot_silently_enable_writes(collect_home):
+    seed = config.load()
+    seed.plugin_settings['tasks'] = {'dry_run': True, 'lists': ['a']}
+    config.save(seed)
+    stale, changed = config.load(), config.load()
+    changed.plugin_settings['tasks']['dry_run'] = False
+    config.save(changed)
+    stale.update_plugin_settings('tasks', {'dry_run': True, 'lists': ['b']})
+    before = (collect_home / 'config.toml').read_bytes()
+    with pytest.raises(config.ConfigConflictError, match='plugin_settings.tasks.dry_run'):
+        config.save(stale)
+    assert (collect_home / 'config.toml').read_bytes() == before
+
+
+def test_explicit_setting_request_conflicts_with_deleted_plugin_table(collect_home):
+    seed = config.load()
+    seed.plugin_settings['tasks'] = {'dry_run': True}
+    config.save(seed)
+    stale, changed = config.load(), config.load()
+    del changed.plugin_settings['tasks']
+    config.save(changed)
+    stale.update_plugin_settings('tasks', {'dry_run': True})
+    with pytest.raises(config.ConfigConflictError, match='plugin_settings.tasks'):
+        config.save(stale)
+    assert config.load().plugin_settings == {}
+
+
+def test_successful_save_consumes_explicit_noop_actions(collect_home):
+    reused = config.load()
+    reused.disable('tasks')
+    reused.set_interval('tasks', 60)
+    config.save(reused)
+    changed = config.load()
+    changed.enable('tasks')
+    changed.set_interval('tasks', 120)
+    config.save(changed)
+    reused.set_interval('other', 30)
+    config.save(reused)
+    assert reused.enabled == {'tasks'}
+    assert reused.interval_overrides == {'tasks': 120, 'other': 30}
 
 
 def test_config_dir_honours_the_env_override(collect_home: Path):

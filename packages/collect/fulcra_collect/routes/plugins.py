@@ -204,9 +204,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                 _validate_url_setting(k, v)
         # Persist
         cfg = _config.load()
-        if plugin_id not in cfg.plugin_settings:
-            cfg.plugin_settings[plugin_id] = {}
-        cfg.plugin_settings[plugin_id].update(body)
+        cfg.update_plugin_settings(plugin_id, body)
         _config.save(cfg)
         daemon.handle_request({"cmd": "reload"})
         return {"ok": True}
@@ -366,9 +364,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         # path is just a string assignment — and we've already validated
         # the key + kind above.
         cfg = _config.load()
-        if plugin_id not in cfg.plugin_settings:
-            cfg.plugin_settings[plugin_id] = {}
-        cfg.plugin_settings[plugin_id][key] = absolute
+        cfg.update_plugin_settings(plugin_id, {key: absolute})
         _config.save(cfg)
         # Surface the new value to the running daemon so the plugin's next
         # run sees the path immediately (mirrors PUT /settings' behaviour).

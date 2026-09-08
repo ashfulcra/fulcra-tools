@@ -109,3 +109,7 @@ Interactive Fulcra sign-in/sign-out blocks task writes throughout the account
 transition and invalidates workers started during it. If the token change or final
 configuration save fails, writes stay blocked until an interactive retry succeeds.
 Automatic token refresh does not clear that protection.
+
+Settings and account changes wait for an active task write to finish. Each new
+write checks your current selection and consent while holding a shared lock, so
+an older worker cannot start another write after the change takes effect.

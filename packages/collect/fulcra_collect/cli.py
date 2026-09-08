@@ -122,10 +122,19 @@ def run(plugin_id: str) -> None:
     click.echo(f"triggered: {plugin_id}")
 
 
+def _save_config(cfg: config_mod.Config) -> None:
+    try:
+        config_mod.save(cfg)
+    except config_mod.ConfigConflictError:
+        raise click.ClickException(
+            "Configuration changed in another process. Retry this command."
+        ) from None
+
+
 def _toggle(plugin_id: str, *, on: bool) -> None:
     cfg = config_mod.load()
     cfg.enable(plugin_id) if on else cfg.disable(plugin_id)
-    config_mod.save(cfg)
+    _save_config(cfg)
     try:
         send_request(_socket_path(), {"cmd": "reload"})
     except ConnectionError:
@@ -155,7 +164,7 @@ def set_interval(plugin_id: str, seconds: int) -> None:
     """Override a scheduled plugin's cadence (in seconds)."""
     cfg = config_mod.load()
     cfg.set_interval(plugin_id, seconds)
-    config_mod.save(cfg)
+    _save_config(cfg)
     try:
         send_request(_socket_path(), {"cmd": "reload"})
     except ConnectionError:
@@ -258,8 +267,8 @@ def set_setting(plugin_id: str, key: str, value: str) -> None:
     coerced = _coerce_setting(setting, value)
 
     cfg = config_mod.load()
-    cfg.plugin_settings.setdefault(plugin_id, {})[key] = coerced
-    config_mod.save(cfg)
+    cfg.update_plugin_settings(plugin_id, {key: coerced})
+    _save_config(cfg)
     try:
         send_request(_socket_path(), {"cmd": "reload"})
     except ConnectionError:

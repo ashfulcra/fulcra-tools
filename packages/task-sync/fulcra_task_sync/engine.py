@@ -1,4 +1,5 @@
 """Completion-only reconciliation with explicit version IDs and durable intent."""
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 import hashlib
 import time
@@ -52,9 +53,10 @@ def _valid_task(task):
 
 
 def run_sync(provider, selected_ids, vault, load_state, save_state, *, dry_run=False,
-             still_selected=None, deadline_s=600, selection_epoch=""):
+             still_selected=None, deadline_s=600, selection_epoch="", mutation_scope=None):
     """See README for account scoping, callbacks, bounds and concurrency limits."""
     result = SyncResult()
+    mutation_scope = mutation_scope or nullcontext
     selected = set(selected_ids)
     if not selected:
         return result
@@ -131,7 +133,8 @@ def run_sync(provider, selected_ids, vault, load_state, save_state, *, dry_run=F
                 continue
             guard(task.collection_id)
             previous = store.task(task_id)
-            _sync_task(provider, vault, task, previous, store, guard, result, dry_run)
+            _sync_task(provider, vault, task, previous, store, guard, result, dry_run,
+                       mutation_scope)
             guard(task.collection_id)
             advance(index)
         except _Stopped:
@@ -156,7 +159,7 @@ def _baseline(task):
             'revision': digest(task.revision), 'content': digest([task.title, task.notes])}
 
 
-def _sync_task(provider, vault, task, previous, store, guard, result, dry_run):
+def _sync_task(provider, vault, task, previous, store, guard, result, dry_run, mutation_scope):
     path = task_path(provider.name, task.id)
     versions = _bounded(vault.versions(path), MAX_VERSIONS)
     if len(set(versions)) != len(versions) or any(not isinstance(v, str) or not v
@@ -236,8 +239,9 @@ def _sync_task(provider, vault, task, previous, store, guard, result, dry_run):
                             'collection': digest(fresh.collection_id)}}
             guard(fresh.collection_id)
             store.save_task(task.id, record)  # Durable intent before source completion.
-            guard(fresh.collection_id)
-            provider.complete(fresh.id, fresh.revision, fresh.collection_id)
+            with mutation_scope():
+                guard(fresh.collection_id)
+                provider.complete(fresh.id, fresh.revision, fresh.collection_id)
             confirmed = provider.get_task(fresh.id)
             if (confirmed is None or not confirmed.completed or confirmed.id != fresh.id
                     or confirmed.collection_id != fresh.collection_id):
@@ -262,8 +266,9 @@ def _sync_task(provider, vault, task, previous, store, guard, result, dry_run):
                                   'seen': sorted(seen), 'baselines': trusted, 'journal': None}
         guard(task.collection_id)
         store.save_task(task.id, record)
-        guard(task.collection_id)
-        version = vault.write(path, rendered)
+        with mutation_scope():
+            guard(task.collection_id)
+            version = vault.write(path, rendered)
         if not isinstance(version, str) or not version or len(version.encode()) > MAX_VERSION_BYTES:
             raise SyncConflict('upload unconfirmed')
         # Only the exact returned version is observed; a concurrent bot version

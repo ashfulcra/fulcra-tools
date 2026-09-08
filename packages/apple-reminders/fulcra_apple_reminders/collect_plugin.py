@@ -3,6 +3,7 @@ from datetime import timedelta
 from functools import partial
 
 from fulcra_collect import config as collect_config
+from fulcra_collect.config_leases import task_mutation_scope
 from fulcra_collect.plugin import Permission, Plugin, Setting, SetupStep
 from fulcra_task_sync.engine import run_sync
 from fulcra_task_sync.vault import FulcraVault
@@ -60,6 +61,7 @@ def run(ctx):
                           load_state=ctx.kv_get, save_state=ctx.kv_set,
                           dry_run=preview, still_selected=partial(current_selection, epoch=epoch),
                           selection_epoch=epoch,
+                          mutation_scope=task_mutation_scope,
                           deadline_s=600)
     finally:
         vault.close()

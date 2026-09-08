@@ -17,7 +17,8 @@ def make_client(callback, *, required=True):
         collect_mode="live_polled", run=lambda ctx: None,
         default_interval=timedelta(minutes=5),
         required_settings=(Setting("lists", "Lists", "multiselect", required=required),
-                           Setting("region", "Region", "text")),
+                           Setting("region", "Region", "text"),
+                           Setting("dry_run", "Preview", "toggle", default=True)),
         required_credentials=(Credential("token", "Token", ""),
                               Credential("shared", "Shared", "", user_level=True)),
         setting_options=callback,
@@ -106,3 +107,19 @@ def test_saved_missing_ids_and_empty_can_persist_without_discovery(collect_home)
     assert client.put(SETTINGS, json={"lists": []}).status_code == 200
     assert client.post("/api/plugin/synthetic-lists/enable").status_code == 400
     assert "synthetic-lists" not in config.load().enabled
+
+
+def test_settings_put_preserves_explicit_preview_intent_on_conflict(collect_home, monkeypatch):
+    client = make_client(lambda ctx, key: [])
+    assert client.put(SETTINGS, json={'lists': ['a'], 'dry_run': True}).status_code == 200
+    save = config.save
+    def concurrent_save(cfg):
+        # Another request turns preview off after this request loaded settings.
+        concurrent = config.load()
+        concurrent.plugin_settings['synthetic-lists']['dry_run'] = False
+        save(concurrent)
+        save(cfg)
+    monkeypatch.setattr(config, 'save', concurrent_save)
+    response = client.put(SETTINGS, json={'lists': ['b'], 'dry_run': True})
+    assert response.status_code == 409
+    assert config.load().plugin_settings['synthetic-lists'] == {'lists': ['a'], 'dry_run': False}

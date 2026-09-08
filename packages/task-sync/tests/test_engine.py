@@ -493,3 +493,80 @@ def test_missing_lookup_does_not_checkpoint_after_deadline_or_deselection(rig, m
     result = run(deadline_s=1, still_selected=lambda: live[0])
     assert result.partial and not result.errors
     assert state == before
+
+
+@pytest.mark.parametrize('operation', ['complete', 'upload'])
+def test_consent_is_rechecked_inside_mutation_scope(rig, operation):
+    from contextlib import contextmanager
+
+    p, v, _, run = rig
+    if operation == 'complete':
+        run()
+        v.resolve()
+    live = [{'list-a'}]
+    @contextmanager
+    def revoked_before_acquisition():
+        # The account transition wins after the last ordinary guard but before
+        # the writer can acquire its lease. It must not use that stale guard.
+        live[0] = set()
+        yield
+    before = len(v.bodies)
+    result = run(still_selected=lambda: live[0], mutation_scope=revoked_before_acquisition)
+    assert result.partial and not result.errors
+    assert p.writes == 0 and not p.items['task-a'].completed
+    assert len(v.bodies) == before
+
+
+@pytest.mark.parametrize('operation', ['complete', 'upload'])
+def test_actual_external_mutation_holds_lease_until_call_returns(rig, tmp_path, monkeypatch, operation):
+    import threading
+    from fulcra_collect import config
+    from fulcra_collect.config_leases import task_mutation_scope
+
+    p, v, _, run = rig
+    monkeypatch.setenv('FULCRA_COLLECT_HOME', str(tmp_path / 'synthetic-config'))
+    cfg = config.load()
+    cfg.enable(p.name)
+    config.save(cfg)
+    captured_epoch = config.load().plugin_epochs[p.name]
+    if operation == 'complete':
+        run()
+        v.resolve()
+    attempted, finished = threading.Event(), threading.Event()
+    failures, order = [], []
+    def revoke():
+        try:
+            attempted.set()
+            with config.fulcra_account_transition():
+                order.append('transition')
+            finished.set()
+        except Exception as exc:
+            failures.append(exc)
+    worker = threading.Thread(target=revoke)
+    def selection():
+        current = config.load()
+        return {'list-a'} if (not current.account_transition and
+                             current.plugin_epochs[p.name] == captured_epoch) else set()
+    real_mutation = p.complete if operation == 'complete' else v.write
+    def paused_mutation(*args):
+        worker.start()
+        assert attempted.wait(5)
+        assert not finished.wait(0.2)
+        value = real_mutation(*args)
+        order.append('mutation')
+        return value
+    if operation == 'complete':
+        p.complete = paused_mutation
+    else:
+        v.write = paused_mutation
+    try:
+        result = run(mutation_scope=task_mutation_scope, still_selected=selection)
+        assert not result.errors
+        assert finished.wait(5)
+        assert not failures
+        assert order == ['mutation', 'transition']
+        assert (p.writes == 1) if operation == 'complete' else bool(v.files)
+    finally:
+        if worker.ident is not None:
+            worker.join(5)
+    assert not worker.is_alive()

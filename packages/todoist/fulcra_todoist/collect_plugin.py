@@ -4,6 +4,7 @@ from functools import partial
 import hmac
 
 from fulcra_collect import config as collect_config, credentials as collect_credentials
+from fulcra_collect.config_leases import task_mutation_scope
 from fulcra_collect.plugin import Credential, Plugin, Setting, SetupStep
 from fulcra_task_sync.engine import run_sync
 from fulcra_task_sync.vault import FulcraVault
@@ -67,7 +68,7 @@ def run(ctx):
             result = run_sync(provider=provider, selected_ids=selected, vault=vault,
                 load_state=ctx.kv_get, save_state=ctx.kv_set, dry_run=preview,
                 still_selected=partial(current_selection, token, epoch=epoch),
-                selection_epoch=epoch, deadline_s=600)
+                selection_epoch=epoch, deadline_s=600, mutation_scope=task_mutation_scope)
         finally:
             vault.close()
     finally:

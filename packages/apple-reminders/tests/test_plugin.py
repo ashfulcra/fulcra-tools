@@ -100,6 +100,8 @@ def test_run_forwards_preview_selection_and_state(monkeypatch):
     assert args.kwargs["load_state"] == ctx.kv_get
     assert args.kwargs["save_state"] == ctx.kv_set
     assert args.kwargs["still_selected"].func is plugin.current_selection
+    from fulcra_collect.config_leases import task_mutation_scope
+    assert args.kwargs["mutation_scope"] is task_mutation_scope
     vault.close.assert_called_once()
 
 

@@ -46,6 +46,15 @@ Capture `RunContext.config_epoch` with settings and pass it into the task engine
 check it in the live selection callback. Configuration and credential transitions
 must invalidate pending journals even when no sync runs between the changes.
 Save configuration under a cross-process lock and publish it atomically.
+Merge each caller's edits against its immutable load/save baseline: enabled
+membership, interval keys, and individual plugin-setting keys merge independently.
+An unchanged stale value must never undo a disable or remove another caller's
+setting. Divergent edits to the same field raise `ConfigConflictError` before
+publication; reload and retry instead of force-saving the stale object.
+For explicit user submissions use `enable`, `disable`, `set_interval`, and
+`update_plugin_settings(plugin_id, values)`: these preserve intent even when the
+submitted value equals the loaded baseline. Direct mapping edits carry only
+semantic differences and cannot represent an explicit unchanged-value request.
 Interactive Fulcra sign-in/sign-out must persist an `account_transition` gate and
 rotate all plugin epochs before changing the token, then rotate again before
 clearing the gate on success. Task callbacks reject the gate as well as stale

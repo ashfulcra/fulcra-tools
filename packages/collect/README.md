@@ -377,9 +377,30 @@ task writes blocked until an interactive sign-in/sign-out successfully completes
 automatic token refresh cannot clear the gate or rotate epochs. Ordinary settings
 saves preserve the stored gate, and overlapping account transitions serialize
 without holding the configuration save lock during Keychain prompts. Returning to
-an earlier selection starts a fresh baseline. Configuration saves serialize across processes and replace the file
-atomically; a concurrent save cannot restore an older revision. Direct edits to
-`config.toml` bypass this lifecycle tracking.
+an earlier selection starts a fresh baseline. Configuration saves serialize across
+processes and replace the file atomically. Each loaded `Config` keeps an immutable
+snapshot of its values; saves merge only the caller's edits against that snapshot.
+Enabled membership, interval keys, and individual plugin-setting keys merge
+independently, so a stale unrelated save cannot undo a disable or erase another
+setting. Divergent changes to the same field raise `ConfigConflictError` before
+writing; reload and retry the edit. Successful saves refresh both the caller's
+values and its baseline with the merged result. Explicit epoch rotations and the
+stored account-transition gate retain their separate lifecycle rules. Direct
+edits to `config.toml` bypass this lifecycle tracking.
+
+Each task write holds shared account and configuration locks from its final consent
+check through the source or Fulcra call. Settings saves and account changes take
+exclusive locks, so an already-running write finishes before a change takes effect;
+the next write checks the new settings. Lock acquisition times out after 30 seconds
+and leaves the run retryable. A remote service may still finish a request after a
+network timeout; Collect cannot cancel work that service has already accepted.
+
+When concurrent changes conflict, the web API returns HTTP 409 with a reload/retry
+message, and the CLI exits with a retry message. Neither reports success nor reloads
+the daemon; the concurrent configuration remains intact. Error text omits setting
+values. Configuration writers must use `enable`, `disable`, `set_interval`, and
+`update_plugin_settings` for explicit user actions, so even a request equal to its
+loaded baseline is preserved as intent and conflicts are rejected visibly.
 
 The CLI accepts multiselect values as JSON arrays of unique, nonempty string IDs:
 `fulcra-collect set-setting apple-reminders selected_lists '["example-list-id"]'`.
