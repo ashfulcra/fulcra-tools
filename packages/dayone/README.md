@@ -6,6 +6,16 @@ InstantAnnotation under a "Journal" definition, carrying the entry text,
 its Day One tags, and lightweight metadata (journal, location, word and
 photo counts).
 
+## Use with Collect
+
+Day One is included in the [Mac installer](../../docs/collect.md#get-started-new-user).
+Choose **Day One → Set up** in the dashboard, select a local database or export,
+and follow the access and destination steps. Local database import requires Full
+Disk Access; keep Day One open so entries from other devices can reach this Mac.
+See the [source guide](../../docs/how-do-i-get-my-data.md#day-one) for details.
+
+The commands below describe the standalone CLI, including its filtering options.
+
 ## Input modes
 
 Day One has no read API and its CLI is write-only, so entries come from

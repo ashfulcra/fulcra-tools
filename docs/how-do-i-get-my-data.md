@@ -4,6 +4,11 @@ This page lists every data source Fulcra Collect can pull from today and
 the pathways that exist for each one. Use it as a lookup: find the source
 you care about, then pick the pathway that matches your setup.
 
+New to Collect? [Install the Mac app](collect.md#get-started-new-user) first.
+[Plugin status](collect.md#plugin-status) distinguishes the current installer
+from unfinished work. Apple Notes is included; Reminders and Todoist are not
+available yet.
+
 Pathways fall into three rough buckets:
 
 - **Live** — runs continuously. A browser extension, a webhook server, or

@@ -1,10 +1,26 @@
 # FulcraMediaHelpers
 
-Import your media history — what you've **Watched**, **Listened to**, and **Read** — into your [Fulcra](https://fulcradynamics.com) personal data account, from ~13 sources, with per-row idempotency and agent-friendly JSON output.
+Import what you've watched, listened to, and read into your
+[Fulcra](https://fulcradynamics.com) account. This package supplies Collect's
+media plugins and a standalone command-line tool.
+
+## Use with Collect
+
+The [Mac installer](../../docs/collect.md#get-started-new-user) includes these
+plugins. Open the dashboard, choose a source, and follow **Set up**. You may
+need a service login, API key, local app permission, or an export file.
+[Available plugins and release status](../../docs/collect.md#plugin-status).
+
+The [source guide](../../docs/how-do-i-get-my-data.md) covers each pathway.
+Spotify uses an extended-history export or Last.fm scrobbles; there is no direct
+live Spotify plugin. The legacy `spotify-ifttt` importer is CLI-only.
+
+The commands below are for source installations and agent workflows. Example
+output uses synthetic data.
 
 ```
 $ fulcra-media import lastfm --json
-{"importer":"lastfm","ok":true,"total":248,"skipped_existing":0,"posted":248,"verified":248,"since_watermark":"2026-05-16T22:00:00+00:00","new_watermark":"2026-05-17T08:42:00+00:00","would_post":null,"errors":[]}
+{"importer":"lastfm","ok":true,"total":3,"skipped_existing":0,"posted":3,"verified":3,"since_watermark":"2026-01-01T00:00:00+00:00","new_watermark":"2026-01-02T00:00:00+00:00","would_post":null,"errors":[]}
 ```
 
 ## Why this exists
@@ -13,7 +29,9 @@ Your media history lives across a dozen services. Each has a different API (or n
 
 This tool funnels all of them into Fulcra as `DurationAnnotation` events, so a single query over your Fulcra account answers questions like "what did I watch on weekends in 2024?" or "what was I listening to last March?" across **all** the services in one shot.
 
-## Quickstart
+## CLI quickstart
+
+Run these commands from `packages/media-helpers/` in a repository checkout.
 
 ```bash
 pip install -e ".[dev]"
@@ -33,6 +51,8 @@ fulcra-media setup         # interactive picker — walks you through service on
 | **Netflix** | `import netflix` | Slim (in-app) CSV or full GDPR export — auto-detected. |
 | **Trakt** | `import trakt` | Direct API. Catches Apple TV+ via Universal Trakt Scrobbler. Cluster handling + cross-source twin dedup built in. |
 | **Apple Podcasts** | `import apple-podcasts` | macOS local SQLite (`MTLibrary.sqlite`). Add `apple-podcasts-timemachine` for replay recovery from Time Machine backups. |
+| **Apple Music takeout** | Collect plugin `apple-music-takeout` | Apple Data & Privacy play-activity CSV. |
+| **Apple TV on-device** | Collect plugin `apple-tv` | Local Watch Now cache; requires Full Disk Access and a recently opened TV app. |
 | **Apple TV / TV+ takeout** | `import apple-takeout` | privacy.apple.com → Apple Media Services → Playback Activity CSV. |
 | **Letterboxd** | `import letterboxd` | Public RSS diary feed. |
 | **Goodreads** | `import goodreads` | Public RSS of the 'read' shelf. |
@@ -41,7 +61,10 @@ fulcra-media setup         # interactive picker — walks you through service on
 | **Anything with a CSV** | `import generic-csv` | Column-mapped import. IFTTT, Pipedream, hand-rolled — any timestamp + title source. |
 | **Anything with an RSS feed** | `import generic-rss` | Same for RSS/Atom feeds. |
 
-Run `fulcra-media import --help` for the live list and `fulcra-media wizard <service>` for service-specific setup instructions.
+Apple Music takeout and on-device Apple TV are Collect plugins; this CLI has no
+matching `import` command for them.
+
+Run `fulcra-media import --help` for the live CLI list and `fulcra-media wizard <service>` for service-specific setup instructions.
 
 ## Categories
 

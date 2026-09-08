@@ -4,6 +4,18 @@ Capture what takes your attention while browsing — every page you read, with t
 
 The capture pipeline is **fully relayless**: the Chrome extension signs in through your browser with an Auth0 device flow and POSTs records **directly to the Fulcra API** (`https://api.fulcradynamics.com/ingest/v1/record/batch`). There is no localhost daemon involvement, no pairing, no per-extension token, and no relay route. The Python package in this repo is now just the Fulcra Collect *pointer* plugin — a static signpost that tells the user to install the browser extension and sign in.
 
+## Install with the Collect download
+
+The [Collect disk image](../../docs/collect.md#get-started-new-user) includes an
+optional Chrome Attention extension folder. Follow its included instructions to
+load it into Chrome, then sign in from the extension. Collect's Attention entry
+points to that setup; installing the Mac app alone does not start browser capture.
+The extension works independently of the Collect daemon.
+
+For a source build, see the [Chrome README](chrome/README.md).
+
+## Package contents
+
 This package holds:
 
 - **`fulcra_attention/`** — the Fulcra Collect pointer plugin (`collect_plugin.py`). It does no collection: it exists only so Collect still surfaces an "Attention" entry whose `run()` emits one informational message directing the user to build/load the extension and sign in via the browser. No credentials, no setup steps, no definition binding.

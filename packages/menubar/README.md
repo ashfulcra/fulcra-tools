@@ -1,11 +1,21 @@
 # fulcra-menubar
 
-macOS menubar UI for `fulcra-collect`. Python + PyObjC + rumps v1; a
-Swift rewrite follows once the UX is locked.
+The Mac app for Fulcra Collect. It lives in the menu bar, shows import status,
+and opens the dashboard for setup and settings.
 
-For installation and Apple Notes setup, start with the
-[Collect guide](../../docs/collect.md#get-started-new-user). The downloadable Mac
-app includes its runtime and plugins. The commands below are for development.
+## Install
+
+Use the [Mac download and setup guide](../../docs/collect.md#get-started-new-user).
+Open the disk image, drag **Fulcra Collect** into **Applications**, then launch it
+from there. Click its menu-bar icon and choose **Install & start daemon** if
+prompted. Open the dashboard and sign in with Fulcra.
+
+The beta is signed, notarized, and built for Apple silicon. It includes its
+Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes. Chrome
+Attention is an optional extension in the disk image with separate setup.
+[Release details and plugin status](../../docs/collect.md#plugin-status).
+
+The commands below are for development.
 
 ## Run in dev mode
 
@@ -137,10 +147,7 @@ web UI must be signed in for the deep-link to land on the requested
 route; unauth users see signin first and lose the param). If you add
 a new deep-link here, update the contract there too.
 
-## Path to Swift
+## Implementation
 
-Per the spec, this Python build is the UX laboratory. Once the
-popover layout, Preferences structure, notification triggers, palette,
-bootstrap copy, and icon assets are locked, the Swift port begins as
-sub-project 2.5. The Python file boundaries were chosen to map 1:1 to
-Swift files — see the spec's "UX lock and the Swift handoff" section.
+The current app uses Python, PyObjC, and rumps. A Swift port is a design direction;
+it is not part of the released installer.

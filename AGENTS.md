@@ -8,6 +8,14 @@ you can't infer from the source; the [`README.md`](README.md) tells the
 top-level story (what each package is, how to install the pieces) and this
 file does not repeat it.
 
+**README updates are required with every change.** Every update to Fulcra Tools
+or anything in it must update the relevant READMEs in the same PR, including
+fixes, plugins, installers, commands, and workflows. If a package has no README,
+update its nearest owning README or add one. Update the root README when the
+change affects installation, available tools, or release status. Document current
+behavior and limits; label unfinished work. Reviewers must block a change whose
+README update is missing or stale. This is a standing repository rule.
+
 **This file is a ship-gate artifact.** Every PR that changes agent-facing
 behavior — CLI verbs, skills, conventions, environment requirements, review
 rules — MUST update this file in the same PR. Reviewers: treat a stale
@@ -1414,10 +1422,12 @@ Keep personal content, team rosters, live measurements, deployment incident reco
 and private approval history in the team's own storage. Examples must let a new
 user configure their own team and recipients without inheriting a live account.
 
-The docs' primary reader is an **agent**; the showcase test is the goal: a
-founder drops this repo's link to their agent asking "anything useful here?"
-and the docs get it to "yes, and here's how" unaided. Standing rules, each
-earned by an incident:
+Write installation and plugin setup for the person using the tool, including
+someone who has never opened Terminal. Agent and contributor guides can assume
+their stated technical context. In both cases, readers should be able to follow
+the instructions without knowing the maintainer's machine or account.
+
+Standing rules:
 
 - **Truth over aspiration.** Document live, verified behavior; stamp
   verification dates and drift headers where the platform moves faster than

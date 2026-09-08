@@ -1,16 +1,22 @@
 # docs — index
 
-A map of the public documentation. Start with the **cold-reader** guides for
-setup and capabilities. Historical designs preserve reusable technical rationale;
-private team history and deployment records belong in each team's own storage.
+Start with the [Collect installation guide](collect.md#get-started-new-user)
+if you want to install the Mac app. It covers sign-in, Apple Notes, and
+[current plugin status](collect.md#plugin-status). The
+[source guide](how-do-i-get-my-data.md) explains what each integration needs.
 
-## Start here (cold reader)
+Contributor guides and agent protocols are below. Historical designs retain
+technical rationale; private team records belong in the team's own storage.
+
+## Start here
 
 - [`how-do-i-get-my-data.md`](how-do-i-get-my-data.md) — every data source
   Fulcra Collect can pull from today, and the pathway for each. No account
   needed to read.
-- [`collect.md`](collect.md) — what Fulcra Collect is and how the local
-  import daemon works.
+- [`collect.md`](collect.md) — install Collect, set up plugins, check release
+  limits, or run it from source.
+- [Apple Notes](../packages/apple-notes/README.md) — access, import, previews,
+  troubleshooting, and the limits of experimental writeback.
 - [`coord-DESIGN.md`](coord-DESIGN.md) — the design of the coord
   agent-coordination layer: why deterministic folds, what the engine owns.
 - [`coord/GET-ON-THE-BUS.md`](coord/GET-ON-THE-BUS.md) — the from-zero

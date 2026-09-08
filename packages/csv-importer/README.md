@@ -2,9 +2,13 @@
 
 Import any CSV stream into [Fulcra](https://fulcradynamics.com) as
 annotations — media plays, body weight, mood scores, expenses, anything.
-Sibling project to
-[FulcraMediaHelpers](https://github.com/ashfulcra/FulcraMediaHelpers);
-the media helpers depend on this library for their generic CSV importer.
+This library is part of Fulcra Tools. The [media helpers](../media-helpers/README.md)
+use it for Collect's **Generic media CSV** plugin.
+
+For media history, [install Collect](../../docs/collect.md#get-started-new-user)
+and use that plugin's setup wizard. The broader annotation and built-in-type
+options below belong to the standalone CLI; they are not all exposed in the
+Collect wizard.
 
 ## Why
 

@@ -11,6 +11,14 @@ Access is read-only (`gmail.readonly`); the relay never sends, modifies, or
 deletes mail.
 
 
+## Use with Collect
+
+Gmail is included in the [Mac installer](../../docs/collect.md#get-started-new-user).
+Choose **Gmail → Set up** in the dashboard. It requires a Google OAuth client as
+well as account sign-in, so there is more setup here than for a local Notes
+import. Follow [the OAuth client instructions](#one-time-create-the-oauth-client)
+below, then connect accounts and configure the rules that select messages.
+Installing Collect alone does not connect Gmail or choose what to upload.
 
 ## How it works
 

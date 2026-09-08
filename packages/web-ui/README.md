@@ -4,9 +4,16 @@ Browser-based UI for Fulcra Collect. The daemon's HTTP server (in
 packages/collect/fulcra_collect/web.py) serves these static files
 from `dist/`.
 
-> **First time here?** See [docs/TESTING.md](../../docs/TESTING.md) for
-> the end-to-end walkthrough: install, start the daemon, paste your
-> Fulcra token, and walk Trakt onboarding step by step.
+**Setting up Collect?** Follow the [Mac installer guide](../../docs/collect.md#get-started-new-user),
+then use **Sign in with Fulcra** in the dashboard. You do not need to paste a
+token for normal setup. [Testing and source setup](../../docs/TESTING.md) are
+for contributors.
+
+The dashboard shows installed plugins, setup steps, run status, and settings.
+[Plugin availability](../../docs/collect.md#plugin-status) depends on the release
+or Python environment running the daemon. Apple Notes setup verifies Full Disk
+Access and requires **Enable & start sync**, or **Enable & run preview** in
+preview mode. Navigating or skipping steps does not start a Notes import.
 
 Tech: vanilla HTML5 + CSS3 + JavaScript + Alpine.js (CDN) +
 Tailwind CSS (CDN) + Lit 3 (CDN, web components). No build step.

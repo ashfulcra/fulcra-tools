@@ -1,21 +1,12 @@
 # Fulcra Collect
 
-**Fulcra Collect** is a local daemon + web wizard that imports your
-personal-data streams into your [Fulcra](https://fulcradynamics.com) account.
-The daemon ([`packages/collect`](../packages/collect)) hosts every plugin, runs
-them on schedule, and serves the onboarding wizard + dashboard. Collect is the
-main project in the [fulcra-tools](../README.md) umbrella repo.
+Collect imports notes, journals, media history, and other data into your
+[Fulcra](https://fulcradynamics.com) account. You choose a source, configure its
+access, and run an import or let Collect check for changes on a schedule.
 
-Collect spans several packages in this repo — the daemon, the frontend it
-serves, the macOS companion, the shared API client, and the data-source
-plugins. They were merged in from separate repositories as the project
-consolidated (see [History](#history)).
-
-> **Working in this repo with an AI agent (Claude, Codex, Cursor, …)?**
-> Read [`AGENTS.md`](../AGENTS.md) first. It documents the non-obvious
-> environmental requirements — the required `uv` extras, the launchd daemon,
-> and the PATH/keychain gotchas — that otherwise cost time to rediscover on
-> first run.
+The Mac app opens a dashboard in your browser. A background process handles the
+imports and saves progress between runs. This page is the installation guide;
+[the source guide](how-do-i-get-my-data.md) explains each integration.
 
 ## Get started (new user)
 
@@ -23,20 +14,35 @@ consolidated (see [History](#history)).
 
 **[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.1-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-This beta installer includes Apple Notes. See the
-[release notes](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.1-macos-arm64)
-for requirements and known limitations.
+The current download is **0.1.1 beta**, released September 8, 2026. It is signed,
+notarized, and includes Apple Notes.
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.1-macos-arm64).
 
 1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
 2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.
 3. Choose **Install & start daemon** if prompted, then open the dashboard and
    **Sign in with Fulcra**.
-4. Choose a source and follow **Set up**. For [Apple Notes](../packages/apple-notes),
-   grant Full Disk Access, verify access, then choose **Enable & start sync**.
+4. Choose a source and follow **Set up**. For Apple Notes, use the steps below.
 
 Requires an Apple silicon Mac running macOS 12 or later. The app includes Python,
 Collect, the Fulcra client, and the plugins; you do not need Terminal or Homebrew.
-This is a beta release. Source installation is available for contributors below.
+There is no Intel Mac or Windows installer in this release.
+
+### Set up Apple Notes
+
+1. Open **Notes** and let iCloud finish downloading your notes to this Mac.
+2. In the Collect dashboard, choose **Apple Notes → Set up**.
+3. Follow the **Full Disk Access** step. In **System Settings → Privacy &
+   Security → Full Disk Access**, add **Fulcra Collect** from Applications.
+4. Restart Collect as directed, then choose **Verify access** in the wizard.
+5. Leave **Preview only** off and choose **Enable & start sync**. To inspect
+   what Collect would import first, turn on **Preview only** and choose
+   **Enable & run preview**.
+
+Copies go to `vault/notes/apple/` in your Fulcra account. Your originals stay in
+Apple Notes. Large libraries can take several runs; each run saves progress,
+and **Run Now** continues the import. The Mac must be awake and connected for
+uploads. [Notes troubleshooting and limits](../packages/apple-notes/README.md).
 
 ### From source (contributors)
 
@@ -52,9 +58,36 @@ Homebrew on macOS and installs the development environment. Keep a source
 checkout current with `bash scripts/update.sh`.
 [Detailed troubleshooting](TESTING.md).
 
+## Plugin status
+
+The current Mac beta bundles **21 plugin entries**. Bundled means the plugin is
+installed; it still needs its own setup. An entry may be a scheduled importer,
+an export reader you run manually, a webhook receiver, or instructions for a
+separate browser extension.
+
+| Source | What is available |
+|---|---|
+| [Apple Notes](../packages/apple-notes/README.md) | Notes and available attachments copied to Fulcra vault files. One-way import in normal setup; separate experimental writeback. |
+| [Day One](../packages/dayone/README.md) | Local journal database or JSON export import. |
+| [Media](../packages/media-helpers/README.md) | 16 entries: Last.fm, Deezer, Trakt, Netflix CSV, Spotify extended history, YouTube takeout, Apple TV takeout, Apple Music takeout, generic RSS, Letterboxd, Goodreads, Apple Podcasts, Podcasts Time Machine recovery, local Apple TV, generic media CSV, and Plex/Jellyfin webhooks. |
+| [Gmail](../packages/gmail/README.md) | Read-only polling with local filters, selected messages in Fulcra Files, and optional agent-bus relay. Requires Google OAuth setup. |
+| [PurpleAir](how-do-i-get-my-data.md#air-quality-purpleair) | Readings from the cloud API or sensors on your local network. |
+| [Fulcra Attention](../packages/attention/README.md) | A setup entry for the separate Chrome extension. The extension sends browsing activity directly to Fulcra and signs in separately. Its install folder is included in the disk image. |
+
+The [source guide](how-do-i-get-my-data.md) has permissions, credentials, import
+formats, and known gaps. These sources have different setup requirements and
+have not all been verified against every service or account. The downloadable
+app also includes `fulcra-api` 0.1.41; source installs use their own environment
+and dependency lock.
+
+**In development:** Apple Reminders with a list picker and completion syncing in
+both directions. **Next:** Todoist with project selection and the same completion
+behavior. Neither is available in this release. This does not promise full
+bidirectional editing of task titles, dates, or lists.
+
 ## How it fits together
 
-Collect is the product; the daemon is the hub everything else plugs into.
+The app, background process, and plugins share the following packages.
 
 | Package | Role in Collect |
 |---|---|
@@ -63,7 +96,10 @@ Collect is the product; the daemon is the hub everything else plugs into.
 | [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records Moment annotations and surfaces daemon status. |
 | [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** + cross-plugin definition resolver. Pulled in by every other package. |
 
-**Writing (the ingest path):** moments, durations, and numeric records go
+Notes and selected emails are uploaded as **Fulcra Files**. Event importers
+write moments, durations, and numeric records through the annotations API.
+
+**Writing events:** moments, durations, and numeric records go
 through the **typed endpoint** (`POST /ingest/v1/record/{data_type}`,
 unwrapped payloads, JSONL batches); tombstones stay on the legacy wrapped
 endpoint (their machine-state payload has no typed slot). The typed endpoint
@@ -86,13 +122,17 @@ mcp.fulcradynamics.com). Collect is the write side of that pair.
 | Package | Sources it adds |
 |---|---|
 | [`packages/media-helpers`](../packages/media-helpers) | Watched/listened/read media — Trakt, Last.fm, Spotify takeouts, YouTube takeouts, Netflix, Apple Podcasts, Apple TV, Deezer, Letterboxd, Goodreads, generic RSS/CSV. |
+| [`packages/apple-notes`](../packages/apple-notes/README.md) | Apple Notes and attachments copied into Fulcra vault files. |
 | [`packages/dayone`](../packages/dayone) | Day One journal entries (live SQLite read or one-shot export-zip upload). |
+| [`packages/gmail`](../packages/gmail/README.md) | Filtered Gmail messages copied into Fulcra Files, with optional bus relay. |
+| [`packages/purpleair`](../packages/purpleair) | Air-quality readings from an API or local sensor. |
 | [`attention`](../packages/attention) | Browsing-attention capture: a relayless Chrome MV3 extension that POSTs tab/idle events **directly to the Fulcra API**. Collect only shows an install-the-extension pointer — there is no daemon relay route or pairing. |
 | [`packages/csv-importer`](../packages/csv-importer) | Generic CSV → Fulcra annotation importer (library + CLI). The same logic the `generic-csv` Collect plugin uses. |
 
-Each package keeps its own README, build, tests, and language toolchain
-(Python and TypeScript both appear here). Start in the package directory
-you care about.
+Start in the package directory you care about. Every change must update its
+relevant README in the same PR, along with this guide and the source guide when
+installation or plugin availability changes. See [the agent guide](../AGENTS.md)
+for contributor rules.
 
 ## Where do I get data from?
 
