@@ -78,3 +78,10 @@ The provider uses an isolated EventKit process with bounded fetches and timeouts
 The Mac bundle includes the Reminders usage descriptions and routes
 `--reminders-bridge` before loading the menu-bar UI. Tests use synthetic EventKit
 objects and never complete personal reminders.
+
+### Fulcra account changes
+
+Interactive Fulcra sign-in/sign-out blocks task writes throughout the account
+transition and invalidates workers started during it. If the token change or final
+configuration save fails, writes stay blocked until an interactive retry succeeds.
+Automatic token refresh does not clear that protection.

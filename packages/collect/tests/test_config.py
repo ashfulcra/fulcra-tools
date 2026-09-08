@@ -291,3 +291,79 @@ def test_fulcra_account_change_invalidates_every_known_plugin(collect_home):
     assert all(after.plugin_epochs[plugin] != epoch for plugin, epoch in before.plugin_epochs.items())
     assert after.enabled == before.enabled
     assert after.plugin_settings == before.plugin_settings
+
+
+def test_account_transition_blocks_stale_saves_and_rotates_again_on_completion(collect_home):
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    stale = config.load()
+    before = dict(stale.plugin_epochs)
+    with config.fulcra_account_transition():
+        during = config.load()
+        assert during.account_transition is True
+        assert during.plugin_epochs['tasks'] != before['tasks']
+        config.save(stale)
+        assert config.load().account_transition is True
+    after = config.load()
+    assert after.account_transition is False
+    assert after.plugin_epochs['tasks'] != during.plugin_epochs['tasks']
+
+
+def test_account_transition_failure_stays_blocked_until_successful_retry(collect_home, monkeypatch):
+    import pytest
+
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    with pytest.raises(RuntimeError, match='synthetic token mutation failed'):
+        with config.fulcra_account_transition():
+            raise RuntimeError('synthetic token mutation failed')
+    assert config.load().account_transition is True
+    with monkeypatch.context() as patch:
+        with pytest.raises(OSError, match='synthetic final save failed'):
+            with config.fulcra_account_transition():
+                def fail_write(*args):
+                    raise OSError('synthetic final save failed')
+                patch.setattr(config, '_atomic_write', fail_write)
+    assert config.load().account_transition is True
+    blocked_epoch = config.load().plugin_epochs['tasks']
+    with config.fulcra_account_transition():
+        pass
+    assert config.load().account_transition is False
+    assert config.load().plugin_epochs['tasks'] != blocked_epoch
+
+
+def test_overlapping_account_transitions_cannot_open_each_others_gate(collect_home):
+    import threading
+
+    cfg = config.load()
+    cfg.enable('tasks')
+    config.save(cfg)
+    attempted, entered, finish = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+    def second_transition():
+        try:
+            attempted.set()
+            with config.fulcra_account_transition():
+                entered.set()
+                assert finish.wait(5)
+        except Exception as exc:
+            errors.append(exc)
+    worker = threading.Thread(target=second_transition)
+    try:
+        with config.fulcra_account_transition():
+            worker.start()
+            assert attempted.wait(5)
+            assert not entered.wait(0.2)
+            assert config.load().account_transition is True
+        assert entered.wait(5)
+        assert config.load().account_transition is True
+        finish.set()
+        worker.join(5)
+        assert not worker.is_alive() and not errors
+        assert config.load().account_transition is False
+    finally:
+        finish.set()
+        if worker.ident is not None:
+            worker.join(5)

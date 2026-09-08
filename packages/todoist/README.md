@@ -102,3 +102,10 @@ no live account and make no real source writes. Provider coverage includes
 pagination failures, account identity, missing and deleted tasks, reopening,
 recurring-task refusal, revision conflicts, uncertain retries, command-level
 errors, stored observations across restarts, and preview behavior.
+
+### Fulcra account changes
+
+Interactive Fulcra sign-in/sign-out blocks task writes throughout the account
+transition and invalidates workers started during it. If the token change or final
+configuration save fails, writes stay blocked until an interactive retry succeeds.
+Automatic token refresh does not clear that protection.

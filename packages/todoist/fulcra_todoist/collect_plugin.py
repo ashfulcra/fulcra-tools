@@ -23,7 +23,8 @@ def selected_projects(value):
 def current_selection(token, epoch=None):
     config = collect_config.load()
     settings = config.plugin_settings.get(PLUGIN_ID, {})
-    if (PLUGIN_ID not in config.enabled or settings.get('dry_run', True) is not False
+    if (getattr(config, 'account_transition', False)
+            or PLUGIN_ID not in config.enabled or settings.get('dry_run', True) is not False
             or (epoch is not None and config.plugin_epochs.get(PLUGIN_ID, '') != epoch)):
         return set()
     current = collect_credentials.get_secret(PLUGIN_ID, 'api_token')

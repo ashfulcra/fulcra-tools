@@ -368,10 +368,16 @@ Workers receive `RunContext.config_epoch` with their settings snapshot. Collect
 rotates that opaque revision when plugin settings, enablement, or credentials
 change through the app or CLI. The task plugins check it before each write, so
 turning preview on, disabling a plugin, removing a list, or reconnecting an
-account cancels pending work. Interactive Fulcra account sign-in or sign-out also
-invalidates pending task writes before the token changes; routine automatic token
-refresh does not. Returning to an earlier selection starts a fresh
-baseline. Configuration saves serialize across processes and replace the file
+account cancels pending work. Interactive Fulcra sign-in/sign-out persists an
+`account_transition` gate and rotates all plugin epochs before changing the token.
+Task writes remain blocked throughout the change, including workers started during
+it. After successful token mutation, another epoch rotation invalidates those
+workers before the gate opens. A failed mutation or final configuration save leaves
+task writes blocked until an interactive sign-in/sign-out successfully completes;
+automatic token refresh cannot clear the gate or rotate epochs. Ordinary settings
+saves preserve the stored gate, and overlapping account transitions serialize
+without holding the configuration save lock during Keychain prompts. Returning to
+an earlier selection starts a fresh baseline. Configuration saves serialize across processes and replace the file
 atomically; a concurrent save cannot restore an older revision. Direct edits to
 `config.toml` bypass this lifecycle tracking.
 

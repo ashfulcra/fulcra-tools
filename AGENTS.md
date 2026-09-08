@@ -46,8 +46,11 @@ Capture `RunContext.config_epoch` with settings and pass it into the task engine
 check it in the live selection callback. Configuration and credential transitions
 must invalidate pending journals even when no sync runs between the changes.
 Save configuration under a cross-process lock and publish it atomically.
-Interactive Fulcra sign-in/sign-out must invalidate all plugin epochs before
-changing the account token; routine automatic refresh must preserve those epochs.
+Interactive Fulcra sign-in/sign-out must persist an `account_transition` gate and
+rotate all plugin epochs before changing the token, then rotate again before
+clearing the gate on success. Task callbacks reject the gate as well as stale
+epochs. Failure leaves the gate closed until an interactive retry succeeds; normal
+configuration saves and automatic token refresh must never clear it.
 
 ## Public repository privacy
 

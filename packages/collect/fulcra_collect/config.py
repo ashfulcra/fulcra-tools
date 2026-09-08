@@ -54,6 +54,7 @@ class Config:
     # is part of the daemon, not a plugin.
     web_port: int = DEFAULT_WEB_PORT
     plugin_epochs: dict[str, str] = field(default_factory=dict)
+    account_transition: bool = False
     _rotated_epochs: set[str] = field(default_factory=set, repr=False)
 
     def rotate_plugin_epoch(self, plugin_id: str) -> None:
@@ -96,6 +97,7 @@ def _load_path(path: Path) -> Config:
         plugin_settings=dict(doc.get("plugin_settings", {})),
         web_port=web_port,
         plugin_epochs=dict(doc.get("plugin_epochs", {})),
+        account_transition=doc.get("account_transition", False) is not False,
     )
 
 
@@ -136,7 +138,7 @@ def save(cfg: Config) -> None:
         _save_locked(cfg, path)
 
 
-def _save_locked(cfg: Config, path: Path) -> None:
+def _save_locked(cfg: Config, path: Path, *, account_transition: bool | None = None) -> None:
     # Read the existing document to preserve any comments and custom
     # sections the user may have added. If the file doesn't exist yet,
     # start from an empty tomlkit document.
@@ -144,6 +146,11 @@ def _save_locked(cfg: Config, path: Path) -> None:
         doc = tomlkit.parse(path.read_text(encoding="utf-8"))
     else:
         doc = tomlkit.document()
+
+    # Ordinary saves preserve the gate already on disk, even when a stale
+    # Config carries False. Only the transition helper passes this override.
+    if account_transition is not None:
+        doc["account_transition"] = account_transition
 
     old_enabled = set(doc.get("enabled", []))
     old_settings = dict(doc.get("plugin_settings", {}))
@@ -174,6 +181,7 @@ def _save_locked(cfg: Config, path: Path) -> None:
 
     _atomic_write(path, tomlkit.dumps(doc))
     cfg.plugin_epochs = epochs
+    cfg.account_transition = doc.get("account_transition", False) is not False
     cfg._rotated_epochs.clear()
 
 
@@ -194,3 +202,29 @@ def invalidate_all_plugin_work() -> None:
         for plugin_id in cfg.enabled | set(cfg.plugin_settings) | set(cfg.plugin_epochs):
             cfg.rotate_plugin_epoch(plugin_id)
         _save_locked(cfg, path)
+
+
+def _persist_account_transition(path: Path, blocked: bool) -> None:
+    with _save_lock(path):
+        cfg = _load_path(path)
+        for plugin_id in cfg.enabled | set(cfg.plugin_settings) | set(cfg.plugin_epochs):
+            cfg.rotate_plugin_epoch(plugin_id)
+        _save_locked(cfg, path, account_transition=blocked)
+
+
+@contextmanager
+def fulcra_account_transition():
+    """Gate task writes across an interactive token change and revoke both epochs.
+
+    A separate transition lock serializes overlapping account changes. The config
+    save lock is released during token mutation, so Keychain UI cannot block
+    config reads or ordinary settings saves. Failure (including process exit) leaves
+    the durable gate closed until a later interactive transition completes.
+    """
+    path = _config_path()
+    with _save_lock(path.with_name(".account-transition.toml")):
+        _persist_account_transition(path, True)
+        yield
+        # This runs only after successful mutation. If this final write fails,
+        # atomic replacement leaves the previously persisted True gate intact.
+        _persist_account_transition(path, False)

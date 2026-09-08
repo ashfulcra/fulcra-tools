@@ -153,8 +153,8 @@ def _capture_validate_store_cli_token(cli_path: str) -> None:
         _log.exception("Fulcra token validation (CLI path) failed: %s", exc)
         raise HTTPException(502, f"Could not reach Fulcra: {type(exc).__name__}")
 
-    collect_config.invalidate_all_plugin_work()
-    _creds.set_user_secret("bearer-token", token)
+    with collect_config.fulcra_account_transition():
+        _creds.set_user_secret("bearer-token", token)
     # SP5 task 1: clear any stale refresh-failed flag from before the
     # user signed back in. See the paste-token POST for rationale.
     _creds.clear_refresh_failed()
@@ -213,8 +213,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         except _web.httpx.HTTPError as exc:
             _log.exception("Fulcra token validation failed: %s", exc)
             raise HTTPException(502, f"Could not reach Fulcra: {type(exc).__name__}")
-        collect_config.invalidate_all_plugin_work()
-        _creds.set_user_secret("bearer-token", token)
+        with collect_config.fulcra_account_transition():
+            _creds.set_user_secret("bearer-token", token)
         # SP5 task 1: a successful interactive sign-in dismisses any
         # prior "refresh exhausted" state so the Settings banner goes
         # away the moment the user re-auths.
@@ -224,8 +224,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
     @app.delete("/api/fulcra/auth/token", dependencies=[Depends(require_token)])
     def fulcra_auth_clear():
         from .. import credentials as _creds
-        collect_config.invalidate_all_plugin_work()
-        _creds.delete_user_secret("bearer-token")
+        with collect_config.fulcra_account_transition():
+            _creds.delete_user_secret("bearer-token")
         return {"ok": True}
 
     # ------------------------------------------------------------------

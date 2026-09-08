@@ -23,7 +23,8 @@ def current_selection(epoch=None):
     """Re-read user intent before writes; disabling or preview cancels mutations."""
     config = collect_config.load()
     settings = config.plugin_settings.get(PLUGIN_ID, {})
-    if (PLUGIN_ID not in config.enabled or settings.get('dry_run', True) is not False
+    if (getattr(config, 'account_transition', False)
+            or PLUGIN_ID not in config.enabled or settings.get('dry_run', True) is not False
             or (epoch is not None and config.plugin_epochs.get(PLUGIN_ID, '') != epoch)):
         return set()
     return selected_lists(settings.get('selected_lists', []))
