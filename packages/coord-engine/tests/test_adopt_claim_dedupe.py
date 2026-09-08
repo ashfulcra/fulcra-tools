@@ -74,7 +74,9 @@ def _run(tmp_path, *, send_ok: bool, record_ok: bool):
     # environment before this block runs. They are preconditions, not
     # decoration: under `set -u` an undefined one kills the fragment at line 1
     # and every assertion below then reports the wrong cause.
-    script = (f'set -u\nSLUG=adopted-x\nVER=v1\nA=agent\n'
+    # Keep the old fallback's channel precondition defined: without it, set -u
+    # aborts that fallback before the raw CLI, hiding the regression.
+    script = (f'set -u\nTYPE=MomentAnnotation/synthetic-channel\nSLUG=adopted-x\nVER=v1\nA=agent\n'
               f'TEAM=acme\nCOORD=team-coordinator\nWHO=team-coordinator\n'
               f'{_claim_block()}\necho BLOCK-COMPLETED\n')
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
