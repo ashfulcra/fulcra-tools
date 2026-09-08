@@ -6,10 +6,10 @@ awake, online, and running Collect. Complete an ordinary task in Todoist and its
 Fulcra copy becomes resolved. Resolve the Fulcra copy and Collect completes the
 Todoist task.
 
-Included in [Collect 0.1.2 for Mac](../../docs/collect.md#get-started-new-user).
-Todoist tests
-use synthetic responses; discovery and completion have not been verified with a
-live Todoist account.
+In development for [Collect 0.1.2](https://github.com/ashfulcra/fulcra-tools/pull/757).
+This package is not in the current Mac download. The steps below describe the
+candidate's setup. Tests use synthetic responses; discovery and completion have
+not been verified with a live Todoist account.
 
 ## Set up
 

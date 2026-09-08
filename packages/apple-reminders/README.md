@@ -5,7 +5,9 @@ Choose the Reminders lists you want in Fulcra. Collect copies their tasks into
 your Mac is running. Complete an ordinary task in Reminders and its Fulcra copy
 becomes resolved. Resolve the Fulcra copy and Collect completes it in Reminders.
 
-Included in [Collect 0.1.2 for Mac](../../docs/collect.md#get-started-new-user).
+In development for [Collect 0.1.2](https://github.com/ashfulcra/fulcra-tools/pull/757).
+This package is not in the current Mac download. The steps below describe the
+candidate's setup; native permission and live completion validation remain open.
 
 ## Set up
 
