@@ -50,7 +50,10 @@ All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow
 [`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree
 privacy guard and credential scan; also review fixture provenance, public
-messages, and generated artifacts. Passing a pattern scan is not proof that
+messages, and generated artifacts. Account-specific UUIDs and device names
+remain private even in retired-channel fixtures. Adoption claims must use the
+authority-checked bus sender; a failed send must not fall back to a hard-coded
+channel or write its success marker. Passing a pattern scan is not proof that
 all personal information has been removed.
 
 ## Where to start
