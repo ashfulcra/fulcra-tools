@@ -1,9 +1,8 @@
 # Fulcra task sync
 
-The engine behind the Reminders and Todoist plugins in the
+The engine behind the Reminders and Todoist plugins in
 [Collect 0.1.2](../../docs/collect.md#get-started-new-user).
-It is not required by the coordination or continuity tools, and is not part of
-the current Mac download.
+It is not required by the coordination or continuity tools.
 
 Shared completion engine for Collect task providers. Source lists must be selected
 explicitly. Source titles, notes, list membership and due dates flow into
