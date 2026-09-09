@@ -435,6 +435,39 @@ def test_active_endpoint_returning_checked_task_is_inconsistent_and_fails_closed
         api.provider().tasks({"project-a"})
 
 
+@pytest.mark.parametrize("completed_before_write", [False, True])
+def test_task_detail_accepts_explicit_completion_without_duplicate_command(completed_before_write):
+    api = API()
+    provider = api.provider()
+    current = provider.tasks({"project-a"})[0]
+
+    def completed_detail(request):
+        if request.url.path == "/api/v1/tasks/task-a" and (
+            completed_before_write or api.history
+        ):
+            return httpx.Response(200, json=task(
+                checked=True, completed_at="2026-02-09T12:00:00Z"
+            ))
+
+    api.override = completed_detail
+    result = provider.complete(current.id, current.revision, current.collection_id)
+    assert result.completed
+    assert result.completed_at == "2026-02-09T12:00:00Z"
+    assert provider.get_task(current.id).completed
+    assert provider.complete(current.id, current.revision, current.collection_id).completed
+    assert len(api.commands) == (0 if completed_before_write else 1)
+
+
+def test_completed_task_detail_requires_valid_completion_timestamp():
+    api = API()
+    api.override = lambda request: (
+        httpx.Response(200, json=task(checked=True))
+        if request.url.path == "/api/v1/tasks/task-a" else None
+    )
+    with pytest.raises(TodoistError, match="completion evidence"):
+        api.provider().get_task("task-a")
+
+
 class State:
     def __init__(self):
         self.values = {}

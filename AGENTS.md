@@ -51,7 +51,10 @@ state, and preview mode before each write. Task status is `open` or `resolved`;
 identity and generation fields bind a completion to the source task. Normalize task paths to absolute Fulcra paths at the Files adapter boundary
 for both history lookup and upload; the API rejects relative upload paths. Read all
 unseen Fulcra file versions so a concurrent bot edit survives an importer write.
-Missing source tasks are never completion evidence. Recurring writeback is
+Missing source tasks are never completion evidence. Todoist task-detail lookup
+can return `checked: true` after completion; accept it only with valid explicit
+completion evidence. Keep active-list validation separate: a checked task there
+still invalidates the snapshot. Recurring writeback is
 unsupported until the provider can atomically protect the intended occurrence.
 Capture `RunContext.config_epoch` with settings and pass it into the task engine;
 check it in the live selection callback. Configuration and credential transitions

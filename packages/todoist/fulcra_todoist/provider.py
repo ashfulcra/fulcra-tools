@@ -250,7 +250,7 @@ class TodoistProvider:
             result.append(Collection(identity, row["name"], writable=writable))
         return result
 
-    def _task(self, row: dict, *, history=False) -> Task | None:
+    def _task(self, row: dict, *, history=False, active_only=True) -> Task | None:
         identity = _identity(row.get("id"))
         project_id = _identity(row.get("project_id"))
         self._load_observation(identity)
@@ -264,7 +264,7 @@ class TodoistProvider:
             or not isinstance(row.get("description"), str)
         ):
             raise TodoistError("Todoist returned an invalid task.")
-        if not history and row["checked"]:
+        if active_only and not history and row["checked"]:
             raise TodoistError("Todoist active endpoint returned an inconsistent task.")
         if not history:
             self._deleted_seen.discard(identity)
@@ -393,17 +393,20 @@ class TodoistProvider:
         self._known = {item.id: item.collection_id for item in found.values()}
         return list(found.values())
 
-    def _active(self, task_id: str) -> Task | None:
+    def _lookup_task(self, task_id: str) -> Task | None:
         row = self._request("GET", "tasks/" + _identity(task_id), missing_ok=True)
         if row is None:
             return None
         if row.get("id") != task_id:
             raise TodoistError("Todoist returned a mismatched task identity.")
-        return self._task(row)
+        # GET /tasks/{id} can return a completed task. Only the active-list
+        # endpoint promises unchecked rows; explicit detail completion still
+        # requires checked=True and a valid completed_at timestamp.
+        return self._task(row, active_only=False)
 
     def get_task(self, task_id: str) -> Task | None:
         self.namespace
-        current = self._active(task_id)
+        current = self._lookup_task(task_id)
         if current is not None:
             return current
         if task_id in self._deleted_seen:
@@ -446,7 +449,7 @@ class TodoistProvider:
             raise TodoistError(
                 "Todoist completion command was not confirmed; refresh and retry safely."
             )
-        after = self._active(task_id)
+        after = self._lookup_task(task_id)
         if after is not None:
             if after.completed:
                 return after

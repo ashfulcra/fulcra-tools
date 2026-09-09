@@ -106,12 +106,12 @@ clicks are ignored, and failures leave access ungranted. A plugin without a
 request callback retains the existing **Open System Settings** / **Verify access**
 flow, including Full Disk Access.
 
-This capability is in the unreleased 0.1.2 app candidate. See the [callback contract](../collect/README.md#native-permission-requests).
+This capability is in the 0.1.2 app. See the [callback contract](../collect/README.md#native-permission-requests).
 
 ### List selection
 
 The shared `input` component renders `Setting.kind="multiselect"` as checkboxes
-for both onboarding and dashboard Configure. This is in the unreleased 0.1.2 app candidate.
+for both onboarding and dashboard Configure. This is in the 0.1.2 app.
 
 Plugins declare `default=[]` and provide a `setting_options(ctx, key)` callback
 through the [Collect plugin contract](../collect/README.md#discovered-multiselect-settings).

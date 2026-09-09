@@ -119,9 +119,9 @@ is not a requirement to run every piece together.
 | [menubar](packages/menubar/README.md) | The macOS app, installer bundle, status controls, and quick recording. |
 | [web-ui](packages/web-ui/README.md) | Collect’s dashboard and setup wizard; static HTML, CSS, and JavaScript. |
 | [apple-notes](packages/apple-notes/README.md) | Copies Notes and available attachments to Fulcra Files; separate experimental writeback. |
-| [apple-reminders](packages/apple-reminders/README.md) | Unreleased: selected Reminders lists and ordinary task completion sync with Fulcra. |
-| [todoist](packages/todoist/README.md) | Unreleased: selected Todoist projects and ordinary task completion sync with Fulcra. |
-| [task-sync](packages/task-sync/README.md) | Shared task synchronization, checkpoints, and write guards for the two candidate plugins. |
+| [apple-reminders](packages/apple-reminders/README.md) | Selected Reminders lists and ordinary task completion sync with Fulcra. |
+| [todoist](packages/todoist/README.md) | Selected Todoist projects and ordinary task completion sync with Fulcra. |
+| [task-sync](packages/task-sync/README.md) | Shared task synchronization, checkpoints, and write guards for Reminders and Todoist. |
 | [attention](packages/attention/README.md) | Browser attention collection, including the [Chrome extension](packages/attention/chrome/README.md). Extensions send directly to Fulcra; Collect’s entry helps with setup. |
 | [dayone](packages/dayone/README.md) | Imports selected journal entries from a local Day One database or JSON export. |
 | [gmail](packages/gmail/README.md) | Read-only Gmail polling, filtering, file uploads, and optional bus relay. |
@@ -180,7 +180,7 @@ Use Collect when you want one of its connectors or a common place to schedule
 imports. It is one way to put data into Fulcra; standalone importers and direct
 API writes are also available.
 
-**[Download Collect 0.1.1 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.1-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Collect 0.1.2 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.2-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)
@@ -189,10 +189,9 @@ you do not need Terminal or Homebrew to install it.
 
 The released beta includes Apple Notes and the sources listed in the
 [plugin-status table](docs/collect.md#plugin-status). Bundled does not mean
-configured or verified with every account. **Reminders and Todoist are in
-[development for 0.1.2](https://github.com/ashfulcra/fulcra-tools/pull/757), not
-in the current download.** They add selected lists/projects and ordinary task
-completion in both directions; recurring tasks must be completed in the source.
+configured or verified with every account. Reminders and Todoist let you choose
+which lists or projects to sync. Ordinary task completion works in both
+directions; recurring tasks must be completed in the source.
 
 ## Working on the repo
 

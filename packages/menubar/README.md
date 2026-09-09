@@ -45,12 +45,13 @@ runs everywhere — Linux CI included. The view layer (status_item,
 popover, preferences) is exercised by manual smoke; see the checklist
 below.
 
-## Task plugins in the unreleased 0.1.2 candidate
+## Task plugins in 0.1.2
 
-The 0.1.2 candidate bundles [Apple Reminders](../apple-reminders/README.md),
+The 0.1.2 app bundles [Apple Reminders](../apple-reminders/README.md),
 [Todoist](../todoist/README.md), and the shared task sync engine. It declares both macOS Reminders usage strings
-and dispatches `--reminders-bridge` before importing the GUI. These additions are awaiting final validation and release. Native permission is requested
-only from the setup wizard's **Allow access** button.
+and dispatches `--reminders-bridge` before importing the GUI. Native permission
+is requested only from the setup wizard's **Allow access** button. Both plugins
+have passed disposable-task completion checks against real Fulcra Files.
 
 ## Build the .app
 

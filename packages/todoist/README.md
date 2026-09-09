@@ -6,10 +6,11 @@ awake, online, and running Collect. Complete an ordinary task in Todoist and its
 Fulcra copy becomes resolved. Resolve the Fulcra copy and Collect completes the
 Todoist task.
 
-In development for [Collect 0.1.2](https://github.com/ashfulcra/fulcra-tools/pull/757).
-This package is not in the current Mac download. The steps below describe the
-candidate's setup. Tests use synthetic responses; discovery and completion have
-not been verified with a live Todoist account.
+Included in [Collect 0.1.2](../../docs/collect.md#get-started-new-user). Live
+checks used a disposable Todoist project and real Fulcra Files. Discovery,
+preview, import, completion in both directions, and repeat sync passed. Bot
+annotations survived, and the test data was removed afterward. This is an
+unofficial integration, not created by, affiliated with, or supported by Todoist.
 
 ## Set up
 
@@ -56,7 +57,10 @@ the [shared task sync contract](../task-sync/README.md).
 Each run reads all pages of selected active tasks and the last **30 days of
 explicit completion history**. A missing task, deletion, failed request, or
 incomplete page set never counts as completion. If a page cannot be read, the
-snapshot fails and does not authorize completion writes.
+snapshot fails and does not authorize completion writes. An individual task
+lookup can return a completed task even though the active-task list cannot.
+Collect accepts that explicit completion only with a valid completion timestamp,
+including when confirming a write or recovering an interrupted sync.
 
 Current active tasks take precedence over older completion history. Collect
 also saves the last observed active update under the verified Todoist account

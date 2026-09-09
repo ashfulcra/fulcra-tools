@@ -1,7 +1,7 @@
 # Fulcra task sync
 
 The engine behind the Reminders and Todoist plugins in the
-[Collect 0.1.2 candidate](https://github.com/ashfulcra/fulcra-tools/pull/757).
+[Collect 0.1.2](../../docs/collect.md#get-started-new-user).
 It is not required by the coordination or continuity tools, and is not part of
 the current Mac download.
 
@@ -195,4 +195,9 @@ cannot revive journals. Slow missing/moved lookups under a short run budget stil
 allow later tasks to progress, without checkpoints after deadline or deselection.
 Real configuration locks verify source/vault call ordering against account
 transitions, settings-write exclusion and bounded lease cleanup. No live data is needed.
-This package has not performed live reminder completion or production rollout.
+Live checks also used disposable Apple Reminders and Todoist tasks with real
+Fulcra Files. Completion worked in both directions, bot annotations survived,
+and repeat runs created no extra versions. Tests included recovery after an
+interrupted Todoist confirmation; all disposable source and vault data was
+removed afterward. These checks do not establish reliability for every account
+or source race.
