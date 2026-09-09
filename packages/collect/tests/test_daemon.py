@@ -354,6 +354,8 @@ def test_set_credential_writes_to_keyring(collect_home: Path, monkeypatch):
 
     assert reply == {"ok": True}
     assert calls == [("set", "lastfm", "session_key", "abc-secret")]
+    from fulcra_collect.config import load
+    assert load().plugin_epochs["lastfm"]
 
 
 def test_delete_credential_calls_keyring(collect_home: Path, monkeypatch):
@@ -380,6 +382,8 @@ def test_delete_credential_calls_keyring(collect_home: Path, monkeypatch):
 
     assert reply == {"ok": True}
     assert calls == [("delete", "lastfm", "session_key")]
+    from fulcra_collect.config import load
+    assert load().plugin_epochs["lastfm"]
 
 
 def test_set_credential_rejects_unknown_plugin(collect_home: Path):

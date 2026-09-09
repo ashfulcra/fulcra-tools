@@ -8,8 +8,7 @@ For a dashboard and scheduled imports, [install Collect](collect.md#get-started-
 Some importers also run as standalone commands; browser extensions send directly
 to Fulcra. The [package index](../README.md#package-index) links each tool's setup.
 [Plugin status](collect.md#plugin-status) distinguishes the current installer
-from unfinished work. Apple Notes is included; Reminders and Todoist are not
-available yet.
+from unfinished work. The current 0.1.2 download includes Apple Notes, Reminders, and Todoist.
 
 Pathways fall into three rough buckets:
 
@@ -31,6 +30,22 @@ this doc doubles as a roadmap reference.
 A few plugin IDs (`generic-rss`, `generic-csv`) are generic adapters
 that can stand in for sources we don't have a dedicated plugin for —
 worth a look when nothing else matches.
+
+## Apple Reminders
+
+The `apple-reminders` plugin is in Collect 0.1.2. It reads selected lists through EventKit and synchronizes
+ordinary task completion with Fulcra task files. Recurring tasks are imported
+but must be completed in Reminders. No lists are selected by default; permission,
+selection, preview, and sync are separate steps.
+[Setup and limitations](../packages/apple-reminders/README.md).
+
+## Todoist
+
+The `todoist` plugin is in Collect 0.1.2. Connect with your Todoist API token, select projects, and
+run a preview. Ordinary task completion syncs in both directions; titles, dates,
+and project membership stay managed in Todoist. Recurring tasks must be completed
+in Todoist. Polling checks 30 days of completion history, so longer offline gaps
+may need review. [Setup and limitations](../packages/todoist/README.md).
 
 ## Apple Podcasts
 

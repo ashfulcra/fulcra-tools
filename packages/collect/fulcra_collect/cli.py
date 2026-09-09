@@ -5,6 +5,7 @@ over the control socket. `_worker` is the internal worker entrypoint.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -121,10 +122,19 @@ def run(plugin_id: str) -> None:
     click.echo(f"triggered: {plugin_id}")
 
 
+def _save_config(cfg: config_mod.Config) -> None:
+    try:
+        config_mod.save(cfg)
+    except config_mod.ConfigConflictError:
+        raise click.ClickException(
+            "Configuration changed in another process. Retry this command."
+        ) from None
+
+
 def _toggle(plugin_id: str, *, on: bool) -> None:
     cfg = config_mod.load()
     cfg.enable(plugin_id) if on else cfg.disable(plugin_id)
-    config_mod.save(cfg)
+    _save_config(cfg)
     try:
         send_request(_socket_path(), {"cmd": "reload"})
     except ConnectionError:
@@ -154,7 +164,7 @@ def set_interval(plugin_id: str, seconds: int) -> None:
     """Override a scheduled plugin's cadence (in seconds)."""
     cfg = config_mod.load()
     cfg.set_interval(plugin_id, seconds)
-    config_mod.save(cfg)
+    _save_config(cfg)
     try:
         send_request(_socket_path(), {"cmd": "reload"})
     except ConnectionError:
@@ -196,6 +206,18 @@ def _coerce_setting(setting, raw: str):
             raise click.ClickException(
                 f"{setting.key}: {raw!r} is not one of {', '.join(allowed)}"
             )
+    if setting.kind == "multiselect":
+        try:
+            values = json.loads(raw)
+        except (ValueError, TypeError):
+            values = None
+        if (not isinstance(values, list)
+                or any(not isinstance(v, str) or not v.strip() for v in values)
+                or len(values) != len(set(values))):
+            raise click.ClickException(
+                f"{setting.key}: expected a JSON array of unique, nonempty string IDs"
+            )
+        return values
     return raw
 
 
@@ -245,8 +267,8 @@ def set_setting(plugin_id: str, key: str, value: str) -> None:
     coerced = _coerce_setting(setting, value)
 
     cfg = config_mod.load()
-    cfg.plugin_settings.setdefault(plugin_id, {})[key] = coerced
-    config_mod.save(cfg)
+    cfg.update_plugin_settings(plugin_id, {key: coerced})
+    _save_config(cfg)
     try:
         send_request(_socket_path(), {"cmd": "reload"})
     except ConnectionError:
@@ -271,6 +293,7 @@ def set_setting(plugin_id: str, key: str, value: str) -> None:
 def set_credential(plugin_id: str, key: str) -> None:
     """Store a plugin secret in the OS keychain (prompts, hidden input)."""
     value = click.prompt(f"{plugin_id}/{key}", hide_input=True)
+    config_mod.invalidate_plugin_work(plugin_id)
     credentials.set_secret(plugin_id, key, value)
     click.echo(f"stored {plugin_id}/{key}")
 

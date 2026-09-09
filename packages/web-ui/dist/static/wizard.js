@@ -103,6 +103,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     oauthStatus: "",
     // Input values collected from "input" steps (key → value)
     inputValues: {},
+    settingOptions: {}, // key → {status, options, error, requestId}
     // File upload state. uploadProgress is 0–100; uploadInFlight is true
     // while the XHR is mid-stream so the template can render a progress
     // bar (multi-GB Spotify takeouts can take minutes — the old base64-in-
@@ -138,6 +139,8 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // prompt you" lie. permissionResult is {granted: bool, hint?: string}.
     permissionResult: null,
     permissionChecking: false,
+    _permissionEpoch: 0,
+    permissionRequesting: false,
     // Map of credential key → true for credentials already present in the
     // keychain. Populated by _loadExisting() on wizard mount so that:
     //   • the input renders a "(currently set — leave blank to keep)" placeholder
@@ -183,7 +186,10 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       // Load existing settings/credentials from the daemon before seeding
       // defaults, so that pre-filled values are not clobbered by defaults
       // and _credPresent is ready before the first input step renders.
-      this._loadExisting().then(() => this._seedDefaults());
+      this._loadExisting().then(() => {
+        this._seedDefaults();
+        this._loadStepOptions();
+      });
 
       // Reactivity bridge to the Lit setup-step components (refactor #68).
       //
@@ -224,12 +230,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.dpForceNew, this.dpNewName,
           this.oauthStatus,
           this.uploadedFileName, this.uploadInFlight, this.uploadProgress,
-          this.permissionResult, this.permissionChecking,
+          this.permissionResult, this.permissionChecking, this.permissionRequesting,
           this.current_permission_id,
           this.extensionConfirmed,
           this.firstRunStatus, this.firstRunSummary, this.firstRunTimelineUrl,
           this.nextBlocked, this.stepError,
-          this.input_fields,
+          this.input_fields, this.settingOptions,
         ];
         // Notify every mounted dispatcher. We bubble through window so
         // both render sites (onboarding flow and dashboard Configure
@@ -288,7 +294,10 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       for (const key of keys) {
         if (next[key] !== undefined && next[key] !== null && next[key] !== "") continue;
         const def = this.settingsMap[key] || this.credsMap[key];
-        if (def && def.default !== null && def.default !== undefined) {
+        if (def?.kind === "multiselect") {
+          next[key] = Array.isArray(def.default) ? [...def.default] : [];
+          changed = true;
+        } else if (def && def.default !== null && def.default !== undefined) {
           next[key] = String(def.default);
           changed = true;
         }
@@ -348,13 +357,105 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           // raw value as the label.
           enum_labels: def.enum_labels || null,
           _kind: def._kind || "setting",
-          value: this.inputValues[key] ?? (def.default !== null && def.default !== undefined ? String(def.default) : ""),
+          value: this.inputValues[key] ?? (def.kind === "multiselect"
+            ? (Array.isArray(def.default) ? [...def.default] : [])
+            : (def.default !== null && def.default !== undefined ? String(def.default) : "")),
+          ...(def.kind === "multiselect" ? this._selectionOptions(key) : {}),
         };
       });
     },
 
     updateField(key, val) {
       this.inputValues = { ...this.inputValues, [key]: val };
+    },
+
+    _selectionOptions(key) {
+      const state = this.settingOptions[key] || {status: "idle", options: []};
+      const options = [...state.options];
+      const known = new Set(options.map(option => option.value));
+      const selected = this.inputValues[key];
+      for (const id of (Array.isArray(selected) ? selected : [])) {
+        if (!known.has(id)) options.push({value: id, label: id, unavailable: true});
+      }
+      return {options, optionsStatus: state.status, optionsError: state.error || ""};
+    },
+
+    _loadStepOptions() {
+      for (const field of this.input_fields) {
+        if (field.kind === "multiselect") this.loadSettingOptions(field.key);
+      }
+    },
+
+    async loadSettingOptions(key) {
+      const previous = this.settingOptions[key] || {options: [], requestId: 0};
+      const requestId = previous.requestId + 1;
+      this.settingOptions = {...this.settingOptions, [key]: {
+        status: "loading", options: previous.options, error: "", requestId,
+      }};
+      try {
+        const result = await api(`/api/plugin/${this.plugin_id}/setting_options/${encodeURIComponent(key)}`);
+        const options = result?.options;
+        const seen = new Set();
+        if (!Array.isArray(options) || options.some(option => {
+          if (!option || typeof option.value !== "string" || !option.value.trim() ||
+              typeof option.label !== "string" || !option.label.trim() ||
+              (option.disabled !== undefined && typeof option.disabled !== "boolean") ||
+              seen.has(option.value)) return true;
+          seen.add(option.value);
+          return false;
+        })) throw new Error("Could not load choices. Retry discovery.");
+        if (this.settingOptions[key].requestId !== requestId) return;
+        this.settingOptions = {...this.settingOptions, [key]: {
+          status: "ready", options, error: "", requestId,
+        }};
+      } catch (error) {
+        if (this.settingOptions[key].requestId !== requestId) return;
+        this.settingOptions = {...this.settingOptions, [key]: {
+          status: "error", options: previous.options,
+          error: error.message || "Could not load choices. Check source access and retry.", requestId,
+        }};
+      }
+    },
+
+    toggleSelection(key, id, checked) {
+      const selected = Array.isArray(this.inputValues[key]) ? this.inputValues[key] : [];
+      if (!checked) {
+        this.updateField(key, selected.filter(value => value !== id));
+        return;
+      }
+      const state = this.settingOptions[key];
+      const option = state?.options.find(value => value.value === id);
+      if (state?.status !== "ready" || !option || option.disabled || selected.includes(id)) return;
+      this.updateField(key, [...selected, id]);
+    },
+
+    _selectionError(field, value) {
+      if (!Array.isArray(value) || value.some(id => typeof id !== "string" || !id.trim()) ||
+          new Set(value).size !== value.length) return `"${field.label}" must contain list selections.`;
+      if (field.required !== false && value.length === 0) return `"${field.label}" is required. Select at least one list.`;
+      if (this.settingOptions[field.key]?.status !== "ready") return `Load choices for "${field.label}" and retry before continuing.`;
+      return "";
+    },
+
+    async _saveSelectionsBeforeEnable() {
+      const selections = {};
+      for (const field of Object.values(this.settingsMap)) {
+        if (field.kind !== "multiselect") continue;
+        const value = this.inputValues[field.key] ?? [];
+        const error = this._selectionError(field, value);
+        if (error) { this.stepError = error; return false; }
+        selections[field.key] = value;
+      }
+      if (!Object.keys(selections).length) return true;
+      try {
+        await api(`/api/plugin/${this.plugin_id}/settings`, {
+          method: "PUT", body: JSON.stringify(selections),
+        });
+        return true;
+      } catch (error) {
+        this.stepError = `Failed to save list selections: ${error.message}`;
+        return false;
+      }
     },
 
     onFileChange(event) {
@@ -413,6 +514,10 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
             return;
           }
           this.firstRunStatus = "running";
+          if (!await this._saveSelectionsBeforeEnable()) {
+            this.firstRunStatus = "idle";
+            return;
+          }
           try {
             await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
             this.firstRunStatus = "done";
@@ -526,6 +631,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this._onStepEnter();
       } else {
         // Last step — skipping past "Done" means skip-plugin.
+        this._invalidatePermissions();
         if (on_skip_plugin) on_skip_plugin();
       }
     },
@@ -533,6 +639,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // Abandon the current plugin's setup entirely. Plugin is NOT enabled.
     // Onboarding advances to the next plugin (or to the done screen).
     skipPlugin() {
+      this._invalidatePermissions();
       if (on_skip_plugin) on_skip_plugin();
     },
 
@@ -542,6 +649,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // walk; the single-plugin Configure flow leaves this callback unset.
     // (task #64)
     backToPluginList() {
+      this._invalidatePermissions();
       if (on_back_to_pick_plugins) on_back_to_pick_plugins();
     },
 
@@ -562,12 +670,21 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     // Called after step index advances — trigger auto-actions
+    _invalidatePermissions() {
+      this._permissionEpoch += 1;
+      this.permissionChecking = false;
+      this.permissionRequesting = false;
+      this.permissionResult = null;
+    },
+
     _onStepEnter() {
+      this._invalidatePermissions();
       // Seed declared defaults into inputValues so the validator agrees with
       // what the user sees in the rendered field (e.g. Day One mode dropdown
       // showed live_app but _submitInputs read inputValues[key] as undefined
       // and threw "Mode is required").
       this._seedDefaults();
+      this._loadStepOptions();
       if (this.current_step.kind === "test_connection") {
         this.runHealthCheck();
       }
@@ -611,6 +728,11 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       if (this.firstRunStatus !== "idle") return;
       this.firstRunStatus = "running";
       this.firstRunSummary = "";
+      if (!await this._saveSelectionsBeforeEnable()) {
+        this.firstRunStatus = "error";
+        this.firstRunSummary = this.stepError;
+        return;
+      }
       // Persist exactly the execution mode named by the start button, even
       // if the user skipped the input step after changing its preview toggle.
       if (this.settingsMap.dry_run) {
@@ -903,12 +1025,16 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // ---------------------------------------------------------------------------
 
     async checkPermission() {
+      if (this.current_step.kind !== "permission_request" ||
+          this.permissionChecking || this.permissionRequesting) return;
+      const epoch = this._permissionEpoch;
       this.permissionChecking = true;
       this.permissionResult = null;
       try {
         const result = await api(`/api/plugin/${this.plugin_id}/check_permission`, {
           method: "POST",
         });
+        if (epoch !== this._permissionEpoch) return;
         this.permissionResult = result;
         if (result.granted === true) {
           this.nextBlocked = false;
@@ -916,13 +1042,38 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.nextBlocked = true;
         }
       } catch (e) {
+        if (epoch !== this._permissionEpoch) return;
         // 404 (no permission_check on this plugin) or transport error —
         // surface as an un-granted result with the error message as the hint
         // so the user sees something rather than a silent failure.
         this.permissionResult = { granted: false, hint: e.message };
         this.nextBlocked = true;
       } finally {
-        this.permissionChecking = false;
+        if (epoch === this._permissionEpoch) this.permissionChecking = false;
+      }
+    },
+
+    // Only the explicit Allow access button calls this method. Step entry
+    // and Verify access use the read-only checkPermission path above.
+    async requestPermission() {
+      if (!this.plugin_contract.permission_request_available ||
+          this.current_step.kind !== "permission_request" ||
+          this.permissionRequesting || this.permissionChecking) return;
+      const epoch = this._permissionEpoch;
+      this.permissionRequesting = true;
+      this.permissionResult = null;
+      this.nextBlocked = true;
+      try {
+        const result = await api(`/api/plugin/${this.plugin_id}/request_permission`, {method: "POST"});
+        if (epoch !== this._permissionEpoch) return;
+        this.permissionResult = result;
+        this.nextBlocked = result.granted !== true;
+      } catch (error) {
+        if (epoch !== this._permissionEpoch) return;
+        this.permissionResult = {granted: false, hint: error.message || "Could not request access. Retry."};
+        this.nextBlocked = true;
+      } finally {
+        if (epoch === this._permissionEpoch) this.permissionRequesting = false;
       }
     },
 
@@ -934,6 +1085,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         "full-disk-access": "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
         "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         "automation": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+        "reminders": "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders",
         "network-loopback-server": null,
       };
       return links[permId] || null;
@@ -955,7 +1107,11 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     async _submitInputs(step) {
       const fields = this.input_fields;
       for (const f of fields) {
-        const val = this.inputValues[f.key] ?? "";
+        const val = this.inputValues[f.key] ?? (f.kind === "multiselect" ? [] : "");
+        if (f.kind === "multiselect") {
+          const error = this._selectionError(this.settingsMap[f.key], val);
+          if (error) { this.stepError = error; return false; }
+        }
         if (!val) {
           if (f._kind === "credential" && this._credPresent[f.key]) {
             // Credential is already set in the keychain and the user left the

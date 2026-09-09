@@ -35,7 +35,7 @@ from pathlib import Path
 import httpx  # noqa: F401 — re-exported for monkeypatching in tests; see module docstring
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
@@ -254,6 +254,13 @@ def build_app(daemon) -> FastAPI:
     :mod:`fulcra_collect.routes`.
     """
     app = FastAPI(title="Fulcra Collect")
+
+    @app.exception_handler(_config.ConfigConflictError)
+    async def config_conflict(_request, _exc):
+        return JSONResponse(status_code=409, content={
+            "detail": "Configuration changed in another window or process. Reload and try again.",
+        })
+
     token = _ensure_token()
     bearer = HTTPBearer(auto_error=False)
 

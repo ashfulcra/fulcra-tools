@@ -17,11 +17,11 @@ imports and saves progress between runs. This page is the installation guide;
 
 ### Mac app (Apple silicon)
 
-**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.1-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.2-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The current download is **0.1.1 beta**, released September 8, 2026. It is signed,
-notarized, and includes Apple Notes.
-[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.1-macos-arm64).
+The current download is **0.1.2 beta**, released September 9, 2026. It is signed,
+notarized, and includes Apple Notes, Apple Reminders, and Todoist.
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.2-macos-arm64).
 
 1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
 2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.
@@ -65,7 +65,7 @@ checkout current with `bash scripts/update.sh`.
 
 ## Plugin status
 
-The current Mac beta bundles **21 plugin entries**. Bundled means the plugin is
+The current Mac beta bundles **23 plugin entries**. Bundled means the plugin is
 installed; it still needs its own setup. An entry may be a scheduled importer,
 an export reader you run manually, a webhook receiver, or instructions for a
 separate browser extension.
@@ -73,6 +73,8 @@ separate browser extension.
 | Source | What is available |
 |---|---|
 | [Apple Notes](../packages/apple-notes/README.md) | Notes and available attachments copied to Fulcra vault files. One-way import in normal setup; separate experimental writeback. |
+| [Apple Reminders](../packages/apple-reminders/README.md) | Selected lists copied to Fulcra, with ordinary completion in both directions. |
+| [Todoist](../packages/todoist/README.md) | Selected projects copied to Fulcra, with ordinary completion in both directions. |
 | [Day One](../packages/dayone/README.md) | Local journal database or JSON export import. |
 | [Media](../packages/media-helpers/README.md) | 16 entries: Last.fm, Deezer, Trakt, Netflix CSV, Spotify extended history, YouTube takeout, Apple TV takeout, Apple Music takeout, generic RSS, Letterboxd, Goodreads, Apple Podcasts, Podcasts Time Machine recovery, local Apple TV, generic media CSV, and Plex/Jellyfin webhooks. |
 | [Gmail](../packages/gmail/README.md) | Read-only polling with local filters, selected messages in Fulcra Files, and optional agent-bus relay. Requires Google OAuth setup. |
@@ -85,11 +87,27 @@ have not all been verified against every service or account. The downloadable
 app also includes `fulcra-api` 0.1.41; source installs use their own environment
 and dependency lock.
 
-**In development:** [Apple Reminders and Todoist](https://github.com/ashfulcra/fulcra-tools/pull/757)
-with list/project selection and ordinary task completion syncing in both directions.
-Both are implemented in the release candidate and awaiting final validation and release.
-Neither is available in this download. This does not promise full
-bidirectional editing of task titles, dates, or lists.
+Apple Reminders and Todoist have passed live checks with disposable tasks:
+import, completion in both directions, preservation of bot annotations, and
+repeat sync without extra file versions. That is a specific check, not a claim
+that every account or edge case has been tested. Titles, dates, and list or
+project membership remain source-managed.
+
+### Reminders and Todoist setup
+
+For **Apple Reminders**, open Reminders and let it finish syncing. In Collect,
+choose **Apple Reminders → Set up → Allow access**, approve the macOS prompt,
+and check the lists you want to sync. Leave **Preview only** on for the first run.
+
+For **Todoist**, choose **Todoist → Set up**. The wizard links to Todoist's token
+instructions: in the web app, open **Settings → Integrations → Developer** and
+copy the API token. Paste it into Collect, then check the projects you want.
+The token stays in your Mac's Keychain.
+
+Choose **Enable & run preview** to check the setup without uploads or completion
+writes. When ready, return to setup, turn **Preview only** off, and choose
+**Enable & start sync**. Collect checks every five minutes while the Mac is awake.
+Removing a list or project stops future syncing and leaves existing Fulcra copies.
 
 ## How it fits together
 

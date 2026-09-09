@@ -20,3 +20,14 @@ def test_fulcra_cli_help_without_gui(monkeypatch, capsys):
         entry.main()
     assert exit.value.code == 0
     assert 'auth' in capsys.readouterr().out
+
+
+def test_reminders_bridge_dispatch_without_gui(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(sys, 'argv', ['Fulcra Collect', '--reminders-bridge'])
+    monkeypatch.setitem(sys.modules, 'fulcra_menubar.app', None)
+    monkeypatch.setitem(sys.modules, 'fulcra_apple_reminders._bridge',
+                        SimpleNamespace(main=lambda: calls.append('bridge') or 0))
+    assert entry.main() == 0
+    assert calls == ['bridge']

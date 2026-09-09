@@ -506,6 +506,8 @@ class Daemon:
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
         try:
+            from .config import invalidate_plugin_work
+            invalidate_plugin_work(plugin_id)
             if self._credential_is_user_level(plugin_id, key):
                 credentials.set_user_secret(key, secret)
             else:
@@ -529,6 +531,8 @@ class Daemon:
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
         try:
+            from .config import invalidate_plugin_work
+            invalidate_plugin_work(plugin_id)
             if self._credential_is_user_level(plugin_id, key):
                 credentials.delete_user_secret(key)
             else:

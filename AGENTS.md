@@ -44,6 +44,37 @@ baseline. Reconciliation reads tracked vault bodies so edits near a sync are not
 missed; retain the complete internal change list and cap only report presentation.
 Partial AppleScript write failures must produce a failed report and failed run.
 
+**Selected-list task sync:** Reminders uses EventKit, with separate read-only
+permission checks and explicit permission requests. No lists are selected by
+default. Import and source completion must re-check live selection, enabled
+state, and preview mode before each write. Task status is `open` or `resolved`;
+identity and generation fields bind a completion to the source task. Normalize task paths to absolute Fulcra paths at the Files adapter boundary
+for both history lookup and upload; the API rejects relative upload paths. Read all
+unseen Fulcra file versions so a concurrent bot edit survives an importer write.
+Missing source tasks are never completion evidence. Todoist task-detail lookup
+can return `checked: true` after completion; accept it only with valid explicit
+completion evidence. Keep active-list validation separate: a checked task there
+still invalidates the snapshot. Recurring writeback is
+unsupported until the provider can atomically protect the intended occurrence.
+Capture `RunContext.config_epoch` with settings and pass it into the task engine;
+check it in the live selection callback. Configuration and credential transitions
+must invalidate pending journals even when no sync runs between the changes.
+Save configuration under a cross-process lock and publish it atomically.
+Merge each caller's edits against its immutable load/save baseline: enabled
+membership, interval keys, and individual plugin-setting keys merge independently.
+An unchanged stale value must never undo a disable or remove another caller's
+setting. Divergent edits to the same field raise `ConfigConflictError` before
+publication; reload and retry instead of force-saving the stale object.
+For explicit user submissions use `enable`, `disable`, `set_interval`, and
+`update_plugin_settings(plugin_id, values)`: these preserve intent even when the
+submitted value equals the loaded baseline. Direct mapping edits carry only
+semantic differences and cannot represent an explicit unchanged-value request.
+Interactive Fulcra sign-in/sign-out must persist an `account_transition` gate and
+rotate all plugin epochs before changing the token, then rotate again before
+clearing the gate on success. Task callbacks reject the gate as well as stale
+epochs. Failure leaves the gate closed until an interactive retry succeeds; normal
+configuration saves and automatic token refresh must never clear it.
+
 ## Public repository privacy
 
 All packages, plugins, skills, examples, and release artifacts must be reusable

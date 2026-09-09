@@ -3,6 +3,7 @@
 // kind="input" — the most complex of the field-rendering kinds.
 // Iterates ctx.input_fields and renders one of four sub-branches per
 // field based on field.kind:
+//   multiselect → discovered checkbox choices bound to arrays of IDs
 //   enum     → <select> with optional enum_labels[]
 //   toggle   → <input type=checkbox> bound to "true"/"false" strings
 //              (the daemon wants strings, not booleans — see updateField)
@@ -39,6 +40,38 @@ class FulcraStepInput extends FulcraStepBase {
   }
 
   _renderControl(field, c) {
+    if (field.kind === "multiselect") {
+      const selected = Array.isArray(field.value) ? field.value : [];
+      const loading = field.optionsStatus === "loading" || field.optionsStatus === "idle";
+      return html`
+        <fieldset aria-label=${field.label} aria-busy=${loading ? "true" : "false"}
+                  class="border border-slate-300 rounded p-3 space-y-2">
+          ${loading ? html`<p role="status" class="text-sm text-slate-500">Loading choices…</p>` : nothing}
+          ${field.optionsStatus === "error"
+            ? html`<p role="alert" class="text-sm text-red-700">${field.optionsError}</p>` : nothing}
+          ${field.optionsStatus === "ready" && !(field.options || []).some(option => !option.unavailable)
+            ? html`<p role="status" class="text-sm text-slate-500">No lists available. Check source access, then retry.</p>` : nothing}
+          ${(field.options || []).map(option => {
+            const checked = selected.includes(option.value);
+            return html`
+              <label class="flex items-center gap-2 text-sm text-slate-700">
+                <input type="checkbox" .checked=${checked}
+                       ?disabled=${!checked && (loading || field.optionsStatus !== "ready" || option.disabled || option.unavailable)}
+                       @change=${e => c.toggleSelection(field.key, option.value, e.target.checked)}
+                       class="h-4 w-4 rounded border-slate-300 text-violet-600">
+                <span>${option.label}
+                  ${option.unavailable ? html`<span class="text-amber-700"> — unavailable; uncheck to remove</span>` : nothing}
+                  ${option.disabled ? html`<span class="text-slate-500"> — read-only</span>` : nothing}
+                </span>
+              </label>`;
+          })}
+          <button type="button" @click=${() => c.loadSettingOptions(field.key)}
+                  ?disabled=${loading} class="text-sm text-violet-700 underline disabled:opacity-50">
+            Retry loading choices
+          </button>
+        </fieldset>`;
+    }
+
     // enum → select
     if (field.kind === "enum" && field.enum_values) {
       return html`

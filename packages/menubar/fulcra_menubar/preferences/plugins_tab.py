@@ -20,6 +20,7 @@ from Foundation import NSString  # type: ignore[import-not-found]
 from fulcra_collect import config as _config
 
 from .._dispatch import on_main_thread
+from .._config_edit import save as save_config_edit
 from .._humanize import humanize_minutes
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
@@ -345,7 +346,9 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
                 cfg.enable(snap.id)
             else:
                 cfg.disable(snap.id)
-            _config.save(cfg)
+            if not save_config_edit(cfg):
+                sender.setState_(1 if snap.id in _config.load().enabled else 0)
+                return
             client.reload()
         _attach(enabled_switch, on_toggle)
         row.addSubview_(enabled_switch)
@@ -392,10 +395,15 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
                 minutes = max(int(sender.stringValue()), 1)
             except ValueError:
                 return
-            _caption.setStringValue_(f"≈ {humanize_minutes(minutes)}")
             cfg2 = _config.load()
             cfg2.set_interval(snap.id, minutes * 60)
-            _config.save(cfg2)
+            if not save_config_edit(cfg2):
+                current = _config.load().interval_overrides.get(snap.id, snap.default_interval_s or 3600)
+                minutes = max(current // 60, 1)
+                sender.setStringValue_(str(minutes))
+                _caption.setStringValue_(f"≈ {humanize_minutes(minutes)}")
+                return
+            _caption.setStringValue_(f"≈ {humanize_minutes(minutes)}")
             client.reload()
         _attach(interval_field, on_interval_change, action="textChanged:")
         row.addSubview_(interval_field)
@@ -461,5 +469,4 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         yoff += 24
 
     return row
-
 

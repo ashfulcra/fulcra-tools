@@ -32,6 +32,7 @@ from AppKit import (  # type: ignore[import-not-found]
 from fulcra_collect import config as _config
 
 from .._daemon_url import daemon_url
+from .._config_edit import save as save_config_edit
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
 from .._objc_targets import attach as _attach
@@ -119,7 +120,8 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
             # plugin going forward.
             cfg = _config.load()
             cfg.disable(plugin_id)
-            _config.save(cfg)
+            if not save_config_edit(cfg):
+                return
             client.reload()
 
         _attach(disable_btn, _on_disable)
@@ -245,5 +247,4 @@ def _to_cg(hex_value: str):
         int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0,
         int(h[4:6], 16) / 255.0, 1.0,
     ).CGColor()
-
 

@@ -31,7 +31,22 @@ the import without uploading.
 Your notes are copied to vault/notes/apple/ in your Fulcra account; originals
 stay in Notes. Large imports resume over several runs.
 
-3. Set up the browser extension (optional)
+3. Connect Reminders or Todoist (optional)
+------------------------------------------
+For Reminders, open the Reminders app and let it finish syncing. In Collect,
+choose Apple Reminders, then Set up. Click Allow access, approve the macOS
+prompt, and check the lists you want to sync.
+
+For Todoist, choose Todoist, then Set up. Follow the wizard's link to find your
+API token, paste it into Collect, and check the projects you want. The token
+is stored in your Mac's Keychain.
+
+Both start in Preview only mode. Enable & run preview checks the setup without
+uploading or changing tasks. To start syncing, return to setup, turn Preview
+only off, and choose Enable & start sync. Completion then syncs both ways for
+ordinary tasks. Recurring tasks must be completed in Reminders or Todoist.
+
+4. Set up the browser extension (optional)
 ------------------------------------------
 The attention extension is loaded manually in Chrome:
 

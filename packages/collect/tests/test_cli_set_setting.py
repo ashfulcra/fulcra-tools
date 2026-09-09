@@ -49,6 +49,7 @@ def _plugin() -> Plugin:
             Setting(key="sensor_index", label="Sensor index", kind="text"),
             Setting(key="verbose", label="Verbose", kind="toggle"),
             Setting(key="web_port", label="Port", kind="port"),
+            Setting(key="lists", label="Lists", kind="multiselect"),
         ),
     )
 
@@ -242,6 +243,17 @@ class TestSecretKindSettingsAreNotEchoed:
 
 
 class TestCoercion:
+    @pytest.mark.parametrize("raw, expected", [('[]', []), ('["one", "two"]', ['one', 'two'])])
+    def test_multiselect_is_stored_as_array(self, env, raw, expected):
+        result = run("demo", "lists", raw)
+        assert result.exit_code == 0, result.output
+        assert settings(env)["lists"] == expected
+
+    @pytest.mark.parametrize("raw", ['one', '{}', 'null', '[1]', '[""]', '[" "]', '["one", "one"]', '[{}]'])
+    def test_invalid_multiselect_writes_nothing(self, env, raw):
+        assert run("demo", "lists", raw).exit_code != 0
+        assert not (env / "config.toml").exists()
+
     @pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "1"])
     def test_truthy_spellings(self, env, raw):
         run("demo", "verbose", raw)

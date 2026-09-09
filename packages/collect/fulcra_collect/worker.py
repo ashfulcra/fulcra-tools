@@ -195,6 +195,7 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     ctx = RunContext(
         plugin_id=plugin.id,
         config=cfg.plugin_settings.get(plugin.id, {}),
+        config_epoch=cfg.plugin_epochs.get(plugin.id, ""),
         # Route each credential to the keychain scope the plugin declared —
         # user_level creds live in the account-scoped store (get_user_secret),
         # everything else in the plugin-scoped one. This mirrors the daemon's

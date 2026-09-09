@@ -100,6 +100,8 @@ class Setting:
       url         — URL string
       port        — TCP port number
       enum        — one of enum_values; rendered as a dropdown
+      multiselect — selected option IDs as a JSON array; options are discovered
+                    with Plugin.setting_options; defaults to an empty list
       toggle      — boolean on/off switch
       interval    — duration / polling interval (seconds or ISO8601)
       secret      — short-lived secret kept in config.toml (true secrets like
@@ -109,7 +111,7 @@ class Setting:
     label: str
     kind: Literal[
         "text", "long_text", "path", "url", "port",
-        "enum", "toggle", "interval", "secret",
+        "enum", "multiselect", "toggle", "interval", "secret",
     ]
     help: str = ""
     enum_values: tuple[str, ...] | None = None
@@ -124,6 +126,10 @@ class Setting:
     default: object = None
     required: bool = True
     placeholder: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kind == "multiselect" and self.default is None:
+            object.__setattr__(self, "default", [])
 
 
 @dataclass(frozen=True)
@@ -248,7 +254,7 @@ class Plugin:
     #: freshness.py.
     freshness: FreshnessExpectation | None = None
     permission_check: Callable[["RunContext"], dict] | None = None
-    """Optional callable that verifies an OS-level permission is actually
+    """Optional read-only callable that verifies an OS-level permission is actually
     granted (e.g. Full Disk Access). Returns
     {"granted": bool, "hint": str | None}. The wizard's permission_request
     step uses this so it can show "verified" instead of the misleading
@@ -281,6 +287,17 @@ class Plugin:
     """
     category: Literal["audio", "video", "books", "journal", "activity", "other"] = "other"
     canonical_definition_name: str | None = None
+    setting_options: Callable[["RunContext", str], list[dict]] | None = None
+    """Read-only discovery for multiselect settings. Returns unique string
+    IDs and labels as {value, label, disabled?}; raises when access fails.
+    Called with saved settings and scoped credentials, never starts a run.
+    """
+
+    permission_request: Callable[["RunContext"], dict] | None = None
+    """Optional native permission prompt, invoked only by the user's explicit
+    Allow access action. Returns {granted: bool, hint?: str | None}. Never
+    invoke it from permission_check, discovery, or setup navigation.
+    """
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -335,6 +352,8 @@ class RunContext:
     log: logging.Logger
     _emit: Callable[[dict], None] = field(repr=False)
     _fulcra_client_factory: Callable[[], object] | None = field(default=None, repr=False)
+    config_epoch: str = ""
+    """Configuration revision captured with config; used to cancel stale work."""
     _claim_dedup_keys: Callable[[set[str]], bool] | None = field(default=None, repr=False)
     """Daemon-backed per-event write-dedup claim. The worker supplies a
     callable that atomically claims a set of dedup keys in the daemon's
