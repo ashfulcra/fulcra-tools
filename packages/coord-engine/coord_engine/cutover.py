@@ -96,7 +96,15 @@ def fold_rows(transport: Any, team: str, agent: str
     except Exception as exc:
         return None, f"coord-fold checkpoint for {agent} unreadable ({exc})", None
     if state == "absent":
-        return None, f"coord-fold checkpoint for {agent} is absent — this identity has not seeded its fold", None
+        # Two situations produce this one absent read, and a POINTED read cannot tell them apart: an identity
+        # that is real but has not seeded a fold, and a name that is simply mistyped. Both are UNKNOWN, so
+        # neither is unsafe — but the old wording asserted the first, and a mistyped name then reads as a live
+        # fleet regression ("this agent stopped folding") rather than as a typo. Separating them would cost a
+        # directory listing, which this module does not do (see the module docstring). So state the measurement
+        # and name both readings instead of picking one.
+        return None, (f"coord-fold checkpoint for {agent} is absent — no fold is seeded under this exact name. "
+                      f"Identity names are exact; a mistyped name is indistinguishable from an unseeded "
+                      f"identity at this cost, so check the name before concluding the fold broke"), None
     if state != "ok" or not body:
         return None, f"coord-fold checkpoint for {agent} is {state}", None
     try:

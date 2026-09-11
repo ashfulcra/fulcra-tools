@@ -292,7 +292,24 @@ def test_obligations_served_from_the_fold_with_no_checkpoint_are_unknown_never_c
     _arm_file_plane_sentinels(monkeypatch)
     rc, payload = _obligations(FakeTransport({SWITCH: _switch("fold")}), capsys)
     assert rc == 3 and payload["state"] == "UNKNOWN", payload
-    assert any("has not seeded its fold" in str(v) for v in payload["details"].values()), payload["details"]
+    assert any("no fold is seeded under this exact name" in str(v) for v in payload["details"].values()), \
+        payload["details"]
+
+
+def test_absent_checkpoint_names_both_readings_instead_of_asserting_one(monkeypatch, capsys):
+    """A pointed read cannot distinguish an unseeded identity from a mistyped name, so the reason must not
+    claim it can. Measured cost of the old wording: a mistyped agent name read as a live fleet regression
+    (the agent it named had simply never existed; the real identity was folding normally two minutes earlier).
+    Both readings, or the next reader re-learns this the same way."""
+    _arm_file_plane_sentinels(monkeypatch)
+    rc, payload = _obligations(FakeTransport({SWITCH: _switch("fold")}), capsys)
+    assert rc == 3 and payload["state"] == "UNKNOWN", payload
+    reasons = [str(v) for v in payload["details"].values()]
+    assert reasons, payload["details"]
+    for reason in reasons:
+        assert "name" in reason, reason                       # the name is offered as a candidate cause
+        assert "indistinguishable" in reason, reason          # and the limit of the measurement is stated
+        assert "this identity has not seeded its fold" not in reason, reason   # never the bare assertion
 
 
 def test_obligations_with_an_unreadable_switch_are_unknown_and_consult_nothing(monkeypatch, capsys):
