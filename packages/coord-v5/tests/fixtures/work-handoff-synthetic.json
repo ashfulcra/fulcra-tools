@@ -1,0 +1,45 @@
+{
+  "schema": "gatekeeper-checkpoint/1",
+  "checkpoint_id": "20000000-0000-4000-8000-000000000003",
+  "workspace_id": "00000000-0000-4000-8000-000000000100",
+  "workstream_id": "00000000-0000-4000-8000-000000000300",
+  "work_id": "00000000-0000-4000-8000-000000000400",
+  "assignment_version": 1,
+  "assignment_event_id": "00000000-0000-4000-8000-000000000006",
+  "identity": {
+    "principal_id": "principal-a",
+    "logical_agent_id": "agent-a",
+    "instance_id": "instance-a",
+    "session_id": "session-a"
+  },
+  "created_at": "2026-09-27T12:00:00.000Z",
+  "objective": "Keep clients compatible",
+  "acceptance_criteria": [{ "id": "criterion-1", "text": "Tests pass" }],
+  "completed_actions": ["Recorded target decision"],
+  "in_progress_actions": ["Compatibility tests"],
+  "decisions": [{ "decision": "Current target", "reason": "Explicit owner answer" }],
+  "unresolved_question_ids": [],
+  "next_actions": ["Run the compatibility suite"],
+  "artifacts": [],
+  "external_operations": [
+    {
+      "operation_id": "20000000-0000-4000-8000-000000000050",
+      "description": "Build submission outcome not observed",
+      "status": "unknown",
+      "receipt": null,
+      "retry_policy": "verify_first",
+      "idempotency_key": null
+    }
+  ],
+  "source_frontier": {
+    "mode": "observed_ids_only",
+    "event_ids": [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000004",
+      "00000000-0000-4000-8000-000000000005",
+      "00000000-0000-4000-8000-000000000006"
+    ],
+    "coverage": "partial",
+    "as_of": "2026-09-27T12:00:00.000Z"
+  }
+}

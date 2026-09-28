@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "eventObservation": {
+    "coverage": "partial",
+    "items": [
+      { "itemId": "synthetic-event", "jobId": "synthetic-job", "revision": "synthetic-revision" }
+    ]
+  },
+  "obligationObservation": {
+    "coverage": "partial",
+    "items": [
+      { "itemId": "synthetic-work", "jobId": "synthetic-job", "revision": "synthetic-revision" }
+    ]
+  },
+  "observedAt": "2026-09-26T00:00:00.000Z"
+}
