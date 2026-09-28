@@ -4,6 +4,8 @@ import { validateWorkEvent, workContentDigest } from './work-contract.js';
 import { replayWorkEvents } from './work-projection.js';
 import checkpointFixture from '../../../tests/fixtures/work-handoff-synthetic.json';
 import * as checkpointApi from './checkpoint.js';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 
 /** @returns {any} */
 function packageInput() {
@@ -21,6 +23,67 @@ function packageInput() {
 }
 
 describe('portable checkpoint bodies and replay packages', () => {
+  it('prepares normalized canonical bytes and digests before publishing a Z timestamp body', () => {
+    const raw = structuredClone(checkpointFixture);
+    raw.created_at = raw.created_at.replace('.000Z', 'Z');
+    raw.source_frontier.as_of = raw.source_frontier.as_of.replace('.000Z', 'Z');
+    expect(typeof checkpointApi.prepareCheckpoint).toBe('function');
+    const prepared = checkpointApi.prepareCheckpoint(raw);
+    expect(prepared.ok).toBe(true);
+    expect(prepared.checkpoint.created_at).toBe('2026-09-27T12:00:00.000Z');
+    expect(JSON.parse(prepared.canonical_body)).toEqual(prepared.checkpoint);
+    const exactBytesDigest = createHash('sha256')
+      .update(prepared.canonical_body, 'utf8')
+      .digest('hex');
+    expect(prepared.body_digest).toBe(exactBytesDigest);
+    expect(prepared.artifact_sha256).toBe(exactBytesDigest);
+    expect(prepared.body_digest).not.toBe(workContentDigest(raw));
+    expect(raw.created_at).toBe('2026-09-27T12:00:00Z');
+  });
+  it('keeps a pretty uploaded artifact hash distinct from normalized body integrity', () => {
+    const input = packageInput();
+    input.checkpoint.created_at = input.checkpoint.created_at.replace('.000Z', 'Z');
+    input.checkpoint.source_frontier.as_of = input.checkpoint.source_frontier.as_of.replace(
+      '.000Z',
+      'Z'
+    );
+    const rawBytes = JSON.stringify(input.checkpoint, null, 2) + '\n';
+    input.publicationEvent.payload.artifact.sha256 = createHash('sha256')
+      .update(rawBytes)
+      .digest('hex');
+    expect(validateWorkEvent(input.publicationEvent).ok).toBe(true);
+    Object.assign(input, context(input.events));
+    const built = checkpointApi.buildHandoffPackage(input);
+    expect(built.ok).toBe(true);
+    expect(
+      built.package.events.find((e) => e.event_id === input.publicationEvent.event_id).payload
+        .artifact.sha256
+    ).toBe(input.publicationEvent.payload.artifact.sha256);
+    expect(input.publicationEvent.payload.body_digest).not.toBe(
+      input.publicationEvent.payload.artifact.sha256
+    );
+    input.checkpoint.objective = 'Altered substantive content';
+    expect(checkpointApi.buildHandoffPackage(input)).toMatchObject({
+      ok: false,
+      error: { code: 'BODY_DIGEST_MISMATCH' }
+    });
+  });
+  it('CLI preparation emits the exact canonical upload bytes and expected publication digest', () => {
+    const child = spawnSync(
+      process.execPath,
+      ['scripts/coord-v5-operations.mjs', 'checkpoint', 'prepare'],
+      { input: JSON.stringify(checkpointFixture), encoding: 'utf8' }
+    );
+    expect(child.status).toBe(0);
+    const prepared = JSON.parse(child.stdout);
+    expect(prepared.body_digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(createHash('sha256').update(prepared.canonical_body).digest('hex')).toBe(
+      prepared.artifact_sha256
+    );
+    expect(
+      checkpointApi.validateCheckpoint(JSON.parse(prepared.canonical_body)).checkpoint
+    ).toEqual(prepared.checkpoint);
+  });
   it('rejects an unrelated frontier without widening the exported scope', () => {
     const i = packageInput();
     i.checkpoint.source_frontier.event_ids.push(history[1].event_id);
@@ -427,7 +490,7 @@ describe('checkpoint publication', () => {
   });
   it('rejects mismatched pointer/checkpoint identity and digest', () => {
     for (const edit of [
-      (/** @type {any} */ e) => (e.payload.artifact.sha256 = 'b'.repeat(64)),
+      (/** @type {any} */ e) => (e.payload.artifact.sha256 = 'not-a-sha256'),
       (/** @type {any} */ e) => (e.payload.checkpoint_id = id(9)),
       (/** @type {any} */ e) => (e.payload.artifact.portable = false)
     ]) {

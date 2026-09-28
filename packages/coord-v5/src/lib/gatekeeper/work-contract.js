@@ -544,11 +544,7 @@ function payload(value, kind, subjectId, parents) {
         invalid('INVALID_ASSIGNMENT_HEAD', p);
       if (value.checkpoint_id !== subjectId) invalid('SUBJECT_MISMATCH', p);
       if (!value.artifact.portable) invalid('PORTABLE_REFERENCE_REQUIRED', `${p}.artifact`);
-      if (
-        typeof value.body_digest !== 'string' ||
-        !/^[a-f0-9]{64}$/.test(value.body_digest) ||
-        (value.artifact.sha256 !== null && value.artifact.sha256 !== value.body_digest)
-      )
+      if (typeof value.body_digest !== 'string' || !/^[a-f0-9]{64}$/.test(value.body_digest))
         invalid('INVALID_DIGEST', `${p}.body_digest`);
       break;
     case 'work.opened':

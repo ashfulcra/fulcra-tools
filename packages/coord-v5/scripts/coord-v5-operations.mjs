@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { validateWorkEvent } from "../src/lib/gatekeeper/work-contract.js";
 import {
   validateCheckpoint,
+  prepareCheckpoint,
   buildHandoffPackage,
 } from "../src/lib/gatekeeper/checkpoint.js";
 import { assessHandoffReadiness } from "../src/lib/gatekeeper/handoff.js";
@@ -135,6 +136,7 @@ async function main() {
     ![
       "event validate",
       "checkpoint validate",
+      "checkpoint prepare",
       "checkpoint package",
       "handoff readiness",
     ].includes(command)
@@ -143,6 +145,7 @@ async function main() {
   const input = await stdinJson();
   if (command === "event validate") return validateWorkEvent(input);
   if (command === "checkpoint validate") return validateCheckpoint(input);
+  if (command === "checkpoint prepare") return prepareCheckpoint(input);
   if (command === "checkpoint package") return buildHandoffPackage(input);
   return assessHandoffReadiness(input);
 }

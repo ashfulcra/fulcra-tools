@@ -189,6 +189,51 @@ const evidenceFor = (s) => [
   }
 ];
 describe('explicit handoff readiness and transfer', () => {
+  function distinctArtifact() {
+    const s = setup();
+    s.publication.payload.artifact.sha256 = 'b'.repeat(64);
+    s.pkg.events.find((e) => e.event_id === s.publication.event_id).payload.artifact.sha256 =
+      'b'.repeat(64);
+    s.digest = workContentDigest(s.pkg);
+    s.offer.payload.package_digest = s.digest;
+    s.ready.payload.package_digest = s.digest;
+    s.checks.package_digest = s.digest;
+    return s;
+  }
+  it('requires independent raw artifact integrity when canonical body and upload hashes differ', () => {
+    const s = distinctArtifact();
+    const input = {
+      package: s.pkg,
+      projection: replayWorkEvents(context(s.events)),
+      receiver: target,
+      checks: s.checks,
+      asOf: time
+    };
+    expect(assessHandoffReadiness(input).status).toBe('blocked');
+    s.checks.publication.artifact_sha256 = 'a'.repeat(64);
+    expect(assessHandoffReadiness(input).status).toBe('blocked');
+    s.checks.publication.artifact_sha256 = 'b'.repeat(64);
+    expect(assessHandoffReadiness(input).status).toBe('ready');
+    s.checks.publication.body_digest = 'a'.repeat(64);
+    expect(assessHandoffReadiness(input).status).toBe('blocked');
+  });
+  it('replay rejects missing or mismatched raw artifact proof before transfer', () => {
+    const s = distinctArtifact(),
+      events = [...s.events, s.offer, s.ready, s.accept];
+    const missing = replayWorkEvents(context(events, evidenceFor(s)));
+    expect(missing.rejected.some((d) => d.code === 'HANDOFF_VERIFICATION_INVALID')).toBe(true);
+    s.checks.publication.artifact_sha256 = 'b'.repeat(64);
+    const accepted = replayWorkEvents(context(events, evidenceFor(s)));
+    expect(
+      accepted.work.find((w) => w.work_id === s.body.work_id).assignment.accepted_actor
+    ).toEqual(target);
+    s.checks.publication.artifact_sha256 = 'a'.repeat(64);
+    expect(
+      replayWorkEvents(context(events, evidenceFor(s))).rejected.some(
+        (d) => d.code === 'HANDOFF_VERIFICATION_INVALID'
+      )
+    ).toBe(true);
+  });
   it('requires independent exact checks and keeps unknown operation effects visible', () => {
     const s = setup();
     const projection = replayWorkEvents(context(s.events));

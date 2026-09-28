@@ -199,10 +199,16 @@ function validHandoffChecks(c) {
     shape(c.receiver, ACTOR_KEYS) &&
     ACTOR_KEYS.every((k) => identifier(c.receiver[k])) &&
     /^[a-f0-9]{64}$/.test(c.package_digest) &&
-    shape(c.publication, ['event_id', 'artifact_id', 'body_digest', 'status', 'receipt_id']) &&
+    shape(
+      c.publication,
+      ['event_id', 'artifact_id', 'body_digest', 'status', 'receipt_id'],
+      ['artifact_sha256']
+    ) &&
     uuid(c.publication.event_id) &&
     uuid(c.publication.artifact_id) &&
     /^[a-f0-9]{64}$/.test(c.publication.body_digest) &&
+    (c.publication.artifact_sha256 === undefined ||
+      /^[a-f0-9]{64}$/.test(c.publication.artifact_sha256)) &&
     status.includes(c.publication.status) &&
     receipt(c.publication.receipt_id) &&
     array(
@@ -423,12 +429,18 @@ function transitionError(e, facts, trust) {
     if (evidence.length !== 1) return 'HANDOFF_VERIFICATION_CONFLICT';
     const c = evidence[0].checks;
     const publication = byId.get(/** @type {string} */ (offer.payload.checkpoint_event_id));
+    const artifactHash = /** @type {any} */ (publication?.payload.artifact)?.sha256;
+    const artifactVerified =
+      c.publication.artifact_sha256 === undefined
+        ? artifactHash === null || artifactHash === publication?.payload.body_digest
+        : c.publication.artifact_sha256 === artifactHash;
     if (
       !sameActor(c.receiver, e.actor) ||
       c.package_digest !== p.package_digest ||
       c.publication.event_id !== publication?.event_id ||
       c.publication.artifact_id !== /** @type {any} */ (publication?.payload.artifact)?.id ||
       c.publication.body_digest !== publication?.payload.body_digest ||
+      !artifactVerified ||
       c.publication.status !== 'verified' ||
       !c.publication.receipt_id ||
       p.verification_receipt_id !== c.publication.receipt_id ||

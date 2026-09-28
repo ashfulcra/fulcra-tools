@@ -1,5 +1,6 @@
 import { canonicalWorkJson, validateWorkEvent, workContentDigest } from './work-contract.js';
 import { replayWorkEvents } from './work-projection.js';
+import { createHash } from 'node:crypto';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
@@ -264,6 +265,20 @@ export function validateCheckpoint(value) {
   } catch (e) {
     return failure(e);
   }
+}
+/** Prepare the normalized body and exact UTF-8 bytes to upload (no trailing newline).
+ * The artifact hash applies only to these bytes, not another serialization.
+ * @param {unknown} value @returns {any} */
+export function prepareCheckpoint(value) {
+  const validated = validateCheckpoint(value);
+  if (!validated.ok) return validated;
+  const canonical_body = canonicalWorkJson(validated.checkpoint);
+  return {
+    ...validated,
+    canonical_body,
+    body_digest: workContentDigest(validated.checkpoint),
+    artifact_sha256: createHash('sha256').update(canonical_body, 'utf8').digest('hex')
+  };
 }
 /** @param {unknown} e */
 function failure(e) {

@@ -6,13 +6,13 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const ACTOR = ['principal_id', 'logical_agent_id', 'instance_id', 'session_id'];
 /** @param {any} a @param {any} b */
 const sameActor = (a, b) => a && b && ACTOR.every((k) => a[k] === b[k]);
-/** @param {any} v @param {string[]} keys */
-const shape = (v, keys) =>
+/** @param {any} v @param {string[]} keys @param {string[]} [optional] */
+const shape = (v, keys, optional = []) =>
   v &&
   typeof v === 'object' &&
   !Array.isArray(v) &&
   keys.every((k) => Object.hasOwn(v, k)) &&
-  Object.keys(v).every((k) => keys.includes(k));
+  Object.keys(v).every((k) => keys.includes(k) || optional.includes(k));
 /** @param {any} v */
 const digest = (v) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 /** @param {any} v */
@@ -87,10 +87,15 @@ function checksShape(v) {
     shape(v.receiver, ACTOR) &&
     ACTOR.every((k) => typeof v.receiver[k] === 'string' && ID.test(v.receiver[k])) &&
     digest(v.package_digest) &&
-    shape(v.publication, ['event_id', 'artifact_id', 'body_digest', 'status', 'receipt_id']) &&
+    shape(
+      v.publication,
+      ['event_id', 'artifact_id', 'body_digest', 'status', 'receipt_id'],
+      ['artifact_sha256']
+    ) &&
     UUID.test(v.publication.event_id) &&
     UUID.test(v.publication.artifact_id) &&
     digest(v.publication.body_digest) &&
+    (v.publication.artifact_sha256 === undefined || digest(v.publication.artifact_sha256)) &&
     status.includes(v.publication.status) &&
     receipt(v.publication.receipt_id) &&
     Array.isArray(v.resources) &&
@@ -212,6 +217,11 @@ export function assessHandoffReadiness(input) {
   )
     errors.push('CHECKS_EXPIRED');
   const pub = checks.publication;
+  const artifactHash = publication.payload.artifact.sha256;
+  const artifactVerified =
+    pub.artifact_sha256 === undefined
+      ? artifactHash === null || artifactHash === publication.payload.body_digest
+      : pub.artifact_sha256 === artifactHash;
   requirements.push({
     kind: 'publication',
     resource_id: pub.artifact_id,
@@ -222,6 +232,7 @@ export function assessHandoffReadiness(input) {
     pub.event_id !== publication.event_id ||
     pub.artifact_id !== publication.payload.artifact.id ||
     pub.body_digest !== publication.payload.body_digest ||
+    !artifactVerified ||
     pub.status !== 'verified' ||
     !pub.receipt_id
   )
