@@ -325,7 +325,11 @@ export function openWorkTransportStore(input) {
         }
       ],
       gaps: ordered.flatMap((item) => item.gaps),
-      errors: ordered.flatMap((item) => item.errors),
+      // Preserve every window in the journal, but report current contact health.
+      // Equal-time failures remain ambiguous; only a strictly newer success heals them.
+      errors: ordered
+        .filter((item) => !success || Date.parse(item.as_of) >= Date.parse(success.as_of))
+        .flatMap((item) => item.errors),
       completeness_evidence_id: null
     };
   }

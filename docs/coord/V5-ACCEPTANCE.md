@@ -1,5 +1,45 @@
 # Coord v5 alpha acceptance
 
+## Independent multi-harness report — 2026-09-28
+
+The harness tester reports 18 bounded real reasoning sessions against commit
+`de1005e7d8fc3febd8950da6b9d89ea367d59079`: Claude Code with Haiku 4.5,
+Codex CLI with GPT-5.4-mini, Hermes with Haiku 4.5, and OpenClaw with Haiku 4.5.
+These are tester-reported results; the raw evidence remains in the private test
+environment and has not been independently replayed by the maintainer.
+
+- Live publication/readback passed in all four harnesses. Fresh-cache retained
+  work, failed-read refusal, source/presence clocks, contested role claims,
+  lapse and authorized resolution were exercised by real model sessions.
+- A Hermes writer uploaded checkpoint bytes through the separate file adjunct.
+  A fresh Claude successor downloaded and verified them, read the event tail,
+  built a package and continued work. The tester normalized checkpoint bytes
+  as a workaround. Independent handoff readiness receipts were not tested.
+- Listener uncertain-send/dedup used a real Codex turn, but locally generated
+  receipts do not prove native receiver delivery. The tester's host lacks the
+  Codex desktop tool and other harness adapters. Earlier idle Codex heartbeat
+  evidence below does not fill those gaps.
+- Reported cost was about $1.18, only $0.51 directly measured; the rest was
+  estimated. This is not a measured fleet operating cost.
+
+The run exposed sticky historical read errors and checkpoint digest normalization
+mismatches. Alpha.3 addresses these with regression coverage and a checkpoint
+preparation command. Targeted external retests remain required. Raw file SHA-256
+and canonical checkpoint body digest are separate integrity checks. Historical
+observation windows stay in the journal when current source health recovers.
+
+Local alpha.3 verification: 373 unit tests across 20 suites and four packed-install
+tests pass on Node 22.16.0 and 26.5.0. The installed-command test also exercises
+checkpoint preparation and independently hashes its exact output bytes.
+
+Alpha.3 packed artifact: `fulcra-coord-v5-0.1.0-alpha.3.tgz`, 33 allowlisted files,
+zero runtime dependencies; SHA-256
+`4f76cc5cbd2d414afe65ca7aad8cca9de3901c97f57345b239c786bdf0724972`.
+
+Cross-account, native delivery across these four harnesses, independently checked
+handoff readiness, harness restart and sustained operation remain unproven. No
+production authority, schedules or fleet enrollment changed.
+
 ## Alpha.2 integration — 2026-09-28
 
 The package now includes source-backed presence, durable role claims and

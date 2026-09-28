@@ -15,7 +15,7 @@ dependencies; no Svelte, prototype checkout, daemon or scheduler. This alpha is
 not published to npm. Run `npm pack` here, then in another directory:
 
 ```sh
-npm install /absolute/path/to/fulcra-coord-v5-0.1.0-alpha.2.tgz
+npm install /absolute/path/to/fulcra-coord-v5-0.1.0-alpha.3.tgz
 npx --no-install coord-v5 --help
 ```
 
@@ -142,7 +142,9 @@ Presence rows expose separate `clocks` and engagement state. Role rows expose
 evaluated `presence`/`roles` arrays beside its projection. Default maximum source
 age is **300000 ms (5 minutes)**; acceptance should supply an explicit age. Source
 `as_of` stays unchanged. Stale/failed source observations retain evidence but mark
-resolution unknown. Partial history cannot prove vacancy or enable automatic role
+resolution unknown. A strictly newer successful read restores current source
+health without deleting earlier diagnostic windows, gaps, or retained work.
+Equal-time failures remain unknown. Partial history cannot prove vacancy or enable automatic role
 routing; only fresh, complete, held roles permit it. Existing explicitly configured
 native routes are separate. CLI digest now consumes authorized retained presence,
 with a separate evaluation time for clocks, and never clears partial coverage.
@@ -153,6 +155,10 @@ Each accepts one UTF-8 JSON value, at most 1 MiB:
 
 - `event validate`: event body; returns `{ok,event}` or `{ok:false,errors}`.
 - `checkpoint validate`: checkpoint body; returns `{ok,checkpoint}` or errors.
+- `checkpoint prepare`: checkpoint body; returns `{ok,checkpoint,canonical_body,
+  body_digest,artifact_sha256}` or errors. `canonical_body` is the exact normalized,
+  key-sorted UTF-8 upload content, with no trailing newline. Existing validation
+  API behavior is unchanged.
 - `checkpoint package`: `{checkpoint,publicationEvent,recipient,accessRequirements,
 events,trust,observation,asOf}` from `buildHandoffPackage`; returns `{ok,package}`
   or errors. Trust includes scope, exact grants and event evidence.
@@ -165,6 +171,32 @@ and external-operation checks bound to recipient/package digest with validity ti
 Missing checks never become success. Invalid input, refused validation and
 unknown/blocked assessments exit nonzero. Parser exceptions return safe codes,
 never input or bearer.
+
+Prepare before publishing a checkpoint so timestamp normalization (for example
+`Z` to `.000Z`) cannot silently change the body you hash:
+
+```sh
+coord-v5 checkpoint prepare < checkpoint.json > prepared.json
+jq -j '.canonical_body' prepared.json > checkpoint.canonical.json
+```
+
+Upload `checkpoint.canonical.json` unchanged. In `checkpoint.published`, use
+`.body_digest` for canonical **normalized checkpoint content** and
+`.artifact_sha256` for these exact uploaded **raw bytes**. `jq -j` matters: adding
+a newline or pretty-printing changes the artifact byte hash. If you intentionally
+upload another JSON serialization, compute its raw SHA256 separately; do not
+replace the prepared body_digest. A receiver verifies downloaded raw bytes against
+artifact.sha256, then validates/normalizes the parsed checkpoint and compares its
+prepared body_digest against publication.body_digest. Both checks are required;
+matching bytes alone is not canonical body integrity, and matching normalized
+content alone is not proof of exact artifact bytes. Preparing JSON does not upload,
+publish, grant access, or independently verify a remote artifact.
+
+When raw and canonical hashes differ, handoff verification receipts must include
+`checks.publication.artifact_sha256` matching the publication's raw artifact hash,
+in addition to its existing `body_digest` binding. Omitting this additive field is
+supported only for legacy publications whose raw hash equals the body digest (or
+whose artifact pointer has no SHA256); it cannot attest a distinct upload hash.
 
 ## APIs and verification
 

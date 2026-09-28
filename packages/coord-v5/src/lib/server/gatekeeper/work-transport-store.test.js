@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fixture from '../../../../tests/fixtures/work-backlog-synthetic.json';
 import { serializeWorkEvent, workContentDigest } from '../../gatekeeper/work-contract.js';
 import { replayWorkEvents } from '../../gatekeeper/work-projection.js';
+import { evaluateSourceFreshness } from '../../gatekeeper/work-presence.js';
 import { readWorkWindow } from './work-transport-read.js';
 import { openWorkTransportStore } from './work-transport-store.js';
 
@@ -167,7 +168,43 @@ describe('atomic synthetic observed-work and intent journal', () => {
       as_of: '2026-09-29T01:00:00.000Z',
       last_successful_observation_at: '2026-09-28T01:00:00.000Z'
     });
-    expect(after.observation.errors).toHaveLength(2);
+    expect(after.observation.errors).toHaveLength(1);
+  });
+
+  it('recovers current freshness after a newer successful read without erasing diagnostic history or retained work', async () => {
+    const dbPath = path();
+    const store = open(dbPath);
+    store.appendWindow(await read([row(1), row(2, event(2), { note: 'malformed' })]));
+    store.appendWindow(await read([], { start, end }, '2026-09-28T01:00:00Z', { malformed: true }));
+    const freshness = (observation) =>
+      evaluateSourceFreshness({
+        projection: { schema: 'gatekeeper-work-view/1', observation },
+        evaluated_at: '2026-09-29T01:00:00Z',
+        max_source_age_ms: 60000
+      });
+    expect(freshness(store.accumulated().observation).source_freshness).toBe('unknown');
+    store.appendWindow(await read([], { start, end }, '2026-09-29T01:00:00Z'));
+    // Late delivery of an older failure cannot poison newer successful contact.
+    store.appendWindow(await read([], { start, end }, at, { malformed: true }));
+    const recovered = open(dbPath).accumulated();
+    expect(recovered.events).toHaveLength(1);
+    expect(recovered.observation.coverage).toBe('partial');
+    expect(recovered.observation.completeness_evidence_id).toBeNull();
+    expect(recovered.observation.gaps.length).toBeGreaterThan(0);
+    expect(recovered.observation.errors).toEqual([]);
+    expect(freshness(recovered.observation).source_freshness).toBe('fresh');
+    expect(store.inspect().observation_count).toBe(4);
+  });
+
+  it('keeps equal-time failure ambiguous regardless of append order', async () => {
+    for (const failedFirst of [true, false]) {
+      const store = open(path());
+      const success = await read([row(1)]);
+      const failure = await read([], { start, end }, at, { malformed: true });
+      for (const result of failedFirst ? [failure, success] : [success, failure])
+        store.appendWindow(result);
+      expect(store.accumulated().observation.errors).toHaveLength(1);
+    }
   });
 
   it('treats a cold empty cache as unavailable, never a complete empty ledger', () => {

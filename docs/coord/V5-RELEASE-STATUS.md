@@ -6,7 +6,7 @@ coord-fold, team authority, and schedules remain unchanged.
 
 | Release gate | Status | Completion evidence required |
 |---|---|---|
-| Standalone package | Alpha.2 integrated | Presence, roles and enrollment included; zero runtime dependencies. See acceptance record for exact checks. |
+| Standalone package | Alpha.3 fixes; external retest pending | Presence, roles and enrollment included; source-health recovery and checkpoint preparation added. Zero runtime dependencies. |
 | Usable bus operations | Verified for core alpha | Explicit owned enrollment; installed publication/readback, authorized views/digests and checkpoint commands. |
 | Two-agent acceptance | Passed for bounded slice | Real question/answer exchange through annotations, separate caches, restart retention and local checkpoint validation. [Evidence and limits](V5-ACCEPTANCE.md). |
 | Upstream delivery | PR open; CI/review pending | [PR #762](https://github.com/ashfulcra/fulcra-tools/pull/762), verified install instructions, public-safe fixtures and exact release artifact. Not merged. |
@@ -51,8 +51,10 @@ fleet listener was installed by these tests.
 
 Remaining gates: other harness live adapters, busy/restart/outage/permission/upgrade
 acceptance, a sustained cost/latency trial, explicit fleet cutover, and upstream
-Workspaces adoption. Claude CLI acceptance needs authentication; unavailable
-harnesses need their own environments. The Workspaces annotation PR is intentionally
+Workspaces adoption. An independent tester now reports real-session bus operations
+across Claude Code, Codex CLI, Hermes and OpenClaw; see the acceptance ledger for
+the verified scope versus tester-reported evidence and remaining native-wake gaps.
+The Workspaces annotation PR is intentionally
 separate and is not claimed to use this package's wire contract automatically.
 
 The release test must distinguish real annotation exchange and native session

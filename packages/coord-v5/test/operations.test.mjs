@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 test("installed commands replay exact owned retained work and keep partial/unknown honest", async () => {
   const dir = mkdtempSync(join(tmpdir(), "coord-v5-operations-"));
@@ -361,6 +362,15 @@ test("installed commands replay exact owned retained work and keep partial/unkno
       },
       asOf: time,
     };
+    const preparedResult = run(["checkpoint", "prepare"], body);
+    assert.equal(preparedResult.status, 0, preparedResult.stdout);
+    const prepared = JSON.parse(preparedResult.stdout);
+    assert.deepEqual(JSON.parse(prepared.canonical_body), prepared.checkpoint);
+    assert.equal(prepared.body_digest, workContentDigest(prepared.checkpoint));
+    assert.equal(prepared.artifact_sha256,
+      createHash("sha256").update(prepared.canonical_body, "utf8").digest("hex"));
+    assert.equal(prepared.canonical_body.endsWith("\n"), false);
+    assert.notEqual(run(["checkpoint", "prepare"], {}).status, 0);
     const packaged = run(["checkpoint", "package"], {
       ...context,
       checkpoint: body,
