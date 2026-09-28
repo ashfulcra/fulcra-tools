@@ -15,7 +15,7 @@ dependencies; no Svelte, prototype checkout, daemon or scheduler. This alpha is
 not published to npm. Run `npm pack` here, then in another directory:
 
 ```sh
-npm install /absolute/path/to/fulcra-coord-v5-0.1.0-alpha.1.tgz
+npm install /absolute/path/to/fulcra-coord-v5-0.1.0-alpha.2.tgz
 npx --no-install coord-v5 --help
 ```
 

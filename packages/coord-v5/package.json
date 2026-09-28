@@ -1,6 +1,6 @@
 {
   "name": "@fulcra/coord-v5",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Opt-in coordination work core and durable local listener (alpha)",
   "type": "module",
   "license": "MIT",
