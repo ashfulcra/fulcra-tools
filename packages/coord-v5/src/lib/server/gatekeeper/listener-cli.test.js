@@ -14,6 +14,26 @@ const scope = {
 /** @type {string[]} */
 const directories = [];
 
+// Node22.16 warns when importing built-in SQLite. Only this exact runtime
+// warning is excluded from assertions; application/other stderr remains visible.
+/** @param {string} stderr */
+function applicationStderr(stderr) {
+  return stderr.replace(
+    /^\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\r?\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\r?\n/gm,
+    ''
+  );
+}
+
+it('filters only the exact built-in SQLite warning, preserving other stderr', () => {
+  const warning =
+    '(node:123) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n';
+  expect(applicationStderr(warning)).toBe('');
+  expect(applicationStderr(`${warning}unexpected stderr\n`)).toBe('unexpected stderr\n');
+  expect(applicationStderr('(node:123) ExperimentalWarning: another warning\n')).toBe(
+    '(node:123) ExperimentalWarning: another warning\n'
+  );
+});
+
 function databasePath() {
   const directory = mkdtempSync(join(tmpdir(), 'listener-cli-'));
   directories.push(directory);
@@ -48,7 +68,7 @@ function run(command, db, input, extra = []) {
   return {
     status: result.status,
     stdout: result.stdout ? JSON.parse(result.stdout) : null,
-    stderr: result.stderr
+    stderr: applicationStderr(result.stderr)
   };
 }
 
@@ -132,7 +152,7 @@ it('reports lease contention with exit 2 and permits read-only inspection', () =
   );
   expect(second.status).toBe(2);
   expect(JSON.parse(second.stdout)).toEqual({ error: { code: 'LEASE_CONFLICT' } });
-  expect(second.stderr).toBe('');
+  expect(applicationStderr(second.stderr)).toBe('');
   expect(run('inspect', db).status).toBe(0);
 });
 

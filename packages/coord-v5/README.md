@@ -8,6 +8,8 @@ Wire formats remain `gatekeeper-work/1` and `gatekeeper/1`.
 ## Install
 
 Requires Node 22.16.0 or newer (built-in SQLite constructor timeout API).
+Node22.16 prints its built-in SQLite ExperimentalWarning on stderr; this is
+not a CLI error, and the package does not suppress runtime warnings.
 Verified on Node 26.5.0, with SQLite/import smoke on 22.16.0. Zero runtime
 dependencies; no Svelte, prototype checkout, daemon or scheduler. This alpha is
 not published to npm. Run `npm pack` here, then in another directory:
