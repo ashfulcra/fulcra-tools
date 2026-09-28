@@ -1,14 +1,14 @@
 # Coord v5 release status
 
-The v5 bus is **not released or adopted**. This branch is packaging the tested
-coordination core independently of the web application. Existing coord-engine,
+The v5 core is **packaged and tested, not merged or fleet-adopted**. This branch
+delivers the coordination core independently of the web application. Existing coord-engine,
 coord-fold, team authority, and schedules remain unchanged.
 
 | Release gate | Status | Completion evidence required |
 |---|---|---|
-| Standalone package | Verified locally | 328 tests across 18 extracted suites; packed offline install/bin/export smoke passes outside the source checkout, without Svelte or runtime dependencies. |
-| Usable bus operations | In progress | Explicit user-owned enrollment, work publication/readback, authorized replay/backlog and checkpoint operations through the installed command. |
-| Two-agent acceptance | Pending | Two real sessions use the installed package, with receipt, outstanding-work and recovery evidence; synthetic legs identified separately. |
+| Standalone package | Verified | 331 unit tests and two packed-install tests pass on Node 22.16 and 26.5; zero runtime dependencies. |
+| Usable bus operations | Verified for core alpha | Explicit owned enrollment; installed publication/readback, authorized views/digests and checkpoint commands. |
+| Two-agent acceptance | Passed for bounded slice | Real question/answer exchange through annotations, separate caches, restart retention and local checkpoint validation. [Evidence and limits](V5-ACCEPTANCE.md). |
 | Upstream delivery | Pending | Reviewed feature PR, verified install instructions, public-safe fixtures, exact release artifact. |
 | Fleet adoption | Not enabled | Explicit team enrollment and verified host-by-host adoption; never inferred from a passing local test. |
 
