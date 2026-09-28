@@ -1410,6 +1410,14 @@ change an existing team's authority, schedules, or historical work when trying
 the alpha. Its Node runtime and explicit enrollment requirements belong to that
 package only; Collect and the web application are not prerequisites.
 
+For new v5 enrollment, use the package's [onboarding guide](packages/coord-v5/docs/onboarding.md)
+and capability-evidenced `coord-v5 enrollment plan`; keep one native listener
+registration per environment/harness. Its plan is not an installed schedule or
+a membership grant. Preserve the distinction between contact, inbox observation,
+progress and checkpoint clocks. Role claims survive in annotation history but
+are not distributed locks; partial source views cannot authorize exclusive
+takeover. Keep private descriptors and managed workspace instructions local.
+
 `2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
 that agrees with the body, deterministic identity precedence, and distinct
 empty, tombstoned, unreadable, and unknown states. Those direct canonical-read

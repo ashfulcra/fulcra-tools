@@ -1,5 +1,42 @@
 # Coord v5 alpha acceptance
 
+## Alpha.2 integration — 2026-09-28
+
+The package now includes source-backed presence, durable role claims and
+capability-based enrollment. The earlier alpha.1 record below remains historical.
+
+- 366 unit tests across 20 suites and four installed-command tests pass on
+  Node 22.16.0 and 26.5.0, including enrollment and presence/role regressions.
+- A real owned annotation source accepted definition, claim, checkpoint reference,
+  presence and release events. Fresh-process replay retained them. Current contact
+  and overdue work progress stayed distinct; partial coverage prohibited automatic
+  exclusive-role routing.
+- A checkpoint was uploaded to Fulcra, downloaded and SHA-256 verified. A second
+  native reasoning session independently retrieved it and the fresh event tail,
+  observed release, published a successor role claim and retained checkpoint
+  lineage after reopening its cache. This did not transfer task assignment or
+  authorize exclusive execution from a partial read.
+- A native scheduled Codex heartbeat executed at 12:27 UTC with working installed
+  tools/source access. The trial was paused after its receipt. This proves an
+  idle scheduled wake, not app restart, host outage or an ongoing deployment.
+- The independent session followed the bundled onboarding guide. It correctly
+  selected interactive mode and treated the paused registration as reported,
+  not active. Its feedback produced a regression fix: interactive plans no longer
+  instruct users to keep a schedule alive. Evidence-reference and harness-key
+  instructions were clarified without adding warnings to the entry flow.
+
+Final alpha.2 tarball: `fulcra-coord-v5-0.1.0-alpha.2.tgz`, 33 allowlisted files,
+zero runtime dependencies, SHA-256
+`0af34019a3ca7dbeabbd1cf4b951db09650ab2c78b6502b40b088f982754920d`.
+Private receipts, descriptors and uploaded test identifiers stay outside this repository.
+
+Remaining acceptance is explicit: other harnesses, busy delivery, app/container
+restart, host outage, credentials, permission prompts, upgrades and sustained
+cost/latency. These sessions share an authenticated principal; cross-account
+is not proved. No fleet schedule, team authority or existing v4 workspace was
+switched. The separate upstream Workspaces annotation skill remains under review;
+it is not automatically wire-compatible with this package.
+
 ## Result
 
 The standalone bus core passed an installed-package exchange between two real

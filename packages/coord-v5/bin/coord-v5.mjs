@@ -20,6 +20,7 @@ Usage: coord-v5 transport <read|publish|inspect|replay> [flags]
        coord-v5 event validate < event.json
        coord-v5 checkpoint <validate|package> < input.json
        coord-v5 handoff readiness < input.json
+       coord-v5 enrollment <plan|instructions> < input.json
 
 Transport requires explicit enrollment and independent owned-source verification.
 Transport read/publish receive the bearer on stdin; config/event files stay private.
@@ -36,6 +37,7 @@ See the installed README for exact arguments and limits.\n`);
       event: "../scripts/coord-v5-operations.mjs",
       checkpoint: "../scripts/coord-v5-operations.mjs",
       handoff: "../scripts/coord-v5-operations.mjs",
+      enrollment: "../scripts/coord-v5-enrollment.mjs",
     };
     if (!Object.hasOwn(scripts, command)) {
       process.stdout.write(

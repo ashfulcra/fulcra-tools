@@ -31,11 +31,19 @@ coord-v5 event validate < event.json
 coord-v5 checkpoint validate < checkpoint.json
 coord-v5 checkpoint package < package-input.json
 coord-v5 handoff readiness < readiness-input.json
+coord-v5 enrollment plan < assessment.json
+coord-v5 enrollment instructions < instructions-input.json
 coord-v5 observation --config ABS --policy ABS --db ABS
 coord-v5 listener configure|prepare|settle|ack|inspect --db ABS --scope JSON --holder ID
 ```
 
 ## Explicit enrollment
+
+Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+The enrollment planner selects an interactive or native-listener path from dated
+local capability evidence, reuses exact native registrations, and preserves faster
+operator intervals. It neither installs a schedule nor grants membership. The
+instructions command returns a reversible local instruction block without editing files.
 
 Config is exactly `{baseUrl,principalId,channel,workspaceId,workstreamId,
 actorBinding}`. Base URL remains `https://api.fulcradynamics.com/`; channel is
