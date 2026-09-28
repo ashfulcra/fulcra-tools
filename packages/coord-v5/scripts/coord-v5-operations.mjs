@@ -11,6 +11,7 @@ import { buildWorkDigest } from "../src/lib/gatekeeper/work-digest.js";
 import { openWorkTransportStore } from "../src/lib/server/gatekeeper/work-transport-store.js";
 import { validateWorkTransportConfig } from "../src/lib/server/gatekeeper/work-transport-config.js";
 import { buildAuthorizedWorkView } from "../src/lib/server/gatekeeper/work-view.js";
+import { presenceRowsForDigest } from "../src/lib/gatekeeper/work-presence.js";
 
 const INPUT_LIMIT = 1024 * 1024;
 const FILE_LIMIT = 64 * 1024;
@@ -121,6 +122,8 @@ async function main() {
         viewerRole: values.role,
         query: values.query,
         asOf: view.projection.as_of,
+        evaluatedAt: view.evaluated_at,
+        presence: presenceRowsForDigest({ rows: view.presence }),
       });
     } finally {
       store.close();

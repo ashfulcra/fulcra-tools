@@ -87,6 +87,58 @@ wake/attempt/target correlations. `inspect` needs no stdin. The listener never i
 a harness, creates a task or installs a schedule. Ack does not complete work. Partial
 retained obligations are conservative cache state, not proof of unfinished terminal work.
 
+## Source-backed presence and durable roles
+
+Presence/role events use the same `gatekeeper-work/1` annotation source, exact
+actor grants and retained source receipts as work. They are not local-only state.
+New capabilities are `presence.publish`, `role.manage`, `role.claim` and
+`role.checkpoint`; configuration/enrollment grants none automatically.
+
+`presence.observed` has exact payload `{actor,contact_at,inbox_observed_at,
+inbox_coverage,progress_at,checkpoint_event_id,contact_due_at,progress_due_at,
+checkpoint_due_at,engagement,work_ids}`. Actor must equal the event author in all
+four identity fields. Engagement is `{mode:resident|session|occasional,until}`;
+only session requires a nonnull zoned `until`. Nullable clocks mean unknown.
+Inbox polling/contact never becomes progress. A checkpoint clock derives from an
+authorized publication, not a claimed heartbeat time. Incomparable presence heads
+remain conflicted; timestamp sorting does not choose one.
+
+Role subjects use stable UUIDs across sessions. Event payloads are:
+
+- `role.defined`: `{name,policy:shared|exclusive}` (`role.manage`), immutable.
+- `role.claimed`: `{expected_role_event_id,previous_claim_event_id,expires_at}`
+  (`role.claim`); nullable previous claim, exact-session renewal only.
+- `role.released`: `{claim_event_id,reason}`; exact claimant or `role.manage`.
+- `role.checkpoint`: `{claim_event_id,checkpoint_event_id,body_digest}`;
+  `role.checkpoint` plus a current unexpired exact claim and authorized same-actor
+  publication with matching digest. Artifact access is independently verified.
+- `role.resolved`: `{expected_role_event_id,claim_event_ids,retained_claim_event_ids}`
+  (`role.manage`); explicitly references all competing claim heads. No timestamp
+  winner. Concurrent renewal/release stays contested until causally resolved.
+
+Every nonnull event reference must be a direct parent, including resolution claim
+IDs. A role checkpoint reference survives release/expiry and successor claims,
+but does not transfer credentials, artifact access, assignment or execution authority.
+Exclusive concurrent claims are contested; shared claims coexist. Lease expiry is
+lapsed, not proof nobody works. Claims are coordination evidence, not distributed locks.
+
+`replayWorkEvents` adds authorized `projection.presence` and `projection.roles`.
+Subpaths `work-presence` / `work-roles` export
+`evaluateWorkPresence({projection,evaluated_at,max_source_age_ms})` and
+`evaluateWorkRoles` with the same input. Both return `{status,evaluated_at,
+source_as_of,last_successful_observation_at,max_source_age_ms,source_freshness,rows}`.
+Presence rows expose separate `clocks` and engagement state. Role rows expose
+`state`, `live_claims`, `routing_allowed`, and retained `checkpoint_reference`.
+
+`buildAuthorizedWorkView` accepts those optional evaluation inputs and adds
+evaluated `presence`/`roles` arrays beside its projection. Default maximum source
+age is **300000 ms (5 minutes)**; acceptance should supply an explicit age. Source
+`as_of` stays unchanged. Stale/failed source observations retain evidence but mark
+resolution unknown. Partial history cannot prove vacancy or enable automatic role
+routing; only fresh, complete, held roles permit it. Existing explicitly configured
+native routes are separate. CLI digest now consumes authorized retained presence,
+with a separate evaluation time for clocks, and never clears partial coverage.
+
 ## Pure stdin commands
 
 Each accepts one UTF-8 JSON value, at most 1 MiB:

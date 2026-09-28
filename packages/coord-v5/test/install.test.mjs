@@ -148,7 +148,7 @@ test("packed install runs independently and ships only the public runtime", () =
       if (contract.parseWorkNote('not-json').ok !== false || validateWorkEvent({}).ok !== false) process.exit(2);
       const view = replay.replayWorkEvents({events:[]});
       if (view.observation.coverage !== 'unavailable' || view.work.length !== 0) process.exit(3);
-      for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener','work-view']) await import('@fulcra/coord-v5/' + module);
+      for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener','work-view','work-presence','work-roles','enrollment']) await import('@fulcra/coord-v5/' + module);
       console.log('independent-runtime-ok');
     `,
       ],

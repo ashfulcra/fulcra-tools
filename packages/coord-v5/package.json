@@ -28,7 +28,10 @@
     "./listener-store": "./src/lib/server/gatekeeper/listener-store.js",
     "./listener-runtime": "./src/lib/server/gatekeeper/listener-runtime.js",
     "./work-listener": "./src/lib/server/gatekeeper/work-listener.js",
-    "./work-view": "./src/lib/server/gatekeeper/work-view.js"
+    "./work-view": "./src/lib/server/gatekeeper/work-view.js",
+    "./work-presence": "./src/lib/gatekeeper/work-presence.js",
+    "./work-roles": "./src/lib/gatekeeper/work-roles.js",
+    "./enrollment": "./src/lib/server/gatekeeper/enrollment.js"
   },
   "files": [
     "bin/coord-v5.mjs",
@@ -36,6 +39,8 @@
     "src/lib/gatekeeper/work-contract.js",
     "src/lib/gatekeeper/work-projection.js",
     "src/lib/gatekeeper/work-digest.js",
+    "src/lib/gatekeeper/work-presence.js",
+    "src/lib/gatekeeper/work-roles.js",
     "src/lib/gatekeeper/checkpoint.js",
     "src/lib/gatekeeper/handoff.js",
     "src/lib/gatekeeper/protocol.js",
@@ -51,6 +56,10 @@
     "src/lib/server/gatekeeper/work-listener.js",
     "src/lib/server/gatekeeper/work-view.js",
     "scripts/coord-v5-operations.mjs",
+    "src/lib/server/gatekeeper/enrollment.js",
+    "scripts/coord-v5-enrollment.mjs",
+    "docs/onboarding.md",
+    "docs/harnesses.md",
     "scripts/gatekeeper-work-transport.mjs",
     "scripts/gatekeeper-listener.mjs",
     "scripts/work-listener-observation.mjs",

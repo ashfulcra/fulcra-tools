@@ -1,10 +1,16 @@
 import { canonicalWorkJson } from '../../gatekeeper/work-contract.js';
 import { replayWorkEvents } from '../../gatekeeper/work-projection.js';
 import { id as listenerId } from './listener-validation.js';
+import { evaluateWorkPresence } from '../../gatekeeper/work-presence.js';
+import { evaluateWorkRoles } from '../../gatekeeper/work-roles.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ACTOR = ['principal_id', 'logical_agent_id', 'instance_id', 'session_id'];
 const CAPABILITIES = new Set([
+  'presence.publish',
+  'role.manage',
+  'role.claim',
+  'role.checkpoint',
   'work.write',
   'question.ask',
   'question.answer',
@@ -81,8 +87,14 @@ function validPolicy(value) {
   }
   return true;
 }
-/** @param {{store:any,policy:any,now:()=>number}} input */
-export function buildAuthorizedWorkView({ store, policy, now }) {
+/** @param {{store:any,policy:any,now:()=>number,evaluated_at?:string,max_source_age_ms?:number}} input */
+export function buildAuthorizedWorkView({
+  store,
+  policy,
+  now,
+  evaluated_at,
+  max_source_age_ms = 300000
+}) {
   if (
     !validPolicy(policy) ||
     !store ||
@@ -140,5 +152,22 @@ export function buildAuthorizedWorkView({ store, policy, now }) {
     observation: accumulated.observation,
     asOf: observedAt
   });
-  return { status: 'ready', projection };
+  const evaluation = {
+    projection,
+    evaluated_at: evaluated_at ?? new Date(clock).toISOString(),
+    max_source_age_ms
+  };
+  const presence = evaluateWorkPresence(evaluation),
+    roles = evaluateWorkRoles(evaluation);
+  if (presence.status !== 'ready' || roles.status !== 'ready')
+    return { status: 'blocked', code: 'INVALID_EVALUATION' };
+  return {
+    status: 'ready',
+    projection,
+    evaluated_at: presence.evaluated_at,
+    source_freshness: presence.source_freshness,
+    max_source_age_ms,
+    presence: presence.rows,
+    roles: roles.rows
+  };
 }

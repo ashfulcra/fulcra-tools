@@ -111,8 +111,24 @@ function validActor(value) {
 
 /** @param {unknown} value @param {string} asOf */
 function validPresence(value, asOf) {
-  if (!exactKeys(value, PRESENCE_KEYS)) return false;
+  if (!object(value)) return false;
+  const optional = ['work_ids', 'checkpoint_work_id'].filter((k) => Object.hasOwn(value, k));
+  if (!exactKeys(value, [...PRESENCE_KEYS, ...optional])) return false;
   const row = /** @type {any} */ (value);
+  const uuid = (v) =>
+    typeof v === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  if (
+    optional.includes('work_ids') &&
+    (!Array.isArray(row.work_ids) || row.work_ids.length > 100 || !row.work_ids.every(uuid))
+  )
+    return false;
+  if (
+    optional.includes('checkpoint_work_id') &&
+    row.checkpoint_work_id !== null &&
+    !uuid(row.checkpoint_work_id)
+  )
+    return false;
   if (!validActor(row.actor) || !PRESENCE_COVERAGE.includes(row.coverage)) return false;
   for (const key of PRESENCE_KEYS.slice(1, 8)) {
     if (row[key] !== null && !instant(row[key])) return false;
@@ -128,7 +144,7 @@ const actorKey = (actor) => ACTOR_KEYS.map((key) => actor[key]).join('\u0000');
 /** @param {string|null} at @param {string|null} due @param {string} asOf @param {string} coverage */
 function clock(at, due, asOf, coverage) {
   let state = 'unknown';
-  if (coverage === 'complete' && at && due) {
+  if (['complete', 'partial'].includes(coverage) && at && due) {
     state = compareTime(asOf, due) > 0 && compareTime(at, due) < 0 ? 'overdue' : 'current';
   }
   return { state, at, due_at: due };
@@ -163,7 +179,7 @@ function clocks(row, asOf) {
 }
 
 /** @param {any} row @param {string} asOf @param {Map<string,PresenceRow>} presence */
-function workItem(row, asOf, presence) {
+function workItem(row, asOf, presence, evaluatedAt = asOf) {
   const value = row.item;
   if (!value) {
     return {
@@ -190,7 +206,16 @@ function workItem(row, asOf, presence) {
   const observed = accepted
     ? (presence.get(actorKey(row.assignment.accepted_actor)) ?? null)
     : null;
-  const observedClocks = accepted ? clocks(observed, asOf) : null;
+  const scopedPresence = observed ? { ...observed } : null;
+  if (scopedPresence?.work_ids && !scopedPresence.work_ids.includes(row.work_id)) {
+    scopedPresence.progress_at = null;
+    scopedPresence.progress_due_at = null;
+  }
+  if (scopedPresence?.checkpoint_work_id && scopedPresence.checkpoint_work_id !== row.work_id) {
+    scopedPresence.checkpoint_at = null;
+    scopedPresence.checkpoint_due_at = null;
+  }
+  const observedClocks = accepted ? clocks(scopedPresence, evaluatedAt) : null;
   const reasons = [];
   if (row.state === 'conflicted' || row.execution_authority === 'blocked_conflict')
     reasons.push('conflicted');
@@ -384,7 +409,7 @@ const urgent = (item) => (item.priority === 'urgent' ? 0 : 1);
 const itemOrder = (a, b) => urgent(a) - urgent(b) || a.id.localeCompare(b.id);
 
 /**
- * @param {{projection:WorkProjection,viewerId:string,viewerRole:ViewerRole,query:WorkQuery,from?:string|null,to?:string|null,asOf:string,presence?:PresenceRow[]}} input
+ * @param {{projection:WorkProjection,viewerId:string,viewerRole:ViewerRole,query:WorkQuery,from?:string|null,to?:string|null,asOf:string,evaluatedAt?:string,presence?:PresenceRow[]}} input
  */
 export function buildWorkDigest(input) {
   const projection = input?.projection;
@@ -406,6 +431,9 @@ export function buildWorkDigest(input) {
     (to === null || instant(to)) &&
     (!from || !to || compareTime(from, to) <= 0);
   const errors = [];
+  const evaluatedAt = input?.evaluatedAt ?? asOf;
+  if (!instant(evaluatedAt) || (asOf && compareTime(evaluatedAt, asOf) < 0))
+    errors.push({ code: 'INVALID_EVALUATION_TIME' });
   if (!validProjection) errors.push({ code: 'INVALID_PROJECTION' });
   if (!asOf) errors.push({ code: 'INVALID_AS_OF' });
   if (!validQuery) errors.push({ code: 'INVALID_QUERY' });
@@ -485,7 +513,7 @@ export function buildWorkDigest(input) {
   ) {
     const openWork = projection.work
       .filter((row) => !row.item || !['completed', 'cancelled', 'closed'].includes(row.item.status))
-      .map((row) => workItem(row, asOf, presence));
+      .map((row) => workItem(row, asOf, presence, evaluatedAt));
     const obligations = projection.questions.flatMap((q) =>
       questionItems(q, projection.work, asOf)
     );

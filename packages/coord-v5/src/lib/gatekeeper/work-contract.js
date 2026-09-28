@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 /** @typedef {{id:string,uri:string,sha256:string|null,version:string|null,media_type:string,owner_principal_id:string,audience:'workspace',portable:boolean}} ArtifactRef */
 /** @typedef {{id:string,text:string}} AcceptanceCriterion */
 /** @typedef {{title:string,intent:string,type:'task'|'open_thread'|'deferred',status:string,owner_id:string|null,next_action:string|null,acceptance_criteria:AcceptanceCriterion[],priority:'normal'|'urgent',dependency_ids:string[],due_at:string|null,revisit:{at:string|null,condition:string|null}|null,blocker:{condition_id:string,kind:'question'|'dependency'|'failure',ref_id:string|null,unlock_condition:string}|null,result:{summary:string,evidence:{criterion_id:string,artifact:ArtifactRef}[]}|null}} WorkItem */
-/** @typedef {{protocol:'gatekeeper-work/1',event_id:string,operation_id:string,workspace_id:string,stream_id:string,workstream_id:string,actor:WorkActor,kind:string,subject:{type:'work'|'question'|'checkpoint'|'handoff',id:string},parents:string[],audience:'workspace',occurred_at:string,payload:Record<string,unknown>,correlation_id?:string}} WorkEvent */
+/** @typedef {{protocol:'gatekeeper-work/1',event_id:string,operation_id:string,workspace_id:string,stream_id:string,workstream_id:string,actor:WorkActor,kind:string,subject:{type:'work'|'question'|'checkpoint'|'handoff'|'role'|'presence',id:string},parents:string[],audience:'workspace',occurred_at:string,payload:Record<string,unknown>,correlation_id?:string}} WorkEvent */
 /** @typedef {{ok:true,event:WorkEvent}|{ok:false,error:{code:string,path:string}}} WorkValidationResult */
 
 export const WORK_PROTOCOL = 'gatekeeper-work/1';
@@ -164,6 +164,27 @@ function utcTime(value) {
   const fraction = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/.exec(value)?.[1] ?? '';
   const digits = fraction ? fraction.padEnd(3, '0') : '000';
   return `${new Date(value).toISOString().slice(0, 19)}.${digits}Z`;
+}
+/** Strict canonical instant for pure evaluation, retaining sub-millisecond precision. */
+export function parseWorkInstant(value) {
+  try {
+    time(value, '$');
+    return utcTime(value);
+  } catch {
+    return null;
+  }
+}
+/** Compare validated instants without losing fractional precision. */
+export function compareWorkInstants(left, right) {
+  const a = parseWorkInstant(left),
+    b = parseWorkInstant(right);
+  if (!a || !b) throw new TypeError('INVALID_TIME');
+  const seconds = a.slice(0, 19).localeCompare(b.slice(0, 19));
+  if (seconds) return seconds;
+  const af = a.slice(20, -1),
+    bf = b.slice(20, -1),
+    n = Math.max(af.length, bf.length);
+  return af.padEnd(n, '0').localeCompare(bf.padEnd(n, '0'));
 }
 /** @param {any} value @param {string} path @param {(entry:any,path:string)=>void} each @param {number} [max] @param {boolean} [unique] */
 function array(value, path, each, max = 100, unique = false) {
@@ -348,6 +369,30 @@ function item(value, path, opened) {
 
 /** @type {Record<string,[string,string[]]>} */
 const kinds = {
+  'presence.observed': [
+    'presence',
+    [
+      'actor',
+      'contact_at',
+      'inbox_observed_at',
+      'inbox_coverage',
+      'progress_at',
+      'checkpoint_event_id',
+      'contact_due_at',
+      'progress_due_at',
+      'checkpoint_due_at',
+      'engagement',
+      'work_ids'
+    ]
+  ],
+  'role.defined': ['role', ['name', 'policy']],
+  'role.claimed': ['role', ['expected_role_event_id', 'previous_claim_event_id', 'expires_at']],
+  'role.released': ['role', ['claim_event_id', 'reason']],
+  'role.checkpoint': ['role', ['claim_event_id', 'checkpoint_event_id', 'body_digest']],
+  'role.resolved': [
+    'role',
+    ['expected_role_event_id', 'claim_event_ids', 'retained_claim_event_ids']
+  ],
   'handoff.offered': [
     'handoff',
     [
@@ -425,6 +470,59 @@ function payload(value, kind, subjectId, parents) {
       if (!parents.includes(value[key])) invalid('PARENT_REQUIRED', `${p}.${key}`);
     }
   switch (kind) {
+    case 'presence.observed':
+      actor(value.actor, `${p}.actor`);
+      for (const key of [
+        'contact_at',
+        'inbox_observed_at',
+        'progress_at',
+        'contact_due_at',
+        'progress_due_at',
+        'checkpoint_due_at'
+      ])
+        time(value[key], `${p}.${key}`, true);
+      oneOf(
+        value.inbox_coverage,
+        ['complete', 'partial', 'unavailable', 'unsupported'],
+        `${p}.inbox_coverage`
+      );
+      uuidField(value.checkpoint_event_id, `${p}.checkpoint_event_id`, true);
+      array(value.work_ids, `${p}.work_ids`, uuidField, 100, true);
+      shape(value.engagement, ['mode', 'until'], [], `${p}.engagement`);
+      oneOf(value.engagement.mode, ['resident', 'session', 'occasional'], `${p}.engagement.mode`);
+      time(value.engagement.until, `${p}.engagement.until`, true);
+      if ((value.engagement.mode === 'session') !== (value.engagement.until !== null))
+        invalid('INVALID_ENGAGEMENT', `${p}.engagement`);
+      break;
+    case 'role.defined':
+      safeId(value.name, `${p}.name`);
+      oneOf(value.policy, ['shared', 'exclusive'], `${p}.policy`);
+      break;
+    case 'role.claimed':
+      uuidField(value.expected_role_event_id, `${p}.expected_role_event_id`);
+      uuidField(value.previous_claim_event_id, `${p}.previous_claim_event_id`, true);
+      time(value.expires_at, `${p}.expires_at`);
+      break;
+    case 'role.released':
+      uuidField(value.claim_event_id, `${p}.claim_event_id`);
+      text(value.reason, `${p}.reason`, true);
+      break;
+    case 'role.checkpoint':
+      uuidField(value.claim_event_id, `${p}.claim_event_id`);
+      uuidField(value.checkpoint_event_id, `${p}.checkpoint_event_id`);
+      digest(value.body_digest, `${p}.body_digest`);
+      break;
+    case 'role.resolved':
+      uuidField(value.expected_role_event_id, `${p}.expected_role_event_id`);
+      array(value.claim_event_ids, `${p}.claim_event_ids`, uuidField, 100, true);
+      array(value.retained_claim_event_ids, `${p}.retained_claim_event_ids`, uuidField, 100, true);
+      if (
+        !value.claim_event_ids.length ||
+        value.claim_event_ids.some((id) => !parents.includes(id)) ||
+        value.retained_claim_event_ids.some((id) => !value.claim_event_ids.includes(id))
+      )
+        invalid('INVALID_ROLE_RESOLUTION', p);
+      break;
     case 'handoff.offered':
       uuidField(value.work_id, `${p}.work_id`);
       version(value.expected_version, `${p}.expected_version`);
@@ -542,6 +640,21 @@ export function validateWorkEvent(value) {
     oneOf(candidate.audience, ['workspace'], '$.audience');
     time(candidate.occurred_at, '$.occurred_at');
     payload(candidate.payload, candidate.kind, candidate.subject.id, candidate.parents);
+    if (candidate.kind === 'presence.observed') {
+      if (canonicalWorkJson(candidate.actor) !== canonicalWorkJson(candidate.payload.actor))
+        invalid('PRESENCE_SELF_REQUIRED', '$.payload.actor');
+      for (const key of ['contact_at', 'inbox_observed_at', 'progress_at'])
+        if (
+          candidate.payload[key] !== null &&
+          compareWorkInstants(candidate.payload[key], candidate.occurred_at) > 0
+        )
+          invalid('FUTURE_OBSERVATION', `$.payload.${key}`);
+    }
+    if (
+      candidate.kind === 'role.claimed' &&
+      compareWorkInstants(candidate.payload.expires_at, candidate.occurred_at) <= 0
+    )
+      invalid('INVALID_ROLE_EXPIRY', '$.payload.expires_at');
     const normalized = JSON.parse(canonicalWorkJson(candidate));
     normalized.occurred_at = utcTime(candidate.occurred_at);
     const data = normalized.payload;
@@ -550,6 +663,17 @@ export function validateWorkEvent(value) {
       if (data.item.revisit?.at) data.item.revisit.at = utcTime(data.item.revisit.at);
     }
     if (data.deadline_at) data.deadline_at = utcTime(data.deadline_at);
+    for (const key of [
+      'contact_at',
+      'inbox_observed_at',
+      'progress_at',
+      'contact_due_at',
+      'progress_due_at',
+      'checkpoint_due_at',
+      'expires_at'
+    ])
+      if (data[key]) data[key] = utcTime(data[key]);
+    if (data.engagement?.until) data.engagement.until = utcTime(data.engagement.until);
     if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > MAX_NOTE_BYTES)
       invalid('LIMIT_EXCEEDED', '$');
     return { ok: true, event: normalized };

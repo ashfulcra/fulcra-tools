@@ -1,4 +1,6 @@
 import { canonicalWorkJson, validateWorkEvent, workContentDigest } from './work-contract.js';
+import { roleTransitionError, foldWorkRoles } from './work-roles.js';
+import { presenceTransitionError, foldWorkPresence } from './work-presence.js';
 
 /** @typedef {import('./work-contract.js').WorkEvent} WorkEvent */
 /** @typedef {{code:string,event_ids?:string[],subject_id?:string,stream_id?:string}} WorkDiagnostic */
@@ -6,7 +8,7 @@ import { canonicalWorkJson, validateWorkEvent, workContentDigest } from './work-
 /** @typedef {{event_id:string,kind:string,event:WorkEvent,disposition:string}} WorkHistoryEntry */
 /** @typedef {{work_id:string,workstream_id:string,item:import('./work-contract.js').WorkItem|null,head_event_id:string|null,event_ids:string[],history:WorkHistoryEntry[],assignment:WorkAssignment,state:string,execution_authority:string,provisional:boolean,validation:WorkDiagnostic[],branch_event_ids:string[]}} WorkRow */
 /** @typedef {{question_id:string,workstream_id:string,opened_event:WorkEvent|null,event_ids:string[],history:WorkHistoryEntry[],acknowledgments:WorkEvent[],answers:WorkEvent[],current_answer:WorkEvent|null,applications:WorkEvent[],state:string,provisional:boolean,branch_event_ids:string[]}} QuestionRow */
-/** @typedef {{schema:'gatekeeper-work-view/1',workspace_id:string|null,as_of:string|null,observation:WorkObservation,work:WorkRow[],questions:QuestionRow[],checkpoints:any[],handoffs:any[],conflicts:WorkDiagnostic[],pending:WorkDiagnostic[],rejected:WorkDiagnostic[]}} WorkProjection */
+/** @typedef {{schema:'gatekeeper-work-view/1',workspace_id:string|null,as_of:string|null,observation:WorkObservation,work:WorkRow[],questions:QuestionRow[],checkpoints:any[],handoffs:any[],presence:any[],roles:any[],conflicts:WorkDiagnostic[],pending:WorkDiagnostic[],rejected:WorkDiagnostic[]}} WorkProjection */
 /** @typedef {{event:WorkEvent,ancestors:Set<string>}} Fact */
 /** @typedef {{workspace_id:string,allowed_stream_ids:string[],event_evidence:{event_id:string,event_digest:string,record_id:string,source_principal_id:string,stream_id:string,received_at:string}[],grants:(import('./work-contract.js').WorkActor & {capabilities:string[]})[],handoff_verifications?:any[]}} WorkTrust */
 /** @typedef {{coverage:string,as_of:string|null,last_successful_observation_at:string|null,sources:{stream_id:string,status:string,pending_pages:number|null}[],gaps:{code:string,stream_id?:string,event_id?:string}[],errors:{code:string,stream_id?:string}[],completeness_evidence_id:string|null}} WorkObservation */
@@ -15,6 +17,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const ACTOR_KEYS = ['principal_id', 'logical_agent_id', 'instance_id', 'session_id'];
 const CAPABILITIES = [
+  'presence.publish',
+  'role.manage',
+  'role.claim',
+  'role.checkpoint',
   'work.write',
   'question.ask',
   'question.answer',
@@ -27,6 +33,11 @@ const CAPABILITIES = [
 ];
 const COVERAGE = ['complete', 'partial', 'unavailable', 'unsupported'];
 const CAPABILITY = new Map([
+  ['presence.observed', 'presence.publish'],
+  ['role.defined', 'role.manage'],
+  ['role.claimed', 'role.claim'],
+  ['role.checkpoint', 'role.checkpoint'],
+  ['role.resolved', 'role.manage'],
   ['handoff.offered', 'handoff.offer'],
   ['handoff.ready', 'handoff.ready'],
   ['checkpoint.published', 'checkpoint.publish'],
@@ -348,6 +359,8 @@ function questionAt(facts, questionId) {
 /** Validate against causal ancestors only. Sorting incomparable events never grants authority.
  * @param {WorkEvent} e @param {Fact[]} facts @param {WorkTrust} trust @returns {string|null} */
 function transitionError(e, facts, trust) {
+  if (e.kind.startsWith('role.')) return roleTransitionError(e, facts, trust);
+  if (e.kind === 'presence.observed') return presenceTransitionError(e, facts);
   const p = /** @type {any} */ (e.payload);
   const byId = new Map(facts.map((f) => [f.event.event_id, f.event]));
   if (e.kind === 'handoff.offered') {
@@ -653,6 +666,8 @@ export function replayWorkEvents(input = {}) {
     questions: [],
     checkpoints: [],
     handoffs: [],
+    presence: [],
+    roles: [],
     conflicts: [],
     pending: [],
     rejected: []
@@ -692,6 +707,13 @@ export function replayWorkEvents(input = {}) {
         output.rejected.push({ code: 'DENIED_SCOPE' });
         continue;
       }
+      if (
+        (e.kind.startsWith('role.') || e.kind === 'presence.observed') &&
+        compareInstants(e.occurred_at, asOf) > 0
+      ) {
+        output.rejected.push(diagnostic(e, 'FUTURE_COORDINATION_EVENT'));
+        continue;
+      }
       const receipt = trust.event_evidence.some(
         (r) =>
           r.event_id === e.event_id &&
@@ -703,13 +725,15 @@ export function replayWorkEvents(input = {}) {
       const grant = trust.grants.some(
         (g) =>
           sameActor(g, e.actor) &&
-          (e.kind === 'assignment.released'
-            ? g.capabilities.includes('assignment.accept') ||
-              g.capabilities.includes('assignment.manage')
-            : e.kind === 'handoff.offered'
-              ? g.capabilities.includes('handoff.offer') ||
+          (e.kind === 'role.released'
+            ? g.capabilities.includes('role.claim') || g.capabilities.includes('role.manage')
+            : e.kind === 'assignment.released'
+              ? g.capabilities.includes('assignment.accept') ||
                 g.capabilities.includes('assignment.manage')
-              : g.capabilities.includes(CAPABILITY.get(e.kind) ?? ''))
+              : e.kind === 'handoff.offered'
+                ? g.capabilities.includes('handoff.offer') ||
+                  g.capabilities.includes('assignment.manage')
+                : g.capabilities.includes(CAPABILITY.get(e.kind) ?? ''))
       );
       if (!receipt || !grant) {
         output.rejected.push({ code: 'UNTRUSTED_EVENT', stream_id: e.stream_id });
@@ -866,6 +890,8 @@ export function replayWorkEvents(input = {}) {
   expandDescendants(quarantined);
   for (const id of quarantined) disposition.set(id, 'conflicted');
   const retained = [...facts.values()].filter((f) => !quarantined.has(f.event.event_id));
+  output.roles = foldWorkRoles(retained);
+  output.presence = foldWorkPresence(retained);
   /** @param {WorkEvent[]} events @returns {WorkHistoryEntry[]} */
   const history = (events) =>
     events.map((e) => ({
@@ -1073,7 +1099,9 @@ export function replayWorkEvents(input = {}) {
     ...output.work,
     ...output.questions,
     ...output.checkpoints,
-    ...output.handoffs
+    ...output.handoffs,
+    ...output.roles,
+    ...output.presence
   ])
     row.provisional = observation.coverage !== 'complete';
   /** @template T @param {T[]} values @returns {T[]} */
