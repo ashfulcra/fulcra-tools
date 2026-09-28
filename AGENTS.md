@@ -1402,6 +1402,14 @@ intents), split by kind:
 
 ## Coord-engine 2.0 truthfulness boundary
 
+The separate [coord-v5 alpha](packages/coord-v5/README.md) is the new work-core
+release track, not an upgrade of the installed Python engine or an activation
+of the v4 cutover. Its [release status](docs/coord/V5-RELEASE-STATUS.md) separates
+packaging, usable operations, agent acceptance, and upstream release. Do not
+change an existing team's authority, schedules, or historical work when trying
+the alpha. Its Node runtime and explicit enrollment requirements belong to that
+package only; Collect and the web application are not prerequisites.
+
 `2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
 that agrees with the body, deterministic identity precedence, and distinct
 empty, tombstoned, unreadable, and unknown states. Those direct canonical-read

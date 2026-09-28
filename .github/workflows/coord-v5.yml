@@ -1,0 +1,36 @@
+name: Coord v5 package
+
+on:
+  pull_request:
+    paths:
+      - 'packages/coord-v5/**'
+      - '.github/workflows/coord-v5.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/coord-v5/**'
+      - '.github/workflows/coord-v5.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: ['22.16.0', '26.5.0']
+    defaults:
+      run:
+        working-directory: packages/coord-v5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: packages/coord-v5/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
