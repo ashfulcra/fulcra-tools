@@ -6,8 +6,6 @@ import {
 import { validateWorkTransportConfig } from './work-transport-config.js';
 import { verifyOwnedWorkStream } from './work-transport-read.js';
 
-const SOURCE_ID = 'com.fulcradynamics.annotation.00000000-0000-4000-8000-000000000901';
-const STREAM_ID = '00000000-0000-4000-8000-000000000901';
 const MAX_TOKEN = 16 * 1024;
 const MAX_RESPONSE = 2 * 1024 * 1024;
 const MAX_UPLOAD_ID = 256;
@@ -23,6 +21,7 @@ function validToken(value) {
 }
 /** @param {any} config @param {any} event */
 function ownEvent(config, event) {
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
   return (
     event.workspace_id === config.workspaceId &&
     event.workstream_id === config.workstreamId &&
@@ -132,6 +131,7 @@ export async function publishWorkOnce(input) {
     return blocked('INVALID_CONFIG');
   }
   const checked = validateWorkEvent(input?.event);
+  const SOURCE_ID = `com.fulcradynamics.annotation.${config.channel.slice('MomentAnnotation/'.length)}`;
   if (!checked.ok || !ownEvent(config, checked.event)) return blocked('INVALID_EVENT_SCOPE');
   if (
     !validToken(input?.token) ||
@@ -146,12 +146,20 @@ export async function publishWorkOnce(input) {
   const id = checked.event.event_id;
   const note = serializeWorkEvent(checked.event);
   const digest = workContentDigest(checked.event);
-  const preflight = await verifyOwnedWorkStream({ fetch: input.fetch, token: input.token, config });
+  const preflight = await verifyOwnedWorkStream({
+    fetch: input.fetch,
+    token: input.token,
+    config
+  });
   if (preflight.status !== 'verified')
     return { status: 'blocked', event_id: id, code: preflight.code };
   let reservation;
   try {
-    reservation = input.store.reserveIntent({ event: checked.event, note, digest });
+    reservation = input.store.reserveIntent({
+      event: checked.event,
+      note,
+      digest
+    });
   } catch {
     return { status: 'blocked', event_id: id, code: 'INTENT_FAILURE' };
   }
@@ -192,7 +200,11 @@ export async function publishWorkOnce(input) {
     });
     if (recorded.status !== 'upload_accepted')
       return { status: 'unknown', event_id: id, code: 'JOURNAL_FAILURE' };
-    return { status: 'pending_readback', event_id: id, upload_id: receipt.upload_id };
+    return {
+      status: 'pending_readback',
+      event_id: id,
+      upload_id: receipt.upload_id
+    };
   } catch (error) {
     const code = safeCode(error);
     try {
@@ -228,7 +240,11 @@ export function reconcileWorkReadback(input) {
   if (records.length === 0) {
     if (intent.state === 'CONFLICT') return { status: 'conflict', event_id: eventId };
     if (intent.state === 'VERIFIED')
-      return { status: 'verified', event_id: eventId, record_id: intent.record_id };
+      return {
+        status: 'verified',
+        event_id: eventId,
+        record_id: intent.record_id
+      };
     return {
       status: intent.state === 'UPLOAD_ACCEPTED' ? 'pending_readback' : 'unknown',
       event_id: eventId

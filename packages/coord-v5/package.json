@@ -27,7 +27,8 @@
     "./listener-validation": "./src/lib/server/gatekeeper/listener-validation.js",
     "./listener-store": "./src/lib/server/gatekeeper/listener-store.js",
     "./listener-runtime": "./src/lib/server/gatekeeper/listener-runtime.js",
-    "./work-listener": "./src/lib/server/gatekeeper/work-listener.js"
+    "./work-listener": "./src/lib/server/gatekeeper/work-listener.js",
+    "./work-view": "./src/lib/server/gatekeeper/work-view.js"
   },
   "files": [
     "bin/coord-v5.mjs",
@@ -48,6 +49,8 @@
     "src/lib/server/gatekeeper/listener-store.js",
     "src/lib/server/gatekeeper/listener-runtime.js",
     "src/lib/server/gatekeeper/work-listener.js",
+    "src/lib/server/gatekeeper/work-view.js",
+    "scripts/coord-v5-operations.mjs",
     "scripts/gatekeeper-work-transport.mjs",
     "scripts/gatekeeper-listener.mjs",
     "scripts/work-listener-observation.mjs",
@@ -56,7 +59,7 @@
   ],
   "scripts": {
     "test:unit": "vitest run --config vitest.config.js",
-    "test:install": "node --test test/install.test.mjs",
+    "test:install": "node --test test/*.test.mjs",
     "test": "npm run test:unit && npm run test:install"
   },
   "devDependencies": {

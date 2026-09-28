@@ -12,8 +12,6 @@ import {
 import { validateWorkTransportConfig } from './work-transport-config.js';
 import { assertTrustedWorkReadResult } from './work-transport-read.js';
 
-const STREAM_ID = '00000000-0000-4000-8000-000000000901';
-const SOURCE_ID = `com.fulcradynamics.annotation.${STREAM_ID}`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EVENT_LIMIT = 1000;
 
@@ -56,6 +54,7 @@ function ensurePath(dbPath) {
 }
 /** @param {any} config */
 function scope(config) {
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
   return {
     principal_id: config.principalId,
     channel: config.channel,
@@ -75,6 +74,8 @@ function plain(value) {
 }
 /** @param {any} record @param {any} config */
 function validRecord(record, config) {
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
+  const SOURCE_ID = `com.fulcradynamics.annotation.${STREAM_ID}`;
   if (
     !plain(record) ||
     typeof record.record_id !== 'string' ||
@@ -121,7 +122,7 @@ function evidence(record) {
     event_digest: record.event_digest,
     record_id: record.record_id,
     source_principal_id: record.source_binding.metadata.fulcra_userid,
-    stream_id: STREAM_ID,
+    stream_id: record.event.stream_id,
     received_at: record.received_at
   };
 }
@@ -161,7 +162,7 @@ function conflicts(records) {
       )
         found.push({
           code,
-          stream_id: STREAM_ID,
+          stream_id: record.event.stream_id,
           event_id: field === 'record_id' ? record.event_id : key
         });
       else if (previous === undefined) groups.set(key, value);
@@ -171,6 +172,7 @@ function conflicts(records) {
 }
 /** @param {any} config @param {any} event */
 function ownEvent(config, event) {
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
   return (
     event.workspace_id === config.workspaceId &&
     event.workstream_id === config.workstreamId &&
@@ -185,6 +187,7 @@ function ownEvent(config, event) {
  * @param {{dbPath:string,config:unknown}} input */
 export function openWorkTransportStore(input) {
   const config = validateWorkTransportConfig(input?.config);
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
   const dbPath = input?.dbPath;
   const fresh = ensurePath(dbPath);
   const db = new DatabaseSync(dbPath, { timeout: 5000 });
@@ -315,7 +318,11 @@ export function openWorkTransportStore(input) {
       as_of: latest?.as_of ?? null,
       last_successful_observation_at: success?.as_of ?? null,
       sources: [
-        { stream_id: STREAM_ID, status: success ? 'partial' : 'unavailable', pending_pages: null }
+        {
+          stream_id: STREAM_ID,
+          status: success ? 'partial' : 'unavailable',
+          pending_pages: null
+        }
       ],
       gaps: ordered.flatMap((item) => item.gaps),
       errors: ordered.flatMap((item) => item.errors),
@@ -330,10 +337,18 @@ export function openWorkTransportStore(input) {
       try {
         result = /** @type {any} */ (assertTrustedWorkReadResult(readResult, config));
       } catch {
-        return { status: 'blocked', added_records: 0, code: 'UNTRUSTED_READ_RESULT' };
+        return {
+          status: 'blocked',
+          added_records: 0,
+          code: 'UNTRUSTED_READ_RESULT'
+        };
       }
       if (Date.parse(result.observation.as_of) < Date.parse(result.window.end))
-        return { status: 'blocked', added_records: 0, code: 'INVALID_OBSERVATION_TIME' };
+        return {
+          status: 'blocked',
+          added_records: 0,
+          code: 'INVALID_OBSERVATION_TIME'
+        };
       if (!result.records.every((/** @type {any} */ record) => validRecord(record, config)))
         return { status: 'blocked', added_records: 0, code: 'INVALID_RECORD' };
       try {
@@ -452,7 +467,13 @@ export function openWorkTransportStore(input) {
             coverage: 'unavailable',
             as_of: null,
             last_successful_observation_at: null,
-            sources: [{ stream_id: STREAM_ID, status: 'unavailable', pending_pages: null }],
+            sources: [
+              {
+                stream_id: STREAM_ID,
+                status: 'unavailable',
+                pending_pages: null
+              }
+            ],
             gaps: [],
             errors: [{ code: 'STORE_CORRUPT', stream_id: STREAM_ID }],
             completeness_evidence_id: null
@@ -486,8 +507,14 @@ export function openWorkTransportStore(input) {
           return prior.operation_id === checked.event.operation_id &&
             prior.digest === intent.digest &&
             prior.note === intent.note
-            ? { status: 'same', state: displayState({ state: state(checked.event.event_id) }) }
-            : { status: 'conflict', state: displayState({ state: state(checked.event.event_id) }) };
+            ? {
+                status: 'same',
+                state: displayState({ state: state(checked.event.event_id) })
+              }
+            : {
+                status: 'conflict',
+                state: displayState({ state: state(checked.event.event_id) })
+              };
         insertIntent.run(
           checked.event.event_id,
           checked.event.operation_id,

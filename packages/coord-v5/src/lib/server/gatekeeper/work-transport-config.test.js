@@ -16,6 +16,16 @@ export const configValue = {
 };
 
 describe('private synthetic transport configuration', () => {
+  it('accepts an explicitly enrolled arbitrary owned scope without supplying authority', () => {
+    const principalId = '00000000-0000-4000-8000-000000000777';
+    const selected = {
+      ...configValue,
+      principalId,
+      channel: 'MomentAnnotation/00000000-0000-4000-8000-000000000778',
+      actorBinding: { ...configValue.actorBinding, principal_id: principalId }
+    };
+    expect(validateWorkTransportConfig(selected)).toEqual(selected);
+  });
   it('returns an isolated, deeply frozen declaration with no capability grant', () => {
     const source = structuredClone(configValue);
     const checked = validateWorkTransportConfig(source);
@@ -29,13 +39,16 @@ describe('private synthetic transport configuration', () => {
   it.each([
     { baseUrl: 'https://other.example/' },
     { principalId: '00000000-0000-4000-8000-000000000001' },
-    { channel: 'MomentAnnotation/00000000-0000-4000-8000-000000000001' },
+    { channel: 'MomentAnnotation/not-a-uuid' },
+    { principalId: 'not-a-uuid' },
     { workspaceId: 'not-a-uuid' },
     { workstreamId: 'not-a-uuid' },
     { capabilities: ['work.write'] },
     { trust: {} },
     { actorBinding: { ...configValue.actorBinding, principal_id: 'other' } },
-    { actorBinding: { ...configValue.actorBinding, logical_agent_id: 'bad id' } },
+    {
+      actorBinding: { ...configValue.actorBinding, logical_agent_id: 'bad id' }
+    },
     { actorBinding: { ...configValue.actorBinding, capability: 'work.write' } }
   ])('rejects unpinned scope, unknown authority, or unsafe actor binding %#', (change) => {
     expect(() => validateWorkTransportConfig({ ...configValue, ...change })).toThrow(

@@ -1,79 +1,110 @@
 # @fulcra/coord-v5 (opt-in alpha)
 
-An independent Node package for durable coordination work: schema validation,
-authorized causal replay, open-work digests, checkpoint/handoff packages, and a
-recoverable local SQLite listener. These are unofficial, unsupported tools.
-Existing `coord-engine` behavior and fleet schedules are unchanged.
+Independent Node tools for durable coordination: validation, authorized causal
+replay, open-work digests, checkpoints/handoffs and a recoverable SQLite listener.
+Unofficial and unsupported; existing coord-engine and fleet schedules are unchanged.
+Wire formats remain `gatekeeper-work/1` and `gatekeeper/1`.
 
-## Install and check
+## Install
 
-Requires Node **22.16.0 or newer**, including built-in `node:sqlite`. The SQLite
-constructor timeout sets this API floor. This extraction was verified on Node
-26.5.0; older versions were not executed. There are zero runtime npm dependencies.
-
-This alpha has not been published to npm. From this directory, run `npm pack`.
-Then, in a separate installation directory:
+Requires Node 22.16.0 or newer (built-in SQLite constructor timeout API).
+Verified on Node 26.5.0, with SQLite/import smoke on 22.16.0. Zero runtime
+dependencies; no Svelte, prototype checkout, daemon or scheduler. This alpha is
+not published to npm. Run `npm pack` here, then in another directory:
 
 ```sh
 npm install /absolute/path/to/fulcra-coord-v5-0.1.0-alpha.1.tgz
-npx --no-install coord-v5 help
+npx --no-install coord-v5 --help
 ```
 
-When a maintainer supplies a packed tarball, install that local file in your own
-directory with `npm install /absolute/path/to/fulcra-coord-v5-0.1.0-alpha.1.tgz`.
-No prototype checkout, Svelte, Collect, daemon, or scheduler is required.
-
-## Commands delivered in this extraction
+## Commands
 
 ```text
-coord-v5 help
 coord-v5 transport read --config ABS --db ABS --start ZONED --end ZONED
 coord-v5 transport publish --config ABS --db ABS --event ABS
-coord-v5 transport inspect --config ABS --db ABS
-coord-v5 transport replay --config ABS --db ABS
+coord-v5 transport inspect|replay --config ABS --db ABS
+coord-v5 work view --config ABS --db ABS --policy ABS
+coord-v5 work digest --config ABS --db ABS --policy ABS --viewer ID --role ROLE --query QUERY
+coord-v5 event validate < event.json
+coord-v5 checkpoint validate < checkpoint.json
+coord-v5 checkpoint package < package-input.json
+coord-v5 handoff readiness < readiness-input.json
 coord-v5 observation --config ABS --policy ABS --db ABS
 coord-v5 listener configure|prepare|settle|ack|inspect --db ABS --scope JSON --holder ID
 ```
 
-**Transport is pinned synthetic, not a usable general production configuration
-yet.** Its reserved example principal is
-`00000000-0000-4000-8000-000000000900`, annotation stream is
-`00000000-0000-4000-8000-000000000901`, and base URL is
-`https://api.fulcradynamics.com/`. A real bearer cannot satisfy these synthetic
-ownership pins. Generic enrollment/configuration is a later release step; this
-extraction does not add grants or create sources.
+## Explicit enrollment
 
-The config is exactly `{baseUrl,principalId,channel,workspaceId,workstreamId,
-actorBinding}`; channel is `MomentAnnotation/<pinned stream>`, and actorBinding is
-exactly `{principal_id,logical_agent_id,instance_id,session_id}`. Config/event/
-policy files must be absolute, regular nonsymlink files, at most 64 KiB, mode
-`0600`, in a private `0700` directory. Databases are also private local files;
-protect their backups because retained notes contain request content.
+Config is exactly `{baseUrl,principalId,channel,workspaceId,workstreamId,
+actorBinding}`. Base URL remains `https://api.fulcradynamics.com/`; channel is
+`MomentAnnotation/<stream UUID>`. Actor binding is exactly
+`{principal_id,logical_agent_id,instance_id,session_id}`, with principal matching
+configuration. Supply your existing owned source and explicit actor binding.
+Synthetic examples use principal `00000000-0000-4000-8000-000000000900` and stream
+`00000000-0000-4000-8000-000000000901`; these are not usable credentials.
+Every live read/publish preflights authenticated principal, catalog channel and
+owned annotation metadata. This package does not create sources or grant authority.
+SQLite scope cannot be rebound to another source.
 
-Transport read/publish receive bearer credentials **only on stdin**, never argv
-or config. Publishing journals one POST intent before I/O; an upload receipt is
-pending, not verified. Reconcile through a later source-valid read; do not invent
-replacement IDs or retry an ambiguous POST. Reads are bounded and partial, and
-empty/failed reads never clear retained work. `transport replay` deliberately
-withholds grants and cannot declare authorized work or global clearance.
+Config/event/policy files must be absolute, regular nonsymlink files, at most
+64 KiB, private (`0600`) in a private (`0700`) directory. Databases/backups contain
+request content and must stay private. Bearers go only on stdin, never argv/config.
 
-`observation` reads an existing cache with explicit policy:
-`{principal_id,workspace_id,stream_id,grants,work_jobs}`. Each grant has the four
-actor fields plus an explicit `capabilities` array; each mapping is exactly
-`{work_id,job_id}`. It prints `{observation,diagnostics}` or a blocked/unavailable
-result without an observation. The successful `.observation` is input to listener
-`prepare`; do not feed an unavailable result to it. It uses retained source read
-time, not cache-open time. Unknown mappings never guess a target.
+Policy is exactly `{principal_id,workspace_id,stream_id,grants,work_jobs}` and must
+match cache scope. Grants contain the four exact actor fields plus explicit
+`capabilities`; job mappings are `{work_id,job_id}`. Empty arrays are valid and
+grant nothing. Configuration is not an authorization grant.
 
-Listener scope is exactly `{principalId,workspaceId,environmentId,harness}`.
-`configure` receives a JSON array of explicit routes on stdin; `prepare` receives
-a version-1 observation; `settle` and `ack` receive exact wake/attempt/target
-correlations. `inspect` needs no stdin. The listener journals and emits action
-descriptors only: **it never invokes a harness**, creates a task, or installs a
-schedule. Acknowledgment does not complete work. Partial journal obligations are
-conservative cache state, not proof that a terminal task remains unfinished.
+Publishing journals a POST intent before I/O. Acceptance is pending, not verified:
+reconcile through a later source-valid read. Never invent replacement IDs or retry
+an ambiguous POST. Reads are bounded/partial; failed/empty reads never clear retained
+work. `transport replay` deliberately withholds grants.
 
-## Public APIs, not CLI verbs yet
+## Retained views and workflow
+
+`work view` returns `{status:"ready",projection}` using the same policy/replay seam
+as the listener bridge and actual accumulated events/source receipts. `work digest`
+returns the digest for `--role member|owner|coordinator` and
+`--query everything_owed|needs_me|completed_history|lost_track`. Both read an existing
+SQLite cache offline. As-of is actual source observation time, not execution time.
+Cold/failed-only caches return unavailable and exit nonzero. Partial data or withheld
+grants never means global all-clear. Historical-range selection and presence filtering
+are API inputs, not CLI features in this slice.
+
+Make private config/policy/event files. Validate the event, publish with bearer stdin,
+then read a fresh bounded window with bearer stdin. Run `work view`/`work digest`.
+Validate a checkpoint and package it with explicit replay/trust inputs. For listeners,
+run `observation`, pass only its successful `.observation` to `listener prepare`, and
+correlate `settle`/`ack` with the exact emitted action. A harness must execute actions.
+
+`observation` returns `{observation,diagnostics}` or blocked/unavailable without an
+observation. Unknown job mappings never guess targets. Listener scope is
+`{principalId,workspaceId,environmentId,harness}`. `configure` takes a route array on
+stdin; `prepare` takes a version-1 observation; `settle`/`ack` take exact
+wake/attempt/target correlations. `inspect` needs no stdin. The listener never invokes
+a harness, creates a task or installs a schedule. Ack does not complete work. Partial
+retained obligations are conservative cache state, not proof of unfinished terminal work.
+
+## Pure stdin commands
+
+Each accepts one UTF-8 JSON value, at most 1 MiB:
+
+- `event validate`: event body; returns `{ok,event}` or `{ok:false,errors}`.
+- `checkpoint validate`: checkpoint body; returns `{ok,checkpoint}` or errors.
+- `checkpoint package`: `{checkpoint,publicationEvent,recipient,accessRequirements,
+events,trust,observation,asOf}` from `buildHandoffPackage`; returns `{ok,package}`
+  or errors. Trust includes scope, exact grants and event evidence.
+- `handoff readiness`: `{package,projection,receiver,checks,asOf}` from
+  `assessHandoffReadiness`; returns ready/unknown/blocked.
+
+These check serialized caller evidence, not network, artifact bytes or access
+independently. Readiness requires separately verified publication/resource receipts
+and external-operation checks bound to recipient/package digest with validity times.
+Missing checks never become success. Invalid input, refused validation and
+unknown/blocked assessments exit nonzero. Parser exceptions return safe codes,
+never input or bearer.
+
+## APIs and verification
 
 ```js
 import {
@@ -86,22 +117,12 @@ import {
 import { replayWorkEvents } from "@fulcra/coord-v5/work-projection";
 ```
 
-Subpath exports also expose `work-contract`, `work-digest`, `checkpoint`,
-`handoff`, `protocol`, `projection`, `listener`, `work-transport-config`,
-`work-transport-read`, `work-transport-store`, `work-transport-publish`,
-`listener-validation`, `listener-store`, `listener-runtime`, and `work-listener`.
-Digest/checkpoint/package/readiness have APIs but no convenient CLI verbs in this
-task. Replay requires separately verified source receipts, exact actor grants,
-scope and observation evidence; an event or package cannot grant itself trust.
-Handoff readiness additionally needs independently verified bytes/access checks.
-No distributed lock, production rollout, or exactly-once external execution is
-claimed. Wire formats remain `gatekeeper-work/1` and compatible `gatekeeper/1`.
+Subpath exports expose core, transport/listener modules and `work-view`. Replay
+requires verified source receipts, exact actor grants, scope and observation evidence;
+an event/package cannot grant itself trust. No distributed lock, rollout or exactly-once
+external execution is claimed.
 
-## Contributor verification
-
-With local development dependencies installed, run `npm test`. The extracted
-Vitest tests use fixtures and real local SQLite, never live network. The separate
-`node --test test/install.test.mjs` packs and installs offline into an empty
-directory, verifies the bin and all runtime exports, and audits package contents.
-Tests and fixtures stay in the repository but are excluded from the tarball.
-See [PROVENANCE.md](PROVENANCE.md) for source files and mechanical transformations.
+Run `npm ci --ignore-scripts` and `npm test`. Tests use synthetic fixtures and real
+local SQLite, never live network. `node --test test/*.test.mjs` packs/installs offline
+into empty directories, exercises installed commands and audits tarball contents.
+Tests/fixtures are excluded from the tarball. See [PROVENANCE.md](PROVENANCE.md).

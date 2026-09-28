@@ -15,18 +15,27 @@ if (major < 22 || (major === 22 && minor < 16)) {
 Usage: coord-v5 transport <read|publish|inspect|replay> [flags]
        coord-v5 listener <configure|prepare|settle|ack|inspect> [flags]
        coord-v5 observation --config ABS --policy ABS --db ABS
+       coord-v5 work view --config ABS --db ABS --policy ABS
+       coord-v5 work digest --config ABS --db ABS --policy ABS --viewer ID --role ROLE --query QUERY
+       coord-v5 event validate < event.json
+       coord-v5 checkpoint <validate|package> < input.json
+       coord-v5 handoff readiness < input.json
 
-Transport is pinned synthetic in this release, not general production configuration.
+Transport requires explicit enrollment and independent owned-source verification.
 Transport read/publish receive the bearer on stdin; config/event files stay private.
 Listener prepares action descriptors only; it never invokes a harness or scheduler.
 Replay without grants cannot establish authorized work or a clear result.
-Core digest/checkpoint/package/readiness APIs are exports, not CLI verbs yet.
+Pure stdin commands do not publish or independently verify caller-supplied checks.
 See the installed README for exact arguments and limits.\n`);
   } else {
     const scripts = {
       transport: "../scripts/gatekeeper-work-transport.mjs",
       listener: "../scripts/gatekeeper-listener.mjs",
       observation: "../scripts/work-listener-observation.mjs",
+      work: "../scripts/coord-v5-operations.mjs",
+      event: "../scripts/coord-v5-operations.mjs",
+      checkpoint: "../scripts/coord-v5-operations.mjs",
+      handoff: "../scripts/coord-v5-operations.mjs",
     };
     if (!Object.hasOwn(scripts, command)) {
       process.stdout.write(
@@ -36,7 +45,13 @@ See the installed README for exact arguments and limits.\n`);
     } else {
       const result = spawnSync(
         process.execPath,
-        [fileURLToPath(new URL(scripts[command], import.meta.url)), ...args],
+        [
+          fileURLToPath(new URL(scripts[command], import.meta.url)),
+          ...(["work", "event", "checkpoint", "handoff"].includes(command)
+            ? [command]
+            : []),
+          ...args,
+        ],
         { stdio: "inherit" },
       );
       if (result.error)

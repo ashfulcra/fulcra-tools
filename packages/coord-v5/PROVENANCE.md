@@ -52,6 +52,13 @@ transport without shipping a personal account/source binding. No other semantic
 rewrite was made. No intake/admission, web app, deployment, private database,
 credential, or real-agent evidence was extracted.
 
+Task2 generalizes synthetic transport pins to explicit validated configuration,
+preserving ownership preflight, branded receipts, SQLite scope and wire names.
+New `work-view.js` factors the listener policy/replay seam without duplicating
+state. New `coord-v5-operations.mjs` exposes retained view/digest and bounded stdin
+wrappers over existing validation/package/readiness APIs. Installed integration
+tests use synthetic principals, fixture responses and real local SQLite only.
+
 New package-owned files: package manifest/exports/files allowlist, root API
 namespaces, standalone Vitest config, product bin dispatcher, packed-install
 smoke test, this provenance file, and README. The MIT license is the destination

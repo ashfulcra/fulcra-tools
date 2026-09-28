@@ -7,8 +7,6 @@ const MAX_NOTE = 64 * 1024;
 const MAX_ROWS = 1000;
 const MAX_TOKEN = 16 * 1024;
 const MAX_WINDOW = 7 * 24 * 60 * 60 * 1000;
-const STREAM_ID = '00000000-0000-4000-8000-000000000901';
-const SOURCE_ID = `com.fulcradynamics.annotation.${STREAM_ID}`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ZONED = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
 const branded = new WeakSet();
@@ -98,7 +96,10 @@ async function readJson(fetchImpl, token, url) {
     const response = await bounded(
       fetchImpl(url, {
         method: 'GET',
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json'
+        },
         redirect: 'error',
         signal: controller.signal
       })
@@ -148,6 +149,7 @@ async function readJson(fetchImpl, token, url) {
 }
 /** @param {any} config */
 function scope(config) {
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
   return {
     principal_id: config.principalId,
     channel: config.channel,
@@ -181,6 +183,8 @@ async function preflight(input) {
   if (typeof input?.fetch !== 'function' || !tokenValid(input?.token))
     return { status: 'unavailable', code: 'INVALID_CONFIG' };
   const urls = paths(config);
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
+  const SOURCE_ID = `com.fulcradynamics.annotation.${STREAM_ID}`;
   try {
     const info = await readJson(input.fetch, input.token, urls.info);
     if (!plain(info) || info.userid !== config.principalId)
@@ -237,6 +241,8 @@ export async function readWorkWindow(input) {
     throw new TypeError('INVALID_CONFIG');
   }
   const { start, end, now } = input ?? {};
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
+  const SOURCE_ID = `com.fulcradynamics.annotation.${STREAM_ID}`;
   const stamped = () => {
     try {
       const value = new Date(now()).toISOString();
@@ -379,6 +385,8 @@ export function assertTrustedWorkReadResult(result, configValue) {
   if (!plain(result) || !branded.has(/** @type {object} */ (result)))
     throw new TypeError('UNTRUSTED_READ_RESULT');
   const value = /** @type {any} */ (result);
+  const STREAM_ID = config.channel.slice('MomentAnnotation/'.length);
+  const SOURCE_ID = `com.fulcradynamics.annotation.${STREAM_ID}`;
   const expectedScope = scope(config);
   if (
     JSON.stringify(value.scope) !== JSON.stringify(expectedScope) ||
@@ -400,7 +408,11 @@ export function assertTrustedWorkReadResult(result, configValue) {
     !Array.isArray(value.observation.sources) ||
     JSON.stringify(value.observation.sources) !==
       JSON.stringify([
-        { stream_id: STREAM_ID, status: value.observation.coverage, pending_pages: null }
+        {
+          stream_id: STREAM_ID,
+          status: value.observation.coverage,
+          pending_pages: null
+        }
       ])
   )
     throw new TypeError('UNTRUSTED_READ_RESULT');

@@ -1,6 +1,4 @@
 const BASE_URL = 'https://api.fulcradynamics.com/';
-const PRINCIPAL_ID = '00000000-0000-4000-8000-000000000900';
-const CHANNEL = 'MomentAnnotation/00000000-0000-4000-8000-000000000901';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const CONFIG_KEYS = [
@@ -39,19 +37,23 @@ function exact(value, keys) {
   );
 }
 
-/** Validate only the fixed synthetic transport declaration; this does not grant actor authority.
+/** Validate explicit enrollment only; this does not grant actor authority or prove ownership.
  * @param {unknown} value */
 export function validateWorkTransportConfig(value) {
   if (!exact(value, CONFIG_KEYS)) throw new TypeError('INVALID_CONFIG');
   const config = /** @type {any} */ (value);
   if (
     config.baseUrl !== BASE_URL ||
-    config.principalId !== PRINCIPAL_ID ||
-    config.channel !== CHANNEL ||
+    typeof config.principalId !== 'string' ||
+    !UUID.test(config.principalId) ||
+    typeof config.channel !== 'string' ||
+    !/^MomentAnnotation\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      config.channel
+    ) ||
     !UUID.test(config.workspaceId) ||
     !UUID.test(config.workstreamId) ||
     !exact(config.actorBinding, ACTOR_KEYS) ||
-    config.actorBinding.principal_id !== PRINCIPAL_ID ||
+    config.actorBinding.principal_id !== config.principalId ||
     !ACTOR_KEYS.every(
       (key) =>
         typeof config.actorBinding[key] === 'string' && IDENTIFIER.test(config.actorBinding[key])
@@ -63,8 +65,8 @@ export function validateWorkTransportConfig(value) {
   );
   return Object.freeze({
     baseUrl: BASE_URL,
-    principalId: PRINCIPAL_ID,
-    channel: CHANNEL,
+    principalId: config.principalId,
+    channel: config.channel,
     workspaceId: config.workspaceId,
     workstreamId: config.workstreamId,
     actorBinding

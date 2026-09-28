@@ -61,7 +61,7 @@ test("packed install runs independently and ships only the public runtime", () =
     });
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /coord-v5/);
-    assert.match(help.stdout, /pinned synthetic/i);
+    assert.match(help.stdout, /explicit enrollment/i);
     const unknown = spawnSync(executable, ["not-a-command"], {
       cwd: directory,
       encoding: "utf8",
@@ -148,7 +148,7 @@ test("packed install runs independently and ships only the public runtime", () =
       if (contract.parseWorkNote('not-json').ok !== false || validateWorkEvent({}).ok !== false) process.exit(2);
       const view = replay.replayWorkEvents({events:[]});
       if (view.observation.coverage !== 'unavailable' || view.work.length !== 0) process.exit(3);
-      for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener']) await import('@fulcra/coord-v5/' + module);
+      for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener','work-view']) await import('@fulcra/coord-v5/' + module);
       console.log('independent-runtime-ok');
     `,
       ],
