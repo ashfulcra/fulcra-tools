@@ -9,7 +9,7 @@ coord-fold, team authority, and schedules remain unchanged.
 | Standalone package | Verified | 331 unit tests and two packed-install tests pass on Node 22.16 and 26.5; zero runtime dependencies. |
 | Usable bus operations | Verified for core alpha | Explicit owned enrollment; installed publication/readback, authorized views/digests and checkpoint commands. |
 | Two-agent acceptance | Passed for bounded slice | Real question/answer exchange through annotations, separate caches, restart retention and local checkpoint validation. [Evidence and limits](V5-ACCEPTANCE.md). |
-| Upstream delivery | Pending | Reviewed feature PR, verified install instructions, public-safe fixtures, exact release artifact. |
+| Upstream delivery | PR open; CI/review pending | [PR #762](https://github.com/ashfulcra/fulcra-tools/pull/762), verified install instructions, public-safe fixtures and exact release artifact. Not merged. |
 | Fleet adoption | Not enabled | Explicit team enrollment and verified host-by-host adoption; never inferred from a passing local test. |
 
 ## Implemented core being packaged
