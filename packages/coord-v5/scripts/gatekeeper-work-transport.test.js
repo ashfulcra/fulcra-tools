@@ -68,7 +68,8 @@ const mockSource = `
     const key = address.includes('/info') ? 'info' : address.includes('/catalog') ? 'catalog' : address.includes('/annotation?') ? 'annotation' : init.method === 'POST' ? 'post' : 'records';
     appendFileSync(process.env.MOCK_LOG, JSON.stringify({ key, method: init.method, url: address, body: init.body ?? null }) + '\\n');
     const value = Object.hasOwn(values, key) ? values[key] : key === 'info' ? { userid: '${principalId}' } : key === 'catalog' ? [{ id: '${config.channel}', api_version: 'v1alpha1', recordable: true, queryable: true, record_spec: { type: 'event' }, fulcra_userid: '${principalId}' }] : key === 'annotation' ? [${JSON.stringify(metadata)}] : key === 'post' ? { upload_id: 'pending-1' } : [];
-    return new Response(JSON.stringify(value), { status: key === 'post' ? 201 : 200, headers: { 'content-type': 'application/json' } });
+    const status = values[key + 'Status'] ?? (key === 'post' ? 201 : 200);
+    return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
   };
   process.argv = [process.execPath, process.env.WORK_SCRIPT, ...JSON.parse(process.env.WORK_ARGS)];
   await import(pathToFileURL(process.env.WORK_SCRIPT).href);
@@ -112,6 +113,24 @@ afterEach(() => {
 });
 
 describe('opt-in synthetic work transport CLI in fresh processes', () => {
+  it('exits nonzero for unavailable reads while retaining cached work', () => {
+    const p = fixturePaths();
+    const readArgs = [
+      'read', '--config', p.configPath, '--db', p.dbPath,
+      '--start', '2026-09-26T00:00:00Z', '--end', '2026-09-27T00:00:00Z'
+    ];
+    const success = run(p, readArgs, 'fixture', { records: [row(1)] });
+    expect(success.status).toBe(0);
+    expect(success.output).toMatchObject({ status: 'stored', coverage: 'partial' });
+
+    const failed = run(p, readArgs, 'fixture', { records: [], recordsStatus: 401 });
+    expect(failed.output).toMatchObject({ status: 'stored', coverage: 'unavailable' });
+    expect(failed.status).not.toBe(0);
+
+    const inspect = run(p, ['inspect', '--config', p.configPath, '--db', p.dbPath]);
+    expect(inspect.output).toMatchObject({ status: 'ready', record_count: 1 });
+  });
+
   it('rejects unknown flags, relative files, oversized files and overlong stdin with safe codes', () => {
     const p = fixturePaths();
     expect(

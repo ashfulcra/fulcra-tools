@@ -68,7 +68,9 @@ grant nothing. Configuration is not an authorization grant.
 Publishing journals a POST intent before I/O. Acceptance is pending, not verified:
 reconcile through a later source-valid read. Never invent replacement IDs or retry
 an ambiguous POST. Reads are bounded/partial; failed/empty reads never clear retained
-work. `transport replay` deliberately withholds grants.
+work. An unavailable read exits nonzero even though its failed observation is journaled;
+clean partial reads remain usable and exit zero. `transport replay` deliberately
+withholds grants.
 
 ## Retained views and workflow
 

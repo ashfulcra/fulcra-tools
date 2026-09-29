@@ -221,7 +221,9 @@ try {
   if (
     result.status === 'blocked' ||
     result.status === 'unavailable' ||
-    result.status === 'blocked_limit'
+    result.status === 'blocked_limit' ||
+    result.coverage === 'unavailable' ||
+    (result.coverage === 'partial' && result.errors?.length > 0)
   )
     process.exitCode = 2;
 } catch (error) {
