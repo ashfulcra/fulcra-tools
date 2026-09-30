@@ -29,7 +29,9 @@ coord-v5 work view --config ABS --db ABS --policy ABS
 coord-v5 work digest --config ABS --db ABS --policy ABS --viewer ID --role ROLE --query QUERY
 coord-v5 event validate < event.json
 coord-v5 checkpoint validate < checkpoint.json
+coord-v5 checkpoint prepare < checkpoint.json
 coord-v5 checkpoint package < package-input.json
+coord-v5 checkpoint verify --artifact ABS --publication ABS
 coord-v5 handoff readiness < readiness-input.json
 coord-v5 handoff verification import --config ABS --db ABS --receipt ABS
 coord-v5 enrollment plan < assessment.json
@@ -191,7 +193,7 @@ events,trust,observation,asOf}` from `buildHandoffPackage`; returns `{ok,package
 - `handoff readiness`: `{package,projection,receiver,checks,asOf}` from
   `assessHandoffReadiness`; returns ready/unknown/blocked.
 
-These check serialized caller evidence, not network, artifact bytes or access
+These stdin commands check serialized caller evidence, not network, artifact bytes or access
 independently. Readiness requires separately verified publication/resource receipts
 and external-operation checks bound to recipient/package digest with validity times.
 Missing checks never become success. Invalid input, refused validation and
@@ -217,6 +219,20 @@ prepared body_digest against publication.body_digest. Both checks are required;
 matching bytes alone is not canonical body integrity, and matching normalized
 content alone is not proof of exact artifact bytes. Preparing JSON does not upload,
 publish, grant access, or independently verify a remote artifact.
+
+For a locally obtained artifact and its `checkpoint.published` event, run
+`coord-v5 checkpoint verify --artifact /private/path/checkpoint.json --publication
+/private/path/publication.json`. Both paths must be absolute, regular, nonsymlink
+files with mode `0600` inside a `0700` directory. Artifact bytes are capped at
+256 KiB and publication JSON at 64 KiB; validated checkpoint content retains the
+128 KiB canonical limit. The command hashes the exact artifact bytes before
+strict UTF-8/JSON decoding, then checks normalized content digest, scope,
+checkpoint/work/assignment bindings, and full actor identity. A successful
+`{ok:true,checkpoint,verification}` records local byte/content measurements only:
+it does not authenticate remote retrieval, access, a native wake, or source
+completeness. Rejections return stable codes without echoing paths or content and
+exit nonzero. The library exposes `verifyCheckpointArtifact(bytes,
+publicationEvent)` for the same bounded check.
 
 When raw and canonical hashes differ, handoff verification receipts must include
 `checks.publication.artifact_sha256` matching the publication's raw artifact hash,

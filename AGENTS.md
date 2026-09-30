@@ -1425,7 +1425,12 @@ but exits nonzero when the current read is unavailable; clean partial reads rema
 nonfatal and never imply absence.
 Use `checkpoint prepare` to obtain normalized checkpoint content and its canonical
 digest before publication; raw artifact integrity and canonical body integrity
-are separate checks. Native action generation is not evidence of a delivered wake.
+are separate checks. A receiver can run `coord-v5 checkpoint verify --artifact ABS
+--publication ABS` on private local files to measure exact raw SHA256, normalized
+body digest, and scope/identity bindings; this is not remote retrieval, access,
+native-wake, or source-completeness proof. Artifact bytes are capped at 256 KiB,
+publication JSON at 64 KiB, and validated checkpoint content at 128 KiB.
+Native action generation is not evidence of a delivered wake.
 `coord-v5 handoff verification import --config ABS --db ABS --receipt ABS`
 retains a private, scope-bound operator attestation through restart. The receipt
 envelope is `{schema:"handoff-verification/1",principal_id,workspace_id,

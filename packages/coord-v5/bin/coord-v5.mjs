@@ -19,6 +19,7 @@ Usage: coord-v5 transport <read|publish|inspect|replay> [flags]
        coord-v5 work digest --config ABS --db ABS --policy ABS --viewer ID --role ROLE --query QUERY
        coord-v5 event validate < event.json
        coord-v5 checkpoint <validate|prepare|package> < input.json
+       coord-v5 checkpoint verify --artifact ABS --publication ABS
        coord-v5 handoff readiness < input.json
        coord-v5 handoff verification import --config ABS --db ABS --receipt ABS
        coord-v5 enrollment <plan|instructions> < input.json

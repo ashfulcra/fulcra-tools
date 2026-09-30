@@ -1,16 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { workContentDigest } from "../src/lib/gatekeeper/work-contract.js";
 
 // Catches omitted runtime files/exports, prototype-only imports, a broken installed
 // bin, and accidental shipping of private/app content. No registry is contacted.
@@ -62,6 +66,56 @@ test("packed install runs independently and ships only the public runtime", () =
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /coord-v5/);
     assert.match(help.stdout, /explicit enrollment/i);
+    assert.match(help.stdout, /checkpoint verify --artifact ABS --publication ABS/);
+    const checkpoint = JSON.parse(readFileSync(resolve(import.meta.dirname, "../tests/fixtures/work-handoff-synthetic.json"), "utf8"));
+    const backlog = JSON.parse(readFileSync(resolve(import.meta.dirname, "../tests/fixtures/work-backlog-synthetic.json"), "utf8"));
+    const baseEvent = backlog.events[0];
+    const artifactBytes = Buffer.from(JSON.stringify(checkpoint));
+    const artifactPath = join(directory, "checkpoint.json");
+    const publicationPath = join(directory, "publication.json");
+    const digest = createHash("sha256").update(artifactBytes).digest("hex");
+    const publication = {
+      ...baseEvent,
+      event_id: "20000000-0000-4000-8000-000000000001",
+      operation_id: "20000000-0000-4000-8000-000000000002",
+      kind: "checkpoint.published",
+      subject: {type:"checkpoint", id:checkpoint.checkpoint_id},
+      parents: [checkpoint.assignment_event_id],
+      payload: {
+        work_id: checkpoint.work_id,
+        checkpoint_id: checkpoint.checkpoint_id,
+        artifact: {id:checkpoint.checkpoint_id, uri:"https://example.invalid/checkpoint.json", sha256:digest, version:null, media_type:"application/json", owner_principal_id:checkpoint.identity.principal_id, audience:"workspace", portable:true},
+        body_digest:workContentDigest(checkpoint),
+        assignment_version:checkpoint.assignment_version,
+        assignment_event_id:checkpoint.assignment_event_id,
+      },
+    };
+    writeFileSync(artifactPath, artifactBytes, {mode:0o600});
+    writeFileSync(publicationPath, JSON.stringify(publication), {mode:0o600});
+    const verify = (artifact = artifactPath, pub = publicationPath) => spawnSync(executable, ["checkpoint", "verify", "--artifact", artifact, "--publication", pub], {cwd:directory, encoding:"utf8"});
+    const good = verify();
+    assert.equal(good.status, 0, good.stdout);
+    assert.equal(JSON.parse(good.stdout).verification.artifact_sha256, digest);
+    writeFileSync(artifactPath, Buffer.concat([artifactBytes, Buffer.from("\n")]), {mode:0o600});
+    const badDigest = verify();
+    assert.equal(badDigest.status, 2);
+    assert.deepEqual(JSON.parse(badDigest.stdout), {ok:false, errors:["ARTIFACT_DIGEST_MISMATCH"]});
+    writeFileSync(artifactPath, artifactBytes, {mode:0o600});
+    chmodSync(artifactPath, 0o644);
+    assert.equal(JSON.parse(verify().stdout).error.code, "UNSAFE_FILE");
+    chmodSync(artifactPath, 0o600);
+    symlinkSync(artifactPath, join(directory, "linked.json"));
+    assert.equal(JSON.parse(verify(join(directory, "linked.json")).stdout).error.code, "UNSAFE_FILE");
+    assert.equal(JSON.parse(verify(join(directory, "missing.json")).stdout).error.code, "UNSAFE_FILE");
+    chmodSync(publicationPath, 0o644);
+    assert.equal(JSON.parse(verify().stdout).error.code, "UNSAFE_FILE");
+    chmodSync(publicationPath, 0o600);
+    writeFileSync(publicationPath, Buffer.alloc(64 * 1024 + 1), {mode:0o600});
+    assert.equal(JSON.parse(verify().stdout).error.code, "FILE_LIMIT");
+    writeFileSync(publicationPath, JSON.stringify(publication), {mode:0o600});
+    writeFileSync(artifactPath, Buffer.alloc(256 * 1024 + 1), {mode:0o600});
+    assert.equal(JSON.parse(verify().stdout).error.code, "FILE_LIMIT");
+    assert.doesNotMatch(verify().stdout, /checkpoint\.json|example\.invalid/);
     const unknown = spawnSync(executable, ["not-a-command"], {
       cwd: directory,
       encoding: "utf8",
