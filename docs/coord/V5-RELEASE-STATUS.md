@@ -1,15 +1,15 @@
 # Coord v5 release status
 
-The v5 core is **packaged and tested, not merged or fleet-adopted**. This branch
-delivers the coordination core independently of the web application. Existing coord-engine,
+The v5 core is an **opt-in alpha foundation, not a completed fleet replacement**.
+It delivers the coordination core independently of the web application. Existing coord-engine,
 coord-fold, team authority, and schedules remain unchanged.
 
 | Release gate | Status | Completion evidence required |
 |---|---|---|
-| Standalone package | Alpha.3 fixes; external retest pending | Presence, roles and enrollment included; source-health recovery and checkpoint preparation added. Zero runtime dependencies. |
+| Standalone package | Alpha.3 targeted retests passed | 374 unit and four packed-install tests; independent targeted recovery/integrity results in the acceptance ledger. Zero runtime dependencies. |
 | Usable bus operations | Verified for core alpha | Explicit owned enrollment; installed publication/readback, authorized views/digests and checkpoint commands. |
 | Two-agent acceptance | Passed for bounded slice | Real question/answer exchange through annotations, separate caches, restart retention and local checkpoint validation. [Evidence and limits](V5-ACCEPTANCE.md). |
-| Upstream delivery | PR open; CI/review pending | [PR #762](https://github.com/ashfulcra/fulcra-tools/pull/762), verified install instructions, public-safe fixtures and exact release artifact. Not merged. |
+| Upstream delivery | See live PR state | [PR #762](https://github.com/ashfulcra/fulcra-tools/pull/762) delivers the foundation; merge is not registry publication or fleet adoption. Build/install from source using the package README. |
 | Fleet adoption | Not enabled | Explicit team enrollment and verified host-by-host adoption; never inferred from a passing local test. |
 | Presence and roles | Implemented and live-tested | Separate presence clocks, causal claims, retained checkpoint lineage; independent successor test. |
 | Native listener enrollment | Implemented; Codex idle wake tested | Evidence-based planner and native recipe; trial paused after successful wake. |
@@ -61,3 +61,11 @@ The release test must distinguish real annotation exchange and native session
 execution from fixture-backed handoff/access checks. Existing v4 commands remain
 the team's operational entry point until an explicit, tested enrollment switches
 a workstream. No pre-v4 history is imported.
+
+## Next delivery: handoff readiness
+
+Prove source completeness and accepted successor ownership before declaring a
+handoff ready. Do not relax partial-history refusal or invent completeness receipts.
+Then validate native successor lifecycle and recovery through supported harness
+mechanisms. Track these as follow-up changes rather than implying that merging
+the alpha foundation completes the rebuild.

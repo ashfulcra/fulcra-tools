@@ -1,5 +1,31 @@
 # Coord v5 alpha acceptance
 
+## Alpha.3 targeted acceptance — 2026-09-30
+
+Runtime acceptance pin: `e3985e2bb18f5148088adc001d7b77c32bf15aef`.
+Fresh local verification passed 374 unit tests across 20 suites and four
+packed-install tests. Package CI passed on Node 22.16.0 and 26.5.0.
+
+An independent Linux Claude Code cloud tester reports passing the targeted
+failed-read/recovery and fresh remote-checkpoint tests against this pin.
+Equivalent JSON with different raw bytes passed both raw-artifact and
+canonical-body checks. Changed checkpoint content with an accurate raw hash
+was rejected by the canonical-body check. These are tester-reported results,
+not a claim that the maintainer reran the remote sessions.
+
+The maintainer separately exercised live annotation read, listener-generated
+action, actual Codex Desktop receiver acknowledgment, and journal reopen without
+duplicate delivery. This bounded existing-session test is not new-session
+creation, restart/outage recovery, or sustained-operation acceptance.
+
+Native scheduled reporting-channel reads have also been observed on Codex and
+reported by the cloud tester. Reporting-channel polling does not implement the
+package's missing Claude dispatcher. Full handoff readiness remains unproven:
+bounded transport reads provide no source-completeness attestation, and accepted
+successor ownership must be demonstrated separately. No fleet cutover or
+cross-account acceptance is claimed. Earlier sections below are historical;
+their pending targeted retests are superseded by this section.
+
 ## Independent multi-harness report — 2026-09-28
 
 The harness tester reports 18 bounded real reasoning sessions against commit
