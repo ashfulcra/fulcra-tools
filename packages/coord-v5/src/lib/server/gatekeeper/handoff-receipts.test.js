@@ -335,6 +335,8 @@ it('keeps an expired ready proof that is a causal parent of later accepted readi
   const laterReceipt = structuredClone(receipt);
   laterReceipt.verification.ready_event_id = laterReady.event_id;
   laterReceipt.verification.ready_event_digest = workContentDigest(laterReady);
+  const laterUntil = '2026-09-27T14:00:00.000Z';
+  laterReceipt.verification.checks.valid_until = laterUntil;
   const accepted = event(8, 'assignment.accepted', {
     work_id: offer.payload.work_id, offer_event_id: offer.event_id,
     expected_assignment_event_id: offer.payload.expected_assignment_event_id,
@@ -345,13 +347,22 @@ it('keeps an expired ready proof that is a causal parent of later accepted readi
   const importAt = Date.parse(time) + 1000;
   expect(store.importHandoffVerification(receipt, { now: importAt })).toEqual({ status: 'stored' });
   expect(store.importHandoffVerification(laterReceipt, { now: importAt })).toEqual({ status: 'stored' });
-  expect(buildAuthorizedWorkView({ store, policy, now: () => importAt }).projection.work
-    .find((row) => row.work_id === offer.payload.work_id).assignment.version).toBe(2);
-  const after = buildAuthorizedWorkView({ store, policy, now: () => Date.parse(until) + 1000 });
-  expect(after.status).toBe('ready');
-  expect(after.projection.handoffs[0].accepted_event.event_id).toBe(accepted.event_id);
-  expect(after.projection.work.find((row) => row.work_id === offer.payload.work_id).assignment)
-    .toMatchObject({ version: 2, owner_id: receiver.logical_agent_id, accepted_actor: receiver });
+  for (const [at, expectedState] of [
+    [importAt, 'valid'],
+    [Date.parse(until) + 1000, 'valid'],
+    [Date.parse(laterUntil) + 1000, 'expired']
+  ]) {
+    const view = buildAuthorizedWorkView({ store, policy, now: () => at });
+    expect(view.status).toBe('ready');
+    const handoff = view.projection.handoffs[0];
+    expect(handoff.state).toBe('accepted');
+    expect(handoff.accepted_event.event_id).toBe(accepted.event_id);
+    expect(handoff.verification).toEqual({
+      state: expectedState, valid_until: laterUntil, ready_event_id: laterReady.event_id
+    });
+    expect(view.projection.work.find((row) => row.work_id === offer.payload.work_id).assignment)
+      .toMatchObject({ version: 2, owner_id: receiver.logical_agent_id, accepted_actor: receiver });
+  }
 });
 
 it('accepts identical authenticated source copies of each referenced event before import and after reopen', async () => {

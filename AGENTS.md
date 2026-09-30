@@ -1445,6 +1445,18 @@ count once for receipt bindings; differing event content under one ID fails
 closed. Import does not independently verify remote artifact bytes,
 remote permissions, native wakes, or source completeness; do not describe it as
 a verifier adapter or use partial coverage to claim all-clear or takeover.
+**Current proof validity is its own fact, never merged into handoff `state`.** Every
+handoff row carries `verification: {state:"valid"|"expired"|"absent"|"unknown",valid_until,
+ready_event_id}`. An accepted row binds this fact to the exact ready event named
+by its accepted event, which may differ from the first retained ready displayed
+on the row. Causal acceptance and proof validity are orthogonal: a clock must
+never un-accept a causal event, so an accepted handoff whose checks lapsed keeps
+`state:"accepted"`, unchanged ownership and no recheck diagnostic, while
+reporting `verification.state:"expired"`. Pure replay defaults the verification
+clock to `asOf`; an explicitly malformed `verificationAsOf` yields `unknown`
+while preserving causal state and ownership. Replay returns early without an
+`asOf`, so no row claims validity without a causal clock. `absent` means no
+retained receipt resolved and only occurs before readiness.
 
 `2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
 that agrees with the body, deterministic identity precedence, and distinct

@@ -646,12 +646,17 @@ function transitionError(e, facts, trust) {
 }
 
 /** Pure rebuild of caller-supplied accumulated history. No trust discovery, persistence, or network.
- * @param {{events?:unknown,trust?:unknown,observation?:unknown,asOf?:unknown}} input
+ * @param {{events?:unknown,trust?:unknown,observation?:unknown,asOf?:unknown,verificationAsOf?:unknown}} input
  * @returns {WorkProjection} */
 export function replayWorkEvents(input = {}) {
   const trustCandidate = jsonCopy(input.trust);
   const trust = validTrust(trustCandidate) ? /** @type {WorkTrust} */ (trustCandidate) : null;
   const asOf = instant(input.asOf) ? utc(/** @type {string} */ (input.asOf)) : null;
+  const hasVerificationAsOf = Object.hasOwn(input, 'verificationAsOf');
+  const validVerificationAsOf = !hasVerificationAsOf || instant(input.verificationAsOf);
+  const verificationAsOf = hasVerificationAsOf && validVerificationAsOf
+    ? utc(/** @type {string} */ (input.verificationAsOf))
+    : asOf;
   const suppliedObservation = jsonCopy(input.observation);
   /** @type {WorkObservation} */
   const observation = validObservation(suppliedObservation)
@@ -1029,13 +1034,30 @@ export function replayWorkEvents(input = {}) {
           .map((e) => e.event_id)
       )
     ].sort();
+    const verificationReady =
+      (accepted &&
+        valid.find(
+          (e) => e.kind === 'handoff.ready' && e.event_id === accepted.payload.ready_event_id
+        )) || ready;
     const proof =
-      ready &&
+      verificationReady &&
       (trust?.handoff_verifications ?? []).find(
         (v) =>
-          v.ready_event_id === ready.event_id && v.ready_event_digest === workContentDigest(ready)
+          v.ready_event_id === verificationReady.event_id &&
+          v.ready_event_digest === workContentDigest(verificationReady)
       );
     const expired = !!(proof && asOf && compareInstants(asOf, proof.checks.valid_until) >= 0);
+    const verificationExpired = !!(
+      proof && validVerificationAsOf && verificationAsOf &&
+      compareInstants(verificationAsOf, proof.checks.valid_until) >= 0
+    );
+    // Current proof validity is orthogonal to causal acceptance.
+    const verification = {
+      state: !validVerificationAsOf ? 'unknown' : !proof ? 'absent' :
+        verificationExpired ? 'expired' : 'valid',
+      valid_until: proof ? proof.checks.valid_until : null,
+      ready_event_id: verificationReady ? verificationReady.event_id : null
+    };
     const state = branch_event_ids.length
       ? 'conflicted'
       : accepted
@@ -1058,6 +1080,7 @@ export function replayWorkEvents(input = {}) {
       history: history(events),
       branch_event_ids,
       state,
+      verification,
       provisional: false
     });
   }

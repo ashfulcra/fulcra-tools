@@ -161,7 +161,8 @@ export function buildAuthorizedWorkView({
       handoff_verifications: verifications
     },
     observation: accumulated.observation,
-    asOf: observedAt
+    asOf: observedAt,
+    verificationAsOf: new Date(clock).toISOString()
   });
   let projection = replay(receipts.verifications);
   if (inactive.size) {

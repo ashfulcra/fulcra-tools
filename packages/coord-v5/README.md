@@ -102,6 +102,19 @@ referenced event; differing content under the same event ID still fails closed.
 With multiple valid ready events for an offer, expired proofs survive only when
 required by a replay-accepted transfer's causal history. Unrelated expired
 pending readiness remains inactive.
+Every handoff row additionally carries `verification`, the current validity of the
+proof behind that handoff, reported separately from `state`:
+`{state:"valid"|"expired"|"absent"|"unknown",valid_until,ready_event_id}`. For accepted
+handoffs, this is the proof named by the accepted event's `ready_event_id`, even
+when an earlier retained ready event is displayed on the row. Causal acceptance
+and current proof validity are orthogonal: a lapsed proof leaves an accepted
+handoff and its ownership unchanged, but reports `verification.state:"expired"`
+so consumers can re-verify before acting. `absent` means no retained receipt
+resolved for the row and only occurs before readiness. Pure replay defaults the
+verification clock to `asOf`; an explicitly supplied malformed
+`verificationAsOf` reports `unknown` without changing causal state or ownership.
+Replay returns early without an `asOf`, so no row claims validity with no causal
+clock.
 Authorized views consume retained proofs automatically; expired checks cannot
 make a pending handoff currently ready, but a valid historical acceptance keeps
 its ownership after expiry. This command trusts the local operator's assertion:
