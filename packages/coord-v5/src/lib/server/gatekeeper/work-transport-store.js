@@ -46,7 +46,12 @@ function verifyReceipt(receipt, config, accumulated) {
     v.checks.package_digest !== v.package_digest ||
     pkg.publication_event_id !== v.checks.publication.event_id
   ) return false;
-  const matches = (id) => accumulated.events.filter((event) => event.event_id === id);
+  // Multiple authenticated source records may carry the same canonical event.
+  // Distinct content for one ID remains ambiguous and must fail closed.
+  const matches = (id) => [...new Map(
+    accumulated.events.filter((event) => event.event_id === id)
+      .map((event) => [canonicalWorkJson(event), event])
+  ).values()];
   const ready = matches(v.ready_event_id);
   const offer = matches(v.offer_event_id);
   const publication = matches(v.checks.publication.event_id);

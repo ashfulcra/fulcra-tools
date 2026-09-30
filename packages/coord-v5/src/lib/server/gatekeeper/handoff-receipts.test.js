@@ -302,6 +302,108 @@ it('keeps replay-accepted ownership after the receipt expires', async () => {
     .toEqual(receiver);
 });
 
+it('keeps the later accepted ready proof after expiry while the unrelated earlier ready expires', async () => {
+  const store = open(path()), { events, receipt, offer, ready } = fixture();
+  const laterReady = event(7, 'handoff.ready', structuredClone(ready.payload), [offer], receiver);
+  const laterReceipt = structuredClone(receipt);
+  laterReceipt.verification.ready_event_id = laterReady.event_id;
+  laterReceipt.verification.ready_event_digest = workContentDigest(laterReady);
+  const accepted = event(8, 'assignment.accepted', {
+    work_id: offer.payload.work_id, offer_event_id: offer.event_id,
+    expected_assignment_event_id: offer.payload.expected_assignment_event_id,
+    expected_version: offer.payload.expected_version, ready_event_id: laterReady.event_id
+  }, [offer, laterReady, events.find((item) => item.event_id === offer.payload.expected_assignment_event_id)], receiver);
+  accepted.subject = { type: 'work', id: offer.payload.work_id };
+  await append(store, [...events, laterReady, accepted]);
+  const importAt = Date.parse(time) + 1000;
+  expect(store.importHandoffVerification(receipt, { now: importAt })).toEqual({ status: 'stored' });
+  expect(store.importHandoffVerification(laterReceipt, { now: importAt })).toEqual({ status: 'stored' });
+  const before = buildAuthorizedWorkView({ store, policy, now: () => importAt });
+  expect(before.projection.handoffs[0].ready_event.event_id).toBe(ready.event_id);
+  expect(before.projection.work.find((row) => row.work_id === offer.payload.work_id).assignment.version).toBe(2);
+  const after = buildAuthorizedWorkView({ store, policy, now: () => Date.parse(until) + 1000 });
+  expect(after.status).toBe('ready');
+  expect(after.projection.handoffs[0].accepted_event.event_id).toBe(accepted.event_id);
+  expect(after.projection.handoffs[0].ready_event.event_id).toBe(laterReady.event_id);
+  expect(after.projection.work.find((row) => row.work_id === offer.payload.work_id).assignment)
+    .toMatchObject({ version: 2, owner_id: receiver.logical_agent_id, accepted_actor: receiver });
+});
+
+it('keeps an expired ready proof that is a causal parent of later accepted readiness', async () => {
+  const store = open(path()), { events, receipt, offer, ready } = fixture();
+  const laterReady = event(7, 'handoff.ready', structuredClone(ready.payload), [offer, ready], receiver);
+  const laterReceipt = structuredClone(receipt);
+  laterReceipt.verification.ready_event_id = laterReady.event_id;
+  laterReceipt.verification.ready_event_digest = workContentDigest(laterReady);
+  const accepted = event(8, 'assignment.accepted', {
+    work_id: offer.payload.work_id, offer_event_id: offer.event_id,
+    expected_assignment_event_id: offer.payload.expected_assignment_event_id,
+    expected_version: offer.payload.expected_version, ready_event_id: laterReady.event_id
+  }, [offer, laterReady, events.find((item) => item.event_id === offer.payload.expected_assignment_event_id)], receiver);
+  accepted.subject = { type: 'work', id: offer.payload.work_id };
+  await append(store, [...events, laterReady, accepted]);
+  const importAt = Date.parse(time) + 1000;
+  expect(store.importHandoffVerification(receipt, { now: importAt })).toEqual({ status: 'stored' });
+  expect(store.importHandoffVerification(laterReceipt, { now: importAt })).toEqual({ status: 'stored' });
+  expect(buildAuthorizedWorkView({ store, policy, now: () => importAt }).projection.work
+    .find((row) => row.work_id === offer.payload.work_id).assignment.version).toBe(2);
+  const after = buildAuthorizedWorkView({ store, policy, now: () => Date.parse(until) + 1000 });
+  expect(after.status).toBe('ready');
+  expect(after.projection.handoffs[0].accepted_event.event_id).toBe(accepted.event_id);
+  expect(after.projection.work.find((row) => row.work_id === offer.payload.work_id).assignment)
+    .toMatchObject({ version: 2, owner_id: receiver.logical_agent_id, accepted_actor: receiver });
+});
+
+it('accepts identical authenticated source copies of each referenced event before import and after reopen', async () => {
+  const { events, receipt, ready, offer, publication } = fixture();
+  for (const referenced of [ready, offer, publication]) {
+    const dbPath = path(), store = open(dbPath);
+    await append(store, [...events, structuredClone(referenced)]);
+    expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }), referenced.kind)
+      .toEqual({ status: 'stored' });
+    store.close(); handles.splice(handles.indexOf(store), 1);
+    const reopened = open(dbPath);
+    expect(reopened.handoffVerifications({ now: Date.parse(time) + 2000 }).status).toBe('ready');
+    const beforeView = buildAuthorizedWorkView({ store: reopened, policy, now: () => Date.parse(time) + 2000 });
+    expect(beforeView.status).toBe('ready');
+    expect(beforeView.projection.handoffs[0].ready_event.event_id).toBe(ready.event_id);
+    const dbPathLater = path(), later = open(dbPathLater);
+    await append(later, events);
+    expect(later.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 })).toEqual({ status: 'stored' });
+    await append(later, [...events, structuredClone(referenced)]);
+    later.close(); handles.splice(handles.indexOf(later), 1);
+    const reopenedLater = open(dbPathLater);
+    expect(reopenedLater.handoffVerifications({ now: Date.parse(time) + 2000 }).status, referenced.kind)
+      .toBe('ready');
+    const afterView = buildAuthorizedWorkView({ store: reopenedLater, policy, now: () => Date.parse(time) + 2000 });
+    expect(afterView.status).toBe('ready');
+    expect(afterView.projection.handoffs[0].ready_event.event_id).toBe(ready.event_id);
+  }
+});
+
+it('fails closed when a referenced ID has a differing authenticated source variant', async () => {
+  const { events, receipt, ready, offer, publication } = fixture();
+  const variants = [
+    [ready, (e) => { e.payload.verification_receipt_id = 'different'; }],
+    [offer, (e) => { e.payload.work_id = id(998); }],
+    [publication, (e) => { e.payload.artifact.uri = 'https://example.invalid/different'; }]
+  ];
+  for (const [referenced, change] of variants) {
+    const changed = structuredClone(referenced); change(changed);
+    const store = open(path());
+    await append(store, [...events, changed]);
+    expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }), referenced.kind)
+      .toEqual({ status: 'blocked', code: 'INVALID_VERIFICATION' });
+    const afterImport = open(path());
+    await append(afterImport, events);
+    expect(afterImport.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }))
+      .toEqual({ status: 'stored' });
+    await append(afterImport, [...events, changed]);
+    expect(afterImport.handoffVerifications({ now: Date.parse(time) + 2000 }))
+      .toMatchObject({ status: 'unavailable', code: 'STORE_CORRUPT' });
+  }
+});
+
 it('requires referenced retained events, rejects expired and malformed receipts, and makes tampering unavailable', async () => {
   const dbPath = path(), store = open(dbPath), { events, receipt } = fixture();
   expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }))

@@ -1434,7 +1434,10 @@ digest and exact access-requirement set, and referenced ready/offer/publication
 events must already be in the authenticated local journal. Views consume valid
 retained checks automatically, fail unavailable on tampering, and refuse expired
 pending readiness. A historically accepted owner is not revoked merely because
-checks expire later. Import does not independently verify remote artifact bytes,
+checks expire later: with multiple ready events, preserve only proofs in the
+replay-accepted transfer's causal history. Identical authenticated source copies
+count once for receipt bindings; differing event content under one ID fails
+closed. Import does not independently verify remote artifact bytes,
 remote permissions, native wakes, or source completeness; do not describe it as
 a verifier adapter or use partial coverage to claim all-clear or takeover.
 

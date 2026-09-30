@@ -95,6 +95,11 @@ requires matching authenticated retained ready, offer, and checkpoint-publicatio
 events, exact receiver/publication bindings, and a verified check for every package
 access requirement. Identical imports return `same`; conflicts, stale checks and
 invalid input are blocked. A damaged stored receipt makes the view unavailable.
+Identical event content in multiple authenticated source records counts as one
+referenced event; differing content under the same event ID still fails closed.
+With multiple valid ready events for an offer, expired proofs survive only when
+required by a replay-accepted transfer's causal history. Unrelated expired
+pending readiness remains inactive.
 Authorized views consume retained proofs automatically; expired checks cannot
 make a pending handoff currently ready, but a valid historical acceptance keeps
 its ownership after expiry. This command trusts the local operator's assertion:

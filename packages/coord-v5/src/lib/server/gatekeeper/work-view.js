@@ -165,9 +165,24 @@ export function buildAuthorizedWorkView({
   });
   let projection = replay(receipts.verifications);
   if (inactive.size) {
-    const historicallyAccepted = new Set(projection.handoffs
-      .filter((handoff) => handoff.accepted_event)
-      .map((handoff) => handoff.ready_event?.event_id));
+    // The displayed ready_event is only the first retained ready for a handoff.
+    // Preserve proofs in each replay-accepted transfer's actual causal ancestry.
+    const byId = new Map(accumulated.events.map((event) => [event.event_id, event]));
+    const historicallyAccepted = new Set();
+    const visited = new Set();
+    const visit = (eventId) => {
+      if (visited.has(eventId)) return;
+      visited.add(eventId);
+      const event = byId.get(eventId);
+      if (!event) return;
+      if (event.kind === 'handoff.ready') historicallyAccepted.add(eventId);
+      for (const parentId of event.parents) visit(parentId);
+    };
+    for (const handoff of projection.handoffs) {
+      if (!handoff.accepted_event) continue;
+      visit(handoff.accepted_event.event_id);
+      historicallyAccepted.add(handoff.accepted_event.payload.ready_event_id);
+    }
     const current = receipts.verifications.filter(
       (verification) => !inactive.has(verification.ready_event_id) ||
         historicallyAccepted.has(verification.ready_event_id)
