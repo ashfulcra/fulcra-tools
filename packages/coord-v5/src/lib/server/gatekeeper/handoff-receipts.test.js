@@ -7,6 +7,7 @@ import backlog from '../../../../tests/fixtures/work-backlog-synthetic.json';
 import checkpoint from '../../../../tests/fixtures/work-handoff-synthetic.json';
 import { buildHandoffPackage } from '../../gatekeeper/checkpoint.js';
 import { serializeWorkEvent, workContentDigest } from '../../gatekeeper/work-contract.js';
+import { assessHandoffReadiness } from '../../gatekeeper/handoff.js';
 import { readWorkWindow } from './work-transport-read.js';
 import { openWorkTransportStore } from './work-transport-store.js';
 import { buildAuthorizedWorkView } from './work-view.js';
@@ -145,6 +146,17 @@ async function append(store, events) {
     now: () => Date.parse(time) });
   expect(store.appendWindow(read).status).toBe('stored');
 }
+function expectPredecessorOwnership(store, workId, now) {
+  const view = buildAuthorizedWorkView({ store, policy, now: () => now });
+  expect(view.status).toBe('ready');
+  const row = view.projection.work.find((candidate) => candidate.work_id === workId);
+  expect(row.assignment).toMatchObject({
+    version: 1, owner_id: sender.logical_agent_id, accepted_actor: sender, state: 'accepted'
+  });
+  expect(row.assignment.accepted_actor).not.toEqual(receiver);
+  expect(view.projection.handoffs.every((handoff) => handoff.accepted_event === null)).toBe(true);
+  return view;
+}
 afterEach(() => {
   for (const handle of handles.splice(0)) handle.close();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -164,6 +176,16 @@ it('retains a valid scoped receipt across reopen without upgrading partial cover
   expect(view.projection.observation.coverage).toBe('partial');
   expect(view.projection.handoffs[0].ready_event.event_id).toBe(ready.event_id);
   expect(view.projection.handoffs[0].state).toBe('ready');
+  const row = view.projection.work.find((candidate) => candidate.work_id === receipt.package.work_id);
+  expect(row.provisional).toBe(true);
+  expect(view.projection.handoffs[0].provisional).toBe(true);
+  expectPredecessorOwnership(reopened, receipt.package.work_id, Date.parse(time) + 2000);
+  const assessment = assessHandoffReadiness({
+    package: receipt.package, projection: view.projection, receiver,
+    checks: receipt.verification.checks, asOf: view.projection.as_of
+  });
+  expect(assessment.status).toBe('blocked');
+  expect(assessment.errors).toContain('PROJECTION_INCOMPLETE');
 });
 
 it('rejects duplicate conflicts and every scope, binding, and resource mismatch without changing saved proof', async () => {
@@ -178,17 +200,22 @@ it('rejects duplicate conflicts and every scope, binding, and resource mismatch 
     status: 'blocked', code: 'VERIFICATION_CONFLICT'
   });
   const bad = [
-    ['scope', (r) => { r.workspace_id = id(700); }],
-    ['ready digest', (r) => { r.verification.ready_event_digest = 'a'.repeat(64); }],
-    ['offer', (r) => { r.verification.offer_event_id = id(701); }],
-    ['package', (r) => { r.verification.package_digest = 'b'.repeat(64); }],
-    ['receiver', (r) => { r.verification.checks.receiver.logical_agent_id = 'wrong'; }],
-    ['publication', (r) => { r.verification.checks.publication.event_id = id(702); }],
-    ['resources', (r) => { r.verification.checks.resources = []; }]
+    ['scope', 'INVALID_VERIFICATION', (r) => { r.workspace_id = id(700); }],
+    ['ready digest', 'INVALID_VERIFICATION', (r) => { r.verification.ready_event_digest = 'a'.repeat(64); }],
+    ['offer', 'INVALID_VERIFICATION', (r) => { r.verification.offer_event_id = id(701); }],
+    ['package', 'INVALID_VERIFICATION', (r) => { r.verification.package_digest = 'b'.repeat(64); }],
+    ['receiver', 'INVALID_VERIFICATION', (r) => { r.verification.checks.receiver.logical_agent_id = 'wrong'; }],
+    ['publication', 'INVALID_VERIFICATION', (r) => { r.verification.checks.publication.event_id = id(702); }],
+    ['resources', 'INVALID_VERIFICATION', (r) => { r.verification.checks.resources = []; }]
   ];
-  for (const [name, change] of bad) {
+  const predecessor = expectPredecessorOwnership(store, receipt.package.work_id, now).projection.work
+    .find((candidate) => candidate.work_id === receipt.package.work_id).assignment;
+  for (const [name, code, change] of bad) {
     const changed = structuredClone(receipt); change(changed);
-    expect(store.importHandoffVerification(changed, { now }), name).toMatchObject({ status: 'blocked' });
+    expect(store.importHandoffVerification(changed, { now }), name).toEqual({ status: 'blocked', code });
+    const after = expectPredecessorOwnership(store, receipt.package.work_id, now).projection.work
+      .find((candidate) => candidate.work_id === receipt.package.work_id).assignment;
+    expect(after, name).toEqual(predecessor);
   }
   expect(store.handoffVerifications({ now }).verifications).toEqual([receipt.verification]);
 });
@@ -201,6 +228,7 @@ it('requires the exact authenticated ready, offer, and publication events', asyn
     expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }), missing)
       .toEqual({ status: 'blocked', code: 'INVALID_VERIFICATION' });
     expect(store.handoffVerifications({ now: Date.parse(time) + 1000 }).verifications).toEqual([]);
+    expectPredecessorOwnership(store, receipt.package.work_id, Date.parse(time) + 1000);
   }
 });
 
@@ -211,6 +239,7 @@ it('rejects an authenticated offer that names a different work item than the pac
   await append(store, changed);
   expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }))
     .toEqual({ status: 'blocked', code: 'INVALID_VERIFICATION' });
+  expectPredecessorOwnership(store, receipt.package.work_id, Date.parse(time) + 1000);
 });
 
 it('migrates the legacy private database in place without erasing observations', async () => {
@@ -275,10 +304,15 @@ it('keeps replay-accepted ownership after the receipt expires', async () => {
 
 it('requires referenced retained events, rejects expired and malformed receipts, and makes tampering unavailable', async () => {
   const dbPath = path(), store = open(dbPath), { events, receipt } = fixture();
-  expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 })).toMatchObject({ status: 'blocked' });
+  expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 }))
+    .toEqual({ status: 'blocked', code: 'INVALID_VERIFICATION' });
   await append(store, events);
-  expect(store.importHandoffVerification(receipt, { now: Date.parse(until) })).toMatchObject({ status: 'blocked' });
-  expect(store.importHandoffVerification({ ...receipt, extra: 'secret-sentinel' }, { now: Date.parse(time) + 1000 })).toMatchObject({ status: 'blocked' });
+  expect(store.importHandoffVerification(receipt, { now: Date.parse(until) }))
+    .toEqual({ status: 'blocked', code: 'VERIFICATION_EXPIRED' });
+  expectPredecessorOwnership(store, receipt.package.work_id, Date.parse(until));
+  expect(store.importHandoffVerification({ ...receipt, extra: 'secret-sentinel' }, { now: Date.parse(time) + 1000 }))
+    .toEqual({ status: 'blocked', code: 'INVALID_VERIFICATION' });
+  expectPredecessorOwnership(store, receipt.package.work_id, Date.parse(time) + 1000);
   expect(store.importHandoffVerification(receipt, { now: Date.parse(time) + 1000 })).toEqual({ status: 'stored' });
   const db = new DatabaseSync(dbPath);
   db.exec("UPDATE handoff_verifications SET receipt_json='tampered'");
