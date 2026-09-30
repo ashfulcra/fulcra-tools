@@ -89,6 +89,9 @@ You can read the docs, inspect the code, install skills, and run local help or
 tests without a Fulcra account. Reading or writing a Fulcra store requires its
 owner’s authorization. [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the
 CLI, HTTP, and MCP surfaces so an agent can choose what its environment supports.
+Its deletion notes distinguish the verified write-side `DeletedRecord` tombstone
+from query surfaces: the type was non-queryable through the catalog and event
+route on 2026-09-30, while visibility of the deleted source record was not tested.
 
 ## Package index
 

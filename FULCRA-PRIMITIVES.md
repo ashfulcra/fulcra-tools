@@ -190,8 +190,17 @@ raw endpoints below are tier-2 material and background for reading old code.
 - **Delete is a tombstone, not an erasure** — worth knowing because it leaks
   through. The CLI implements `delete` by *recording* a **`DeletedRecord`**
   (`{"record_id": …, "data_type": <base type>}`) through the same ingest path.
-  So deletion is itself an append, `DeletedRecord` is a real queryable type,
-  and `--no-validate` on `delete` skips the `DeletedRecord` schema check. There
+  So deletion is itself an append, and `--no-validate` on `delete` skips the
+  `DeletedRecord` schema check. **`DeletedRecord` is NOT readable** (verified
+  live 2026-09-30): `fulcra catalog -d DeletedRecord` reports
+  `"queryable": false`, `"class": "tombstone"`, `"record_spec": {"type":
+  "tombstone"}`, and `GET /data/v1alpha1/event/DeletedRecord` returns **HTTP
+  404**. An earlier version of this file called it "a real queryable type",
+  which was wrong. Scope of this correction: it records only that the type
+  cannot be enumerated through the catalog or the event route on that date. It
+  says nothing about what deletion does to the deleted record itself — whether a
+  tombstoned record still appears on its own type's event route was not tested
+  here, and the API documents neither behaviour. There
   is still **no update/replace verb**: correct a record by deleting and
   re-recording, or by writing a superseding one.
 - **Lib:** `record_data_type(data_type, records, api_version="v1alpha1")` takes
