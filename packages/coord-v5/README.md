@@ -29,8 +29,11 @@ coord-v5 work view --config ABS --db ABS --policy ABS
 coord-v5 work digest --config ABS --db ABS --policy ABS --viewer ID --role ROLE --query QUERY
 coord-v5 event validate < event.json
 coord-v5 checkpoint validate < checkpoint.json
+coord-v5 checkpoint prepare < checkpoint.json
 coord-v5 checkpoint package < package-input.json
+coord-v5 checkpoint verify --artifact ABS --publication ABS
 coord-v5 handoff readiness < readiness-input.json
+coord-v5 handoff verification import --config ABS --db ABS --receipt ABS
 coord-v5 enrollment plan < assessment.json
 coord-v5 enrollment instructions < instructions-input.json
 coord-v5 observation --config ABS --policy ABS --db ABS
@@ -57,7 +60,8 @@ owned annotation metadata. This package does not create sources or grant authori
 SQLite scope cannot be rebound to another source.
 
 Config/event/policy files must be absolute, regular nonsymlink files, at most
-64 KiB, private (`0600`) in a private (`0700`) directory. Databases/backups contain
+64 KiB, private (`0600`) in a private (`0700`) directory. Handoff receipt input
+has the same private-file rules and a 2 MiB limit. Databases/backups contain
 request content and must stay private. Bearers go only on stdin, never argv/config.
 
 Policy is exactly `{principal_id,workspace_id,stream_id,grants,work_jobs}` and must
@@ -82,6 +86,41 @@ SQLite cache offline. As-of is actual source observation time, not execution tim
 Cold/failed-only caches return unavailable and exit nonzero. Partial data or withheld
 grants never means global all-clear. Historical-range selection and presence filtering
 are API inputs, not CLI features in this slice.
+
+`handoff verification import` accepts one operator-trusted local attestation and
+retains it in the private SQLite database across restarts. Its exact envelope is
+`{schema:"handoff-verification/1",principal_id,workspace_id,workstream_id,
+stream_id,package,verification}`. `package` is the validated handoff package whose
+digest the offer and ready events name; `verification` is the existing replay
+verification shape with ready/offer IDs, digests, and `checks`. The importer
+requires matching authenticated retained ready, offer, and checkpoint-publication
+events, exact receiver/publication bindings, and a verified check for every package
+access requirement. Identical imports return `same`; conflicts, stale checks and
+invalid input are blocked. A damaged stored receipt makes the view unavailable.
+Identical event content in multiple authenticated source records counts as one
+referenced event; differing content under the same event ID still fails closed.
+With multiple valid ready events for an offer, expired proofs survive only when
+required by a replay-accepted transfer's causal history. Unrelated expired
+pending readiness remains inactive.
+Every handoff row additionally carries `verification`, the current validity of the
+proof behind that handoff, reported separately from `state`:
+`{state:"valid"|"expired"|"absent"|"unknown",valid_until,ready_event_id}`. For accepted
+handoffs, this is the proof named by the accepted event's `ready_event_id`, even
+when an earlier retained ready event is displayed on the row. Causal acceptance
+and current proof validity are orthogonal: a lapsed proof leaves an accepted
+handoff and its ownership unchanged, but reports `verification.state:"expired"`
+so consumers can re-verify before acting. `absent` means no retained receipt
+resolved for the row and only occurs before readiness. Pure replay defaults the
+verification clock to `asOf`; an explicitly supplied malformed
+`verificationAsOf` reports `unknown` without changing causal state or ownership.
+Replay returns early without an `asOf`, so no row claims validity with no causal
+clock.
+Authorized views consume retained proofs automatically; expired checks cannot
+make a pending handoff currently ready, but a valid historical acceptance keeps
+its ownership after expiry. This command trusts the local operator's assertion:
+it does not fetch an artifact, test remote access, issue a native wake, or prove
+source completeness. Partial history stays partial and cannot authorize an
+exclusive takeover or all-clear.
 
 Make private config/policy/event files. Validate the event, publish with bearer stdin,
 then read a fresh bounded window with bearer stdin. Run `work view`/`work digest`.
@@ -167,7 +206,7 @@ events,trust,observation,asOf}` from `buildHandoffPackage`; returns `{ok,package
 - `handoff readiness`: `{package,projection,receiver,checks,asOf}` from
   `assessHandoffReadiness`; returns ready/unknown/blocked.
 
-These check serialized caller evidence, not network, artifact bytes or access
+These stdin commands check serialized caller evidence, not network, artifact bytes or access
 independently. Readiness requires separately verified publication/resource receipts
 and external-operation checks bound to recipient/package digest with validity times.
 Missing checks never become success. Invalid input, refused validation and
@@ -193,6 +232,20 @@ prepared body_digest against publication.body_digest. Both checks are required;
 matching bytes alone is not canonical body integrity, and matching normalized
 content alone is not proof of exact artifact bytes. Preparing JSON does not upload,
 publish, grant access, or independently verify a remote artifact.
+
+For a locally obtained artifact and its `checkpoint.published` event, run
+`coord-v5 checkpoint verify --artifact /private/path/checkpoint.json --publication
+/private/path/publication.json`. Both paths must be absolute, regular, nonsymlink
+files with mode `0600` inside a `0700` directory. Artifact bytes are capped at
+256 KiB and publication JSON at 64 KiB; validated checkpoint content retains the
+128 KiB canonical limit. The command hashes the exact artifact bytes before
+strict UTF-8/JSON decoding, then checks normalized content digest, scope,
+checkpoint/work/assignment bindings, and full actor identity. A successful
+`{ok:true,checkpoint,verification}` records local byte/content measurements only:
+it does not authenticate remote retrieval, access, a native wake, or source
+completeness. Rejections return stable codes without echoing paths or content and
+exit nonzero. The library exposes `verifyCheckpointArtifact(bytes,
+publicationEvent)` for the same bounded check.
 
 When raw and canonical hashes differ, handoff verification receipts must include
 `checks.publication.artifact_sha256` matching the publication's raw artifact hash,

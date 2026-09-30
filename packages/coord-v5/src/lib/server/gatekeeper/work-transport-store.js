@@ -9,11 +9,86 @@ import {
   validateWorkEvent,
   workContentDigest
 } from '../../gatekeeper/work-contract.js';
+import { validateHandoffPackage } from '../../gatekeeper/checkpoint.js';
+import { validHandoffVerification, compareInstants } from '../../gatekeeper/work-projection.js';
 import { validateWorkTransportConfig } from './work-transport-config.js';
 import { assertTrustedWorkReadResult } from './work-transport-read.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EVENT_LIMIT = 1000;
+const RECEIPT_LIMIT = 2 * 1024 * 1024;
+const RECEIPT_KEYS = ['schema', 'principal_id', 'workspace_id', 'workstream_id', 'stream_id', 'package', 'verification'];
+
+/** @param {any} receipt @param {any} config @param {any} accumulated */
+function verifyReceipt(receipt, config, accumulated) {
+  if (
+    !plain(receipt) ||
+    Reflect.ownKeys(receipt).length !== RECEIPT_KEYS.length ||
+    !RECEIPT_KEYS.every((key) => Object.hasOwn(receipt, key)) ||
+    receipt.schema !== 'handoff-verification/1' ||
+    receipt.principal_id !== config.principalId ||
+    receipt.workspace_id !== config.workspaceId ||
+    receipt.workstream_id !== config.workstreamId ||
+    receipt.stream_id !== config.channel.slice('MomentAnnotation/'.length) ||
+    !validHandoffVerification(receipt.verification) ||
+    accumulated.status !== 'ready'
+  ) return false;
+  const checked = validateHandoffPackage(receipt.package);
+  if (!checked.ok) return false;
+  const pkg = checked.package;
+  const v = receipt.verification;
+  if (
+    workContentDigest(pkg) !== v.package_digest ||
+    pkg.workspace_id !== receipt.workspace_id ||
+    pkg.workstream_id !== receipt.workstream_id ||
+    pkg.recipient.principal_id !== receipt.principal_id ||
+    canonicalWorkJson(pkg.recipient) !== canonicalWorkJson(v.checks.receiver) ||
+    v.checks.package_digest !== v.package_digest ||
+    pkg.publication_event_id !== v.checks.publication.event_id
+  ) return false;
+  // Multiple authenticated source records may carry the same canonical event.
+  // Distinct content for one ID remains ambiguous and must fail closed.
+  const matches = (id) => [...new Map(
+    accumulated.events.filter((event) => event.event_id === id)
+      .map((event) => [canonicalWorkJson(event), event])
+  ).values()];
+  const ready = matches(v.ready_event_id);
+  const offer = matches(v.offer_event_id);
+  const publication = matches(v.checks.publication.event_id);
+  if (ready.length !== 1 || offer.length !== 1 || publication.length !== 1) return false;
+  const [r] = ready, [o] = offer, [p] = publication;
+  if (
+    r.kind !== 'handoff.ready' || o.kind !== 'handoff.offered' || p.kind !== 'checkpoint.published' ||
+    r.workstream_id !== receipt.workstream_id || o.workstream_id !== receipt.workstream_id ||
+    p.workstream_id !== receipt.workstream_id ||
+    workContentDigest(r) !== v.ready_event_digest ||
+    r.payload.offer_event_id !== o.event_id ||
+    r.payload.package_digest !== v.package_digest ||
+    o.payload.package_digest !== v.package_digest ||
+    o.payload.work_id !== pkg.work_id ||
+    r.subject.id !== o.subject.id ||
+    o.payload.checkpoint_event_id !== p.event_id ||
+    canonicalWorkJson(r.actor) !== canonicalWorkJson(o.payload.target) ||
+    canonicalWorkJson(r.actor) !== canonicalWorkJson(v.checks.receiver) ||
+    r.payload.verification_receipt_id !== v.checks.publication.receipt_id ||
+    p.subject.id !== pkg.checkpoint.checkpoint_id ||
+    p.payload.work_id !== pkg.work_id ||
+    p.payload.artifact.id !== v.checks.publication.artifact_id ||
+    p.payload.body_digest !== v.checks.publication.body_digest ||
+    canonicalWorkJson(p) !== canonicalWorkJson(pkg.events.find((event) => event.event_id === p.event_id)) ||
+    v.checks.publication.status !== 'verified' || !v.checks.publication.receipt_id ||
+    v.checks.resources.some((resource) => resource.status !== 'verified' || !resource.receipt_id) ||
+    compareInstants(v.checks.checked_at, r.occurred_at) > 0 ||
+    compareInstants(r.occurred_at, v.checks.valid_until) >= 0
+  ) return false;
+  const artifactHash = p.payload.artifact.sha256;
+  if (v.checks.publication.artifact_sha256 === undefined
+    ? artifactHash !== null && artifactHash !== p.payload.body_digest
+    : v.checks.publication.artifact_sha256 !== artifactHash) return false;
+  const required = pkg.access_requirements.map((resource) => `${resource.resource_id}:${resource.scope_id}:${resource.action}`).sort();
+  const verified = v.checks.resources.map((resource) => `${resource.resource_id}:${resource.scope_id}:${resource.action}`).sort();
+  return canonicalWorkJson(required) === canonicalWorkJson(verified);
+}
 
 /** @param {string} dbPath */
 function ensurePath(dbPath) {
@@ -211,11 +286,14 @@ export function openWorkTransportStore(input) {
         db.exec(
           'CREATE TABLE intent_transitions (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, state TEXT NOT NULL, code TEXT, upload_id TEXT, record_id TEXT)'
         );
+        db.exec(
+          'CREATE TABLE handoff_verifications (ready_event_id TEXT PRIMARY KEY, receipt_digest TEXT NOT NULL, receipt_json TEXT NOT NULL)'
+        );
         db.prepare('INSERT INTO meta (key,value) VALUES (?,?)').run(
           'config',
           JSON.stringify(config)
         );
-        db.exec('PRAGMA user_version = 1');
+        db.exec('PRAGMA user_version = 2');
         db.exec('COMMIT');
       } catch (error) {
         db.exec('ROLLBACK');
@@ -223,7 +301,7 @@ export function openWorkTransportStore(input) {
       }
     } else {
       if (
-        version !== 1 ||
+        ![1, 2].includes(version) ||
         db.prepare('SELECT value FROM meta WHERE key = ?').get('config')?.value !==
           JSON.stringify(config)
       )
@@ -232,6 +310,18 @@ export function openWorkTransportStore(input) {
         if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name))
           throw new Error('STORE_CORRUPT');
       if (db.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok')
+        throw new Error('STORE_CORRUPT');
+      if (version === 1) {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.exec('CREATE TABLE handoff_verifications (ready_event_id TEXT PRIMARY KEY, receipt_digest TEXT NOT NULL, receipt_json TEXT NOT NULL)');
+          db.exec('PRAGMA user_version = 2');
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
+      } else if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='handoff_verifications'").get())
         throw new Error('STORE_CORRUPT');
     }
   } catch (error) {
@@ -258,6 +348,15 @@ export function openWorkTransportStore(input) {
   );
   const currentTransition = db.prepare(
     'SELECT state,code,upload_id,record_id FROM intent_transitions WHERE event_id=? ORDER BY seq DESC LIMIT 1'
+  );
+  const insertVerification = db.prepare(
+    'INSERT INTO handoff_verifications (ready_event_id,receipt_digest,receipt_json) VALUES (?,?,?)'
+  );
+  const selectVerification = db.prepare(
+    'SELECT ready_event_id,receipt_digest,receipt_json FROM handoff_verifications WHERE ready_event_id=?'
+  );
+  const allVerifications = db.prepare(
+    'SELECT ready_event_id,receipt_digest,receipt_json FROM handoff_verifications ORDER BY ready_event_id'
   );
   let closed = false;
   /** @param {()=>any} operation */
@@ -334,6 +433,70 @@ export function openWorkTransportStore(input) {
     };
   }
   return {
+    /** Explicit trusted local attestation, never a remote verification or completeness claim.
+     * @param {unknown} receipt @param {{now:number}} timing */
+    importHandoffVerification(receipt, { now } = /** @type {any} */ ({})) {
+      try {
+        if (!Number.isFinite(now)) return { status: 'blocked', code: 'INVALID_CLOCK' };
+        const canonical = canonicalWorkJson(receipt);
+        if (Buffer.byteLength(canonical, 'utf8') > RECEIPT_LIMIT)
+          return { status: 'blocked', code: 'RECEIPT_LIMIT' };
+        const value = JSON.parse(canonical);
+        return transaction(() => {
+          const accumulated = this.accumulated();
+          if (!verifyReceipt(value, config, accumulated))
+            return { status: 'blocked', code: 'INVALID_VERIFICATION' };
+          const stamp = new Date(now).toISOString();
+          if (compareInstants(value.verification.checks.checked_at, stamp) > 0 ||
+              compareInstants(stamp, value.verification.checks.valid_until) >= 0)
+            return { status: 'blocked', code: 'VERIFICATION_EXPIRED' };
+          const digest = createHash('sha256').update(canonical).digest('hex');
+          const prior = selectVerification.get(value.verification.ready_event_id);
+          if (prior) {
+            if (prior.receipt_digest !== createHash('sha256').update(prior.receipt_json).digest('hex'))
+              return { status: 'unavailable', code: 'STORE_CORRUPT' };
+            return prior.receipt_digest === digest && prior.receipt_json === canonical
+              ? { status: 'same' } : { status: 'blocked', code: 'VERIFICATION_CONFLICT' };
+          }
+          insertVerification.run(value.verification.ready_event_id, digest, canonical);
+          return { status: 'stored' };
+        });
+      } catch {
+        return { status: 'blocked', code: 'INVALID_VERIFICATION' };
+      }
+    },
+    /** Return historically valid proofs plus current inactivity markers. The view decides
+     * whether an inactive proof is needed to preserve an already accepted transfer.
+     * @param {{now:number}} timing */
+    handoffVerifications({ now } = /** @type {any} */ ({})) {
+      if (!Number.isFinite(now)) return { status: 'blocked', code: 'INVALID_CLOCK' };
+      try {
+        if (closed) throw new Error('STORE_CLOSED');
+        const accumulated = this.accumulated();
+        const rows = allVerifications.all();
+        if (accumulated.status !== 'ready' && rows.length) throw new Error('STORE_CORRUPT');
+        const stamp = new Date(now).toISOString();
+        const verifications = [];
+        const inactive_ready_event_ids = [];
+        for (const row of rows) {
+          if (Buffer.byteLength(row.receipt_json, 'utf8') > RECEIPT_LIMIT ||
+              createHash('sha256').update(row.receipt_json).digest('hex') !== row.receipt_digest)
+            throw new Error('STORE_CORRUPT');
+          const receipt = JSON.parse(row.receipt_json);
+          if (canonicalWorkJson(receipt) !== row.receipt_json ||
+              row.ready_event_id !== receipt.verification?.ready_event_id ||
+              !verifyReceipt(receipt, config, accumulated)) throw new Error('STORE_CORRUPT');
+          const checks = receipt.verification.checks;
+          if (compareInstants(checks.checked_at, stamp) > 0 ||
+              compareInstants(stamp, checks.valid_until) >= 0)
+            inactive_ready_event_ids.push(row.ready_event_id);
+          verifications.push(receipt.verification);
+        }
+        return { status: 'ready', verifications, inactive_ready_event_ids };
+      } catch {
+        return { status: 'unavailable', code: 'STORE_CORRUPT' };
+      }
+    },
     /** @param {unknown} readResult */
     appendWindow(readResult) {
       /** @type {any} */

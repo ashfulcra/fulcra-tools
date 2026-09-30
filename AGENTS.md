@@ -1425,7 +1425,38 @@ but exits nonzero when the current read is unavailable; clean partial reads rema
 nonfatal and never imply absence.
 Use `checkpoint prepare` to obtain normalized checkpoint content and its canonical
 digest before publication; raw artifact integrity and canonical body integrity
-are separate checks. Native action generation is not evidence of a delivered wake.
+are separate checks. A receiver can run `coord-v5 checkpoint verify --artifact ABS
+--publication ABS` on private local files to measure exact raw SHA256, normalized
+body digest, and scope/identity bindings; this is not remote retrieval, access,
+native-wake, or source-completeness proof. Artifact bytes are capped at 256 KiB,
+publication JSON at 64 KiB, and validated checkpoint content at 128 KiB.
+Native action generation is not evidence of a delivered wake.
+`coord-v5 handoff verification import --config ABS --db ABS --receipt ABS`
+retains a private, scope-bound operator attestation through restart. The receipt
+envelope is `{schema:"handoff-verification/1",principal_id,workspace_id,
+workstream_id,stream_id,package,verification}`; package bytes bind the offer
+digest and exact access-requirement set, and referenced ready/offer/publication
+events must already be in the authenticated local journal. Views consume valid
+retained checks automatically, fail unavailable on tampering, and refuse expired
+pending readiness. A historically accepted owner is not revoked merely because
+checks expire later: with multiple ready events, preserve only proofs in the
+replay-accepted transfer's causal history. Identical authenticated source copies
+count once for receipt bindings; differing event content under one ID fails
+closed. Import does not independently verify remote artifact bytes,
+remote permissions, native wakes, or source completeness; do not describe it as
+a verifier adapter or use partial coverage to claim all-clear or takeover.
+**Current proof validity is its own fact, never merged into handoff `state`.** Every
+handoff row carries `verification: {state:"valid"|"expired"|"absent"|"unknown",valid_until,
+ready_event_id}`. An accepted row binds this fact to the exact ready event named
+by its accepted event, which may differ from the first retained ready displayed
+on the row. Causal acceptance and proof validity are orthogonal: a clock must
+never un-accept a causal event, so an accepted handoff whose checks lapsed keeps
+`state:"accepted"`, unchanged ownership and no recheck diagnostic, while
+reporting `verification.state:"expired"`. Pure replay defaults the verification
+clock to `asOf`; an explicitly malformed `verificationAsOf` yields `unknown`
+while preserving causal state and ownership. Replay returns early without an
+`asOf`, so no row claims validity without a causal clock. `absent` means no
+retained receipt resolved and only occurs before readiness.
 
 `2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
 that agrees with the body, deterministic identity precedence, and distinct

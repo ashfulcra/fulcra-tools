@@ -268,7 +268,10 @@ test("installed commands replay exact owned retained work and keep partial/unkno
     const large = run(["event", "validate"], "x".repeat(1024 * 1024 + 1));
     assert.notEqual(large.status, 0);
     assert.equal(JSON.parse(large.stdout).error.code, "INPUT_LIMIT");
-    const body = JSON.parse(
+    const normalizePrincipal = (value) => JSON.parse(JSON.stringify(value)
+      .replaceAll('principal-a', principal)
+      .replaceAll('00000000-0000-4000-8000-000000000200', stream));
+    const body = normalizePrincipal(JSON.parse(
       readFileSync(
         resolve(
           import.meta.dirname,
@@ -276,7 +279,7 @@ test("installed commands replay exact owned retained work and keep partial/unkno
         ),
         "utf8",
       ),
-    );
+    ));
     const checkpoint = run(["checkpoint", "validate"], body);
     assert.equal(checkpoint.status, 0, checkpoint.stdout);
     const again = run(
@@ -285,7 +288,7 @@ test("installed commands replay exact owned retained work and keep partial/unkno
     );
     assert.equal(again.status, 0);
     assert.deepEqual(JSON.parse(again.stdout), JSON.parse(checkpoint.stdout));
-    const history = [...fixture.events, ...fixture.replay_events];
+    const history = normalizePrincipal([...fixture.events, ...fixture.replay_events]);
     const base = history[0];
     const time = "2026-09-27T12:00:00.000Z";
     const recipient = {
@@ -392,6 +395,97 @@ test("installed commands replay exact owned retained work and keep partial/unkno
     assert.ok(JSON.parse(readiness.stdout).errors.includes("CHECKS_MISSING"));
     assert.notEqual(run(["checkpoint", "package"], {}).status, 0);
     assert.notEqual(run(["handoff", "readiness"], {}).status, 0);
+    const packageDigest = workContentDigest(pkg);
+    const receiver = recipient;
+    const offer = {
+      ...base,
+      event_id: "30000000-0000-4000-8000-000000000004",
+      operation_id: "30000000-0000-4000-8000-000000001004",
+      kind: "handoff.offered",
+      subject: { type: "handoff", id: "30000000-0000-4000-8000-000000000010" },
+      occurred_at: time,
+      parents: [publication.event_id, history[5].event_id],
+      payload: {
+        work_id: body.work_id,
+        expected_assignment_event_id: body.assignment_event_id,
+        expected_version: body.assignment_version,
+        checkpoint_event_id: publication.event_id,
+        package_digest: packageDigest,
+        target: receiver,
+      },
+    };
+    const ready = {
+      ...base,
+      event_id: "30000000-0000-4000-8000-000000000005",
+      operation_id: "30000000-0000-4000-8000-000000001005",
+      kind: "handoff.ready",
+      subject: offer.subject,
+      actor: receiver,
+      occurred_at: time,
+      parents: [offer.event_id],
+      payload: { offer_event_id: offer.event_id, package_digest: packageDigest,
+        verification_receipt_id: "receipt-pub" },
+    };
+    const handoffDb = join(cache, "handoff.sqlite");
+    const handoffStore = openWorkTransportStore({ config, dbPath: handoffDb });
+    const rows = [...history, publication, offer, ready].map((e, n) => ({
+      id: `50000000-0000-4000-8000-${String(n + 1).padStart(12, "0")}`,
+      source_id: source, metadata, note: serializeWorkEvent(e),
+    }));
+    const handoffFetch = (url) => String(url).includes("/info") ||
+      String(url).includes("/catalog") || String(url).includes("/annotation?")
+      ? fetch(url)
+      : new Response(JSON.stringify(rows), { headers: { "content-type": "application/json" } });
+    const handoffRead = await readWorkWindow({ config, fetch: handoffFetch,
+      token: "fixture-only", start: "2026-09-26T00:00:00Z", end: "2026-09-27T00:00:00Z",
+      now: () => Date.parse(time) });
+    assert.equal(handoffStore.appendWindow(handoffRead).status, "stored");
+    handoffStore.close();
+    const receipt = {
+      schema: "handoff-verification/1", principal_id: principal,
+      workspace_id: base.workspace_id, workstream_id: base.workstream_id,
+      stream_id: stream, package: pkg,
+      verification: {
+        ready_event_id: ready.event_id, ready_event_digest: workContentDigest(ready),
+        offer_event_id: offer.event_id, package_digest: packageDigest,
+        checks: {
+          checked_at: time, valid_until: "2099-01-01T00:00:00.000Z",
+          receiver, package_digest: packageDigest,
+          publication: { event_id: publication.event_id, artifact_id: publication.payload.artifact.id,
+            body_digest: publication.payload.body_digest, status: "verified", receipt_id: "receipt-pub" },
+          resources: [],
+        },
+      },
+    };
+    const receiptPath = join(cache, "receipt.json");
+    writeFileSync(receiptPath, JSON.stringify(receipt), { mode: 0o600 });
+    const importArgs = ["handoff", "verification", "import", "--config", configPath,
+      "--db", handoffDb, "--receipt", receiptPath];
+    const imported = run(importArgs);
+    assert.equal(imported.status, 0, imported.stdout + imported.stderr);
+    assert.deepEqual(JSON.parse(imported.stdout), { status: "stored" });
+    assert.deepEqual(JSON.parse(run(importArgs).stdout), { status: "same" });
+    const handoffPolicy = { ...policy, grants: [
+      { ...event.actor, capabilities: ["work.write", "assignment.manage", "assignment.accept",
+        "question.ask", "question.answer", "question.apply", "checkpoint.publish", "handoff.offer"] },
+      { ...receiver, capabilities: ["handoff.ready", "assignment.accept"] },
+    ] };
+    writeFileSync(policyPath, JSON.stringify(handoffPolicy));
+    const handoffView = run(["work", "view", "--config", configPath, "--db", handoffDb,
+      "--policy", policyPath]);
+    assert.equal(handoffView.status, 0, handoffView.stdout);
+    const handoffProjection = JSON.parse(handoffView.stdout).projection;
+    assert.equal(handoffProjection.observation.coverage, "partial");
+    assert.equal(handoffProjection.handoffs[0].ready_event.event_id, ready.event_id);
+    const badReceipt = { ...receipt, extra: "secret-sentinel" };
+    writeFileSync(receiptPath, JSON.stringify(badReceipt));
+    const badImport = run(importArgs);
+    assert.notEqual(badImport.status, 0);
+    assert.equal(badImport.stdout.includes("secret-sentinel"), false);
+    chmodSync(receiptPath, 0o644);
+    const publicInput = run(importArgs);
+    assert.notEqual(publicInput.status, 0);
+    assert.equal(publicInput.stdout.includes("secret-sentinel"), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

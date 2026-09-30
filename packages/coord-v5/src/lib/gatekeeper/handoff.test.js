@@ -484,18 +484,95 @@ describe('explicit handoff readiness and transfer', () => {
       ).toBe('blocked');
     }
   });
-  it('keeps historical transfer but demands recheck once adapter validity expires', () => {
+  it('keeps accepted historical ownership after adapter validity expires', () => {
     const s = setup();
     const events = [...s.events, s.offer, s.ready, s.accept];
     const historical = replayWorkEvents(context(events, evidenceFor(s)));
     expect(historical.work[0].assignment.version).toBe(2);
     const expired = replayWorkEvents(context(events, evidenceFor(s), later));
     expect(expired.work[0].assignment.version).toBe(2);
-    expect(expired.work[0].execution_authority).toBe('blocked_validation');
-    expect(expired.work[0].validation.some((d) => d.code === 'HANDOFF_RECHECK_REQUIRED')).toBe(
-      true
-    );
-    expect(expired.handoffs[0].state).toBe('blocked');
+    expect(expired.work[0].assignment.accepted_actor).toEqual(target);
+    expect(expired.work[0].validation.some((d) => d.code === 'HANDOFF_RECHECK_REQUIRED')).toBe(false);
+    expect(expired.handoffs[0].state).toBe('accepted');
+  });
+  it('reports current proof validity as its own fact without touching causal state', () => {
+    const s = setup();
+    const events = [...s.events, s.offer, s.ready, s.accept];
+    const fresh = replayWorkEvents(context(events, evidenceFor(s)));
+    expect(fresh.handoffs[0].verification).toEqual({
+      state: 'valid',
+      valid_until: later,
+      ready_event_id: s.ready.event_id
+    });
+    const expired = replayWorkEvents(context(events, evidenceFor(s), later));
+    expect(expired.handoffs[0].verification).toEqual({
+      state: 'expired',
+      valid_until: later,
+      ready_event_id: s.ready.event_id
+    });
+    expect(expired.handoffs[0].state).toBe('accepted');
+    expect(expired.work[0].assignment.version).toBe(2);
+    expect(expired.work[0].assignment.accepted_actor).toEqual(target);
+    expect(expired.work[0].execution_authority).toBe('accepted');
+    expect(expired.work[0].validation.some((d) => d.code === 'HANDOFF_RECHECK_REQUIRED')).toBe(false);
+    expect(JSON.stringify(expired.handoffs[0])).not.toBe(JSON.stringify(fresh.handoffs[0]));
+  });
+  it('reports absent when no receipt was supplied, and never invents validity', () => {
+    const s = setup();
+    const events = [...s.events, s.offer, s.ready, s.accept];
+    const none = replayWorkEvents(context(events, []));
+    expect(none.handoffs[0].state).toBe('offered');
+    expect(none.handoffs[0].ready_event).toBeFalsy();
+    expect(none.handoffs[0].accepted_event).toBeFalsy();
+    expect(none.handoffs[0].verification).toEqual({
+      state: 'absent',
+      valid_until: null,
+      ready_event_id: null
+    });
+  });
+  it('produces no rows at all without a clock, so validity is never un-evaluable', () => {
+    const s = setup();
+    const events = [...s.events, s.offer, s.ready, s.accept];
+    const ctx = context(events, evidenceFor(s));
+    delete ctx.asOf;
+    const noClock = replayWorkEvents(ctx);
+    expect(noClock.handoffs).toHaveLength(0);
+    expect(noClock.work).toHaveLength(0);
+    expect(noClock.as_of).toBe(null);
+  });
+  it('uses an explicit verification clock without changing causal replay and rejects an invalid one', () => {
+    const s = setup();
+    const events = [...s.events, s.offer, s.ready, s.accept];
+    const ctx = context(events, evidenceFor(s));
+    const historical = replayWorkEvents(ctx);
+    expect(historical.handoffs[0].verification.state).toBe('valid');
+    const current = replayWorkEvents({ ...ctx, verificationAsOf: later });
+    expect(current.handoffs[0].verification).toEqual({
+      state: 'expired', valid_until: later, ready_event_id: s.ready.event_id
+    });
+    expect(current.handoffs[0].state).toBe(historical.handoffs[0].state);
+    expect(current.work[0].assignment.version).toBe(2);
+    const invalid = replayWorkEvents({ ...ctx, verificationAsOf: null });
+    expect(invalid.handoffs[0].verification).toEqual({
+      state: 'unknown', valid_until: later, ready_event_id: s.ready.event_id
+    });
+    expect(invalid.handoffs[0].state).toBe('accepted');
+    expect(invalid.work[0].assignment.version).toBe(2);
+  });
+  it('resolves the receipt against the only ready events that can be retained', () => {
+    const s = setup();
+    const other = event(7, 'handoff.ready', {
+      offer_event_id: s.offer.event_id,
+      package_digest: s.digest,
+      verification_receipt_id: 'receipt-pub'
+    }, [s.offer], target);
+    const events = [...s.events, s.offer, other, s.ready, s.accept];
+    const v = replayWorkEvents(context(events, evidenceFor(s)));
+    expect(v.handoffs).toHaveLength(1);
+    expect(v.handoffs[0].ready_event.event_id).toBe(s.ready.event_id);
+    expect(v.handoffs[0].verification.ready_event_id).toBe(s.ready.event_id);
+    expect(v.handoffs[0].verification.state).toBe('valid');
+    expect(v.rejected ?? []).toHaveLength(0);
   });
   it('deduplicates exact replay and rejects forged verification and package fields', () => {
     const s = setup();

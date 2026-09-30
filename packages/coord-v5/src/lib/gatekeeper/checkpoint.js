@@ -280,6 +280,57 @@ export function prepareCheckpoint(value) {
     artifact_sha256: createHash('sha256').update(canonical_body, 'utf8').digest('hex')
   };
 }
+/** Verify local receiver bytes against a structurally valid publication. This does not
+ * authenticate retrieval, access, or source completeness.
+ * @param {unknown} bytes @param {unknown} publicationEvent @returns {any} */
+export function verifyCheckpointArtifact(bytes, publicationEvent) {
+  try {
+    need(bytes instanceof Uint8Array, 'INVALID_ARTIFACT_BYTES');
+    need(bytes.byteLength <= 256 * 1024, 'LIMIT_EXCEEDED');
+    const publication = validateWorkEvent(publicationEvent);
+    need(publication.ok && publication.event.kind === 'checkpoint.published', 'INVALID_PUBLICATION');
+    const e = publication.event;
+    const b = e.payload;
+    need(b.artifact.sha256 !== null, 'ARTIFACT_DIGEST_REQUIRED');
+    const artifactSha256 = createHash('sha256').update(bytes).digest('hex');
+    need(artifactSha256 === b.artifact.sha256.toLowerCase(), 'ARTIFACT_DIGEST_MISMATCH');
+    let decoded;
+    try {
+      decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch {
+      throw new Invalid('INVALID_JSON');
+    }
+    const valid = validateCheckpoint(decoded);
+    need(valid.ok, 'INVALID_CHECKPOINT');
+    const c = valid.checkpoint;
+    need(
+      e.workspace_id === c.workspace_id && e.workstream_id === c.workstream_id,
+      'CHECKPOINT_SCOPE_MISMATCH'
+    );
+    need(
+      e.subject.id === c.checkpoint_id &&
+        b.checkpoint_id === c.checkpoint_id &&
+        b.work_id === c.work_id &&
+        b.assignment_version === c.assignment_version &&
+        b.assignment_event_id === c.assignment_event_id &&
+        canonicalWorkJson(e.actor) === canonicalWorkJson(c.identity),
+      'PUBLICATION_BINDING_MISMATCH'
+    );
+    need(b.body_digest === workContentDigest(c), 'BODY_DIGEST_MISMATCH');
+    return {
+      ok: true,
+      checkpoint: c,
+      verification: {
+        publication_event_id: e.event_id,
+        checkpoint_id: c.checkpoint_id,
+        artifact_sha256: artifactSha256,
+        body_digest: workContentDigest(c)
+      }
+    };
+  } catch (e) {
+    return { ok: false, errors: [e instanceof Invalid ? e.message : 'INVALID_JSON'] };
+  }
+}
 /** @param {unknown} e */
 function failure(e) {
   return {

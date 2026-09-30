@@ -5,6 +5,7 @@ import { validateWorkEvent } from "../src/lib/gatekeeper/work-contract.js";
 import {
   validateCheckpoint,
   prepareCheckpoint,
+  verifyCheckpointArtifact,
   buildHandoffPackage,
 } from "../src/lib/gatekeeper/checkpoint.js";
 import { assessHandoffReadiness } from "../src/lib/gatekeeper/handoff.js";
@@ -16,6 +17,8 @@ import { presenceRowsForDigest } from "../src/lib/gatekeeper/work-presence.js";
 
 const INPUT_LIMIT = 1024 * 1024;
 const FILE_LIMIT = 64 * 1024;
+const RECEIPT_FILE_LIMIT = 2 * 1024 * 1024;
+const CHECKPOINT_ARTIFACT_LIMIT = 256 * 1024;
 /** @param {string} path */
 function privatePath(path) {
   if (
@@ -43,15 +46,20 @@ function privatePath(path) {
   }
 }
 /** @param {string} path */
-function privateJson(path) {
-  if (privatePath(path).size > FILE_LIMIT) throw new Error("FILE_LIMIT");
-  const bytes = readFileSync(path);
-  if (bytes.byteLength > FILE_LIMIT) throw new Error("FILE_LIMIT");
+function privateJson(path, limit = FILE_LIMIT) {
+  const bytes = privateBytes(path, limit);
   try {
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new Error("INVALID_JSON");
   }
+}
+/** @param {string} path @param {number} limit */
+function privateBytes(path, limit) {
+  if (privatePath(path).size > limit) throw new Error("FILE_LIMIT");
+  const bytes = readFileSync(path);
+  if (bytes.byteLength > limit) throw new Error("FILE_LIMIT");
+  return bytes;
 }
 async function stdinJson() {
   const chunks = [];
@@ -89,6 +97,24 @@ function flags(args, keys) {
 }
 async function main() {
   const [group, action, ...args] = process.argv.slice(2);
+  if (group === "checkpoint" && action === "verify") {
+    const values = flags(args, ["artifact", "publication"]);
+    const bytes = privateBytes(values.artifact, CHECKPOINT_ARTIFACT_LIMIT);
+    const publication = privateJson(values.publication);
+    return verifyCheckpointArtifact(bytes, publication);
+  }
+  if (group === "handoff" && action === "verification" && args[0] === "import") {
+    const values = flags(args.slice(1), ["config", "db", "receipt"]);
+    const config = validateWorkTransportConfig(privateJson(values.config));
+    const receipt = privateJson(values.receipt, RECEIPT_FILE_LIMIT);
+    privatePath(values.db);
+    const store = openWorkTransportStore({ config, dbPath: values.db });
+    try {
+      return store.importHandoffVerification(receipt, { now: Date.now() });
+    } finally {
+      store.close();
+    }
+  }
   if (group === "work" && ["view", "digest"].includes(action)) {
     const keys = [
       "config",

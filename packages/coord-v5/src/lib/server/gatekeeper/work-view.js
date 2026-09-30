@@ -100,6 +100,7 @@ export function buildAuthorizedWorkView({
     !store ||
     typeof store.inspect !== 'function' ||
     typeof store.accumulated !== 'function' ||
+    typeof store.handoffVerifications !== 'function' ||
     typeof now !== 'function'
   )
     return { status: 'blocked', code: 'INVALID_POLICY' };
@@ -141,17 +142,54 @@ export function buildAuthorizedWorkView({
     Date.parse(observedAt) > clock
   )
     return { status: 'blocked', code: 'INVALID_CLOCK' };
-  const projection = replayWorkEvents({
+  let receipts;
+  try {
+    receipts = store.handoffVerifications({ now: clock });
+  } catch {
+    return { status: 'unavailable', code: 'VERIFICATION_UNAVAILABLE' };
+  }
+  if (receipts.status !== 'ready')
+    return { status: 'unavailable', code: 'VERIFICATION_UNAVAILABLE' };
+  const inactive = new Set(receipts.inactive_ready_event_ids);
+  const replay = (verifications) => replayWorkEvents({
     events: accumulated.events,
     trust: {
       workspace_id: policy.workspace_id,
       allowed_stream_ids: [policy.stream_id],
       event_evidence: accumulated.event_evidence,
-      grants: policy.grants
+      grants: policy.grants,
+      handoff_verifications: verifications
     },
     observation: accumulated.observation,
-    asOf: observedAt
+    asOf: observedAt,
+    verificationAsOf: new Date(clock).toISOString()
   });
+  let projection = replay(receipts.verifications);
+  if (inactive.size) {
+    // The displayed ready_event is only the first retained ready for a handoff.
+    // Preserve proofs in each replay-accepted transfer's actual causal ancestry.
+    const byId = new Map(accumulated.events.map((event) => [event.event_id, event]));
+    const historicallyAccepted = new Set();
+    const visited = new Set();
+    const visit = (eventId) => {
+      if (visited.has(eventId)) return;
+      visited.add(eventId);
+      const event = byId.get(eventId);
+      if (!event) return;
+      if (event.kind === 'handoff.ready') historicallyAccepted.add(eventId);
+      for (const parentId of event.parents) visit(parentId);
+    };
+    for (const handoff of projection.handoffs) {
+      if (!handoff.accepted_event) continue;
+      visit(handoff.accepted_event.event_id);
+      historicallyAccepted.add(handoff.accepted_event.payload.ready_event_id);
+    }
+    const current = receipts.verifications.filter(
+      (verification) => !inactive.has(verification.ready_event_id) ||
+        historicallyAccepted.has(verification.ready_event_id)
+    );
+    if (current.length !== receipts.verifications.length) projection = replay(current);
+  }
   const evaluation = {
     projection,
     evaluated_at: evaluated_at ?? new Date(clock).toISOString(),

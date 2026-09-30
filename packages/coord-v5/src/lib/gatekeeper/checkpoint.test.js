@@ -419,6 +419,113 @@ const publication = () => ({
     assignment_event_id: history[5].event_id
   }
 });
+
+/** @param {any} body @param {Buffer} bytes */
+function verificationPublication(body, bytes) {
+  const e = publication();
+  e.payload.body_digest = workContentDigest(checkpointApi.validateCheckpoint(body).checkpoint);
+  e.payload.artifact.sha256 = createHash('sha256').update(bytes).digest('hex');
+  return e;
+}
+
+describe('receiver checkpoint artifact verification', () => {
+  it('measures canonical and pretty raw bytes while normalizing Z timestamps without mutating inputs', () => {
+    const body = structuredClone(checkpointFixture);
+    body.created_at = body.created_at.replace('.000Z', 'Z');
+    body.source_frontier.as_of = body.source_frontier.as_of.replace('.000Z', 'Z');
+    const prepared = checkpointApi.prepareCheckpoint(body);
+    const canonical = Buffer.from(prepared.canonical_body);
+    const pretty = Buffer.from(JSON.stringify(body, null, 2) + '\n');
+    for (const bytes of [canonical, pretty]) {
+      const event = verificationPublication(body, bytes);
+      const original = structuredClone(event);
+      const result = checkpointApi.verifyCheckpointArtifact(bytes, event);
+      expect(result).toEqual({
+        ok: true,
+        checkpoint: prepared.checkpoint,
+        verification: {
+          publication_event_id: event.event_id,
+          checkpoint_id: body.checkpoint_id,
+          artifact_sha256: event.payload.artifact.sha256,
+          body_digest: event.payload.body_digest
+        }
+      });
+      expect(event).toEqual(original);
+      expect(checkpointApi.verifyCheckpointArtifact(new Uint8Array(bytes), event).ok).toBe(true);
+    }
+    expect(body.created_at).toBe('2026-09-27T12:00:00Z');
+  });
+
+  it('rejects raw tampering before decoding and normalized body mismatch after a matching raw hash', () => {
+    const bytes = Buffer.from(JSON.stringify(checkpointFixture));
+    const event = verificationPublication(checkpointFixture, bytes);
+    const tampered = Buffer.from(JSON.stringify(checkpointFixture) + '\n');
+    expect(checkpointApi.verifyCheckpointArtifact(tampered, event)).toEqual({
+      ok: false, errors: ['ARTIFACT_DIGEST_MISMATCH']
+    });
+    const changed = structuredClone(checkpointFixture);
+    changed.objective = 'Changed objective';
+    const changedBytes = Buffer.from(JSON.stringify(changed));
+    event.payload.artifact.sha256 = createHash('sha256').update(changedBytes).digest('hex');
+    expect(checkpointApi.verifyCheckpointArtifact(changedBytes, event)).toEqual({
+      ok: false, errors: ['BODY_DIGEST_MISMATCH']
+    });
+  });
+
+  it('fails closed on malformed bytes, unsupported input, and byte limits', () => {
+    const bytes = Buffer.from(JSON.stringify(checkpointFixture));
+    const event = verificationPublication(checkpointFixture, bytes);
+    for (const [input, code] of [
+      ['not bytes', 'INVALID_ARTIFACT_BYTES'],
+      [Buffer.alloc(256 * 1024 + 1), 'LIMIT_EXCEEDED'],
+      [Buffer.from([0xff]), 'INVALID_JSON'],
+      [Buffer.from('{'), 'INVALID_JSON']
+    ]) {
+      const e = structuredClone(event);
+      if (input instanceof Uint8Array && input.byteLength <= 256 * 1024)
+        e.payload.artifact.sha256 = createHash('sha256').update(input).digest('hex');
+      expect(checkpointApi.verifyCheckpointArtifact(input, e)).toEqual({ok:false, errors:[code]});
+    }
+    const invalid = Buffer.from('{"schema":"gatekeeper-checkpoint/1"}');
+    event.payload.artifact.sha256 = createHash('sha256').update(invalid).digest('hex');
+    expect(checkpointApi.verifyCheckpointArtifact(invalid, event)).toMatchObject({
+      ok:false, errors:['INVALID_CHECKPOINT']
+    });
+    const tooLargeBody = structuredClone(checkpointFixture);
+    tooLargeBody.objective = 'x'.repeat(4096);
+    tooLargeBody.completed_actions = Array(40).fill('x'.repeat(4096));
+    const withinRawLimit = Buffer.from(JSON.stringify(tooLargeBody));
+    expect(withinRawLimit.byteLength).toBeLessThan(256 * 1024);
+    event.payload.artifact.sha256 = createHash('sha256').update(withinRawLimit).digest('hex');
+    expect(checkpointApi.verifyCheckpointArtifact(withinRawLimit, event)).toEqual({
+      ok:false, errors:['INVALID_CHECKPOINT']
+    });
+  });
+
+  it('rejects every publication binding even when byte and body digests match', () => {
+    const bytes = Buffer.from(JSON.stringify(checkpointFixture));
+    const original = verificationPublication(checkpointFixture, bytes);
+    const edits = [
+      [(e) => { e.kind = 'work.opened'; }, 'INVALID_PUBLICATION'],
+      [(e) => { e.payload.artifact.sha256 = null; e.payload.artifact.version = 'v1'; }, 'ARTIFACT_DIGEST_REQUIRED'],
+      [(e) => { e.workspace_id = id(90); }, 'CHECKPOINT_SCOPE_MISMATCH'],
+      [(e) => { e.workstream_id = id(90); }, 'CHECKPOINT_SCOPE_MISMATCH'],
+      [(e) => { e.subject.id = id(90); e.payload.checkpoint_id = id(90); }, 'PUBLICATION_BINDING_MISMATCH'],
+      [(e) => { e.payload.work_id = id(90); }, 'PUBLICATION_BINDING_MISMATCH'],
+      [(e) => { e.payload.assignment_version = 2; }, 'PUBLICATION_BINDING_MISMATCH'],
+      [(e) => { e.payload.assignment_event_id = id(90); }, 'INVALID_PUBLICATION'],
+      [(e) => { e.actor.session_id = 'other-session'; }, 'PUBLICATION_BINDING_MISMATCH']
+    ];
+    for (const [index, [edit, code]] of edits.entries()) {
+      const e = structuredClone(original);
+      edit(e);
+      const result = checkpointApi.verifyCheckpointArtifact(bytes, e);
+      expect(result, `binding case ${index}`).toEqual({ok:false, errors:[code]});
+      expect(result).not.toHaveProperty('checkpoint');
+      expect(result).not.toHaveProperty('verification');
+    }
+  });
+});
 /** @param {any[]} events */
 function context(events) {
   return {
