@@ -100,6 +100,7 @@ export function buildAuthorizedWorkView({
     !store ||
     typeof store.inspect !== 'function' ||
     typeof store.accumulated !== 'function' ||
+    typeof store.handoffVerifications !== 'function' ||
     typeof now !== 'function'
   )
     return { status: 'blocked', code: 'INVALID_POLICY' };
@@ -141,17 +142,38 @@ export function buildAuthorizedWorkView({
     Date.parse(observedAt) > clock
   )
     return { status: 'blocked', code: 'INVALID_CLOCK' };
-  const projection = replayWorkEvents({
+  let receipts;
+  try {
+    receipts = store.handoffVerifications({ now: clock });
+  } catch {
+    return { status: 'unavailable', code: 'VERIFICATION_UNAVAILABLE' };
+  }
+  if (receipts.status !== 'ready')
+    return { status: 'unavailable', code: 'VERIFICATION_UNAVAILABLE' };
+  const inactive = new Set(receipts.inactive_ready_event_ids);
+  const replay = (verifications) => replayWorkEvents({
     events: accumulated.events,
     trust: {
       workspace_id: policy.workspace_id,
       allowed_stream_ids: [policy.stream_id],
       event_evidence: accumulated.event_evidence,
-      grants: policy.grants
+      grants: policy.grants,
+      handoff_verifications: verifications
     },
     observation: accumulated.observation,
     asOf: observedAt
   });
+  let projection = replay(receipts.verifications);
+  if (inactive.size) {
+    const historicallyAccepted = new Set(projection.handoffs
+      .filter((handoff) => handoff.accepted_event)
+      .map((handoff) => handoff.ready_event?.event_id));
+    const current = receipts.verifications.filter(
+      (verification) => !inactive.has(verification.ready_event_id) ||
+        historicallyAccepted.has(verification.ready_event_id)
+    );
+    if (current.length !== receipts.verifications.length) projection = replay(current);
+  }
   const evaluation = {
     projection,
     evaluated_at: evaluated_at ?? new Date(clock).toISOString(),

@@ -381,7 +381,8 @@ it('work view evaluates authorized presence with explicit age while preserving s
       events: input.events,
       event_evidence: input.trust.event_evidence,
       observation: input.observation
-    })
+    }),
+    handoffVerifications: () => ({ status: 'ready', verifications: [], inactive_ready_event_ids: [] })
   };
   const view = buildAuthorizedWorkView({
     store,

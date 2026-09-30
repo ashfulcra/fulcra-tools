@@ -101,7 +101,7 @@ is not a requirement to run every piece together.
 | Package | What it does |
 |---|---|
 | [coord-engine](packages/coord-engine/README.md) | Team tasks, directives, roles, reviews, presence, continuity, routing, and other bus bookkeeping. |
-| [coord-v5](packages/coord-v5/README.md) | Opt-in Node coordination alpha foundation: typed work, presence/roles, replay, backlog, checkpoints and native-listener enrollment. Start with [guided setup](packages/coord-v5/docs/onboarding.md); see [tested capabilities and remaining gates](docs/coord/V5-RELEASE-STATUS.md). Full handoff readiness remains in development; existing teams are not upgraded automatically. |
+| [coord-v5](packages/coord-v5/README.md) | Opt-in Node coordination alpha foundation: typed work, presence/roles, replay, backlog, checkpoints, native-listener enrollment, and private durable import of operator-trusted handoff verification receipts. Start with [guided setup](packages/coord-v5/docs/onboarding.md); see [tested capabilities and remaining gates](docs/coord/V5-RELEASE-STATUS.md). Receipt import does not independently verify remote access or source completeness; existing teams are not upgraded automatically. |
 | [coord-fold](packages/coord-fold/README.md) | Folds coordination events into bounded, resumable obligation views. |
 | [coord-mesh](packages/coord-mesh/README.md) | Cross-account coordination through outboxes and scoped data shares. |
 | [coord-tracker-bridge](packages/coord-tracker-bridge/README.md) | Projects coordination work into external trackers; includes a Linear adapter and separate planning/apply steps. |

@@ -31,6 +31,7 @@ coord-v5 event validate < event.json
 coord-v5 checkpoint validate < checkpoint.json
 coord-v5 checkpoint package < package-input.json
 coord-v5 handoff readiness < readiness-input.json
+coord-v5 handoff verification import --config ABS --db ABS --receipt ABS
 coord-v5 enrollment plan < assessment.json
 coord-v5 enrollment instructions < instructions-input.json
 coord-v5 observation --config ABS --policy ABS --db ABS
@@ -57,7 +58,8 @@ owned annotation metadata. This package does not create sources or grant authori
 SQLite scope cannot be rebound to another source.
 
 Config/event/policy files must be absolute, regular nonsymlink files, at most
-64 KiB, private (`0600`) in a private (`0700`) directory. Databases/backups contain
+64 KiB, private (`0600`) in a private (`0700`) directory. Handoff receipt input
+has the same private-file rules and a 2 MiB limit. Databases/backups contain
 request content and must stay private. Bearers go only on stdin, never argv/config.
 
 Policy is exactly `{principal_id,workspace_id,stream_id,grants,work_jobs}` and must
@@ -82,6 +84,23 @@ SQLite cache offline. As-of is actual source observation time, not execution tim
 Cold/failed-only caches return unavailable and exit nonzero. Partial data or withheld
 grants never means global all-clear. Historical-range selection and presence filtering
 are API inputs, not CLI features in this slice.
+
+`handoff verification import` accepts one operator-trusted local attestation and
+retains it in the private SQLite database across restarts. Its exact envelope is
+`{schema:"handoff-verification/1",principal_id,workspace_id,workstream_id,
+stream_id,package,verification}`. `package` is the validated handoff package whose
+digest the offer and ready events name; `verification` is the existing replay
+verification shape with ready/offer IDs, digests, and `checks`. The importer
+requires matching authenticated retained ready, offer, and checkpoint-publication
+events, exact receiver/publication bindings, and a verified check for every package
+access requirement. Identical imports return `same`; conflicts, stale checks and
+invalid input are blocked. A damaged stored receipt makes the view unavailable.
+Authorized views consume retained proofs automatically; expired checks cannot
+make a pending handoff currently ready, but a valid historical acceptance keeps
+its ownership after expiry. This command trusts the local operator's assertion:
+it does not fetch an artifact, test remote access, issue a native wake, or prove
+source completeness. Partial history stays partial and cannot authorize an
+exclusive takeover or all-clear.
 
 Make private config/policy/event files. Validate the event, publish with bearer stdin,
 then read a fresh bounded window with bearer stdin. Run `work view`/`work digest`.

@@ -1426,6 +1426,17 @@ nonfatal and never imply absence.
 Use `checkpoint prepare` to obtain normalized checkpoint content and its canonical
 digest before publication; raw artifact integrity and canonical body integrity
 are separate checks. Native action generation is not evidence of a delivered wake.
+`coord-v5 handoff verification import --config ABS --db ABS --receipt ABS`
+retains a private, scope-bound operator attestation through restart. The receipt
+envelope is `{schema:"handoff-verification/1",principal_id,workspace_id,
+workstream_id,stream_id,package,verification}`; package bytes bind the offer
+digest and exact access-requirement set, and referenced ready/offer/publication
+events must already be in the authenticated local journal. Views consume valid
+retained checks automatically, fail unavailable on tampering, and refuse expired
+pending readiness. A historically accepted owner is not revoked merely because
+checks expire later. Import does not independently verify remote artifact bytes,
+remote permissions, native wakes, or source completeness; do not describe it as
+a verifier adapter or use partial coverage to claim all-clear or takeover.
 
 `2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
 that agrees with the body, deterministic identity precedence, and distinct

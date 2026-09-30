@@ -484,18 +484,16 @@ describe('explicit handoff readiness and transfer', () => {
       ).toBe('blocked');
     }
   });
-  it('keeps historical transfer but demands recheck once adapter validity expires', () => {
+  it('keeps accepted historical ownership after adapter validity expires', () => {
     const s = setup();
     const events = [...s.events, s.offer, s.ready, s.accept];
     const historical = replayWorkEvents(context(events, evidenceFor(s)));
     expect(historical.work[0].assignment.version).toBe(2);
     const expired = replayWorkEvents(context(events, evidenceFor(s), later));
     expect(expired.work[0].assignment.version).toBe(2);
-    expect(expired.work[0].execution_authority).toBe('blocked_validation');
-    expect(expired.work[0].validation.some((d) => d.code === 'HANDOFF_RECHECK_REQUIRED')).toBe(
-      true
-    );
-    expect(expired.handoffs[0].state).toBe('blocked');
+    expect(expired.work[0].assignment.accepted_actor).toEqual(target);
+    expect(expired.work[0].validation.some((d) => d.code === 'HANDOFF_RECHECK_REQUIRED')).toBe(false);
+    expect(expired.handoffs[0].state).toBe('accepted');
   });
   it('deduplicates exact replay and rejects forged verification and package fields', () => {
     const s = setup();

@@ -118,7 +118,7 @@ function utc(value) {
 /** Compare already-validated instants without dropping sub-millisecond precision.
  * Only receipt/observation bounds use clocks; event state never does.
  * @param {string} left @param {string} right */
-function compareInstants(left, right) {
+export function compareInstants(left, right) {
   const a = utc(left);
   const b = utc(right);
   const seconds = a.slice(0, 19).localeCompare(b.slice(0, 19));
@@ -225,7 +225,7 @@ function validHandoffChecks(c) {
   );
 }
 /** @param {any} v */
-function validHandoffVerification(v) {
+export function validHandoffVerification(v) {
   return (
     shape(v, [
       'ready_event_id',
@@ -1038,7 +1038,7 @@ export function replayWorkEvents(input = {}) {
     const expired = !!(proof && asOf && compareInstants(asOf, proof.checks.valid_until) >= 0);
     const state = branch_event_ids.length
       ? 'conflicted'
-      : accepted && !expired
+      : accepted
         ? 'accepted'
         : expired
           ? 'blocked'
@@ -1060,13 +1060,6 @@ export function replayWorkEvents(input = {}) {
       state,
       provisional: false
     });
-    if (accepted && expired) {
-      const row = workMap.get(accepted.subject.id);
-      if (row) {
-        row.validation.push({ code: 'HANDOFF_RECHECK_REQUIRED', subject_id: row.work_id });
-        row.execution_authority = 'blocked_validation';
-      }
-    }
   }
   for (const w of output.work) {
     for (const dependency of w.item?.dependency_ids ?? [])
