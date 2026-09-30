@@ -1,0 +1,363 @@
+{
+  "workspace_id": "00000000-0000-4000-8000-000000000100",
+  "events": [
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "operation_id": "00000000-0000-4000-8000-000000000101",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "work.opened",
+      "subject": {
+        "type": "work",
+        "id": "00000000-0000-4000-8000-000000000400"
+      },
+      "parents": [],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "item": {
+          "title": "Ship migration",
+          "intent": "Keep clients compatible",
+          "type": "task",
+          "status": "proposed",
+          "owner_id": "agent-a",
+          "next_action": "Write compatibility tests",
+          "acceptance_criteria": [
+            {
+              "id": "criterion-1",
+              "text": "Tests pass"
+            }
+          ],
+          "priority": "normal",
+          "dependency_ids": [],
+          "due_at": null,
+          "revisit": null,
+          "blocker": null,
+          "result": null
+        }
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000002",
+      "operation_id": "00000000-0000-4000-8000-000000000102",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "work.opened",
+      "subject": {
+        "type": "work",
+        "id": "00000000-0000-4000-8000-000000000401"
+      },
+      "parents": [],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:01:00.000Z",
+      "payload": {
+        "item": {
+          "title": "Revisit legacy client",
+          "intent": "Avoid losing the compatibility question",
+          "type": "deferred",
+          "status": "deferred",
+          "owner_id": null,
+          "next_action": null,
+          "acceptance_criteria": [],
+          "priority": "normal",
+          "dependency_ids": [],
+          "due_at": null,
+          "revisit": {
+            "at": null,
+            "condition": "When the migration tests land"
+          },
+          "blocker": null,
+          "result": null
+        }
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000003",
+      "operation_id": "00000000-0000-4000-8000-000000000103",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "question.opened",
+      "subject": {
+        "type": "question",
+        "id": "00000000-0000-4000-8000-000000000500"
+      },
+      "parents": [],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:02:00.000Z",
+      "payload": {
+        "work_ids": ["00000000-0000-4000-8000-000000000400"],
+        "text": "Which compatibility target?",
+        "decision_maker_id": "agent-a",
+        "options": ["Current", "Legacy"],
+        "recommendation": null,
+        "deadline_at": null,
+        "escalation_target_id": null
+      }
+    }
+  ],
+  "replay_events": [
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000004",
+      "operation_id": "00000000-0000-4000-8000-000000000104",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "work.revised",
+      "subject": {
+        "type": "work",
+        "id": "00000000-0000-4000-8000-000000000400"
+      },
+      "parents": ["00000000-0000-4000-8000-000000000001"],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "expected_event_id": "00000000-0000-4000-8000-000000000001",
+        "item": {
+          "title": "Ship migration",
+          "intent": "Keep clients compatible",
+          "type": "task",
+          "status": "ready",
+          "owner_id": "agent-a",
+          "next_action": "Write compatibility tests",
+          "acceptance_criteria": [
+            {
+              "id": "criterion-1",
+              "text": "Tests pass"
+            }
+          ],
+          "priority": "normal",
+          "dependency_ids": [],
+          "due_at": null,
+          "revisit": null,
+          "blocker": null,
+          "result": null
+        },
+        "reason": null
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000005",
+      "operation_id": "00000000-0000-4000-8000-000000000105",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "assignment.offered",
+      "subject": {
+        "type": "work",
+        "id": "00000000-0000-4000-8000-000000000400"
+      },
+      "parents": ["00000000-0000-4000-8000-000000000004"],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "work_id": "00000000-0000-4000-8000-000000000400",
+        "expected_assignment_event_id": null,
+        "expected_version": 0,
+        "target": {
+          "principal_id": "principal-a",
+          "logical_agent_id": "agent-a",
+          "instance_id": "instance-a",
+          "session_id": "session-a"
+        }
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000006",
+      "operation_id": "00000000-0000-4000-8000-000000000106",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "assignment.accepted",
+      "subject": {
+        "type": "work",
+        "id": "00000000-0000-4000-8000-000000000400"
+      },
+      "parents": ["00000000-0000-4000-8000-000000000005"],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "work_id": "00000000-0000-4000-8000-000000000400",
+        "offer_event_id": "00000000-0000-4000-8000-000000000005",
+        "expected_assignment_event_id": null,
+        "expected_version": 0,
+        "ready_event_id": null
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000007",
+      "operation_id": "00000000-0000-4000-8000-000000000107",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "work.revised",
+      "subject": {
+        "type": "work",
+        "id": "00000000-0000-4000-8000-000000000400"
+      },
+      "parents": [
+        "00000000-0000-4000-8000-000000000004",
+        "00000000-0000-4000-8000-000000000006",
+        "00000000-0000-4000-8000-000000000003"
+      ],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "expected_event_id": "00000000-0000-4000-8000-000000000004",
+        "item": {
+          "title": "Ship migration",
+          "intent": "Keep clients compatible",
+          "type": "task",
+          "status": "blocked",
+          "owner_id": "agent-a",
+          "next_action": "Write compatibility tests",
+          "acceptance_criteria": [
+            {
+              "id": "criterion-1",
+              "text": "Tests pass"
+            }
+          ],
+          "priority": "normal",
+          "dependency_ids": [],
+          "due_at": null,
+          "revisit": null,
+          "blocker": {
+            "condition_id": "target-choice",
+            "kind": "question",
+            "ref_id": "00000000-0000-4000-8000-000000000500",
+            "unlock_condition": "Apply the compatibility target decision"
+          },
+          "result": null
+        },
+        "reason": "Target decision needed"
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000008",
+      "operation_id": "00000000-0000-4000-8000-000000000108",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "question.answered",
+      "subject": {
+        "type": "question",
+        "id": "00000000-0000-4000-8000-000000000500"
+      },
+      "parents": ["00000000-0000-4000-8000-000000000003"],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "opened_event_id": "00000000-0000-4000-8000-000000000003",
+        "supersedes_answer_event_id": null,
+        "text": "Current target"
+      }
+    },
+    {
+      "protocol": "gatekeeper-work/1",
+      "event_id": "00000000-0000-4000-8000-000000000009",
+      "operation_id": "00000000-0000-4000-8000-000000000109",
+      "workspace_id": "00000000-0000-4000-8000-000000000100",
+      "stream_id": "00000000-0000-4000-8000-000000000200",
+      "workstream_id": "00000000-0000-4000-8000-000000000300",
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "kind": "question.applied",
+      "subject": {
+        "type": "question",
+        "id": "00000000-0000-4000-8000-000000000500"
+      },
+      "parents": [
+        "00000000-0000-4000-8000-000000000008",
+        "00000000-0000-4000-8000-000000000007",
+        "00000000-0000-4000-8000-000000000006"
+      ],
+      "audience": "workspace",
+      "occurred_at": "2026-09-26T10:00:00.000Z",
+      "payload": {
+        "answer_event_id": "00000000-0000-4000-8000-000000000008",
+        "work_id": "00000000-0000-4000-8000-000000000400",
+        "condition_id": "target-choice"
+      }
+    }
+  ],
+  "digest_presence": [
+    {
+      "actor": {
+        "principal_id": "principal-a",
+        "logical_agent_id": "agent-a",
+        "instance_id": "instance-a",
+        "session_id": "session-a"
+      },
+      "contact_at": "2026-09-27T12:00:00.000Z",
+      "inbox_observed_at": "2026-09-27T12:00:00.000Z",
+      "progress_at": null,
+      "checkpoint_at": null,
+      "contact_due_at": "2026-09-26T12:00:00.000Z",
+      "progress_due_at": null,
+      "checkpoint_due_at": null,
+      "coverage": "complete"
+    }
+  ]
+}

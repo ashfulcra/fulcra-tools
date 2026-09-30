@@ -1402,6 +1402,31 @@ intents), split by kind:
 
 ## Coord-engine 2.0 truthfulness boundary
 
+The separate [coord-v5 alpha](packages/coord-v5/README.md) is the new work-core
+release track, not an upgrade of the installed Python engine or an activation
+of the v4 cutover. Its [release status](docs/coord/V5-RELEASE-STATUS.md) separates
+packaging, usable operations, agent acceptance, and upstream release. Do not
+change an existing team's authority, schedules, or historical work when trying
+the alpha. Its Node runtime and explicit enrollment requirements belong to that
+package only; Collect and the web application are not prerequisites.
+
+For new v5 enrollment, use the package's [onboarding guide](packages/coord-v5/docs/onboarding.md)
+and capability-evidenced `coord-v5 enrollment plan`; keep one native listener
+registration per environment/harness. Its plan is not an installed schedule or
+a membership grant. Preserve the distinction between contact, inbox observation,
+progress and checkpoint clocks. Role claims survive in annotation history but
+are not distributed locks; partial source views cannot authorize exclusive
+takeover. Keep private descriptors and managed workspace instructions local.
+
+In v5, current source health can recover after a strictly newer successful read;
+historical errors remain in the observation journal and coverage remains partial.
+`coord-v5 transport read` journals failed observations and preserves cached work,
+but exits nonzero when the current read is unavailable; clean partial reads remain
+nonfatal and never imply absence.
+Use `checkpoint prepare` to obtain normalized checkpoint content and its canonical
+digest before publication; raw artifact integrity and canonical body integrity
+are separate checks. Native action generation is not evidence of a delivered wake.
+
 `2.0.0` ships the truthfulness spine only: typed command outcomes, exit status
 that agrees with the body, deterministic identity precedence, and distinct
 empty, tombstoned, unreadable, and unknown states. Those direct canonical-read

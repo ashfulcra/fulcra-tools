@@ -1,0 +1,77 @@
+{
+  "name": "@fulcra/coord-v5",
+  "version": "0.1.0-alpha.3",
+  "description": "Opt-in coordination work core and durable local listener (alpha)",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "bin": {
+    "coord-v5": "bin/coord-v5.mjs"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./work-contract": "./src/lib/gatekeeper/work-contract.js",
+    "./work-projection": "./src/lib/gatekeeper/work-projection.js",
+    "./work-digest": "./src/lib/gatekeeper/work-digest.js",
+    "./checkpoint": "./src/lib/gatekeeper/checkpoint.js",
+    "./handoff": "./src/lib/gatekeeper/handoff.js",
+    "./protocol": "./src/lib/gatekeeper/protocol.js",
+    "./projection": "./src/lib/gatekeeper/projection.js",
+    "./listener": "./src/lib/gatekeeper/listener.js",
+    "./work-transport-config": "./src/lib/server/gatekeeper/work-transport-config.js",
+    "./work-transport-read": "./src/lib/server/gatekeeper/work-transport-read.js",
+    "./work-transport-store": "./src/lib/server/gatekeeper/work-transport-store.js",
+    "./work-transport-publish": "./src/lib/server/gatekeeper/work-transport-publish.js",
+    "./listener-validation": "./src/lib/server/gatekeeper/listener-validation.js",
+    "./listener-store": "./src/lib/server/gatekeeper/listener-store.js",
+    "./listener-runtime": "./src/lib/server/gatekeeper/listener-runtime.js",
+    "./work-listener": "./src/lib/server/gatekeeper/work-listener.js",
+    "./work-view": "./src/lib/server/gatekeeper/work-view.js",
+    "./work-presence": "./src/lib/gatekeeper/work-presence.js",
+    "./work-roles": "./src/lib/gatekeeper/work-roles.js",
+    "./enrollment": "./src/lib/server/gatekeeper/enrollment.js"
+  },
+  "files": [
+    "bin/coord-v5.mjs",
+    "src/index.js",
+    "src/lib/gatekeeper/work-contract.js",
+    "src/lib/gatekeeper/work-projection.js",
+    "src/lib/gatekeeper/work-digest.js",
+    "src/lib/gatekeeper/work-presence.js",
+    "src/lib/gatekeeper/work-roles.js",
+    "src/lib/gatekeeper/checkpoint.js",
+    "src/lib/gatekeeper/handoff.js",
+    "src/lib/gatekeeper/protocol.js",
+    "src/lib/gatekeeper/projection.js",
+    "src/lib/gatekeeper/listener.js",
+    "src/lib/server/gatekeeper/work-transport-config.js",
+    "src/lib/server/gatekeeper/work-transport-read.js",
+    "src/lib/server/gatekeeper/work-transport-store.js",
+    "src/lib/server/gatekeeper/work-transport-publish.js",
+    "src/lib/server/gatekeeper/listener-validation.js",
+    "src/lib/server/gatekeeper/listener-store.js",
+    "src/lib/server/gatekeeper/listener-runtime.js",
+    "src/lib/server/gatekeeper/work-listener.js",
+    "src/lib/server/gatekeeper/work-view.js",
+    "scripts/coord-v5-operations.mjs",
+    "src/lib/server/gatekeeper/enrollment.js",
+    "scripts/coord-v5-enrollment.mjs",
+    "docs/onboarding.md",
+    "docs/harnesses.md",
+    "scripts/gatekeeper-work-transport.mjs",
+    "scripts/gatekeeper-listener.mjs",
+    "scripts/work-listener-observation.mjs",
+    "README.md",
+    "PROVENANCE.md"
+  ],
+  "scripts": {
+    "test:unit": "vitest run --config vitest.config.js",
+    "test:install": "node --test test/*.test.mjs",
+    "test": "npm run test:unit && npm run test:install"
+  },
+  "devDependencies": {
+    "vitest": "4.1.11"
+  }
+}

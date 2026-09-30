@@ -9,7 +9,7 @@ members = ["packages/*"]
 # hermes-vercel + litellm packages that also used to need excluding were
 # extracted to their own standalone repos — ashfulcra/fulcra-hermes-vercel and
 # ashfulcra/fulcra-litellm.)
-exclude = ["packages/web-ui"]
+exclude = ["packages/web-ui", "packages/coord-v5"]
 
 # Workspace-wide pytest settings — applied when running `pytest packages/`
 # from the monorepo root.  Each package also has its own [tool.pytest.ini_options]
