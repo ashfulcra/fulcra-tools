@@ -1444,6 +1444,14 @@ body digest, and scope/identity bindings; this is not remote retrieval, access,
 native-wake, or source-completeness proof. Artifact bytes are capped at 256 KiB,
 publication JSON at 64 KiB, and validated checkpoint content at 128 KiB.
 Native action generation is not evidence of a delivered wake.
+The v5 runtime's explicit host-injected `dispatchCodexWake` supports only scope
+harness `codex` and privately bound desktop thread/host targets. Trusted native
+read/send callbacks are required; injection does not prove authority or grants.
+It requires exact idle preflight, commits a SQLite claim before sending once,
+and retains claimed/uncertain attempts without automatic retry. Each callback
+has a bounded observation timeout, not cancellation. Acceptance is not receiver
+acknowledgment or work completion; synthetic tests are not live acceptance.
+See the [Codex dispatcher contract](packages/coord-v5/README.md#explicit-host-injected-codex-delivery).
 The v5 listener's opt-in `dispatch-claude` command resumes a privately bound
 `claude-code` target `{kind:"claude-code",sessionId:UUID,cwd:ABS}` using a trusted
 absolute operator-supplied executable; pass the prepared action's `.arguments`
