@@ -18,13 +18,16 @@ function nativePayload(raw) {
         typeof raw.content[0].text !== 'string' || raw.content[0].text.length > 64 * 1024) return null;
     try { candidates.push(JSON.parse(raw.content[0].text)); } catch { return null; }
   }
-  if (!candidates.length) return raw;
+  if (!candidates.length) {
+    try { if (typeof JSON.stringify(raw) !== 'string') return null; } catch { return null; }
+    return raw;
+  }
   if (Object.hasOwn(raw, 'thread') || Object.hasOwn(raw, 'threadId')) return null;
   const payload = candidates[0];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.isError || payload.is_error || payload.error) return null;
   try {
     const json = JSON.stringify(payload);
-    if (candidates.some(value => JSON.stringify(value) !== json)) return null;
+    if (typeof json !== 'string' || candidates.some(value => JSON.stringify(value) !== json)) return null;
   } catch { return null; }
   return payload;
 }

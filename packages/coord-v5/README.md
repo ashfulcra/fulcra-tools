@@ -185,7 +185,9 @@ Preflight requires raw native schema-version-1 thread evidence with exact
 `structuredContent` are supported; malformed/error/contradictory wrappers fail
 closed. Busy/unknown/unavailable reads cause no send and retain the prepared
 obligation for later reconsideration. This snapshot is not global race-free busy
-enforcement. After preflight, one SQLite transaction rechecks lease, correlation,
+enforcement. Direct and structured payloads that cannot serialize as JSON (such
+as cyclic or BigInt-bearing objects) are invalid native evidence. After preflight,
+one SQLite transaction rechecks lease, correlation,
 route and prepared state, then commits `dispatching`/`claimed` and a UUID claim
 before invoking send exactly once. Other claimed/uncertain sends to the same
 resolved thread/host in that local journal scope require reconciliation.

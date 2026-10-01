@@ -377,3 +377,43 @@ it('classifies non-JSON structured send evidence as uncertain instead of throwin
   });
   expect(result).toMatchObject({ state: 'uncertain', code: 'INVALID_NATIVE_RESULT' });
 });
+
+it.each(['cyclic', 'bigint', 'undefined serialization'])('retains an uncertain claim without retry for malformed direct %s send evidence', async kind => {
+  // Removing direct-payload serialization validation would promote this to acceptance.
+  const f = setup();
+  const response = { threadId: target.threadId };
+  if (kind === 'undefined serialization') response.toJSON = () => undefined;
+  else response.invalid = kind === 'cyclic' ? response : 1n;
+  let sends = 0;
+  const opts = { ...options(f), sendMessage: async () => { sends++; return response; } };
+  const result = await runtime.dispatchCodexWake(f.store, f.lease, f.input, opts);
+  expect(result).toMatchObject({ state: 'uncertain', code: 'INVALID_NATIVE_RESULT' });
+  expect(attemptOf(f)).toMatchObject({ dispatchStatus: 'uncertain', receiptStatus: 'unknown' });
+  expect(attemptOf(f).dispatchClaimId).toBeTruthy();
+  expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, opts)).toMatchObject({ code: 'NOT_DISPATCHABLE' });
+  expect(sends).toBe(1);
+});
+
+it.each(['cyclic', 'bigint', 'undefined serialization'])('refuses malformed direct %s read evidence without send or claim', async kind => {
+  // Moving direct return before validation would authorize sending on malformed read evidence.
+  const f = setup();
+  const response = rawRead();
+  if (kind === 'undefined serialization') response.toJSON = () => undefined;
+  else response.invalid = kind === 'cyclic' ? response : 1n;
+  let sends = 0;
+  const result = await runtime.dispatchCodexWake(f.store, f.lease, f.input, {
+    ...options(f), readThread: async () => response,
+    sendMessage: async () => { sends++; return { threadId: target.threadId }; }
+  });
+  expect(result).toMatchObject({ state: 'prepared', code: 'INVALID_THREAD_RESULT' });
+  expect(sends).toBe(0);
+  expect(attemptOf(f).dispatchClaimId).toBeUndefined();
+  expect(stateOf(f).policy.obligations).toEqual({ '["job","item"]': 'r1' });
+});
+
+it('refuses structured send evidence whose serialization produces no JSON value', async () => {
+  const f = setup();
+  expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, {
+    ...options(f), sendMessage: async () => ({ structuredContent: { threadId: target.threadId, toJSON: () => undefined } })
+  })).toMatchObject({ state: 'uncertain', code: 'INVALID_NATIVE_RESULT' });
+});
