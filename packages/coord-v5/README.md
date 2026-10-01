@@ -365,3 +365,12 @@ Run `npm ci --ignore-scripts` and `npm test`. Tests use synthetic fixtures and r
 local SQLite, never live network. `node --test test/*.test.mjs` packs/installs offline
 into empty directories, exercises installed commands and audits tarball contents.
 Tests/fixtures are excluded from the tarball. See [PROVENANCE.md](PROVENANCE.md).
+
+The installed crash regression SIGKILLs the owned dispatch script after a synthetic
+executor observes its committed claim. Fresh same-holder commands retain the exact
+wake/attempt, refuse resend, and preserve obligations through partial/unavailable
+reads; the executor launches once. Focused SQLite tests also retain the session fence
+after an ambiguous outcome is acknowledged and reopened, and retain a claim when
+successful child settlement meets an expired lease. These are local synthetic
+regressions, not native Claude interruption, different-holder takeover, host-outage,
+provider completeness, or production acceptance evidence.
