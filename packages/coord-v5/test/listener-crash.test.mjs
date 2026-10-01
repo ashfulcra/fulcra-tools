@@ -31,7 +31,7 @@ test('installed dispatcher crash retains exact claim and refuses same-holder res
   const scope = { principalId: 'synthetic', workspaceId: 'synthetic', environmentId: 'crash-test', harness: 'claude-code' };
   const holder = 'synthetic-holder';
   const target = { kind: 'claude-code', sessionId: '11111111-1111-4111-8111-111111111111', cwd: directory };
-  let dispatcher, marker, exit, closed = false, spawnError;
+  let dispatcher, marker, exit, closed = false, spawnError, testError;
   let stdout = '', stderr = '', outputOverflow = false;
   const run = (program, args, options = {}) => {
     const result = spawnSync(program, args, {
@@ -166,21 +166,42 @@ test('installed dispatcher crash retains exact claim and refuses same-holder res
     }
     assert.equal(JSON.parse(readFileSync(markerPath, 'utf8')).count, 1);
     assert.equal(fixtureRunning(), false);
+  } catch (error) {
+    testError = error;
   } finally {
-    // On pre-marker failure, allow the bounded product executor timeout to clean
-    // up before interrupting dispatch. Never leave an unidentified orphan behind.
-    if (dispatcher && !marker && !exit) {
-      await until(() => existsSync(markerPath) || exit !== undefined || closed, 7000, 'failure cleanup marker or dispatcher exit');
+    const errors = testError ? [testError] : [];
+    try {
+      // On pre-marker failure, allow the bounded product executor timeout to clean
+      // up before interrupting dispatch. Never signal an unidentified executor.
+      if (dispatcher && !marker && !exit) {
+        await until(() => existsSync(markerPath) || exit !== undefined || closed, 7000, 'failure cleanup marker or dispatcher exit');
+      }
+      if (!marker && existsSync(markerPath)) marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+      await stopFixture();
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      try {
+        if (dispatcher && !exit) dispatcher.kill('SIGKILL');
+        if (dispatcher) await until(() => closed, 3000, 'owned dispatcher cleanup');
+      } catch (error) {
+        errors.push(error);
+      } finally {
+        try {
+          dispatcher?.stdin.destroy();
+          dispatcher?.stdout.destroy();
+          dispatcher?.stderr.destroy();
+        } catch (error) {
+          errors.push(error);
+        } finally {
+          try { rmSync(directory, { recursive: true, force: true }); }
+          catch (error) { errors.push(error); }
+        }
+      }
     }
-    if (!marker && existsSync(markerPath)) marker = JSON.parse(readFileSync(markerPath, 'utf8'));
-    await stopFixture();
-    if (dispatcher && !exit) dispatcher.kill('SIGKILL');
-    if (dispatcher) {
-      await until(() => closed, 3000, 'owned dispatcher cleanup');
-      dispatcher.stdin.destroy();
-      dispatcher.stdout.destroy();
-      dispatcher.stderr.destroy();
-    }
-    rmSync(directory, { recursive: true, force: true });
+    // Preserve the original test/identity failure, including when cleanup also
+    // fails. A failed ownership check never authorizes signalling that PID.
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'Test and/or owned-process cleanup failed');
   }
 });
