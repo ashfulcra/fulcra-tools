@@ -47,6 +47,110 @@ describe("enrollment capability decisions", () => {
     value.capabilities.schedule.observed_at = "2026-09-01T12:00:00Z";
     expect(planEnrollment(value).mode).toBe("interactive");
   });
+  it("selects native events without a schedule or loop and does not promise idle delivery", () => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = proof();
+    const result = planEnrollment(value);
+    expect(result.mode).toBe("native-event");
+    expect(result.deployment_action).toEqual({ action: "install_with_native_harness_tool" });
+    expect(result.service_level).toBe("trial");
+    expect(result.membership).toBe("requires_authorized_grant");
+    expect(result.deployment_status).toBe("not_installed");
+    expect(result.capabilities.idle_wake.status).toBe("unknown");
+    expect(result.next_steps.join(" ")).toMatch(/native event registration/);
+    expect(result.next_steps.join(" ")).toMatch(/reception.*idle worker delivery/i);
+    expect(result.next_steps.join(" ")).not.toMatch(/Keep the schedule alive|cadence|interval/);
+  });
+  it("prefers native events over a verified session loop", () => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = proof();
+    value.capabilities.loop = proof();
+    expect(planEnrollment(value).mode).toBe("native-event");
+  });
+  it("retains the scheduled backstop when event ingress and schedule are verified", () => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = proof();
+    value.capabilities.schedule = proof();
+    value.capabilities.loop = proof();
+    const result = planEnrollment(value);
+    expect(result.mode).toBe("native-event-with-backstop");
+    expect(result.next_steps.join(" ")).toMatch(/native event registration/);
+    expect(result.next_steps.join(" ")).toMatch(/schedule.*backstop/i);
+  });
+  it.each([
+    ["unknown", "schedule", "native-scheduled"],
+    ["unsupported", "loop", "session-loop"],
+    ["stale", "schedule", "native-scheduled"],
+    ["stale", "loop", "session-loop"],
+    ["stale", null, "interactive"],
+  ])("uses fallback for %s ingress with %s", (status, fallback, mode) => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = status === "stale"
+      ? { ...proof(), observed_at: "2026-09-21T11:59:59Z" }
+      : { status };
+    if (fallback) value.capabilities[fallback] = proof();
+    const result = planEnrollment(value);
+    expect(result.mode).toBe(mode);
+    expect(result.capabilities.event_ingress.status).toBe(status === "stale" ? "unknown" : status);
+  });
+  it("accepts ingress at the evidence-age boundary but drops an expired backstop", () => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = { ...proof(), observed_at: "2026-09-21T12:00:00Z" };
+    value.capabilities.schedule = { ...proof(), observed_at: "2026-09-21T11:59:59Z" };
+    expect(planEnrollment(value).mode).toBe("native-event");
+    value.evidence_max_age_hours = 24;
+    expect(planEnrollment(value).mode).toBe("interactive");
+  });
+  it.each([
+    ["read", "inquiry-only"],
+    ["publish", "inquiry-only"],
+    ["checkpoint", "interactive"],
+    ["dispatch", "interactive"],
+  ])("does not automate native events without current %s evidence", (capability, mode) => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = proof();
+    value.capabilities[capability] = { ...proof(), observed_at: "2026-09-01T12:00:00Z" };
+    expect(planEnrollment(value).mode).toBe(mode);
+    delete value.capabilities[capability];
+    expect(planEnrollment(value).mode).toBe(mode);
+  });
+  it("does not let native event evidence bypass unattended opt-in", () => {
+    const value = input();
+    value.unattended = false;
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = proof();
+    value.capabilities.schedule = proof();
+    value.capabilities.loop = proof();
+    expect(planEnrollment(value).mode).toBe("interactive");
+  });
+  it("reuses only the exact listener registration across event and fallback modes", () => {
+    const value = input();
+    const key = planEnrollment(value).listener_key;
+    value.capabilities.dispatch = proof();
+    value.capabilities.event_ingress = proof();
+    value.registrations = [
+      { listener_key: "different-key", native_id: "unrelated-registration" },
+      { listener_key: key, native_id: "event-registration" },
+      { listener_key: key, native_id: "event-registration" },
+    ];
+    const result = planEnrollment(value);
+    expect(result.mode).toBe("native-event");
+    expect(result.listener_key).toBe(key);
+    expect(result.deployment_status).toBe("registration_reported");
+    expect(result.deployment_action).toEqual({ action: "reuse", native_id: "event-registration" });
+    expect(result.membership).toBe("requires_authorized_grant");
+    expect(result.service_level).toBe("trial");
+    value.capabilities.schedule = proof();
+    expect(planEnrollment(value).listener_key).toBe(key);
+    value.registrations.push({ listener_key: key, native_id: "competing-registration" });
+    expect(() => planEnrollment(value)).toThrow(/competing/);
+  });
   it("binds one listener key to environment/harness, not a worker session or chosen mode", () => {
     const value = input();
     const first = planEnrollment(value);

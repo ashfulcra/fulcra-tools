@@ -1413,7 +1413,12 @@ package only; Collect and the web application are not prerequisites.
 For new v5 enrollment, use the package's [onboarding guide](packages/coord-v5/docs/onboarding.md)
 and capability-evidenced `coord-v5 enrollment plan`; keep one native listener
 registration per environment/harness. Its plan is not an installed schedule or
-a membership grant. Preserve the distinction between contact, inbox observation,
+a membership grant. Current verified event ingress selects `native-event` without
+requiring a schedule/loop when read, publish, checkpoint, dispatch and explicit
+unattended opt-in are satisfied; a verified schedule is a backstop. A reporting
+listener routes attention to separate workers, while deliberate self-ticking
+owned-task execution is a separate opt-in mode. Planner mode is not event-adapter
+support or idle-wake proof. Preserve the distinction between contact, inbox observation,
 progress and checkpoint clocks. Role claims survive in annotation history but
 are not distributed locks; partial source views cannot authorize exclusive
 takeover. Keep private descriptors and managed workspace instructions local.

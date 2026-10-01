@@ -8,6 +8,28 @@ const run = (verb, input) =>
     input: JSON.stringify(input),
     encoding: "utf8",
   });
+test("enrollment CLI plans native events without scheduling and retains authorization boundaries", () => {
+  const observed_at = "2026-09-28T12:00:00Z";
+  const capability = { status: "verified", observed_at, evidence_ref: "receipt:synthetic" };
+  const result = run("plan", {
+    version: 1,
+    principal_id: "example",
+    workspace_id: "example",
+    environment_id: "local",
+    harness: "codex-desktop",
+    harness_version: "test",
+    unattended: true,
+    evaluated_at: observed_at,
+    capabilities: Object.fromEntries(["read", "publish", "checkpoint", "dispatch", "event_ingress"].map(name => [name, capability])),
+  });
+  assert.equal(result.status, 0, result.stdout);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.mode, "native-event");
+  assert.equal(plan.membership, "requires_authorized_grant");
+  assert.equal(plan.service_level, "trial");
+  assert.equal(plan.deployment_status, "not_installed");
+  assert.doesNotMatch(plan.next_steps.join(" "), /Keep the schedule alive/);
+});
 test("enrollment CLI selects interactive and never echoes unknown secret fields", () => {
   const input = {
     version: 1,

@@ -67,6 +67,33 @@ test("packed install runs independently and ships only the public runtime", () =
     assert.match(help.stdout, /coord-v5/);
     assert.match(help.stdout, /explicit enrollment/i);
     assert.match(help.stdout, /checkpoint verify --artifact ABS --publication ABS/);
+    const observedAt = "2026-09-28T12:00:00Z";
+    const enrollment = spawnSync(executable, ["enrollment", "plan"], {
+      cwd: directory,
+      input: JSON.stringify({
+        version: 1,
+        principal_id: "synthetic",
+        workspace_id: "synthetic",
+        environment_id: "synthetic",
+        harness: "codex-desktop",
+        harness_version: "test",
+        unattended: true,
+        evaluated_at: observedAt,
+        capabilities: Object.fromEntries(
+          ["read", "publish", "checkpoint", "dispatch", "event_ingress"].map(name => [
+            name,
+            { status: "verified", observed_at: observedAt, evidence_ref: "receipt:synthetic" },
+          ]),
+        ),
+      }),
+      encoding: "utf8",
+    });
+    assert.equal(enrollment.status, 0, enrollment.stdout);
+    const enrollmentPlan = JSON.parse(enrollment.stdout);
+    assert.equal(enrollmentPlan.mode, "native-event");
+    assert.equal(enrollmentPlan.deployment_status, "not_installed");
+    assert.equal(enrollmentPlan.membership, "requires_authorized_grant");
+    assert.equal(enrollmentPlan.service_level, "trial");
     const checkpoint = JSON.parse(readFileSync(resolve(import.meta.dirname, "../tests/fixtures/work-handoff-synthetic.json"), "utf8"));
     const backlog = JSON.parse(readFileSync(resolve(import.meta.dirname, "../tests/fixtures/work-backlog-synthetic.json"), "utf8"));
     const baseEvent = backlog.events[0];

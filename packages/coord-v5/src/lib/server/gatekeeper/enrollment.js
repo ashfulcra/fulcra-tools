@@ -125,8 +125,8 @@ export function planEnrollment(input) {
     value.unattended &&
     verified("dispatch")
   ) {
-    if (verified("event_ingress") && verified("schedule"))
-      mode = "native-event-with-backstop";
+    if (verified("event_ingress"))
+      mode = verified("schedule") ? "native-event-with-backstop" : "native-event";
     else if (verified("schedule")) mode = "native-scheduled";
     else if (verified("loop")) mode = "session-loop";
   }
@@ -157,6 +157,7 @@ export function planEnrollment(input) {
     throw new TypeError("Resolve competing listener registrations");
   const existing = [...matches][0];
   const automated = !["interactive", "inquiry-only"].includes(mode);
+  const eventMode = ["native-event", "native-event-with-backstop"].includes(mode);
   return {
     version: 1,
     listener_key: listenerKey,
@@ -200,14 +201,20 @@ export function planEnrollment(input) {
       "Round-trip one scoped event and retrieve a published checkpoint before advertising recovery.",
       ...(automated
         ? [
-            "Reuse the native registration for this listener key; keep one listener per environment/harness.",
+            eventMode
+              ? "Reuse or configure the verified native event registration for this listener key; keep one listener per environment/harness. Observe real event reception and idle worker delivery before advertising that service level."
+              : "Reuse the native registration for this listener key; keep one listener per environment/harness.",
           ]
         : []),
       "Read events and durable obligations together; dispatch only local configured role/job routes.",
       "Record native delivery receipts separately from worker acknowledgment and task progress.",
-      automated
-        ? "Keep the schedule alive, report read failures, and re-probe capabilities after harness updates."
-        : "Continue interactively; automatic checking remains optional. Report read failures and re-probe capabilities after harness updates.",
+      mode === "native-event"
+        ? "Keep the native event registration active, report read failures, and re-probe capabilities after harness updates."
+        : mode === "native-event-with-backstop"
+          ? "Keep the native event registration active and the schedule alive as a backstop, report read failures, and re-probe capabilities after harness updates."
+          : automated
+            ? "Keep the schedule alive, report read failures, and re-probe capabilities after harness updates."
+            : "Continue interactively; automatic checking remains optional. Report read failures and re-probe capabilities after harness updates.",
     ],
   };
 }

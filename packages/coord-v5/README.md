@@ -46,7 +46,12 @@ coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
 The enrollment planner selects an interactive or native-listener path from dated
 local capability evidence, reuses exact native registrations, and preserves faster
-operator intervals. It neither installs a schedule nor grants membership. The
+operator intervals. With explicit unattended opt-in and current read, publish,
+checkpoint and dispatch evidence, verified event ingress selects `native-event`
+without scheduling; a verified schedule adds a backstop. Scheduling/loops remain
+fallbacks without ingress. This is a plan, not an event adapter or idle-wake proof.
+The reporting listener routes attention to separate workers; owned-task self-ticking
+execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
 instructions command returns a reversible local instruction block without editing files.
 
 Config is exactly `{baseUrl,principalId,channel,workspaceId,workstreamId,
