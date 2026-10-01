@@ -53,6 +53,7 @@
     "src/lib/server/gatekeeper/listener-validation.js",
     "src/lib/server/gatekeeper/listener-store.js",
     "src/lib/server/gatekeeper/listener-runtime.js",
+    "src/lib/server/gatekeeper/listener-claude.js",
     "src/lib/server/gatekeeper/work-listener.js",
     "src/lib/server/gatekeeper/work-view.js",
     "scripts/coord-v5-operations.mjs",

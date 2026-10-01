@@ -1,3 +1,5 @@
+import { isAbsolute, resolve } from 'node:path';
+
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
 const unsafe = new Set(['__proto__', 'prototype', 'constructor']);
 
@@ -32,6 +34,22 @@ export function id(value) {
   return value;
 }
 
+/** Exact native target; legacy Codex targets keep their original shape. */
+export function target(value) {
+  if (value?.kind === 'claude-code') {
+    const result = exact(value, ['kind', 'sessionId', 'cwd']);
+    if (typeof result.sessionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result.sessionId))
+      throw new TypeError('Invalid Claude session');
+    if (typeof result.cwd !== 'string' || result.cwd.length > 4096 || !isAbsolute(result.cwd) || resolve(result.cwd) !== result.cwd || /[\x00-\x1f\x7f]/.test(result.cwd))
+      throw new TypeError('Invalid Claude working directory');
+    return { ...result };
+  }
+  const result = exact(value, ['threadId'], ['hostId']);
+  id(result.threadId);
+  if (Object.hasOwn(result, 'hostId')) id(result.hostId);
+  return { ...result };
+}
+
 /** @param {unknown} input @returns {Record<string, any>} */
 export function routes(input) {
   if (!Array.isArray(input) || input.length > 1000) throw new TypeError('Invalid listener routes');
@@ -41,7 +59,7 @@ export function routes(input) {
     const route = exact(
       raw,
       ['jobId', 'logicalIdentity', 'lifecycle'],
-      ['threadId', 'hostId', 'coordinatorJobId']
+      ['threadId', 'hostId', 'coordinatorJobId', 'target']
     );
     const jobId = id(route.jobId);
     id(route.logicalIdentity);
@@ -49,6 +67,10 @@ export function routes(input) {
       throw new TypeError('Invalid listener route');
     for (const key of ['threadId', 'hostId', 'coordinatorJobId'])
       if (Object.hasOwn(route, key)) id(route[key]);
+    if (Object.hasOwn(route, 'target')) {
+      if (Object.hasOwn(route, 'threadId') || Object.hasOwn(route, 'hostId') || target(route.target).kind !== 'claude-code')
+        throw new TypeError('Invalid listener route target');
+    }
     result[jobId] = { ...route };
   }
   for (const start of Object.keys(result)) {
@@ -161,9 +183,7 @@ export function correlation(value, receipt = false) {
   );
   id(source.wakeId);
   id(source.attemptId);
-  const target = exact(source.target, ['threadId'], ['hostId']);
-  id(target.threadId);
-  if (Object.hasOwn(target, 'hostId')) id(target.hostId);
+  target(source.target);
   if (receipt && !['accepted', 'error', 'unknown'].includes(source.status))
     throw new TypeError('Invalid listener receipt');
   return source;

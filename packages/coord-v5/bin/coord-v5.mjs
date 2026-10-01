@@ -13,7 +13,8 @@ if (major < 22 || (major === 22 && minor < 16)) {
   if (!command || ["help", "--help", "-h"].includes(command)) {
     process.stdout.write(`coord-v5 — opt-in coordination alpha\n
 Usage: coord-v5 transport <read|publish|inspect|replay> [flags]
-       coord-v5 listener <configure|prepare|settle|ack|inspect> [flags]
+       coord-v5 listener <configure|prepare|settle|ack|inspect|dispatch-claude> [flags]
+       coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable ABS [--timeout-ms N]
        coord-v5 observation --config ABS --policy ABS --db ABS
        coord-v5 work view --config ABS --db ABS --policy ABS
        coord-v5 work digest --config ABS --db ABS --policy ABS --viewer ID --role ROLE --query QUERY
@@ -26,7 +27,8 @@ Usage: coord-v5 transport <read|publish|inspect|replay> [flags]
 
 Transport requires explicit enrollment and independent owned-source verification.
 Transport read/publish receive the bearer on stdin; config/event files stay private.
-Listener prepares action descriptors only; it never invokes a harness or scheduler.
+Listener prepare returns descriptors only. Explicit dispatch-claude resumes a bound native session;
+it never installs a scheduler, creates a session, or automatically retries a claimed invocation.
 Replay without grants cannot establish authorized work or a clear result.
 Pure stdin commands do not publish or independently verify caller-supplied checks.
 Handoff verification import retains an operator-trusted local attestation, not remote proof.

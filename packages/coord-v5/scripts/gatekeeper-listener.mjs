@@ -5,6 +5,7 @@ import { openListenerStore } from '../src/lib/server/gatekeeper/listener-store.j
 import {
   acknowledgeWake,
   configureRoutes,
+  dispatchClaudeWake,
   prepareWake,
   settleWake
 } from '../src/lib/server/gatekeeper/listener-runtime.js';
@@ -15,8 +16,9 @@ import {
   observation,
   routes
 } from '../src/lib/server/gatekeeper/listener-validation.js';
+import { validateClaudeExecutor } from '../src/lib/server/gatekeeper/listener-claude.js';
 
-const commands = new Set(['configure', 'prepare', 'settle', 'ack', 'inspect']);
+const commands = new Set(['configure', 'prepare', 'settle', 'ack', 'inspect', 'dispatch-claude']);
 const inputLimit = 256 * 1024;
 const leaseTtlMs = 120000;
 
@@ -26,12 +28,13 @@ function badInput() {
 
 /** @param {string[]} args */
 function parseArgs(args) {
-  if (args.length !== 7 || !commands.has(args[0])) badInput();
+  if (args.length < 7 || args.length % 2 !== 1 || !commands.has(args[0])) badInput();
   /** @type {Record<string,string>} */
   const flags = {};
   for (let i = 1; i < args.length; i += 2) {
     const key = args[i];
-    if (!['--db', '--scope', '--holder'].includes(key) || Object.hasOwn(flags, key) || !args[i + 1])
+    const allowed = args[0] === 'dispatch-claude' ? ['--db', '--scope', '--holder', '--executable', '--timeout-ms'] : ['--db', '--scope', '--holder'];
+    if (!allowed.includes(key) || Object.hasOwn(flags, key) || !args[i + 1])
       badInput();
     flags[key] = args[i + 1];
   }
@@ -54,7 +57,9 @@ function parseArgs(args) {
   ]);
   for (const value of Object.values(scope)) id(value);
   const holder = id(flags['--holder']);
-  return { command: args[0], db, scope, holder };
+  const executor = args[0] === 'dispatch-claude' ? { executable: flags['--executable'], timeoutMs: flags['--timeout-ms'] === undefined ? 60000 : Number(flags['--timeout-ms']) } : undefined;
+  if (executor) validateClaudeExecutor(executor);
+  return { command: args[0], db, scope, holder, executor };
 }
 
 async function readInput() {
@@ -76,7 +81,7 @@ function checkedInput(command, input, now) {
   if (command === 'configure') return routes(input) && input;
   if (command === 'prepare') return observation(input, now, 0) && input;
   if (command === 'settle') return correlation(input, true);
-  if (command === 'ack') return correlation(input);
+  if (command === 'ack' || command === 'dispatch-claude') return correlation(input);
   badInput();
 }
 
@@ -120,7 +125,9 @@ async function main() {
       return;
     }
     const result =
-      parsed.command === 'configure'
+      parsed.command === 'dispatch-claude'
+        ? await dispatchClaudeWake(store, lease, input, parsed.executor)
+        : parsed.command === 'configure'
         ? configureRoutes(store, lease, input, now)
         : parsed.command === 'prepare'
           ? prepareWake(store, lease, input, now)
@@ -128,6 +135,7 @@ async function main() {
             ? settleWake(store, lease, input, now)
             : acknowledgeWake(store, lease, input, now);
     print(result);
+    if (parsed.command === 'dispatch-claude' && result.code !== 'NATIVE_ACCEPTED') process.exitCode = 2;
   } catch (error) {
     print({
       error: {

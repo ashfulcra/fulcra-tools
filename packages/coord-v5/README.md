@@ -38,6 +38,7 @@ coord-v5 enrollment plan < assessment.json
 coord-v5 enrollment instructions < instructions-input.json
 coord-v5 observation --config ABS --policy ABS --db ABS
 coord-v5 listener configure|prepare|settle|ack|inspect --db ABS --scope JSON --holder ID
+coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable ABS [--timeout-ms N]
 ```
 
 ## Explicit enrollment
@@ -132,9 +133,76 @@ correlate `settle`/`ack` with the exact emitted action. A harness must execute a
 observation. Unknown job mappings never guess targets. Listener scope is
 `{principalId,workspaceId,environmentId,harness}`. `configure` takes a route array on
 stdin; `prepare` takes a version-1 observation; `settle`/`ack` take exact
-wake/attempt/target correlations. `inspect` needs no stdin. The listener never invokes
-a harness, creates a task or installs a schedule. Ack does not complete work. Partial
+wake/attempt/target correlations. `inspect` needs no stdin. `prepare` never invokes
+a harness; only explicit `dispatch-claude` invokes a bound Claude CLI session.
+The listener never creates a session/task or installs a schedule. Ack does not complete work. Partial
 retained obligations are conservative cache state, not proof of unfinished terminal work.
+
+### Explicit Claude CLI delivery
+
+Use scope harness `claude-code` (not Claude desktop/cloud/web). Private routes
+bind an existing session and trusted working directory, separate from Codex
+`threadId`/`hostId` routes:
+
+```json
+[{"jobId":"synthetic-job","logicalIdentity":"synthetic-agent","lifecycle":"active","target":{"kind":"claude-code","sessionId":"11111111-1111-4111-8111-111111111111","cwd":"/absolute/trusted/workspace"}}]
+```
+
+The UUID is deliberately invented, not a usable native session. Keep real route
+inputs, session IDs, CWD mappings and the SQLite journal private. A Claude route
+cannot also contain a Codex thread/host. Retired routes may resolve to an active
+Claude coordinator; rebinding a session or CWD supersedes old attempts.
+
+`prepare` emits `{wakeId,attemptId,tool:"coord-v5 listener dispatch-claude",
+arguments:{wakeId,attemptId,target}}`. Pass only `.arguments` on stdin to the
+explicit dispatcher; it reconstructs the bounded prompt from journaled items.
+The trusted operator supplies the absolute executable via `--executable`, never
+an event, route, prompt, arbitrary argv or shell command. CLI authentication must
+already work; this command neither signs in nor changes credentials.
+
+Dispatch fixes `--print --resume UUID --model claude-haiku-4-5-20251001 --max-budget-usd 0.25
+--output-format json --safe-mode --tools '' --disable-slash-commands
+--strict-mcp-config --mcp-config '{"mcpServers":{}}' --permission-mode plan
+--no-chrome`. The prompt goes on stdin. Safe mode, disabled skills, zero built-in
+tools and an empty strict MCP configuration exclude ambient execution tools.
+Unsupported flags fail closed, with no fallback invocation. These flags request
+the full model ID `claude-haiku-4-5-20251001` and a $0.25 provider budget; the
+adapter enforces exact argv, not provider model routing or billing. The served
+conversational model may differ despite the requested model ID: inspect actual
+assistant-model telemetry. A controlled
+fresh-print comparison in one environment motivated the full-ID request; it is
+not universal routing evidence or resumed-session proof. Auxiliary `modelUsage`
+entries do not identify the conversational model. A successful run below the
+requested budget does not prove cap enforcement or a hard spend ceiling.
+The adapter bounds runtime to at most 60 seconds (lower with `--timeout-ms`) and
+combined stdout/stderr to at most 64 KiB. Timeout/output overflow kills only the
+owned child; this is not descendant cleanup or a provider cancellation guarantee.
+Raw process output and secret-bearing diagnostics are not printed or journaled.
+
+A SQLite transaction commits `dispatching`/`claimed` before spawning. Only exit
+0 JSON with `type:"result"`, `subtype:"success"`, `is_error:false` and the exact
+`session_id` yields `{wakeId,attemptId,state:"accepted",code:"NATIVE_ACCEPTED"}`
+and exit 0. Malformed, mismatched, timed-out, oversized or failed output yields
+`uncertain` and a safe code at exit 2. Repeat/stale/busy dispatch is refused at
+exit 2; invalid input exits 1. Accepted is native invocation acceptance, not a
+receiver acknowledgment, work completion, schedule/lifecycle proof, or complete
+provider history. `listener ack` remains a separate exact-target action.
+
+Claims fence duplicate attempts and other attempts for the same native session
+only within this journal/scope. The operator must prevent concurrent resume by
+other processes, journals, scopes or interactive sessions. A native CLI refusal
+is uncertain, never proof that a message was not delivered. Natural process exit
+is tested independently of crash recovery: a crash or failed settlement leaves
+a claim requiring reconciliation, and no claim/uncertain invocation retries
+automatically. Before explicitly attesting a later acceptance with `settle`,
+establish that no dispatcher is still executing and independently verify the
+exact attempt/session. An acknowledgment alone does not release an ambiguous
+dispatch claim. Never manufacture a replacement session to retry ambiguity.
+
+Synthetic executable fixtures and the packed-install tests verify these local
+contracts without contacting Claude. Authenticated native acceptance, busy-session
+behavior, restart/host outage, scheduled wakes and provider-version compatibility
+require separate live evidence; fixture success proves none of them.
 
 ## Source-backed presence and durable roles
 
