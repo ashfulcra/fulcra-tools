@@ -35,6 +35,7 @@ describe("enrollment capability decisions", () => {
     value.capabilities.schedule = proof();
     const result = planEnrollment(value);
     expect(result.mode).toBe("native-scheduled");
+    expect(result.next_steps.join(" ")).toMatch(/Keep the schedule alive/);
     expect(result.service_level).toBe("trial");
     expect(result.listener_scope).toEqual({
       principalId: "account-example",
@@ -46,6 +47,16 @@ describe("enrollment capability decisions", () => {
     expect(planEnrollment(value).service_level).toBe("idle-wake-verified");
     value.capabilities.schedule.observed_at = "2026-09-01T12:00:00Z";
     expect(planEnrollment(value).mode).toBe("interactive");
+  });
+  it("maintains a verified session loop without requiring an unknown schedule", () => {
+    const value = input();
+    value.capabilities.dispatch = proof();
+    value.capabilities.loop = proof();
+    const result = planEnrollment(value);
+    expect(result.mode).toBe("session-loop");
+    expect(result.capabilities.schedule.status).toBe("unknown");
+    expect(result.next_steps.join(" ")).toMatch(/Keep the session loop active/);
+    expect(result.next_steps.join(" ")).not.toMatch(/Keep the schedule alive/);
   });
   it("selects native events without a schedule or loop and does not promise idle delivery", () => {
     const value = input();

@@ -212,9 +212,11 @@ export function planEnrollment(input) {
         ? "Keep the native event registration active, report read failures, and re-probe capabilities after harness updates."
         : mode === "native-event-with-backstop"
           ? "Keep the native event registration active and the schedule alive as a backstop, report read failures, and re-probe capabilities after harness updates."
-          : automated
-            ? "Keep the schedule alive, report read failures, and re-probe capabilities after harness updates."
-            : "Continue interactively; automatic checking remains optional. Report read failures and re-probe capabilities after harness updates.",
+          : mode === "session-loop"
+            ? "Keep the session loop active, report read failures, and re-probe capabilities after harness updates."
+            : automated
+              ? "Keep the schedule alive, report read failures, and re-probe capabilities after harness updates."
+              : "Continue interactively; automatic checking remains optional. Report read failures and re-probe capabilities after harness updates.",
     ],
   };
 }
