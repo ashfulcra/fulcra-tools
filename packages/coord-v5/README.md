@@ -50,8 +50,30 @@ coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
 The enrollment planner selects an interactive or native-listener path from dated
 local capability evidence, reuses exact native registrations, and preserves faster
-operator intervals. It neither installs a schedule nor grants membership. The
-instructions command returns a reversible local instruction block without editing files.
+operator intervals. With explicit unattended opt-in and current read, publish,
+checkpoint and dispatch evidence, verified event ingress selects `native-event`
+without scheduling; a verified schedule adds a backstop. Scheduling/loops remain
+fallbacks without ingress. This is a plan, not an event adapter or idle-wake proof.
+The reporting listener routes attention to separate workers; owned-task self-ticking
+execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
+instructions command returns `{content}` without editing files. Its stdin is
+`{content,workspace_id,remove}` plus optional `instruction_mode:"worker"|"listener"|"executor"`.
+Omitted or explicit `worker` preserves the original worker block byte for byte.
+`listener` is reporting/routing only: no worker claims, execution, progress,
+completion or fabricated receiver acknowledgment. `executor` requires explicit
+owned-task authorization and recovery context, continues reachable work without
+waiting for ticks, and prefers bounded subagents while retaining responsibility.
+A wake or mode selection grants nothing; self-ticking needs separate authorization
+and is never auto-installed. Review and apply listener/executor content only to
+their local/session instructions, not shared repository-wide worker instructions.
+Switching roles replaces one managed workspace block; `remove:true` with any valid
+role reverses it without altering surrounding content. Invalid modes, including
+on removal, produce sanitized `INVALID_ENROLLMENT_INPUT`. This is instruction
+generation, not runtime policy enforcement or verified agent instruction-following.
+
+The exported enrollment API is
+`managedInstructions(content, workspaceId, remove=false, instructionMode="worker")`.
+Instruction roles are independent of the planner's capability-based enrollment `mode`.
 
 Config is exactly `{baseUrl,principalId,channel,workspaceId,workstreamId,
 actorBinding}`. Base URL remains `https://api.fulcradynamics.com/`; channel is
@@ -138,9 +160,59 @@ observation. Unknown job mappings never guess targets. Listener scope is
 `{principalId,workspaceId,environmentId,harness}`. `configure` takes a route array on
 stdin; `prepare` takes a version-1 observation; `settle`/`ack` take exact
 wake/attempt/target correlations. `inspect` needs no stdin. `prepare` never invokes
-a harness; only explicit `dispatch-claude` invokes a bound Claude CLI session.
+a harness. Explicit `dispatch-claude` invokes a bound Claude CLI session; the
+host-injected API below invokes an existing Codex desktop thread.
 The listener never creates a session/task or installs a schedule. Ack does not complete work. Partial
 retained obligations are conservative cache state, not proof of unfinished terminal work.
+
+### Explicit host-injected Codex delivery
+
+Import `dispatchCodexWake` from `@fulcra/coord-v5/listener-runtime` and call
+`await dispatchCodexWake(store, lease, {wakeId, attemptId, target}, options)`
+with the prepared action's IDs and exact private `{threadId, hostId?}` target.
+Only listener scope harness `codex` is supported, not `codex-cloud`, ChatGPT,
+or Claude. Omitted route host resolves to `local` for native calls and fencing;
+the existing prepared descriptor shape is unchanged. Caller prompt text is refused:
+the bounded notification prompt is reconstructed from journaled identity/items/IDs.
+
+`options` must explicitly supply trusted host callbacks `readThread(target)`
+and `sendMessage({threadId,hostId,prompt})`, with optional `now()` and `timeoutMs`
+(default 60000, integer 1..60000). Each native call has its own observation timeout,
+so read plus send may take up to twice that bound; this cannot cancel an invoked
+callback. No tool lookup, credentials, subprocess, schedule, automatic send or new
+session is provided. The host must enforce existing permissions/authority;
+callback injection is not proof of authentication or authorization.
+
+Preflight requires raw native schema-version-1 thread evidence with exact
+`thread.id`, resolved `thread.hostId` and `thread.status.type:"idle"`. A present
+`thread.kind` must be `codex`. Direct objects, one MCP JSON text block, or
+`structuredContent` are supported; malformed/error/contradictory wrappers fail
+closed. Busy/unknown/unavailable reads cause no send and retain the prepared
+obligation for later reconsideration. This snapshot is not global race-free busy
+enforcement. Direct and structured payloads that cannot serialize as JSON (such
+as cyclic or BigInt-bearing objects) are invalid native evidence. After preflight,
+one SQLite transaction rechecks lease, correlation,
+route and prepared state, then commits `dispatching`/`claimed` and a UUID claim
+before invoking send exactly once. Other claimed/uncertain sends to the same
+resolved thread/host in that local journal scope require reconciliation.
+
+An exact raw send `{threadId}` response without errors is `NATIVE_ACCEPTED`:
+tool acceptance only, never receiver read, acknowledgment, execution, ownership,
+or completion. Empty/wrong-target/error/malformed results are
+`INVALID_NATIVE_RESULT`; thrown calls are `NATIVE_FAILED`; timeout is `TIMEOUT`.
+These retain an uncertain claim/obligation, survive restart, and never retry
+automatically. Late results cannot settle the journal. An expired lease, changed
+claim, or inconsistent acknowledgment/receipt fails settlement closed, retaining
+the committed evidence for reconciliation. A consistent accepted receipt keeps
+an already acknowledged state; ack does not complete the obligation.
+
+Refusals return the original wake/attempt IDs, current state and a safe code:
+`STALE_BINDING`, `NOT_DISPATCHABLE`, `THREAD_RECONCILIATION_REQUIRED`,
+`INVALID_THREAD_RESULT`, `THREAD_NOT_IDLE`, `PREFLIGHT_UNAVAILABLE`, or
+`PREFLIGHT_TIMEOUT`. Invalid inputs/callbacks, correlation mismatch and lease/claim
+fence failures throw without native diagnostics or private target data. Tests
+exercise real SQLite and the installed package with synthetic callbacks only;
+they do not establish authenticated live acceptance.
 
 ### Explicit Claude CLI delivery
 
@@ -347,3 +419,12 @@ Run `npm ci --ignore-scripts` and `npm test`. Tests use synthetic fixtures and r
 local SQLite, never live network. `node --test test/*.test.mjs` packs/installs offline
 into empty directories, exercises installed commands and audits tarball contents.
 Tests/fixtures are excluded from the tarball. See [PROVENANCE.md](PROVENANCE.md).
+
+The installed crash regression SIGKILLs the owned dispatch script after a synthetic
+executor observes its committed claim. Fresh same-holder commands retain the exact
+wake/attempt, refuse resend, and preserve obligations through partial/unavailable
+reads; the executor launches once. Focused SQLite tests also retain the session fence
+after an ambiguous outcome is acknowledged and reopened, and retain a claim when
+successful child settlement meets an expired lease. These are local synthetic
+regressions, not native Claude interruption, different-holder takeover, host-outage,
+provider completeness, or production acceptance evidence.

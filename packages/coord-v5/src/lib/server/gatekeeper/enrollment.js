@@ -125,8 +125,8 @@ export function planEnrollment(input) {
     value.unattended &&
     verified("dispatch")
   ) {
-    if (verified("event_ingress") && verified("schedule"))
-      mode = "native-event-with-backstop";
+    if (verified("event_ingress"))
+      mode = verified("schedule") ? "native-event-with-backstop" : "native-event";
     else if (verified("schedule")) mode = "native-scheduled";
     else if (verified("loop")) mode = "session-loop";
   }
@@ -157,6 +157,7 @@ export function planEnrollment(input) {
     throw new TypeError("Resolve competing listener registrations");
   const existing = [...matches][0];
   const automated = !["interactive", "inquiry-only"].includes(mode);
+  const eventMode = ["native-event", "native-event-with-backstop"].includes(mode);
   return {
     version: 1,
     listener_key: listenerKey,
@@ -200,25 +201,39 @@ export function planEnrollment(input) {
       "Round-trip one scoped event and retrieve a published checkpoint before advertising recovery.",
       ...(automated
         ? [
-            "Reuse the native registration for this listener key; keep one listener per environment/harness.",
+            eventMode
+              ? "Reuse or configure the verified native event registration for this listener key; keep one listener per environment/harness. Observe real event reception and idle worker delivery before advertising that service level."
+              : "Reuse the native registration for this listener key; keep one listener per environment/harness.",
           ]
         : []),
       "Read events and durable obligations together; dispatch only local configured role/job routes.",
       "Record native delivery receipts separately from worker acknowledgment and task progress.",
-      automated
-        ? "Keep the schedule alive, report read failures, and re-probe capabilities after harness updates."
-        : "Continue interactively; automatic checking remains optional. Report read failures and re-probe capabilities after harness updates.",
+      mode === "native-event"
+        ? "Keep the native event registration active, report read failures, and re-probe capabilities after harness updates."
+        : mode === "native-event-with-backstop"
+          ? "Keep the native event registration active and the schedule alive as a backstop, report read failures, and re-probe capabilities after harness updates."
+          : mode === "session-loop"
+            ? "Keep the session loop active, report read failures, and re-probe capabilities after harness updates."
+            : automated
+              ? "Keep the schedule alive, report read failures, and re-probe capabilities after harness updates."
+              : "Continue interactively; automatic checking remains optional. Report read failures and re-probe capabilities after harness updates.",
     ],
   };
 }
 
 /** Return an idempotent reversible block; caller controls the local file edit. */
-export function managedInstructions(content, workspaceId, remove = false) {
+export function managedInstructions(
+  content,
+  workspaceId,
+  remove = false,
+  instructionMode = "worker",
+) {
   id(workspaceId);
   if (
     typeof content !== "string" ||
     content.length > 1_000_000 ||
-    typeof remove !== "boolean"
+    typeof remove !== "boolean" ||
+    !["worker", "listener", "executor"].includes(instructionMode)
   )
     throw new TypeError("Invalid instruction input");
   const start = `<!-- coord-v5:start ${workspaceId} -->`;
@@ -237,14 +252,44 @@ export function managedInstructions(content, workspaceId, remove = false) {
     let to = ends[0].index + end.length;
     if (content[to] === "\n") to++;
     const existing = content.slice(from, to);
-    const replacement = remove ? "" : block(workspaceId);
+    const replacement = remove ? "" : block(workspaceId, instructionMode);
     return content.replace(existing, replacement);
   }
   if (remove) return content;
   // No separator is inserted: removing this exact block restores caller content byte for byte.
-  return content + block(workspaceId);
+  return content + block(workspaceId, instructionMode);
 }
 
-function block(workspaceId) {
+function block(workspaceId, instructionMode) {
+  if (instructionMode === "listener")
+    return `<!-- coord-v5:start ${workspaceId} -->
+Coord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.
+Reporting-only listener: read authorized addressed/mapped bus events and retained obligations together.
+Unknown, failed or partial reads retain obligations; an empty event tail never proves all-clear.
+Execute only exact prepared supported native message actions through locally configured authorized routes.
+Report only your own reads, routing, conflicts and delivery reconciliation. Keep native receipts
+separate from receiver acknowledgment and worker progress. Never fabricate or send a receiver
+acknowledgment on a worker's behalf.
+Do not claim or execute worker tasks, or publish their progress or completion on their behalf.
+Prefer verified native event ingress; tick/loop fallback requires separate authorization.
+These instructions install no event registration, schedule or loop and grant no permissions.
+Use the installed Coord v5 onboarding and harness guides for exact preparation and receipt handling.
+<!-- coord-v5:end -->
+`;
+  if (instructionMode === "executor")
+    return `<!-- coord-v5:start ${workspaceId} -->
+Coord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.
+Owned-task executor: execute only explicitly authorized tasks you own, with verified recovery context.
+A wake is not a grant. If ownership or recovery context is missing, report the gap; do not adopt work.
+Resume owned obligations and continue reachable authorized work without waiting for ticks between steps.
+Prefer bounded subagents for scoped reasoning or implementation while retaining responsibility.
+Record commitments, progress, blockers and outcomes for your owned work through typed coordination events.
+Before yielding, make the next action and recovery context durable. Report failed reads; never call them empty.
+Unknown or partial reads retain obligations and cannot authorize takeover.
+Direct self-ticking requires separate explicit executor authorization; never auto-create a schedule or loop.
+These instructions install nothing and grant no permissions, ownership or unattended-operation authority.
+Use the installed Coord v5 onboarding guide for enrollment and harness-specific execution.
+<!-- coord-v5:end -->
+`;
   return `<!-- coord-v5:start ${workspaceId} -->\nCoord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.\nAt work start, resume obligations. Record actionable commitments before substantial work.\nPublish progress, blockers and results through typed coordination events. Before yielding,\nmake the next action and recovery context durable. Report failed reads; never call them empty.\nUse the installed Coord v5 onboarding guide for enrollment and harness-specific listening.\n<!-- coord-v5:end -->\n`;
 }

@@ -1413,7 +1413,20 @@ package only; Collect and the web application are not prerequisites.
 For new v5 enrollment, use the package's [onboarding guide](packages/coord-v5/docs/onboarding.md)
 and capability-evidenced `coord-v5 enrollment plan`; keep one native listener
 registration per environment/harness. Its plan is not an installed schedule or
-a membership grant. Preserve the distinction between contact, inbox observation,
+a membership grant. Current verified event ingress selects `native-event` without
+requiring a schedule/loop when read, publish, checkpoint, dispatch and explicit
+unattended opt-in are satisfied; a verified schedule is a backstop. A reporting
+listener routes attention to separate workers, while deliberate self-ticking
+owned-task execution is a separate opt-in mode. Planner mode is not event-adapter
+support or idle-wake proof. `enrollment instructions` accepts optional
+`instruction_mode: worker|listener|executor`; omitted/explicit worker preserves
+the existing block bytes. Apply listener/executor blocks only in their own local/session
+instructions, not shared repository-wide worker instructions. The listener reports
+its own reads/routes/conflicts/reconciliation, not worker progress/completion or
+fabricated receiver acknowledgment. Executor work needs explicit task ownership
+and recovery context; a wake is not authority to adopt work. No instruction mode
+installs a schedule or grants permissions; self-ticking requires separate authorization.
+Generation/CLI tests are not proof of agent obedience. Preserve the distinction between contact, inbox observation,
 progress and checkpoint clocks. Role claims survive in annotation history but
 are not distributed locks; partial source views cannot authorize exclusive
 takeover. Keep private descriptors and managed workspace instructions local.
@@ -1431,6 +1444,14 @@ body digest, and scope/identity bindings; this is not remote retrieval, access,
 native-wake, or source-completeness proof. Artifact bytes are capped at 256 KiB,
 publication JSON at 64 KiB, and validated checkpoint content at 128 KiB.
 Native action generation is not evidence of a delivered wake.
+The v5 runtime's explicit host-injected `dispatchCodexWake` supports only scope
+harness `codex` and privately bound desktop thread/host targets. Trusted native
+read/send callbacks are required; injection does not prove authority or grants.
+It requires exact idle preflight, commits a SQLite claim before sending once,
+and retains claimed/uncertain attempts without automatic retry. Each callback
+has a bounded observation timeout, not cancellation. Acceptance is not receiver
+acknowledgment or work completion; synthetic tests are not live acceptance.
+See the [Codex dispatcher contract](packages/coord-v5/README.md#explicit-host-injected-codex-delivery).
 The v5 listener's opt-in `dispatch-claude` command resumes a privately bound
 `claude-code` target `{kind:"claude-code",sessionId:UUID,cwd:ABS}` using a trusted
 absolute operator-supplied executable; pass the prepared action's `.arguments`

@@ -22,12 +22,13 @@ try {
   let result;
   if (action === "plan") result = planEnrollment(input);
   else {
-    exact(input, ["content", "workspace_id", "remove"]);
+    exact(input, ["content", "workspace_id", "remove"], ["instruction_mode"]);
     result = {
       content: managedInstructions(
         input.content,
         input.workspace_id,
         input.remove,
+        input.instruction_mode,
       ),
     };
   }
