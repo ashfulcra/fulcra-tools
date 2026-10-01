@@ -218,6 +218,66 @@ describe("enrollment capability decisions", () => {
 });
 
 describe("managed local instruction block", () => {
+  // Catches worker-byte drift independently of the generator's implementation.
+  const worker = "<!-- coord-v5:start workspace-example -->\n" +
+    "Coord v5 workspace: workspace-example. Use the configured workspace descriptor and exact actor grants.\n" +
+    "At work start, resume obligations. Record actionable commitments before substantial work.\n" +
+    "Publish progress, blockers and results through typed coordination events. Before yielding,\n" +
+    "make the next action and recovery context durable. Report failed reads; never call them empty.\n" +
+    "Use the installed Coord v5 onboarding guide for enrollment and harness-specific listening.\n" +
+    "<!-- coord-v5:end -->\n";
+  const modes = ["worker", "listener", "executor"];
+  it("keeps omitted, undefined and explicit worker output byte-identical", () => {
+    for (const mode of [undefined, "worker"])
+      expect(managedInstructions("prefix", "workspace-example", false, mode)).toBe("prefix" + worker);
+    expect(managedInstructions("prefix", "workspace-example")).toBe("prefix" + worker);
+  });
+  // Catches ignored selection, stale replacement, duplicate blocks and damaged edges.
+  // These assertions measure text transformation, not agent instruction-following.
+  it.each(modes)("selects distinct %s content and preserves all mode transitions", (source) => {
+    const selected = managedInstructions("", "workspace-example", false, source);
+    if (source !== "worker") expect(selected).not.toBe(worker);
+    expect(managedInstructions("", "workspace-example", false, "listener")).not.toBe(
+      managedInstructions("", "workspace-example", false, "executor"),
+    );
+    for (const original of ["", "prefix", "prefix\n", "prefix\r\n"]) {
+      const added = managedInstructions(original, "workspace-example", false, source);
+      for (const suffix of ["", "suffix"]) {
+        const surrounding = added + suffix;
+        for (const target of modes) {
+          const changed = managedInstructions(surrounding, "workspace-example", false, target);
+          if (source !== target) expect(changed).not.toBe(surrounding);
+          expect(changed.startsWith(original)).toBe(true);
+          expect(changed.endsWith("<!-- coord-v5:end -->\n" + suffix)).toBe(true);
+          expect(changed.match(/<!-- coord-v5:start /g)).toHaveLength(1);
+          expect(changed.match(/<!-- coord-v5:end -->/g)).toHaveLength(1);
+          expect(managedInstructions(changed, "workspace-example", false, target)).toBe(changed);
+          expect(managedInstructions(changed, "workspace-example")).toBe(original + worker + suffix);
+          for (const removeMode of modes)
+            expect(managedInstructions(changed, "workspace-example", true, removeMode)).toBe(original + suffix);
+        }
+      }
+    }
+  });
+  // Catches validation bypass on add, replacement and both removal early returns.
+  it.each(["unknown", "", null, 0, false, {}, [], "Listener"].map(mode => ({ mode })))("rejects invalid mode $mode on every branch", ({ mode }) => {
+    for (const content of ["prefix", "prefix" + worker + "suffix"])
+      for (const remove of [false, true])
+        expect(() => managedInstructions(content, "workspace-example", remove, mode)).toThrow(TypeError);
+  });
+  // Catches role selection weakening workspace/fence or existing input validation.
+  it.each(modes)("retains exact input and fence refusals for %s", (mode) => {
+    for (const content of [worker + worker, worker.replace("workspace-example", "workspace-other"),
+      "<!-- coord-v5:start workspace-example -->\n", "<!-- coord-v5:end -->",
+      "<!-- coord-v5:end -->\n<!-- coord-v5:start workspace-example -->\n"])
+      for (const remove of [false, true])
+        expect(() => managedInstructions(content, "workspace-example", remove, mode)).toThrow();
+    expect(() => managedInstructions(null, "workspace-example", false, mode)).toThrow();
+    expect(() => managedInstructions("x".repeat(1_000_001), "workspace-example", false, mode)).toThrow();
+    expect(() => managedInstructions("", "workspace-example", "false", mode)).toThrow();
+    expect(() => managedInstructions("", "", false, mode)).toThrow();
+    expect(managedInstructions("prefix", "workspace-example", true, mode)).toBe("prefix");
+  });
   it("preserves existing content and reruns without duplicate blocks", () => {
     const original = "# Local instructions\n\nKeep my rules.\n";
     const added = managedInstructions(original, "workspace-example");

@@ -52,7 +52,24 @@ without scheduling; a verified schedule adds a backstop. Scheduling/loops remain
 fallbacks without ingress. This is a plan, not an event adapter or idle-wake proof.
 The reporting listener routes attention to separate workers; owned-task self-ticking
 execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
-instructions command returns a reversible local instruction block without editing files.
+instructions command returns `{content}` without editing files. Its stdin is
+`{content,workspace_id,remove}` plus optional `instruction_mode:"worker"|"listener"|"executor"`.
+Omitted or explicit `worker` preserves the original worker block byte for byte.
+`listener` is reporting/routing only: no worker claims, execution, progress,
+completion or fabricated receiver acknowledgment. `executor` requires explicit
+owned-task authorization and recovery context, continues reachable work without
+waiting for ticks, and prefers bounded subagents while retaining responsibility.
+A wake or mode selection grants nothing; self-ticking needs separate authorization
+and is never auto-installed. Review and apply listener/executor content only to
+their local/session instructions, not shared repository-wide worker instructions.
+Switching roles replaces one managed workspace block; `remove:true` with any valid
+role reverses it without altering surrounding content. Invalid modes, including
+on removal, produce sanitized `INVALID_ENROLLMENT_INPUT`. This is instruction
+generation, not runtime policy enforcement or verified agent instruction-following.
+
+The exported enrollment API is
+`managedInstructions(content, workspaceId, remove=false, instructionMode="worker")`.
+Instruction roles are independent of the planner's capability-based enrollment `mode`.
 
 Config is exactly `{baseUrl,principalId,channel,workspaceId,workstreamId,
 actorBinding}`. Base URL remains `https://api.fulcradynamics.com/`; channel is
