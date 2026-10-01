@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { executeClaude, validateClaudeExecutor } from './listener-claude.js';
+import { executeCodex, preflightCodex, validateCodexExecutor } from './listener-codex.js';
 import { advanceListenerPolicy, evaluateWake } from '../../gatekeeper/listener.js';
 import {
   correlation,
@@ -309,6 +310,68 @@ function matched(state, value) {
   )
     throw new Error('Listener correlation mismatch');
   return attempt;
+}
+
+/** Explicit host-injected delivery; never invoked by configure/prepare. */
+export async function dispatchCodexWake(store, lease, input, options) {
+  const value = correlation(input);
+  if (lease.scope.harness !== 'codex' || value.target.kind)
+    throw new TypeError('Invalid Codex dispatch target');
+  validateCodexExecutor(options);
+  const now = options.now ?? Date.now;
+  // Freeze caller correlation before either asynchronous native boundary.
+  const original = { wakeId: value.wakeId, attemptId: value.attemptId, target: { ...value.target } };
+  const nativeTarget = { threadId: original.target.threadId, hostId: original.target.hostId ?? 'local' };
+  let blocked;
+  const check = state => {
+    const attempt = matched(state, original);
+    const route = state.routes[attempt.jobId];
+    if (attempt.superseded || !route || route.bindingVersion !== attempt.bindingVersion ||
+        !sameFields(destination(route, state.routes).target, attempt.target, targetFields))
+      blocked = { state: attempt.state, code: 'STALE_BINDING' };
+    else if (attempt.state !== 'prepared' || attempt.dispatchStatus)
+      blocked = { state: attempt.state, code: 'NOT_DISPATCHABLE' };
+    else if (Object.values(state.attempts).some(other => other !== attempt && !other.target?.kind &&
+      other.target?.threadId === nativeTarget.threadId && (other.target.hostId ?? 'local') === nativeTarget.hostId &&
+      ['claimed', 'uncertain'].includes(other.dispatchStatus)))
+      blocked = { state: attempt.state, code: 'THREAD_RECONCILIATION_REQUIRED' };
+    return attempt;
+  };
+  store.transact(lease, now(), state => { check(state); return state; });
+  const refusal = () => ({ wakeId: original.wakeId, attemptId: original.attemptId, ...blocked });
+  if (blocked) return refusal();
+  const preflight = await preflightCodex(nativeTarget, options);
+  let claim;
+  store.transact(lease, now(), state => {
+    const attempt = check(state);
+    if (!blocked && preflight.code !== 'THREAD_IDLE')
+      blocked = { state: attempt.state, code: preflight.code };
+    if (!blocked) {
+      attempt.state = 'dispatching';
+      attempt.dispatchStatus = 'claimed';
+      attempt.dispatchClaimId = randomUUID();
+      claim = { claimId: attempt.dispatchClaimId, prompt: promptFor(attempt, attempt.items, attempt.wakeId, attempt.attemptId) };
+    }
+    return state;
+  });
+  if (blocked) return refusal();
+  const outcome = await executeCodex(nativeTarget, claim.prompt, options);
+  let result;
+  store.transact(lease, now(), state => {
+    const attempt = matched(state, original);
+    if (attempt.dispatchClaimId !== claim.claimId || attempt.dispatchStatus !== 'claimed' ||
+        !['dispatching', 'acknowledged'].includes(attempt.state))
+      throw new Error('Codex dispatch claim mismatch');
+    if (attempt.state === 'acknowledged' && !outcome.accepted)
+      throw new Error('Conflicting listener receipt');
+    attempt.dispatchStatus = outcome.accepted ? 'accepted' : 'uncertain';
+    attempt.receiptStatus = outcome.accepted ? 'accepted' : 'unknown';
+    attempt.dispatchCode = outcome.code;
+    if (attempt.state !== 'acknowledged') attempt.state = outcome.accepted ? 'accepted' : 'uncertain';
+    result = { wakeId: attempt.wakeId, attemptId: attempt.attemptId, state: attempt.state, code: outcome.code };
+    return state;
+  });
+  return result;
 }
 
 /** Explicit opt-in delivery. A claimed/ambiguous invocation is never retried. */

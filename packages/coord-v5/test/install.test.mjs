@@ -283,6 +283,45 @@ test("packed install runs independently and ships only the public runtime", () =
       const view = replay.replayWorkEvents({events:[]});
       if (view.observation.coverage !== 'unavailable' || view.work.length !== 0) process.exit(3);
       for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener','work-view','work-presence','work-roles','enrollment']) await import('@fulcra/coord-v5/' + module);
+      const assert = (await import('node:assert/strict')).default;
+      const { resolve } = await import('node:path');
+      const { openListenerStore } = await import('@fulcra/coord-v5/listener-store');
+      const { configureRoutes, prepareWake, dispatchCodexWake } = await import('@fulcra/coord-v5/listener-runtime');
+      const scope = { principalId:'synthetic', workspaceId:'synthetic', environmentId:'test', harness:'codex' };
+      const target = { threadId:'synthetic-thread', hostId:'local' };
+      const db = resolve('installed-codex.sqlite');
+      const store = openListenerStore(db);
+      try {
+        const lease = store.acquire(scope, 'test', 1767225600000, 300000);
+        configureRoutes(store, lease, [{ jobId:'job', logicalIdentity:'agent', lifecycle:'active', ...target }], 1767225600001);
+        const action = prepareWake(store, lease, { version:1, observedAt:'2026-01-01T00:00:00.002Z', eventObservation:{ coverage:'complete', items:[] }, obligationObservation:{ coverage:'complete', items:[{jobId:'job',itemId:'item',revision:'r1'}] } }, 1767225600002).actions[0];
+        let calls = 0;
+        const input = { wakeId:action.wakeId, attemptId:action.attemptId, target };
+        const result = await dispatchCodexWake(store, lease, input, {
+          now:() => 1767225600003,
+          readThread:async args => {
+            assert.deepEqual(args, target);
+            return { content:[{type:'text',text:JSON.stringify({schemaVersion:1,thread:{id:target.threadId,hostId:'local',status:{type:'idle'}}})}] };
+          },
+          sendMessage:async args => {
+            calls++;
+            const independent = openListenerStore(db);
+            try {
+              const attempt = independent.inspect(scope).state.attempts[action.wakeId];
+              assert.equal(attempt.state, 'dispatching');
+              assert.equal(attempt.dispatchStatus, 'claimed');
+              assert.match(attempt.dispatchClaimId, /^[0-9a-f-]{36}$/);
+            } finally { independent.close(); }
+            assert.deepEqual(args, { ...target, prompt:action.arguments.prompt });
+            return { content:[{type:'text',text:JSON.stringify({threadId:target.threadId})}] };
+          }
+        });
+        assert.equal(result.code, 'NATIVE_ACCEPTED');
+        assert.equal(result.state, 'accepted');
+        assert.equal(calls, 1);
+        assert.equal(store.inspect(scope).state.policy.obligations['["job","item"]'], 'r1');
+        assert.equal((await dispatchCodexWake(store, lease, input, { now:() => 1767225600003, readThread:() => {throw Error('repeat read');}, sendMessage:() => {throw Error('repeat send');} })).code, 'NOT_DISPATCHABLE');
+      } finally { store.close(); }
       console.log('independent-runtime-ok');
     `,
       ],
