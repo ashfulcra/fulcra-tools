@@ -28,8 +28,13 @@ canonical enrollment harness `claude-code`. Configure a private
 `target:{kind:"claude-code",sessionId:UUID,cwd:ABS}` route and pass the prepared
 action's `.arguments` on stdin with trusted `--executable ABS`. Existing Codex
 thread routes and native heartbeat steps are unchanged. See the [dispatcher
-contract](../README.md#explicit-claude-cli-delivery) for fixed Haiku/$0.25/tool-free
-flags, 60-second/64-KiB bounds, exact result correlation and safe failure codes.
+contract](../README.md#explicit-claude-cli-delivery) for fixed flags requesting
+Haiku and a $0.25 provider budget, tool-free execution, 60-second/64-KiB bounds,
+exact result correlation and safe failure codes. Exact argv is enforced; served
+model and provider billing are not. Inspect actual assistant-model telemetry:
+the served model may differ from the requested alias, and auxiliary `modelUsage`
+does not identify the conversational model. Sub-budget success does not prove
+a hard spend ceiling.
 
 Preparing is not sending. An accepted native result is not receiver acknowledgment,
 source completeness, a schedule, or lifecycle acceptance. The local journal claims

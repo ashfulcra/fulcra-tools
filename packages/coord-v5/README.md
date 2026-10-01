@@ -165,9 +165,14 @@ Dispatch fixes `--print --resume UUID --model haiku --max-budget-usd 0.25
 --strict-mcp-config --mcp-config '{"mcpServers":{}}' --permission-mode plan
 --no-chrome`. The prompt goes on stdin. Safe mode, disabled skills, zero built-in
 tools and an empty strict MCP configuration exclude ambient execution tools.
-Unsupported flags fail closed, with no fallback invocation. The CLI request
-budget is $0.25, runtime at most 60 seconds (lower with `--timeout-ms`), and
-combined stdout/stderr at most 64 KiB. Timeout/output overflow kills only the
+Unsupported flags fail closed, with no fallback invocation. These flags request
+Haiku and a $0.25 provider budget; the adapter enforces exact argv, not provider
+model routing or billing. The served conversational model may differ despite the
+requested alias: inspect actual assistant-model telemetry. Auxiliary `modelUsage`
+entries do not identify the conversational model. A successful run below the
+requested budget does not prove cap enforcement or a hard spend ceiling.
+The adapter bounds runtime to at most 60 seconds (lower with `--timeout-ms`) and
+combined stdout/stderr to at most 64 KiB. Timeout/output overflow kills only the
 owned child; this is not descendant cleanup or a provider cancellation guarantee.
 Raw process output and secret-bearing diagnostics are not printed or journaled.
 

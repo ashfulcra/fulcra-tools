@@ -1434,8 +1434,12 @@ Native action generation is not evidence of a delivered wake.
 The v5 listener's opt-in `dispatch-claude` command resumes a privately bound
 `claude-code` target `{kind:"claude-code",sessionId:UUID,cwd:ABS}` using a trusted
 absolute operator-supplied executable; pass the prepared action's `.arguments`
-on stdin. It fixes Haiku/$0.25/safe-mode/tool-free/strict-empty-MCP flags, claims
-before spawning and bounds runtime/output. Only exact native success is accepted,
+on stdin. It fixes flags requesting Haiku and a $0.25 provider budget alongside
+safe-mode/tool-free/strict-empty-MCP flags, claims before spawning and bounds
+runtime/output. Exact argv does not guarantee the served model or provider
+billing: inspect actual assistant-model telemetry, not auxiliary `modelUsage`.
+The served model may differ from the requested alias; sub-budget success does
+not prove a hard spend ceiling. Only exact native success is accepted,
 never acknowledgment or lifecycle proof. Claimed/uncertain invocations never
 retry automatically; reconcile exact receipts after confirming the old process
 is no longer executing. The same-session fence covers one local journal/scope,
