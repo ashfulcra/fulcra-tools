@@ -1,20 +1,33 @@
 # In-harness listeners
 
-One listener serves an enrolled environment/harness; role/job reasoning sessions remain disposable. Store the native listener registration with the private workspace descriptor. A fresh listener reconstructs unfinished obligations from annotations and recovers ambiguous delivery from its receipts before resending.
+One reporting listener serves an enrolled environment/harness; addressed role/job workers remain separate and reasoning sessions disposable. Its job is to receive bus traffic, preserve coverage and route attention through locally configured native messaging, not execute the workers' tasks. Prefer bounded subagents for worker reasoning or implementation. A deliberate self-ticking executor may continue its own assigned task, but only as a separate opt-in mode. Store the native listener registration with the private workspace descriptor. A fresh listener reconstructs unfinished obligations from annotations and recovers ambiguous delivery from its receipts before resending.
+
+Verified native event ingress is the preferred enrollment path when dispatch, recovery and scoped read/publish are also current and unattended operation was requested. A schedule can backstop that path; verified ticks or session loops are fallbacks when event ingress is absent, unsupported or unknown. The planner's `native-event` mode does not implement an event adapter or prove that a product supports event ingress. Verify actual reception and idle worker delivery in the enrolled environment before advertising them.
+
+Generate `instruction_mode:"listener"` through the [instructions command](onboarding.md#capability-assessment)
+for this reporting session; use `executor` only for separately authorized owned-task execution.
+Keep these role blocks in listener/executor local/session instructions, never shared repository-wide
+worker instructions. The default `worker` block is unchanged. Listener reports cover its own reads,
+routes, conflicts and reconciliation, never worker claims/progress/completion or invented receiver
+acknowledgments. Executor recovery needs explicit ownership and context; a wake cannot authorize
+adoption. Mode selection installs nothing: fallback ticks/loops and direct executor self-ticking
+each require separate authorization. Generated prose is not runtime enforcement or consumer-agent proof.
 
 ## Codex desktop
 
-Use native thread heartbeats/scheduled tasks and native thread messaging from an active listener turn. Do not configure an external command as though it could call an app-only tool. Local scheduled runs require the app and machine to be available; verify permissions in the actual scheduled turn. See [Codex scheduled tasks](https://learn.chatgpt.com/docs/automations).
+Use locally verified native thread messaging from an active listener turn. Assess event ingress separately; use native thread heartbeats/scheduled tasks as a verified fallback or backstop, not a mandatory event-path component. Do not configure an external command as though it could call an app-only tool. Local scheduled runs require the app and machine to be available; verify permissions in the actual scheduled turn. See [Codex scheduled tasks](https://learn.chatgpt.com/docs/automations).
+
+Verify the exact native cross-session route locally, including human authorization and target restrictions. An observed Codex ancestor-target restriction is evidence about that route, not a universal prohibition on messaging peer sessions. Keep route identifiers and target mappings private; availability in an active turn does not prove an idle receiver will wake.
 
 The enrollment plan's `listener_scope` uses the dispatcher's `codex` harness key. Keep one private listener SQLite journal for that scope and configure exact job-to-thread routes with `coord-v5 listener configure`. `active` routes target an existing thread; `dormant` routes request a successor; `retired` routes notify their configured coordinator. Successor creation is a harness action, not an implied role grant.
 
 Use this bounded native listener job recipe, substituting only local approved configuration paths and identity:
 
-1. Read the owned annotation source with `transport read`; obtain both fresh events and durable obligations with `observation`. Preserve partial/unavailable coverage.
+1. On actual event reception or a fallback tick, read the owned annotation source with `transport read`; obtain both fresh events and durable obligations with `observation`. Preserve partial/unavailable coverage and the durable cursor/dedup state; do not treat a failed read as empty or advance past an unprocessed gap.
 2. Pass that observation to `listener prepare` using the registered scope, journal and holder. Inspect its known attention items and prepared actions.
-3. Execute only the prepared supported native message action for a locally configured route. Save `accepted`, `error`, or `unknown` via `listener settle` using the exact wake, attempt and target. A native send acceptance is not worker acknowledgment or completion. A receiver acknowledges with `listener ack` after matching its target and wake IDs.
+3. Execute only the prepared supported native message action for a locally configured route. Preserve the journal's delivery intent before invoking native messaging. Save `accepted`, `error`, or `unknown` via `listener settle` using the exact wake, attempt and target. Keep that native receipt separate from receiver acknowledgment and task progress/completion. A receiver acknowledges with `listener ack` after matching its target and wake IDs.
 4. Report `needs_successor`, `needs_coordinator`, conflicts, failed reads and uncertain delivery to the configured coordinator. For a successor, retrieve role/job checkpoint plus the fresh event tail and verify artifact access before transferring responsibility. Reconcile an uncertain send rather than creating a new identity to retry it.
-5. Use the returned interval for this native heartbeat only. Preserve a faster operator interval. Update through the native scheduling tool while preserving the full prompt, target and notification preferences. Failed or incomplete reads retain short error retry; they are not quiet time. Never cancel the listener merely because a workstream finished.
+5. For an event path, keep the verified event registration active. If a native heartbeat is the fallback or backstop, use the returned interval for that heartbeat only. Preserve a faster operator interval. Update through the native scheduling tool while preserving the full prompt, target and notification preferences. Failed or incomplete reads are not quiet time; scheduled retries retain the short error interval. Never cancel the environment listener merely because a workstream finished.
 6. Stay quiet for unchanged non-actionable state; notify on meaningful work, failure, completion or user decision. Reasoning sessions publish their own contact/progress/checkpoints; the listener reports only its own successful reads.
 
 The journal's recurrence is a suggestion until the native schedule update succeeds. Record both values. Live idle-wake proof does not establish restart, host-outage, permission-prompt or upgrade behavior; keep those capability fields unknown until tested. Do not restart the user's app or host as part of ordinary enrollment.
@@ -60,4 +73,4 @@ Official starting points: [Claude scheduled tasks](https://code.claude.com/docs/
 
 ## Acceptance record
 
-Capture harness/version, listener registration, scheduled time, actual execution time, source coverage, native delivery receipt, receiver acknowledgment and observed model usage when available. Test idle, busy, restart, outage, credentials, permission prompts and version drift separately. Unknown usage remains unknown. A 24-hour cost/latency experiment is a separate measurement, not an extrapolation from one successful wake.
+Capture harness/version, listener registration, actual event reception/execution time, scheduled time when applicable, source coverage, native delivery intent/receipt, receiver acknowledgment and observed model usage when available. Test idle, busy, restart, outage, credentials, permission prompts and version drift separately. Unknown usage remains unknown. A 24-hour cost/latency experiment is a separate measurement, not an extrapolation from one successful wake.

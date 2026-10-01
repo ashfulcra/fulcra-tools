@@ -67,6 +67,63 @@ test("packed install runs independently and ships only the public runtime", () =
     assert.match(help.stdout, /coord-v5/);
     assert.match(help.stdout, /explicit enrollment/i);
     assert.match(help.stdout, /checkpoint verify --artifact ABS --publication ABS/);
+    const observedAt = "2026-09-28T12:00:00Z";
+    const enrollment = spawnSync(executable, ["enrollment", "plan"], {
+      cwd: directory,
+      input: JSON.stringify({
+        version: 1,
+        principal_id: "synthetic",
+        workspace_id: "synthetic",
+        environment_id: "synthetic",
+        harness: "codex-desktop",
+        harness_version: "test",
+        unattended: true,
+        evaluated_at: observedAt,
+        capabilities: Object.fromEntries(
+          ["read", "publish", "checkpoint", "dispatch", "event_ingress"].map(name => [
+            name,
+            { status: "verified", observed_at: observedAt, evidence_ref: "receipt:synthetic" },
+          ]),
+        ),
+      }),
+      encoding: "utf8",
+    });
+    assert.equal(enrollment.status, 0, enrollment.stdout);
+    const enrollmentPlan = JSON.parse(enrollment.stdout);
+    assert.equal(enrollmentPlan.mode, "native-event");
+    assert.equal(enrollmentPlan.deployment_status, "not_installed");
+    assert.equal(enrollmentPlan.membership, "requires_authorized_grant");
+    assert.equal(enrollmentPlan.service_level, "trial");
+    // Reuse this actual offline pack/install; catches omitted shipping/wiring for role conversion.
+    const originalInstructions = "synthetic-prefix";
+    const instructionsFile = join(directory, "AGENTS.md");
+    writeFileSync(instructionsFile, originalInstructions);
+    const instructions = (content, instruction_mode, remove = false) => spawnSync(
+      executable, ["enrollment", "instructions"], {
+        cwd: directory, encoding: "utf8",
+        input: JSON.stringify({ content, workspace_id: "synthetic", remove, instruction_mode }),
+      },
+    );
+    let content = originalInstructions;
+    const roleOutputs = [];
+    for (const mode of ["listener", "executor", "worker"]) {
+      const result = instructions(content, mode);
+      assert.equal(result.status, 0, result.stdout);
+      const output = JSON.parse(result.stdout);
+      assert.deepEqual(Object.keys(output), ["content"]);
+      content = output.content;
+      assert.ok(content.startsWith(originalInstructions));
+      assert.equal(content.match(/<!-- coord-v5:start /g).length, 1);
+      roleOutputs.push(content);
+    }
+    assert.equal(new Set(roleOutputs).size, 3);
+    const removedInstructions = instructions(content + "synthetic-suffix", "listener", true);
+    assert.equal(removedInstructions.status, 0, removedInstructions.stdout);
+    assert.deepEqual(JSON.parse(removedInstructions.stdout), { content: originalInstructions + "synthetic-suffix" });
+    const invalidInstructions = instructions("synthetic-never-echo", { secret: "synthetic-never-echo" }, true);
+    assert.equal(invalidInstructions.status, 1);
+    assert.deepEqual(JSON.parse(invalidInstructions.stdout), { error: { code: "INVALID_ENROLLMENT_INPUT" } });
+    assert.equal(readFileSync(instructionsFile, "utf8"), originalInstructions);
     const checkpoint = JSON.parse(readFileSync(resolve(import.meta.dirname, "../tests/fixtures/work-handoff-synthetic.json"), "utf8"));
     const backlog = JSON.parse(readFileSync(resolve(import.meta.dirname, "../tests/fixtures/work-backlog-synthetic.json"), "utf8"));
     const baseEvent = backlog.events[0];
