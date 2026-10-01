@@ -1,21 +1,27 @@
 # Coord v5 release status
 
+Current evidence: 2026-10-01, after [PR #763](https://github.com/ashfulcra/fulcra-tools/pull/763),
+[PR #764](https://github.com/ashfulcra/fulcra-tools/pull/764) and
+[PR #765](https://github.com/ashfulcra/fulcra-tools/pull/765).
+
 The v5 core is an **opt-in alpha foundation, not a completed fleet replacement**.
 It delivers the coordination core independently of the web application. Existing coord-engine,
 coord-fold, team authority, and schedules remain unchanged.
 
 | Release gate | Status | Completion evidence required |
 |---|---|---|
-| Standalone package | Alpha.3 targeted retests passed | 374 unit and four packed-install tests; independent targeted recovery/integrity results in the acceptance ledger. Zero runtime dependencies. |
+| Standalone package | Alpha.3 current suite passed | 426 unit and four installed-package tests; seven merge-commit CI checks passed. Zero runtime dependencies. [Pins and provenance](V5-ACCEPTANCE.md#current-bounded-release-evidence--2026-10-01). |
 | Usable bus operations | Verified for core alpha | Explicit owned enrollment; installed publication/readback, authorized views/digests and checkpoint commands. |
 | Two-agent acceptance | Passed for bounded slice | Real question/answer exchange through annotations, separate caches, restart retention and local checkpoint validation. [Evidence and limits](V5-ACCEPTANCE.md). |
-| Upstream delivery | See live PR state | [PR #762](https://github.com/ashfulcra/fulcra-tools/pull/762) delivers the foundation; merge is not registry publication or fleet adoption. Build/install from source using the package README. |
+| Upstream delivery | Foundation and follow-ups merged | [PR #762](https://github.com/ashfulcra/fulcra-tools/pull/762) foundation, #763 retained handoff receipts, #764 queryability documentation, and #765 explicit Claude dispatch. #765 merged 2026-10-01 at 10:45:58 UTC; merge is not npm publication or fleet adoption. |
 | Fleet adoption | Not enabled | Explicit team enrollment and verified host-by-host adoption; never inferred from a passing local test. |
 | Presence and roles | Implemented and live-tested | Separate presence clocks, causal claims, retained checkpoint lineage; independent successor test. |
 | Native listener enrollment | Implemented; Codex idle wake tested | Evidence-based planner and native recipe; trial paused after successful wake. |
+| Claude CLI delivery | Implemented; bounded installed resume/replay evidence reviewed | Exact private target, journal claim, fixed full model-ID request and no automatic retry. Peer authenticated artifacts were reviewed, not independently rerun. Native acceptance is not acknowledgment or lifecycle proof. |
+| Native lifecycle | Limited evidence; further acceptance remains | Earlier Codex owned-process SIGTERM/resume used a test-only broker. No shipped cross-harness lifecycle adapter, outage or fleet proof. This work does not wait for provider completeness. |
 | Lightweight onboarding | Bundled | Positive entry guide and reversible local instruction block; upstream Workspaces remains a separate reviewed change. |
 
-## Implemented core being packaged
+## Implemented core
 
 - Typed work, assignment, question, checkpoint and handoff events.
 - Authorized causal replay and explicit conflict reporting.
@@ -23,6 +29,9 @@ coord-fold, team authority, and schedules remain unchanged.
 - Portable checkpoint packages and successor readiness checks.
 - Annotation readback and local durable publication/observation journals.
 - Listener routing, prepared attempts, receipt recording and restart deduplication.
+- Explicit journal-claimed Claude CLI resume with bounded runtime/output.
+- Local checkpoint byte verification and private durable import of operator-trusted
+  handoff verification receipts; neither independently proves remote access.
 
 These are components, not a claim of autonomous fleet operation. Annotation
 records are work authority; local journals are operational caches. A bounded
@@ -49,8 +58,9 @@ durable delivery actions; the native recipe executes them and applies suggested
 adaptive intervals through harness tools, not an external daemon. No unattended
 fleet listener was installed by these tests.
 
-Remaining gates: other harness live adapters, busy/restart/outage/permission/upgrade
-acceptance, a sustained cost/latency trial, explicit fleet cutover, and upstream
+Remaining gates for broader adoption: other harness live adapters,
+busy/restart/outage/permission/upgrade acceptance, a sustained cost/latency trial,
+explicit fleet cutover, and upstream
 Workspaces adoption. An independent tester now reports real-session bus operations
 across Claude Code, Codex CLI, Hermes and OpenClaw; see the acceptance ledger for
 the verified scope versus tester-reported evidence and remaining native-wake gaps.
@@ -62,10 +72,20 @@ execution from fixture-backed handoff/access checks. Existing v4 commands remain
 the team's operational entry point until an explicit, tested enrollment switches
 a workstream. No pre-v4 history is imported.
 
-## Next delivery: handoff readiness
+## Next delivery: bounded native lifecycle acceptance
 
-Prove source completeness and accepted successor ownership before declaring a
-handoff ready. Do not relax partial-history refusal or invent completeness receipts.
-Then validate native successor lifecycle and recovery through supported harness
-mechanisms. Track these as follow-up changes rather than implying that merging
-the alpha foundation completes the rebuild.
+Extend lifecycle and recovery tests through supported harness mechanisms using
+isolated, owned sessions. Keep natural exit/resume, crash recovery, busy delivery,
+outage and permission/upgrade behavior as separate evidence. The earlier bounded
+Codex SIGTERM/resume test used a test-only broker; it does not supply a shipped
+cross-harness adapter. No newer crash acceptance is claimed here.
+
+This can proceed before the provider defines complete-history coverage.
+[Provider issue #115](https://github.com/fulcradynamics/fulcra-api-python/issues/115)
+requests an ingestion-ordered completeness contract; accepted ownership and that
+contract remain unconfirmed. This limits complete-history/full-handoff claims,
+not the bounded release or independent native lifecycle work. Keep partial/unknown
+views honest: no all-clear, automatic takeover or invented completeness receipt.
+Full handoff readiness still needs independently verified artifact/access checks,
+accepted successor ownership and the required source coverage. Local receipt
+import retains an operator attestation; it does not independently create that proof.

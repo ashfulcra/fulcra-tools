@@ -5,6 +5,10 @@ replay, open-work digests, checkpoints/handoffs and a recoverable SQLite listene
 Unofficial and unsupported; existing coord-engine and fleet schedules are unchanged.
 Wire formats remain `gatekeeper-work/1` and `gatekeeper/1`.
 
+See [current release evidence and remaining gates](../../docs/coord/V5-RELEASE-STATUS.md)
+and the [acceptance ledger](../../docs/coord/V5-ACCEPTANCE.md). Bounded native
+delivery/lifecycle evidence is separate from complete-history and full-handoff proof.
+
 ## Install
 
 Requires Node 22.16.0 or newer (built-in SQLite constructor timeout API).

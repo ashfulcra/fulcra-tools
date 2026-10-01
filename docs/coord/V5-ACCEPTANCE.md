@@ -1,6 +1,50 @@
 # Coord v5 alpha acceptance
 
-## Alpha.3 targeted acceptance — 2026-09-30
+## Current bounded-release evidence — 2026-10-01
+
+Reviewed runtime pin: `16fe686f859b03d71afc06169de46144fa6ef431`.
+[PR #765](https://github.com/ashfulcra/fulcra-tools/pull/765) merged at
+2026-10-01 10:45:58 UTC as `6d6626b1bfd0eb45afa165a77b8f9d63705b8abf`.
+The pinned source passed 426 unit tests across 22 files and four installed-package
+tests; a fresh isolated local run at the merge commit passed the same suite.
+Seven merge-commit CI checks passed. These checks include synthetic subprocess
+and source fixtures; they do not constitute authenticated native acceptance.
+
+An acceptance reviewer inspected a peer's authenticated installed Claude CLI
+resume/replay artifacts and matched the installed runtime source digest to the
+reviewed source. The resumed invocation produced Haiku assistant rows; repeat
+dispatch produced no replay assistant row. This is reviewed peer evidence, not
+an independently rerun native session. The dispatcher now exists: it claims the
+exact journaled wake before invoking the bound session and refuses automatic
+retry. Its [contract](../../packages/coord-v5/README.md#explicit-claude-cli-delivery)
+fixes the full model-ID request and safety flags, bounds runtime/output, and
+requires exact native result correlation. Requested model/provider budget are
+not universal served-model or hard-spend guarantees; auxiliary `modelUsage` is
+not conversational-model evidence. Acceptance is not receiver acknowledgment,
+work completion, crash/outage recovery or scheduled fleet operation.
+
+[PR #763](https://github.com/ashfulcra/fulcra-tools/pull/763) adds scoped durable
+import of operator-trusted handoff verification receipts. The importer and local
+checkpoint byte verifier do not independently establish remote retrieval,
+permissions or source completeness. [PR #764](https://github.com/ashfulcra/fulcra-tools/pull/764)
+corrects queryability documentation; it does not establish a completeness contract.
+
+Earlier bounded Codex owned-process SIGTERM/resume acceptance used a test-only
+broker. It is not a shipped cross-harness adapter or host-outage proof. Further
+native lifecycle acceptance can proceed independently of
+[provider issue #115](https://github.com/fulcradynamics/fulcra-api-python/issues/115),
+whose accepted owner and ingestion-ordered completeness contract remain unconfirmed.
+That limitation gates complete-history/full-handoff claims, not this bounded
+release or lifecycle tests. Partial/unknown coverage still cannot authorize
+all-clear or exclusive takeover; full handoff proof and accepted successor
+ownership remain separate. No newer crash acceptance, fleet/production deployment
+or cross-account acceptance is claimed. Private artifacts and identities stay
+outside this repository.
+
+## Historical: Alpha.3 targeted acceptance — 2026-09-30
+
+Historical snapshot. Current dispatcher status and release boundaries are above;
+the counts, pins and pending claims below describe this earlier run only.
 
 Runtime acceptance pin: `e3985e2bb18f5148088adc001d7b77c32bf15aef`.
 Fresh local verification passed 374 unit tests across 20 suites and four
@@ -20,13 +64,14 @@ creation, restart/outage recovery, or sustained-operation acceptance.
 
 Native scheduled reporting-channel reads have also been observed on Codex and
 reported by the cloud tester. Reporting-channel polling does not implement the
-package's missing Claude dispatcher. Full handoff readiness remains unproven:
+then-unimplemented Claude dispatcher (now delivered in PR #765).
+Full handoff readiness remained unproven:
 bounded transport reads provide no source-completeness attestation, and accepted
 successor ownership must be demonstrated separately. No fleet cutover or
 cross-account acceptance is claimed. Earlier sections below are historical;
 their pending targeted retests are superseded by this section.
 
-## Independent multi-harness report — 2026-09-28
+## Historical: Independent multi-harness report — 2026-09-28
 
 The harness tester reports 18 bounded real reasoning sessions against commit
 `de1005e7d8fc3febd8950da6b9d89ea367d59079`: Claude Code with Haiku 4.5,
@@ -66,7 +111,7 @@ Cross-account, native delivery across these four harnesses, independently checke
 handoff readiness, harness restart and sustained operation remain unproven. No
 production authority, schedules or fleet enrollment changed.
 
-## Alpha.2 integration — 2026-09-28
+## Historical: Alpha.2 integration — 2026-09-28
 
 The package now includes source-backed presence, durable role claims and
 capability-based enrollment. The earlier alpha.1 record below remains historical.
@@ -103,7 +148,10 @@ is not proved. No fleet schedule, team authority or existing v4 workspace was
 switched. The separate upstream Workspaces annotation skill remains under review;
 it is not automatically wire-compatible with this package.
 
-## Result
+## Historical: Alpha.1 result — 2026-09-28
+
+The remaining sections record the alpha.1 artifact and checks, not current totals
+or a current list of all supported dispatchers.
 
 The standalone bus core passed an installed-package exchange between two real
 native Codex sessions on 2026-09-28 UTC. This is an opt-in core release, not fleet
