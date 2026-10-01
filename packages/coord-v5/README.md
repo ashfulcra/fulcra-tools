@@ -160,15 +160,18 @@ The trusted operator supplies the absolute executable via `--executable`, never
 an event, route, prompt, arbitrary argv or shell command. CLI authentication must
 already work; this command neither signs in nor changes credentials.
 
-Dispatch fixes `--print --resume UUID --model haiku --max-budget-usd 0.25
+Dispatch fixes `--print --resume UUID --model claude-haiku-4-5-20251001 --max-budget-usd 0.25
 --output-format json --safe-mode --tools '' --disable-slash-commands
 --strict-mcp-config --mcp-config '{"mcpServers":{}}' --permission-mode plan
 --no-chrome`. The prompt goes on stdin. Safe mode, disabled skills, zero built-in
 tools and an empty strict MCP configuration exclude ambient execution tools.
 Unsupported flags fail closed, with no fallback invocation. These flags request
-Haiku and a $0.25 provider budget; the adapter enforces exact argv, not provider
-model routing or billing. The served conversational model may differ despite the
-requested alias: inspect actual assistant-model telemetry. Auxiliary `modelUsage`
+the full model ID `claude-haiku-4-5-20251001` and a $0.25 provider budget; the
+adapter enforces exact argv, not provider model routing or billing. The served
+conversational model may differ despite the requested model ID: inspect actual
+assistant-model telemetry. A controlled
+fresh-print comparison in one environment motivated the full-ID request; it is
+not universal routing evidence or resumed-session proof. Auxiliary `modelUsage`
 entries do not identify the conversational model. A successful run below the
 requested budget does not prove cap enforcement or a hard spend ceiling.
 The adapter bounds runtime to at most 60 seconds (lower with `--timeout-ms`) and

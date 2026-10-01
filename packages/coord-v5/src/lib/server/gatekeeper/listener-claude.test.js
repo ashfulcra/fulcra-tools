@@ -67,7 +67,7 @@ it('accepts only native success and launches fixed safe argv with journal prompt
   const { dispatch, cwd, store, input } = setup({ response: successful, inspectClaim: true });
   expect(await dispatch()).toMatchObject({ state: 'accepted', code: 'NATIVE_ACCEPTED' });
   const calls = JSON.parse(readFileSync(join(cwd, 'calls.json'), 'utf8'));
-  expect(calls.argv).toEqual(['--print', '--resume', sessionId, '--model', 'haiku', '--max-budget-usd', '0.25', '--output-format', 'json', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'plan', '--no-chrome']);
+  expect(calls.argv).toEqual(['--print', '--resume', sessionId, '--model', 'claude-haiku-4-5-20251001', '--max-budget-usd', '0.25', '--output-format', 'json', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'plan', '--no-chrome']);
   expect(calls.cwd).toBe(cwd);
   expect(calls.claimState).toBe('claimed');
   expect(calls.prompt).toContain(`Wake ${input.wakeId}; attempt ${input.attemptId}`);

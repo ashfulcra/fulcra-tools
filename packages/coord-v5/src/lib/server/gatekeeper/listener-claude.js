@@ -20,7 +20,7 @@ export async function executeClaude(target, prompt, options) {
   return new Promise(resolveOutcome => {
     let child;
     try {
-      child = spawn(options.executable, ['--print', '--resume', target.sessionId, '--model', 'haiku', '--max-budget-usd', '0.25', '--output-format', 'json', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'plan', '--no-chrome'], {
+      child = spawn(options.executable, ['--print', '--resume', target.sessionId, '--model', 'claude-haiku-4-5-20251001', '--max-budget-usd', '0.25', '--output-format', 'json', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'plan', '--no-chrome'], {
         cwd: target.cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe']
       });
     } catch { resolveOutcome({ accepted: false, code: 'SPAWN_FAILED' }); return; }
