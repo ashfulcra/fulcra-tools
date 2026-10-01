@@ -165,6 +165,51 @@ it('retains a crash-left claim after reopen and reports reconciliation without r
   expect(result.actions).toEqual([]);
 });
 
+it('keeps an acknowledged ambiguous session fenced after reopen for a different wake', async () => {
+  const { dispatch, prepare, input, store, db, lease, cwd } = setup({ raw: 'not-json' });
+  const next = prepare('r2', start + 3).actions[0];
+  expect(next.wakeId).not.toBe(input.wakeId);
+  expect(await dispatch()).toMatchObject({ state: 'uncertain' });
+  expect(runtime.acknowledgeWake(store, lease, input, start + 11)).toMatchObject({ state: 'acknowledged' });
+  const retained = store.inspect(scope).state.attempts[input.wakeId];
+  expect(retained).toMatchObject({ state: 'acknowledged', dispatchStatus: 'uncertain', receiptStatus: 'unknown' });
+  store.close();
+  const reopened = openListenerStore(db);
+  resources.push({ store: reopened, cwd: mkdtempSync(join(tmpdir(), 'claude-cleanup-')) });
+  expect(await runtime.dispatchClaudeWake(reopened, lease, next.arguments, {
+    executable: resolve('tests/fixtures/claude-cli-synthetic.mjs'), now: () => start + 12,
+  })).toEqual({ wakeId: next.wakeId, attemptId: next.attemptId, state: 'prepared', code: 'SESSION_RECONCILIATION_REQUIRED' });
+  expect(reopened.inspect(scope).state.attempts[input.wakeId]).toEqual(retained);
+  expect(reopened.inspect(scope).state.attempts[next.wakeId]).toMatchObject({ state: 'prepared' });
+  expect(JSON.parse(readFileSync(join(cwd, 'calls.json'), 'utf8')).count).toBe(1);
+});
+
+it('retains the committed claim when successful child settlement hits lease expiry', async () => {
+  const { dispatch, store, db, lease, input, cwd } = setup({ response: successful, inspectClaim: true });
+  let clockReads = 0;
+  await expect(dispatch({ now: () => ++clockReads === 1 ? lease.expiresAt - 1 : lease.expiresAt }))
+    .rejects.toThrow('Listener lease expired or fenced');
+  expect(clockReads).toBe(2); // Claim was valid; only post-child settlement expired.
+  const claim = store.inspect(scope).state.attempts[input.wakeId];
+  expect(claim).toMatchObject({ state: 'dispatching', dispatchStatus: 'claimed', attemptId: input.attemptId, target: input.target });
+  expect(claim.dispatchClaimId).toEqual(expect.any(String));
+  expect(claim.receiptStatus).toBeUndefined();
+  expect(claim.dispatchCode).toBeUndefined();
+  const calls = JSON.parse(readFileSync(join(cwd, 'calls.json'), 'utf8'));
+  expect(calls.claimState).toBe('claimed');
+  expect(calls.count).toBe(1);
+  store.close();
+  const reopened = openListenerStore(db);
+  resources.push({ store: reopened, cwd: mkdtempSync(join(tmpdir(), 'claude-cleanup-')) });
+  const fresh = reopened.acquire(scope, 'holder', lease.expiresAt, 300000);
+  expect(fresh).not.toBeNull();
+  expect(await runtime.dispatchClaudeWake(reopened, fresh, input, {
+    executable: resolve('tests/fixtures/claude-cli-synthetic.mjs'), now: () => lease.expiresAt + 1,
+  })).toEqual({ wakeId: input.wakeId, attemptId: input.attemptId, state: 'dispatching', code: 'NOT_DISPATCHABLE' });
+  expect(reopened.inspect(scope).state.attempts[input.wakeId]).toEqual(claim);
+  expect(JSON.parse(readFileSync(join(cwd, 'calls.json'), 'utf8')).count).toBe(1);
+});
+
 it('correlates Claude acknowledgments without inventing one from native acceptance', async () => {
   const { dispatch, store, lease, input } = setup();
   await dispatch();
