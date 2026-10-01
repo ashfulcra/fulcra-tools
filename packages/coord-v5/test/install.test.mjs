@@ -145,6 +145,29 @@ test("packed install runs independently and ships only the public runtime", () =
     assert.equal(inspectListener.status, 0, inspectListener.stderr);
     assert.deepEqual(JSON.parse(inspectListener.stdout), { snapshot: null });
     assert.equal(existsSync(listenerDb), false);
+    // A real synthetic subprocess verifies the packed dispatcher, not provider access.
+    const claudeScope = JSON.stringify({ principalId: 'synthetic', workspaceId: 'synthetic', environmentId: 'test', harness: 'claude-code' });
+    const claudeDb = join(directory, 'claude-listener.sqlite');
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const target = { kind: 'claude-code', sessionId, cwd: directory };
+    const fixtureExecutable = join(directory, 'synthetic-claude.mjs');
+    writeFileSync(fixtureExecutable, readFileSync(resolve(import.meta.dirname, '../tests/fixtures/claude-cli-synthetic.mjs')), { mode: 0o755 });
+    writeFileSync(join(directory, 'behavior.json'), JSON.stringify({ response: { type: 'result', subtype: 'success', is_error: false, session_id: sessionId } }));
+    const listener = (command, input, extra = []) => spawnSync(executable, ['listener', command, '--db', claudeDb, '--scope', claudeScope, '--holder', 'test', ...extra], { cwd: directory, input: JSON.stringify(input), encoding: 'utf8' });
+    const configured = listener('configure', [{ jobId: 'job', logicalIdentity: 'agent', lifecycle: 'active', target }]);
+    assert.equal(configured.status, 0, configured.stdout);
+    const preparedClaude = listener('prepare', { version: 1, observedAt: new Date(Date.now() - 1000).toISOString(), eventObservation: { coverage: 'complete', items: [{ jobId: 'job', itemId: 'item', revision: 'r1' }] }, obligationObservation: { coverage: 'complete', items: [] } });
+    assert.equal(preparedClaude.status, 0, preparedClaude.stdout);
+    const dispatchInput = JSON.parse(preparedClaude.stdout).actions[0].arguments;
+    const rejectedOptions = listener('dispatch-claude', dispatchInput, ['--executable', fixtureExecutable, '--timeout-ms', '60001']);
+    assert.equal(rejectedOptions.status, 1);
+    const acceptedClaude = listener('dispatch-claude', dispatchInput, ['--executable', fixtureExecutable]);
+    assert.equal(acceptedClaude.status, 0, acceptedClaude.stdout);
+    assert.equal(JSON.parse(acceptedClaude.stdout).state, 'accepted');
+    const repeatClaude = listener('dispatch-claude', dispatchInput, ['--executable', fixtureExecutable]);
+    assert.equal(repeatClaude.status, 2);
+    assert.equal(JSON.parse(repeatClaude.stdout).code, 'NOT_DISPATCHABLE');
+    assert.equal(JSON.parse(readFileSync(join(directory, 'calls.json'), 'utf8')).count, 1);
     const principal = "00000000-0000-4000-8000-000000000900";
     const config = {
       baseUrl: "https://api.fulcradynamics.com/",

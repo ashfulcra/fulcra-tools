@@ -1431,6 +1431,18 @@ body digest, and scope/identity bindings; this is not remote retrieval, access,
 native-wake, or source-completeness proof. Artifact bytes are capped at 256 KiB,
 publication JSON at 64 KiB, and validated checkpoint content at 128 KiB.
 Native action generation is not evidence of a delivered wake.
+The v5 listener's opt-in `dispatch-claude` command resumes a privately bound
+`claude-code` target `{kind:"claude-code",sessionId:UUID,cwd:ABS}` using a trusted
+absolute operator-supplied executable; pass the prepared action's `.arguments`
+on stdin. It fixes Haiku/$0.25/safe-mode/tool-free/strict-empty-MCP flags, claims
+before spawning and bounds runtime/output. Only exact native success is accepted,
+never acknowledgment or lifecycle proof. Claimed/uncertain invocations never
+retry automatically; reconcile exact receipts after confirming the old process
+is no longer executing. The same-session fence covers one local journal/scope,
+not other processes/journals/scopes. Keep native routes and CWDs private; do not
+sign in, create sessions, change credentials or force takeover as dispatch setup.
+Synthetic fixture success is not authenticated native acceptance. See the
+[dispatcher contract](packages/coord-v5/README.md#explicit-claude-cli-delivery).
 `coord-v5 handoff verification import --config ABS --db ABS --receipt ABS`
 retains a private, scope-bound operator attestation through restart. The receipt
 envelope is `{schema:"handoff-verification/1",principal_id,workspace_id,

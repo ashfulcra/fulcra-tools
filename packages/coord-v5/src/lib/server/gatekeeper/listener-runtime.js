@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { executeClaude, validateClaudeExecutor } from './listener-claude.js';
 import { advanceListenerPolicy, evaluateWake } from '../../gatekeeper/listener.js';
 import {
   correlation,
@@ -31,6 +32,7 @@ const routeFields = [
   'hostId',
   'coordinatorJobId'
 ];
+const targetFields = ['kind', 'sessionId', 'cwd', 'threadId', 'hostId'];
 
 /** @param {Record<string,string>} previous @param {Item[]} incoming @param {string} coverage */
 function mergeItems(previous, incoming, coverage) {
@@ -51,18 +53,18 @@ function listed(map, kind) {
 function destination(route, routes) {
   if (route.lifecycle === 'retired') {
     const coordinator = routes[route.coordinatorJobId];
-    if (!coordinator || coordinator.lifecycle !== 'active' || !coordinator.threadId)
+    if (!coordinator || coordinator.lifecycle !== 'active' || (!coordinator.threadId && !coordinator.target))
       return { status: 'needs_coordinator' };
     return {
-      target: {
+      target: coordinator.target ?? {
         threadId: coordinator.threadId,
         ...(coordinator.hostId ? { hostId: coordinator.hostId } : {})
       }
     };
   }
-  if (route.lifecycle !== 'active' || !route.threadId) return { status: 'needs_successor' };
+  if (route.lifecycle !== 'active' || (!route.threadId && !route.target)) return { status: 'needs_successor' };
   return {
-    target: { threadId: route.threadId, ...(route.hostId ? { hostId: route.hostId } : {}) }
+    target: route.target ?? { threadId: route.threadId, ...(route.hostId ? { hostId: route.hostId } : {}) }
   };
 }
 
@@ -126,7 +128,7 @@ export function configureRoutes(store, lease, routes, nowMs) {
       const bindingVersion =
         prior &&
         sameFields(prior, route, routeFields) &&
-        sameFields(oldTarget, newTarget, ['threadId', 'hostId'])
+        sameFields(oldTarget, newTarget, targetFields)
           ? prior.bindingVersion
           : baseVersion + 1;
       if (!Number.isSafeInteger(bindingVersion)) throw new RangeError('Listener binding exhausted');
@@ -212,7 +214,7 @@ export function prepareWake(store, lease, input, nowMs) {
     const actions = [];
     const attention = [];
     const reconciliation = /** @type {any[]} */ (Object.values(state.attempts))
-      .filter((attempt) => ['prepared', 'uncertain'].includes(attempt.state))
+      .filter((attempt) => ['prepared', 'dispatching', 'uncertain'].includes(attempt.state) || ['claimed', 'uncertain'].includes(attempt.dispatchStatus))
       .map((attempt) => ({
         wakeId: attempt.wakeId,
         attemptId: attempt.attemptId,
@@ -238,7 +240,8 @@ export function prepareWake(store, lease, input, nowMs) {
         attention.push({ jobId, status: resolved.status });
         continue;
       }
-      if (lease.scope.harness !== 'codex') {
+      const claude = resolved.target?.kind === 'claude-code';
+      if (lease.scope.harness !== (claude ? 'claude-code' : 'codex')) {
         attention.push({ jobId, status: 'unsupported_harness' });
         continue;
       }
@@ -261,8 +264,8 @@ export function prepareWake(store, lease, input, nowMs) {
       actions.push({
         wakeId,
         attemptId,
-        tool: 'mcp__codex_app__send_message_to_thread',
-        arguments: { ...target, prompt: promptFor(route, sorted, wakeId, attemptId) }
+        tool: claude ? 'coord-v5 listener dispatch-claude' : 'mcp__codex_app__send_message_to_thread',
+        arguments: claude ? { wakeId, attemptId, target } : { ...target, prompt: promptFor(route, sorted, wakeId, attemptId) }
       });
     }
     let interval = policy.nextIntervalMinutes ?? 15;
@@ -302,11 +305,52 @@ function matched(state, value) {
   if (
     !attempt ||
     attempt.attemptId !== value.attemptId ||
-    attempt.target.threadId !== value.target.threadId ||
-    (attempt.target.hostId ?? null) !== (value.target.hostId ?? null)
+    !sameFields(attempt.target, value.target, targetFields)
   )
     throw new Error('Listener correlation mismatch');
   return attempt;
+}
+
+/** Explicit opt-in delivery. A claimed/ambiguous invocation is never retried. */
+export async function dispatchClaudeWake(store, lease, input, options) {
+  const value = correlation(input);
+  if (lease.scope.harness !== 'claude-code' || value.target.kind !== 'claude-code')
+    throw new TypeError('Invalid Claude dispatch target');
+  validateClaudeExecutor(options);
+  const now = options.now ?? Date.now;
+  let claim;
+  let blocked;
+  store.transact(lease, now(), state => {
+    const attempt = matched(state, value);
+    const route = state.routes[attempt.jobId];
+    if (attempt.superseded || !route || route.bindingVersion !== attempt.bindingVersion || !sameFields(destination(route, state.routes).target, attempt.target, targetFields)) {
+      blocked = { state: attempt.state, code: 'STALE_BINDING' };
+    } else if (attempt.state !== 'prepared' || attempt.dispatchStatus) {
+      blocked = { state: attempt.state, code: 'NOT_DISPATCHABLE' };
+    } else if (Object.values(state.attempts).some(other => other !== attempt && other.target?.kind === 'claude-code' && other.target.sessionId === attempt.target.sessionId && ['claimed', 'uncertain'].includes(other.dispatchStatus))) {
+      blocked = { state: attempt.state, code: 'SESSION_RECONCILIATION_REQUIRED' };
+    } else {
+      attempt.state = 'dispatching';
+      attempt.dispatchStatus = 'claimed';
+      attempt.dispatchClaimId = randomUUID();
+      claim = { claimId: attempt.dispatchClaimId, target: { ...attempt.target }, prompt: promptFor(attempt, attempt.items, attempt.wakeId, attempt.attemptId) };
+    }
+    return state;
+  });
+  if (blocked) return { wakeId: value.wakeId, attemptId: value.attemptId, ...blocked };
+  const outcome = await executeClaude(claim.target, claim.prompt, options);
+  let result;
+  store.transact(lease, now(), state => {
+    const attempt = matched(state, value);
+    if (attempt.dispatchClaimId !== claim.claimId) throw new Error('Claude dispatch claim mismatch');
+    attempt.dispatchStatus = outcome.accepted ? 'accepted' : 'uncertain';
+    attempt.receiptStatus = outcome.accepted ? 'accepted' : 'unknown';
+    attempt.dispatchCode = outcome.code;
+    if (attempt.state !== 'acknowledged') attempt.state = outcome.accepted ? 'accepted' : 'uncertain';
+    result = { wakeId: attempt.wakeId, attemptId: attempt.attemptId, state: attempt.state, code: outcome.code };
+    return state;
+  });
+  return result;
 }
 
 /** @param {Store} store @param {Lease} lease @param {unknown} receipt @param {number} nowMs */
@@ -321,6 +365,7 @@ export function settleWake(store, lease, receipt, nowMs) {
     if (attempt.state === 'acknowledged' && next !== 'accepted')
       throw new Error('Conflicting listener receipt');
     attempt.receiptStatus = value.status;
+    if (attempt.dispatchStatus && value.status === 'accepted') attempt.dispatchStatus = 'accepted';
     if (attempt.state !== 'acknowledged') attempt.state = next;
     result = { wakeId: attempt.wakeId, attemptId: attempt.attemptId, state: attempt.state };
     return state;

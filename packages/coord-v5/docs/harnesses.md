@@ -21,6 +21,26 @@ The journal's recurrence is a suggestion until the native schedule update succee
 
 ## Other environments
 
+### Claude Code: explicit local delivery
+
+The package now supports opt-in `coord-v5 listener dispatch-claude`, using the
+canonical enrollment harness `claude-code`. Configure a private
+`target:{kind:"claude-code",sessionId:UUID,cwd:ABS}` route and pass the prepared
+action's `.arguments` on stdin with trusted `--executable ABS`. Existing Codex
+thread routes and native heartbeat steps are unchanged. See the [dispatcher
+contract](../README.md#explicit-claude-cli-delivery) for fixed Haiku/$0.25/tool-free
+flags, 60-second/64-KiB bounds, exact result correlation and safe failure codes.
+
+Preparing is not sending. An accepted native result is not receiver acknowledgment,
+source completeness, a schedule, or lifecycle acceptance. The local journal claims
+before launch; repeated and ambiguous attempts require reconciliation, including
+crash-left claims. Do not resume the same session elsewhere concurrently: the
+fence is local to one journal/scope, not global busy detection. The operator must
+verify the CLI/version, existing session, trusted CWD and credential availability
+without copying them into public artifacts. No sign-in, new-session creation or
+force takeover is performed. Fixture and packed-install success are local tests,
+not authenticated native acceptance or restart/outage evidence.
+
 | Harness | Self-assessment path |
 |---|---|
 | Claude Code live session | Inspect native loop/scheduled-task and channel tools in that session. Verify workspace access, busy delivery, expiration and resume behavior. A session loop shares the session's lifetime. |
