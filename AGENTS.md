@@ -335,6 +335,28 @@ under `skills/`, each package with its own README, build, and tests.
   the only way to stop a stale timestamp being believed; if it can be neither
   updated nor removed, the verb exits 3. Pointer updates are monotonic: an
   older snapshot must never move an agent's reported age backwards.
+- **`health` freshness is SHARD RECENCY; the advance fact is separate.** EVERY
+  reconcile exit writes a health shard, aborts included — `_write_health_shard`
+  runs before the early `return` — so a host that has aborted every pass for
+  hours still renders `[ok … 0.02h ago]`. Measured on `team/fulcra` 2026-10-02:
+  the task index had not advanced in ~16h while `health` reported `4/7 host(s)
+  fresh` with four `[ok]` rows, the only trace an unlabelled `1 warn`. The shard
+  could not have answered either — `build_shard` recorded `warnings` as a COUNT
+  and dropped `degraded`/`reason` entirely, so the distinction was unrecorded,
+  not merely unrendered. Shards now carry **`advanced`** plus
+  **`degraded_reason`**, the fold adds `advancing`/`aborting`/`unknown_advance`
+  over FRESH hosts only, and the text says `DID NOT ADVANCE: <reason>` per host
+  plus a headline. **A shard with no `advanced` key is UNKNOWN, never True** — a
+  missing field is not evidence a pass succeeded, and during a rollout a
+  pre-upgrade host must read as unknown rather than accused or excused.
+  `fresh`/`stale`/`healthy` and the exit code keep their exact prior meaning
+  (one production reader, `cli.cmd_health`, audited): whether an all-aborting
+  fleet should flip `healthy` is an OPEN REVIEW QUESTION, not something the fold
+  decides. Known imprecision, stated not hidden: an inventory-only generation
+  refusal still writes `summaries.json` as the compatibility cache and its shard
+  call site never sees that reason, so it reports `advanced: True` with its
+  warnings — "advanced" means *was not aborted and wrote the index*, never
+  *published a clean generation*.
 - The `.settled` marker's MERGE EVIDENCE is never overwritten by the tally
   cache: a settleable tally once stamped `state: APPROVED` over
   `state: MERGED` + `merge_sha` — found in production, where the very

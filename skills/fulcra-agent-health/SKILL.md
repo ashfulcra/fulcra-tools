@@ -16,10 +16,25 @@ role-escalation sweep land here too — A5b.)
 
 ## How it works
 - Every `coord-engine reconcile` writes a small **health shard**
-  (`_coord/health/<host-key>.json`: host, timestamp, engine version, task count, warnings) and prunes
-  shards older than 30 days (age-based GC).
-- **`coord-engine health <team>`** folds the shards: per-host last-reconcile age, STALE flag (>24h),
-  engine version — exits non-zero when no host is fresh (usable as a monitor probe).
+  (`_coord/health/<host-key>.json`: host, timestamp, engine version, task count, warnings,
+  `advanced`, `degraded_reason`) and prunes shards older than 30 days (age-based GC).
+  **EVERY exit writes one, aborts included** — the shard write runs before the early
+  `return` — so a shard proves a pass *ran*, never that it *advanced the index*.
+- **`coord-engine health <team>`** folds the shards into TWO separate facts per host:
+  - **fresh / STALE (>24h)** — shard recency. Did this host write a beat lately?
+  - **`advanced`** — did the pass move the index? `False` prints
+    `DID NOT ADVANCE: <reason>` and feeds the `aborting` rollup plus a headline
+    warning. **A shard with no `advanced` key is `None` = UNKNOWN, never `True`**
+    (an older engine wrote it; a missing field is not evidence a pass succeeded),
+    counted in `unknown_advance`.
+
+  Rollups count FRESH hosts only, because they answer "is the index moving now":
+  `advancing`, `aborting`, `unknown_advance`. `fresh`/`healthy` and the exit code are
+  unchanged — **`healthy: true` with `aborting > 0` is a real and dangerous state**, and
+  a monitor alerting only on `healthy: false` will miss it. Alert on `aborting` too.
+
+  Earned live: `team/fulcra` went ~16h without the index advancing while `health` read
+  `4/7 host(s) fresh` with four `[ok]` rows; the only trace was an unlabelled `1 warn`.
 - **`coord-engine doctor [team]`** is the local preflight: storage CLI on PATH, File Store reachable,
   engine version. Run it after install and inside scheduled jobs' self-tests (the parent project's
   heartbeats failed silently on exactly these).
@@ -51,5 +66,8 @@ coord-engine escalate <team>        # vacancy sweep (heartbeat-safe)
 
 ## When to use
 - After installing coord on a new machine (doctor).
-- In monitoring/heartbeat wrappers (health --json; alert on `healthy: false`).
-- Diagnosing "the index looks stale" — health shows which reconciler stopped.
+- In monitoring/heartbeat wrappers (health --json; alert on `healthy: false`
+  **and on `aborting > 0`** — a fleet of fresh hosts that all abort still reports
+  `healthy: true`, which is exactly the freeze that hid for 16h).
+- Diagnosing "the index looks stale" — health shows which reconciler stopped, and now
+  also which reconcilers are running but advancing nothing (`DID NOT ADVANCE`).
