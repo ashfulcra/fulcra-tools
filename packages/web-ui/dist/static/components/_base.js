@@ -22,17 +22,11 @@
 // Components do NOT mutate ctx; they call its methods. State lives in
 // createWizard()'s closure exactly as today.
 //
-// SRI + Lit URL choice:
-// We use `cdn.jsdelivr.net/gh/lit/dist@VER/all/lit-all.min.js` — the Lit
-// team's pre-bundled CDN file — rather than `npm/lit@VER/index.js`, which
-// uses bare module specifiers (`@lit/reactive-element`) that browsers
-// can't resolve without an importmap. lit-all is one bundled file
-// containing LitElement, html, nothing, AND every directive
-// (`unsafeHTML`, etc.) as top-level exports. One SRI-pinned URL covers
-// everything; no separate hashes per directive subpath.
-// Discovered 2026-05-27: the npm/lit@VER/index.js URL silently 404'd
-// every component because of the bare-specifier resolution failure.
-import { LitElement, html, nothing } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
+// Lit ships as one local pre-bundled module containing LitElement, html,
+// nothing, and the directives used by the step components. This keeps the
+// setup flow available offline and avoids running third-party CDN code in a
+// page that can control the local daemon.
+import { LitElement, html, nothing } from "/static/vendor/lit-3.2.1.min.js";
 
 export { html, nothing };
 

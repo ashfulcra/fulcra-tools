@@ -115,6 +115,97 @@ def test_pending_relay_reconciles_to_done(tmp_path):
     assert led.is_fully_done("m1", "r1", 1, ["relay"])
 
 
+def test_relay_pending_is_recorded_once_across_retries(tmp_path):
+    led = Ledger(_ACCT, root=tmp_path)
+    key = outbox_key(_ACCT, "m1", "r1", 1)
+
+    assert led.ensure_relay_pending(LedgerEntry.relay_pending(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        outbox_key=key,
+    )) is True
+    assert led.ensure_relay_pending(LedgerEntry.relay_pending(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        outbox_key=key,
+    )) is False
+
+    assert len(led.entries()) == 1
+
+
+def test_two_instances_refresh_stale_cache_before_append(tmp_path):
+    first = Ledger(_ACCT, root=tmp_path)
+    second = Ledger(_ACCT, root=tmp_path)
+    assert first.entries() == []
+    second.append(LedgerEntry.file_done(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        sha256="h1", destination="d1",
+    ))
+    first.append(LedgerEntry.file_done(
+        account_id=_ACCT, message_id="m2", rule_id="r1", rule_version=1,
+        sha256="h2", destination="d2",
+    ))
+    assert [row["message_id"] for row in first.entries()] == ["m1", "m2"]
+
+
+def test_two_instances_record_pending_key_once(tmp_path):
+    first = Ledger(_ACCT, root=tmp_path)
+    second = Ledger(_ACCT, root=tmp_path)
+    key = outbox_key(_ACCT, "m1", "r1", 1)
+    entry = LedgerEntry.relay_pending(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        outbox_key=key,
+    )
+    assert first.ensure_relay_pending(entry) is True
+    assert second.ensure_relay_pending(entry) is False
+    assert len(Ledger(_ACCT, root=tmp_path).entries()) == 1
+
+
+def test_compact_collapses_duplicate_pending_rows_and_keeps_done(tmp_path):
+    led = Ledger(_ACCT, root=tmp_path)
+    key = outbox_key(_ACCT, "m1", "r1", 1)
+    pending = LedgerEntry.relay_pending(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        outbox_key=key,
+    )
+    for _ in range(20):
+        led.append(pending)
+    led.append(LedgerEntry.file_done(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        sha256="h", destination="d",
+    ))
+    led.append(LedgerEntry.relay_done(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        outbox_key=key,
+    ))
+
+    assert led.compact_if_needed(min_entries=1, redundancy_ratio=1.1) is True
+    rows = led.entries()
+    assert [(row["action"], row["status"]) for row in rows] == [
+        ("file", "done"), ("relay", "done"),
+    ]
+    assert led.remaining_actions("m1", "r1", 1, ["file", "relay"]) == []
+
+
+def test_done_lookup_reads_large_ledger_only_once_per_instance(tmp_path, monkeypatch):
+    led = Ledger(_ACCT, root=tmp_path)
+    led.append(LedgerEntry.file_done(
+        account_id=_ACCT, message_id="m1", rule_id="r1", rule_version=1,
+        sha256="h", destination="d",
+    ))
+    fresh = Ledger(_ACCT, root=tmp_path)
+    original = fresh.path.read_text
+    reads = 0
+
+    def counted(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(type(fresh.path), "read_text", lambda self, *a, **kw: counted(*a, **kw))
+    for _ in range(20):
+        assert fresh.done_actions("m1", "r1", 1) == {"file"}
+    assert reads == 1
+
+
 # -- outbox key determinism -------------------------------------------------
 
 

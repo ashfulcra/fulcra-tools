@@ -18,8 +18,9 @@ or Python environment running the daemon. Apple Notes setup verifies Full Disk
 Access and requires **Enable & start sync**, or **Enable & run preview** in
 preview mode. Navigating or skipping steps does not start a Notes import.
 
-Tech: vanilla HTML5 + CSS3 + JavaScript + Alpine.js (CDN) +
-Tailwind CSS (CDN) + Lit 3 (CDN, web components). No build step.
+Tech: vanilla HTML5 + CSS3 + JavaScript, with pinned copies of Alpine.js,
+Tailwind CSS, Marked, and Lit 3 under `dist/static/vendor/`. No build step and
+no runtime CDN dependency. The matching license texts ship beside the bundles.
 
 ## Local development
 
@@ -37,9 +38,9 @@ To live-edit: just save files in `dist/`. Reload the browser.
 
 ## Architecture pointers
 
-- Frontend talks to the daemon via JSON at `/api/*` with a Bearer
-  token (the daemon sets a `fulcra_token` cookie on the initial
-  HTML load).
+- Frontend talks to the daemon via JSON at `/api/*`. The daemon sets an
+  HttpOnly, SameSite `fulcra_token` cookie on the initial HTML load; browser
+  JavaScript cannot read or forward the token itself.
 - The wizard renderer (in `wizard.js`, Phase C) walks each plugin's
   `setup_steps` array fetched from `/api/plugin/{id}/contract`.
 - Step rendering itself lives in Lit web components under
@@ -136,10 +137,9 @@ file. Next, Back, and Skip navigation never enable or run a plugin; the final
 
 ### Why Lit (not a build step, not Alpine partials)
 
-- **No build step.** Lit ships as an ES module on jsdelivr; the
-  `<script type="module">` tag in `index.html` pins it via SRI, the
-  same security posture as marked / alpine. Local development stays
-  zero-config: save a file, reload the browser.
+- **No build step.** Lit ships as a local ES module under `dist/static/vendor/`.
+  Marked, Alpine, and the Tailwind browser compiler are vendored there too.
+  Local development stays zero-config: save a file, reload the browser.
 - **Real components, not partials.** Alpine has no partial / include
   system, which is why duplication happened. Lit gives us a first-class
   component model that's a 1:1 substitution for the inline templates.
@@ -224,7 +224,9 @@ node --test packages/web-ui/tests/*.test.cjs
 
 The tests cover explicit start and native-permission consent, array persistence, failed discovery and
 retry, missing/disabled selections, stale requests, and the shared component's
-rendered checkbox states. For a component change, also run:
+rendered checkbox states. They also execute the packaged Marked version and
+verify that raw HTML and non-HTTP links are rendered inert. For a component
+change, also run:
 
 
 - `node --check packages/web-ui/dist/static/components/step-<kind>.js`

@@ -56,6 +56,23 @@ def test_runner_treats_a_worker_that_emits_no_result_as_error(collect_home: Path
     assert outcome == "error"
 
 
+def test_runner_keeps_scrubbed_stderr_when_worker_crashes(collect_home: Path):
+    script = (
+        "import sys;"
+        "sys.stderr.write('crashed with Authorization: Bearer super-secret-token\\n');"
+        "sys.exit(2)"
+    )
+    outcome = runner.run(
+        "p", _python_worker(script),
+        now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+    )
+    assert outcome == "error"
+    error = state.load("p").last_error
+    assert "crashed with Authorization" in error
+    assert "super-secret-token" not in error
+    assert "Bearer <redacted>" in error
+
+
 def test_runner_persists_the_watermark_from_the_result(collect_home: Path):
     script = (
         "import json,sys;"
@@ -168,7 +185,8 @@ def test_runner_records_a_run_summary_when_done_with_no_annotations(collect_home
     )
     activity = RecentActivity()
 
-    class MockDaemon: pass
+    class MockDaemon:
+        pass
     daemon = MockDaemon()
     daemon.activity = activity
 
@@ -196,7 +214,8 @@ def test_runner_does_not_double_log_when_done_with_annotations(collect_home: Pat
     )
     activity = RecentActivity()
 
-    class MockDaemon: pass
+    class MockDaemon:
+        pass
     daemon = MockDaemon()
     daemon.activity = activity
 
@@ -224,7 +243,8 @@ def test_runner_records_a_failure_summary_on_error_outcome(collect_home: Path):
     )
     activity = RecentActivity()
 
-    class MockDaemon: pass
+    class MockDaemon:
+        pass
     daemon = MockDaemon()
     daemon.activity = activity
 
@@ -253,7 +273,8 @@ def test_runner_records_a_timeout_summary_on_timeout_outcome(collect_home: Path)
     script = "import time; time.sleep(30)"
     activity = RecentActivity()
 
-    class MockDaemon: pass
+    class MockDaemon:
+        pass
     daemon = MockDaemon()
     daemon.activity = activity
 

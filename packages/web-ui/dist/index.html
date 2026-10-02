@@ -5,44 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Fulcra Collect</title>
   <link rel="stylesheet" href="/static/app.css">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- marked — full CommonMark + GFM renderer used by renderMd() in wizard.js.
-       Pinned to an exact version + SRI hash so a CDN compromise can't
-       silently swap the bundle. To upgrade: bump the version, recompute
-       the hash with
-         curl -s https://cdn.jsdelivr.net/npm/marked@<new-version>/marked.min.js \
-           | openssl dgst -sha384 -binary | openssl base64 -A
-       and update both src and integrity below. -->
-  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
-          integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+"
-          crossorigin="anonymous"></script>
-  <!-- Alpine pinned to an exact version + SRI hash (same upgrade dance
-       as the marked tag above). -->
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"
-          integrity="sha384-l8f0VcPi/M1iHPv8egOnY/15TDwqgbOR1anMIJWvU6nLRgZVLTLSaNqi/TOoT5Fh"
-          crossorigin="anonymous"></script>
-  <!-- Lit 3 — web-components base used by the setup_step renderer
-       (refactor #68). Pinned + SRI'd exactly like marked + alpine.
-       Note: Lit ships as an ES module, so type="module" (not classic) —
-       this differs from marked/alpine, which are classic scripts.
-
-       Why the gh/lit/dist@VER/all/lit-all.min.js URL instead of
-       npm/lit@VER/index.js: the npm root entry contains BARE module
-       specifiers (`import {…} from "@lit/reactive-element"`) which
-       browsers cannot resolve without an import map. The lit-all bundle
-       resolves those internally, so it Just Works from a <script
-       type="module">. Found the hard way 2026-05-27 when the first cut
-       at this tag silently failed with "Failed to resolve module
-       specifier '@lit/reactive-element'" in the browser console.
-
-       Upgrade dance: bump version, recompute the hash with
-         curl -s https://cdn.jsdelivr.net/gh/lit/dist@<new>/all/lit-all.min.js \
-           | openssl dgst -sha384 -binary | openssl base64 -A
-       and update both src and integrity below. -->
-  <script type="module"
-          src="https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js"
-          integrity="sha384-6eOP+rg+J4nKf4UtKD8fqsZ6YceRLAp12ABz3pbrJvKSm504E6jX6xow/ITJrBTW"
-          crossorigin="anonymous"></script>
+  <!-- Browser dependencies ship with the app. Keeping these exact versions
+       local means Collect starts offline and its loopback control surface
+       never executes code fetched from a third-party CDN. Matching licenses
+       live beside the bundles in /static/vendor/. -->
+  <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
+  <script src="/static/vendor/marked-15.0.12.min.js"></script>
+  <script defer src="/static/vendor/alpinejs-3.14.1.min.js"></script>
   <!-- Setup-step web-component bundle (refactor #68). Module script so it
        resolves AFTER the Lit module above. Order matters: components must
        be registered as custom elements before <fulcra-step> appears in

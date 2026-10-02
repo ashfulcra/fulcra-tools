@@ -1,15 +1,12 @@
 """The 'Daemon not running' card that replaces the plugin list when
 the control socket is unreachable. Single CTA: 'Install & start daemon'
-runs `fulcra-collect install` (writes the launchd plist) then
-`launchctl load <plist>` (starts the daemon immediately) in subprocesses
-on a background thread, captures stdout/stderr, and shows the output in
-a small label below the button.
+writes the launchd plist for the copy of ``fulcra-collect`` inside this app,
+registers it as a Login Item when macOS supports that, and starts it with the
+same lifecycle code used by the daemon controls.
 """
 from __future__ import annotations
 
-import platform
 import shutil
-import subprocess
 import threading
 from pathlib import Path
 
@@ -21,47 +18,12 @@ from AppKit import (  # type: ignore[import-not-found]
 from .._objc_targets import attach as _attach
 from ..theme import colors, typography
 
-# Module-level registry of in-flight install subprocesses. The app's _quit
-# handler calls cancel_pending() to terminate them before exit — otherwise
-# Python's daemon-thread teardown kills the Python wrapper but not the OS
-# process beneath, leaving a partial install orphaned under launchd.
-_pending_procs: list[subprocess.Popen] = []
-
-
-def _run_step(cmd: list[str]) -> tuple[int, str]:
-    """Run a subprocess command; track the Popen on _pending_procs so
-    app quit can terminate it. Returns (returncode, combined output)."""
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    _pending_procs.append(proc)
-    try:
-        out, _ = proc.communicate(timeout=30)
-        return proc.returncode, out.strip()
-    except subprocess.TimeoutExpired:
-        # Kill the hung process before letting the exception propagate
-        # so it doesn't outlive the menubar.
-        proc.kill()
-        try:
-            proc.communicate(timeout=5)
-        except Exception:
-            pass
-        raise
-    finally:
-        try:
-            _pending_procs.remove(proc)
-        except ValueError:
-            pass
-
-
 def cancel_pending() -> None:
-    """Terminate any in-flight install subprocesses. Called by the
-    app's _quit handler before rumps.quit_application()."""
-    for proc in list(_pending_procs):
-        try:
-            proc.terminate()
-        except Exception:
-            pass
+    """Compatibility hook for the app's quit path.
+
+    Install now uses bounded synchronous lifecycle calls on a daemon thread,
+    so there is no child process owned by this module to cancel.
+    """
 
 
 def make_bootstrap_card(width: float, height: float) -> NSView:
@@ -89,7 +51,9 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
     ))
     button.setBezelStyle_(NSBezelStyleRounded)
 
-    if shutil.which("fulcra-collect"):
+    from .. import daemon_lifecycle
+    executable = daemon_lifecycle.expected_executable()
+    if Path(executable).is_file() or shutil.which(executable):
         button.setTitle_("Install & start daemon")
     else:
         button.setTitle_("Install fulcra-collect first")
@@ -107,40 +71,9 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
         log.setStringValue_("Running…")
         def work():
             try:
-                rc1, p1_out = _run_step(["fulcra-collect", "install"])
-                if rc1 != 0:
-                    output = (
-                        f"ERROR: install failed with exit code {rc1}."
-                        + (f"\n{p1_out}" if p1_out else "")
-                    )
-                else:
-                    # Load the service so the daemon starts immediately.
-                    # On macOS the plist has RunAtLoad=true, so launchctl
-                    # load both registers and starts it. On Linux we use
-                    # systemctl --user enable --now.
-                    if platform.system() == "Darwin":
-                        plist = (
-                            Path.home()
-                            / "Library"
-                            / "LaunchAgents"
-                            / "com.fulcra.collect.plist"
-                        )
-                        load_cmd = ["launchctl", "load", str(plist)]
-                    else:
-                        load_cmd = [
-                            "systemctl", "--user", "enable", "--now",
-                            "fulcra-collect",
-                        ]
-                    rc2, p2_out = _run_step(load_cmd)
-                    if rc2 != 0:
-                        output = (
-                            f"ERROR: daemon load failed with exit code {rc2}."
-                            " Service installed but not running; check Console.app log."
-                            + (f"\n{p2_out}" if p2_out else "")
-                        )
-                    else:
-                        combined = "\n".join(filter(None, [p1_out, p2_out]))
-                        output = combined or "Daemon installed and started."
+                daemon_lifecycle.install()
+                daemon_lifecycle.start()
+                output = "Daemon installed and started."
             except Exception as exc:
                 output = f"{type(exc).__name__}: {exc}"
             # Update label on main thread.
@@ -153,5 +86,4 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
 
     _attach(button, on_click)
     return view
-
 

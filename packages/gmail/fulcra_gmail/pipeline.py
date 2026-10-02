@@ -41,6 +41,28 @@ _log = logging.getLogger("fulcra_gmail.pipeline")
 
 #: Canonical effect order — file BEFORE relay (relay only after file-done).
 _CANONICAL_ACTIONS = (ACTION_FILE, ACTION_RELAY)
+# A relay message can need two coord subprocesses (emit + readback), each with
+# a 60-second timeout. Five effectful messages cap that worst-case work at ten
+# subprocess waits, leaving the 900-second collect worker enough room for Gmail
+# fetches, file writes, and clean result/checkpoint publication.
+DEFAULT_MAX_EFFECTFUL_MESSAGES = 5
+
+
+@dataclass
+class EffectBudget:
+    """Shared bound for unfinished messages across one worker run."""
+
+    remaining: int = DEFAULT_MAX_EFFECTFUL_MESSAGES
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+    def consume(self) -> bool:
+        if self.exhausted:
+            return False
+        self.remaining -= 1
+        return True
 
 
 class InjectedCrash(RuntimeError):
@@ -124,7 +146,7 @@ def process_message(
             )
             return False
         key = outbox_key(account_id, message_id, rid, rver)
-        ledger.append(LedgerEntry.relay_pending(
+        ledger.ensure_relay_pending(LedgerEntry.relay_pending(
             account_id=account_id, message_id=message_id, rule_id=rid,
             rule_version=rver, outbox_key=key,
         ))
@@ -163,6 +185,8 @@ class PollResult:
     cursor: int | None
     #: Candidate ids that could not be fetched this run (frontier holes).
     unresolved: int = 0
+    #: True when incomplete work was deliberately deferred to a later poll.
+    budget_exhausted: bool = False
 
 
 def poll_account_rule(
@@ -176,6 +200,8 @@ def poll_account_rule(
     relay_emitter: RelayEmitterProtocol | None,
     now_epoch: int | None = None,
     crash: Callable[[str], None] | None = None,
+    max_effectful_messages: int = DEFAULT_MAX_EFFECTFUL_MESSAGES,
+    effect_budget: EffectBudget | None = None,
 ) -> PollResult:
     """Run one contiguous-frontier poll for a single ``(account, rule)``.
 
@@ -187,6 +213,7 @@ def poll_account_rule(
     # the strict contiguous-frontier rule advances the cursor only through
     # observed done candidates, so wall-clock time is not consulted here.
     rid, rver = rule.id, rule.version
+    budget = effect_budget or EffectBudget(max_effectful_messages)
     cursor = cursors.get(rid, rver)
 
     from .rules import build_query
@@ -222,7 +249,15 @@ def poll_account_rule(
     # the cursor past a candidate we couldn't fetch.
     blocked = unresolved > 0
     processed = 0
+    budget_exhausted = False
     for message in effective:
+        remaining = ledger.remaining_actions(
+            str(message.get("id")), rid, rver, required_actions(rule),
+        )
+        if remaining and not budget.consume():
+            blocked = True
+            budget_exhausted = True
+            continue
         done = process_message(
             message, rule=rule, account_id=account_id, ledger=ledger,
             files_writer=files_writer, relay_emitter=relay_emitter, crash=crash,
@@ -250,4 +285,5 @@ def poll_account_rule(
         account_id=account_id, rule_id=rid, rule_version=rver,
         candidates=len(ids), effective=len(effective), processed=processed,
         blocked=blocked, cursor=cursors.get(rid, rver), unresolved=unresolved,
+        budget_exhausted=budget_exhausted,
     )

@@ -168,15 +168,18 @@ def test_ui_page_renders_builder(client):
     for anchor in ("gmail-rule-builder", "/api/gmail/rules/search",
                    "/api/gmail/rules/derive", "/api/gmail/rules/preview"):
         assert anchor in html
-    # The page must read the daemon's web token from the fulcra_token cookie
-    # (how the collect frontend delivers it), not a non-existent localStorage key.
-    assert "fulcra_token=" in html
-    # ...and self-bootstrap the cookie when the page is opened directly in a
-    # browser that never loaded the dashboard root (which is what sets it):
-    # ensureToken() fetches / once, and the token is read per-request so a
-    # cookie that arrives after page load still takes effect.
+    # The root installs an HttpOnly auth cookie. The page must bootstrap it and
+    # let fetch send it same-origin; JavaScript must never read or mirror it.
     assert "ensureToken" in html
-    assert "getToken()" in html
+    assert "credentials:'same-origin'" in html
+    assert "document.cookie" not in html
+    assert "localStorage" not in html
+    assert "'Authorization'" not in html
+    # Untrusted ids are emitted as escaped JSON strings inside handlers rather
+    # than interpolated raw into JavaScript source.
+    assert "JSON.stringify(String(s))" in html
+    assert "jsonArg(m.message_id)" in html
+    assert "jsonArg(r.id)" in html
     # The edit workflow: an edit affordance that issues a PUT, and a merge over
     # the full rule (editBody) so unedited fields aren't dropped on save.
     assert "editRule(" in html

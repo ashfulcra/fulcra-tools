@@ -44,7 +44,10 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   importer crashes from the daemon. The worker streams structured
   progress and annotation events back to the parent over a pipe; the
   parent records them in the unified state store and in an in-memory
-  ring buffer that powers the dashboard's "Recently" feed.
+  ring buffer that powers the dashboard's "Recently" feed. Each run gets
+  its own process group, so a timeout also stops helper commands started by
+  the plugin. If a worker dies before it can emit a structured result, Collect
+  keeps a bounded, secret-scrubbed copy of stderr as the diagnostic.
 * **Stores secrets in the OS keychain.** Per-plugin credentials live
   under a `fulcra-collect:<plugin-id>` service name; the user-level
   Fulcra bearer token shares one namespace (`fulcra-collect:user`)
@@ -55,6 +58,10 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   The port is stable across restarts so that OAuth redirect URIs
   registered with external providers don't break when the daemon
   restarts.
+  Requests must also carry a loopback Host header. The browser receives the
+  local control token in an HttpOnly, SameSite cookie; JavaScript cannot read
+  it. Browser libraries are packaged with Collect rather than loaded from a
+  CDN, and the server sends a policy that blocks remote scripts.
 * **Auto-launches the macOS menubar app** on startup when one is
   installed, so the user always has a visible status indicator
   without remembering a second command.
@@ -299,10 +306,10 @@ removal, and requires an explicit Enable action after configuration.
 
 ## HTTP API surface
 
-Protected JSON routes require a bearer token from
-`~/.config/fulcra-collect/web-token`, seeded into a cookie by the HTML root.
-The frontend copies that local token into its Authorization header. It is
-separate from the Fulcra account token. HTML/static resources and OAuth
+Protected JSON routes require the local token from
+`~/.config/fulcra-collect/web-token`. The browser uses the HttpOnly cookie set
+by the HTML root; native and command-line clients can send the same value as a
+Bearer token. It is separate from the Fulcra account token. HTML/static resources and OAuth
 callbacks have their own access paths; see [web.py](fulcra_collect/web.py) and
 [routes/](fulcra_collect/routes/) for exact guards and request shapes.
 
@@ -352,7 +359,7 @@ Everything lives under `~/.config/fulcra-collect/` (override via
 | `config.toml`                  | Per-plugin enabled flag + interval overrides + `[daemon] web_port`. |
 | `state.db`                     | SQLite (WAL mode) — per-plugin run state, dedup claims, and plugin-scoped JSON/KV. Schema migrations and their current version live in [db.py](fulcra_collect/db.py). |
 | `control.sock`                 | Unix-domain socket the CLI talks to. |
-| `web-token`                    | Random bearer token (0600) seeded on first boot, mounted into the web UI as a cookie. |
+| `web-token`                    | Random local control token (0600) seeded on first boot and sent to the browser in an HttpOnly, SameSite cookie. |
 | `web-url`                      | The currently-bound web URL — read by the menubar and ad-hoc tools. |
 | `auth-fingerprint`             | SHA-256 prefix of the stable account identity (JWT `sub`; token-based fallback for opaque tokens). Detects account changes and invalidates cached definition IDs without treating routine token refresh as an account switch. |
 | `quick_record_favorites.json`  | The user's pinned annotation defs for the menubar popover. |

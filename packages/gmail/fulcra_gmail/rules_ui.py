@@ -34,19 +34,15 @@ RULES_UI_HTML = r"""<!doctype html>
 <div id="status" class="m" style="display:none;font-weight:600"></div>
 <hr><h1>Rules</h1><div id="rules"></div>
 <script>
-function getToken(){return (document.cookie.match(/(?:^|;\s*)fulcra_token=([^;]+)/) || [])[1]
-  || localStorage.getItem('fulcra-web-token') || '';}
 async function ensureToken(){
-  // The daemon sets the fulcra_token cookie on GET / (the dashboard root).
-  // If this page is opened directly in a browser that never loaded the
-  // dashboard, bootstrap the cookie with one same-origin fetch of /.
-  if(getToken())return;
+  // GET / installs the daemon's HttpOnly auth cookie. JavaScript never reads
+  // or copies the token; same-origin fetches send the cookie themselves.
   try{await fetch('/', {credentials:'same-origin', cache:'no-store'});}catch(e){}
 }
 let RESULTS=[], LABEL={}, CHIPS=[], EDITING=null, EDIT_RULE=null;
 async function api(path, body, method){const m=method||(body?'POST':'GET');
-  const H={'Content-Type':'application/json','Authorization':'Bearer '+getToken()};
-  const r=await fetch(path,{method:m,headers:H,
+  const H={'Content-Type':'application/json'};
+  const r=await fetch(path,{method:m,headers:H,credentials:'same-origin',
   body:body?JSON.stringify(body):undefined});if(!r.ok)throw new Error((await r.json()).detail||r.status);return r.json();}
 function acct(){return document.getElementById('acct').value;}
 async function loadAccounts(){try{const d=await api('/api/gmail/rules/accounts');
@@ -63,9 +59,9 @@ async function search(){const q=document.getElementById('q').value;
   }catch(e){box.innerHTML='<em>Search failed: '+esc(e.message)+'</em>';}}
 function render(){document.getElementById('results').innerHTML=RESULTS.map(m=>`
   <div class="msg"><div class="sub">${esc(m.subject)}</div><div class="frm">${esc(m.from)} · ${esc(m.date)}</div>
-  <div class="row"><button class="sec" onclick="mark('${m.message_id}','pos')">✓ match</button>
-  <button class="sec" onclick="mark('${m.message_id}','neg')">✗ not</button>
-  <span id="lbl-${m.message_id}"></span></div></div>`).join('');}
+  <div class="row"><button class="sec" onclick="mark(${jsonArg(m.message_id)},'pos')">✓ match</button>
+  <button class="sec" onclick="mark(${jsonArg(m.message_id)},'neg')">✗ not</button>
+  <span id="lbl-${esc(m.message_id)}"></span></div></div>`).join('');}
 function mark(id,v){LABEL[id]=LABEL[id]===v?undefined:v;
   document.getElementById('lbl-'+id).textContent=LABEL[id]==='pos'?'✓':LABEL[id]==='neg'?'✗':'';}
 function ids(v){return Object.keys(LABEL).filter(k=>LABEL[k]===v);}
@@ -135,12 +131,13 @@ async function editRule(id){const r=await api('/api/gmail/rules/'+encodeURICompo
 async function loadRules(){const d=await api('/api/gmail/rules');
   document.getElementById('rules').innerHTML=d.rules.map(r=>`<div class="msg">
    <b>${esc(r.name)}</b> <span class="frm">${esc(r.summary)}</span>
-   <button class="sec" onclick="editRule('${r.id}')">edit</button>
-   <button class="sec" onclick="toggleRule('${r.id}',${!r.enabled})">${r.enabled?'disable':'enable'}</button>
-   <button class="sec" onclick="delRule('${r.id}')">delete</button></div>`).join('');}
-async function toggleRule(id,en){await api('/api/gmail/rules/'+id+'/enabled',{enabled:en});loadRules();}
+   <button class="sec" onclick="editRule(${jsonArg(r.id)})">edit</button>
+   <button class="sec" onclick="toggleRule(${jsonArg(r.id)},${!r.enabled})">${r.enabled?'disable':'enable'}</button>
+   <button class="sec" onclick="delRule(${jsonArg(r.id)})">delete</button></div>`).join('');}
+async function toggleRule(id,en){await api('/api/gmail/rules/'+encodeURIComponent(id)+'/enabled',{enabled:en});loadRules();}
 async function delRule(id){if(confirm('Delete '+id+'?')){await api('/api/gmail/rules/'+encodeURIComponent(id),null,'DELETE');loadRules();}}
 function val(id){return document.getElementById(id).value.trim();}
-function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function jsonArg(s){return esc(JSON.stringify(String(s)));}
 (async()=>{await ensureToken();loadAccounts();loadRules();})();
 </script></body></html>"""

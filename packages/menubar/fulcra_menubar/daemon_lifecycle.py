@@ -37,8 +37,12 @@ and become no-ops on non-macOS so the tests run on Linux CI too.
 from __future__ import annotations
 
 import logging
+import plistlib
 import shutil
 import subprocess
+import sys
+import time
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Literal
 
@@ -83,6 +87,33 @@ def plist_path() -> Path:
     Indirected so tests can monkeypatch this module-level function and
     point ``is_installed()`` at a tmp_path file."""
     return Path.home() / "Library" / "LaunchAgents" / PLIST_NAME
+
+
+def expected_executable() -> str:
+    """The daemon launcher shipped beside this running app, if bundled."""
+    app_bin = Path(sys.executable).parent
+    bundled = app_bin / "fulcra-collect"
+    if app_bin.name == "MacOS" and app_bin.parent.name == "Contents" \
+            and bundled.is_file():
+        return str(bundled)
+    return shutil.which("fulcra-collect") or "fulcra-collect"
+
+
+def installed_executable() -> str | None:
+    """Read the executable currently written into the launchd plist."""
+    try:
+        payload = plistlib.loads(plist_path().read_bytes())
+        argv = payload.get("ProgramArguments") or []
+        return argv[0] if argv and isinstance(argv[0], str) else None
+    except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+        return None
+
+
+def local_daemon_version() -> str:
+    try:
+        return importlib_metadata.version("fulcra-collect")
+    except importlib_metadata.PackageNotFoundError:
+        return "unknown"
 
 
 # ---- State queries ---------------------------------------------------------
@@ -224,7 +255,7 @@ def install() -> Path:
     autostart-on-login until they're on a newer OS.
     """
     from fulcra_collect import service_manager as _sm
-    exe = shutil.which("fulcra-collect") or "fulcra-collect"
+    exe = expected_executable()
     path = _sm.install(executable=exe)
     if _SM_AVAILABLE:
         try:
@@ -236,6 +267,41 @@ def install() -> Path:
                 path, exc_info=True,
             )
     return path
+
+
+def reconcile_current_install(*, client: DaemonClient | None = None) -> bool:
+    """Move an existing service to this app build and restart stale code.
+
+    Dragging a newer app over an older one does not make launchd reload its
+    plist or replace an already-running process. This one-shot reconciliation
+    runs from the app at launch. It touches only an installation that already
+    exists; first-time setup remains an explicit user action in the UI.
+    """
+    if not plist_path().exists():
+        return False
+    expected = expected_executable()
+    path_drift = installed_executable() != expected
+    c = client if client is not None else DaemonClient(timeout=1.0)
+    running = False
+    version_drift = False
+    try:
+        reply = c.version()
+        running = bool(reply.get("ok"))
+        remote = str(reply.get("daemon_version", "unknown"))
+        local = local_daemon_version()
+        version_drift = running and local != "unknown" and remote != local
+    except DaemonUnavailable:
+        pass
+    if not path_drift and not version_drift:
+        return False
+    from fulcra_collect import service_manager as _sm
+    _sm.install(executable=expected)
+    # launchd caches the job definition when it loads the plist. A daemon can
+    # be loaded but unresponsive, so the socket probe alone cannot tell us
+    # whether kickstart would revive the stale executable. Boot out and
+    # bootstrap every drifted install so launchd must read the rewritten plist.
+    restart(require_stop=True)
+    return True
 
 
 def uninstall() -> None:
@@ -288,10 +354,18 @@ def start() -> None:
     if rc != 0:
         # Common cause: service not yet bootstrapped (plist exists but
         # launchctl doesn't know about it).  Bootstrap then kickstart.
-        bootstrap_rc, bootstrap_out = _launchctl(
-            "bootstrap", f"gui/{os.getuid()}", str(plist_path()),
-        )
-        if bootstrap_rc != 0 and "service already loaded" not in bootstrap_out.lower():
+        bootstrap_out = ""
+        for attempt in range(5):
+            bootstrap_rc, bootstrap_out = _launchctl(
+                "bootstrap", f"gui/{os.getuid()}", str(plist_path()),
+            )
+            if bootstrap_rc == 0 or "service already loaded" in bootstrap_out.lower():
+                break
+            # launchd can briefly reject bootstrap immediately after bootout
+            # even though the job has disappeared from `launchctl print`.
+            if attempt < 4:
+                time.sleep(0.25)
+        else:
             raise DaemonLifecycleError(
                 f"Couldn't start daemon: {out or bootstrap_out or 'launchctl failed'}"
             )
@@ -323,7 +397,7 @@ def stop() -> None:
         )
 
 
-def restart() -> None:
+def restart(*, require_stop: bool = False) -> None:
     """Stop + start the daemon.
 
     Done as two separate launchctl calls (rather than ``launchctl
@@ -334,6 +408,8 @@ def restart() -> None:
     try:
         stop()
     except DaemonLifecycleError as exc:
+        if require_stop:
+            raise
         # Continue to start() anyway — the user clicked Restart, they
         # want it running.  Surface the stop error in the start error
         # if start also fails.

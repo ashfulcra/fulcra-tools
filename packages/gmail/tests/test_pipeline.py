@@ -157,6 +157,41 @@ def test_relay_failure_leaves_message_incomplete(tmp_path):
     assert ledger.remaining_actions("m1", "receipts", 1, [ACTION_FILE, ACTION_RELAY]) == [ACTION_RELAY]
 
 
+def test_relay_failure_does_not_grow_pending_ledger_on_retry(tmp_path):
+    ledger, files, relay = _deps(tmp_path, relay=FakeRelay(fail=True))
+    rule = _rule()
+    msg = _msg("m1", 1_600_000_000_000)
+    for _ in range(20):
+        assert not process_message(
+            msg, rule=rule, account_id="acct-1", ledger=ledger,
+            files_writer=files, relay_emitter=relay,
+        )
+    pending = [row for row in ledger.entries()
+               if row["action"] == ACTION_RELAY and row["status"] == "pending"]
+    assert len(pending) == 1
+
+
+def test_poll_bounds_effectful_messages_so_worker_timeout_can_finish(tmp_path):
+    ledger, files, relay = _deps(tmp_path, relay=FakeRelay(fail=True))
+    cursors = CursorStore("acct-1", root=tmp_path)
+    rule = _rule()
+    messages = [
+        _msg(f"m{i}", 1_600_000_000_000 + i * 1000)
+        for i in range(10)
+    ]
+
+    result = poll_account_rule(
+        client=FakeClient(messages), rule=rule, account_id="acct-1",
+        ledger=ledger, cursors=cursors, files_writer=files,
+        relay_emitter=relay, max_effectful_messages=3,
+    )
+
+    assert result.budget_exhausted is True
+    assert result.blocked is True
+    assert len(relay.emits) == 3
+    assert len(files._api.uploads) == 3
+
+
 def test_relay_rule_with_no_backend_stays_blocked_until_restored(tmp_path):
     # P1-b regression: a ["file","relay"] rule with NO relay backend must NOT
     # silently mark the message done. It stays INCOMPLETE (cursor blocked) until

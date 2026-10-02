@@ -16,6 +16,16 @@ Open the disk image, drag **Fulcra Collect** into **Applications**, then launch 
 from there. Click its menu-bar icon and choose **Install & start daemon** if
 prompted. Open the dashboard and sign in with Fulcra.
 
+That button installs the daemon included inside the app; it does not need a
+separate command-line installation or a Terminal `PATH`. On later launches the
+app checks an existing service file. If it points at an older checkout or the
+running daemon has an older version, the app rewrites the service file for the
+current app. It restarts a running daemon and starts a repaired service that was
+already down. In both cases it unloads any cached launchd job before loading the
+rewritten service file. Settings, credentials, plugin state, and cursors remain
+in place. If macOS refuses to unload the cached job, the app reports the failure
+and does not claim the old process was upgraded.
+
 The beta is signed, notarized, and built for Apple silicon. It includes its
 Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. Chrome
 Attention is an optional extension in the disk image with separate setup.
@@ -45,9 +55,9 @@ runs everywhere — Linux CI included. The view layer (status_item,
 popover, preferences) is exercised by manual smoke; see the checklist
 below.
 
-## Task plugins in 0.1.2
+## Task plugins
 
-The 0.1.2 app bundles [Apple Reminders](../apple-reminders/README.md),
+The app bundles [Apple Reminders](../apple-reminders/README.md),
 [Todoist](../todoist/README.md), and the shared task sync engine. It declares both macOS Reminders usage strings
 and dispatches `--reminders-bridge` before importing the GUI. Native permission
 is requested only from the setup wizard's **Allow access** button. Both plugins
@@ -69,8 +79,10 @@ builder-home paths and removes nonportable pip scripts before signing.
 
 For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,
-staples, and checks the installer. An unnotarized development build is not the
-normal installer; do not ask users to bypass Gatekeeper.
+staples, and checks the installer. The build also verifies a fresh copy of the
+signed app, which catches invalid nested launcher signatures before the disk
+image is made. An unnotarized development build is not the normal installer;
+do not ask users to bypass Gatekeeper.
 
 ## Manual smoke checklist
 
