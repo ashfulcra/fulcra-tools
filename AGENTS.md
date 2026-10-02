@@ -335,30 +335,38 @@ under `skills/`, each package with its own README, build, and tests.
   the only way to stop a stale timestamp being believed; if it can be neither
   updated nor removed, the verb exits 3. Pointer updates are monotonic: an
   older snapshot must never move an agent's reported age backwards.
-- **A feed's EMPTY answer over a long window is the one reading the detector
-  cannot check from the envelope.** Measured on the live store 2026-10-02:
-  `data-updates` answered monotonically out to `after=-7d` (to 107287 changes),
-  and past that either failed or returned **200 with `file_changes: []` and a
-  `start_time` echoing the exact requested `after`**. A 25-day window reported
-  ZERO changes while a 7-day window INSIDE it reported 107287 — a superset
-  holding fewer changes than its subset. Nothing in that envelope is
-  objectionable: it is well-formed, fast, wrong, and passes every attestation
-  the detector already performs. **So never "fix" the resulting reconcile stall
-  by raising `COORD_TRANSPORT_TIMEOUT`**: the loud abort exists only because the
-  30s bound makes the over-horizon read fail, and a longer bound hands the
-  detector a trusted, attested CLEAR asserting nothing changed in 25 days — a
-  visible stall becomes a silent fleet-wide false clear. The remedy needs no
-  horizon constant because it detects the CONTRADICTION: one extra read over a
-  recent sub-window either corroborates the empty or disproves it, cut from the
-  FEED'S OWN frontier so clock skew cannot move the boundary. It ships
-  **DORMANT** behind `COORD_FEED_EMPTY_CORROBORATION` (any unrecognised value is
-  off) because the check can only turn CLEAR into UNKNOWN — the correct
-  direction, and exactly the direction that freezes a team if it misfires: an
-  unreadable *corroboration* read is `FEED_EMPTY_UNCORROBORATED` and fails
-  closed. Neither new reason joins `RECOVERABLE_FEED_WINDOW_REASONS`: whether a
-  feed caught lying should trigger the full-scan recovery is a separate ruling
-  from whether an unreadable coverage boundary should, and that is pinned by
-  test so it cannot drift in silently.
+- **`data-updates` intermittently answers 200 with an EMPTY `file_changes` on a
+  window that otherwise works.** Measured at the RAW HTTP boundary
+  (`GET /data/v1/updates?start_time=&end_time=`) and through the CLI, 2026-10-02:
+  `-1d` returned 13135 file changes in 4.0 MB and `-7d` returned 106187 in
+  32.7 MB, but `-8d` and beyond returned **HTTP 500 with an empty body**, and —
+  the part that matters — a window WELL INSIDE the working range intermittently
+  returned **rc 0 with `file_changes: []` and a populated `data_types` map**:
+  1 of 3 reps at `-7d`, 1 of 3 at `-25d`, 1 of 30 at `-1d` (20 consecutive clean
+  reps in one batch, so the rate is low and variable). One explanation covers
+  all of it: the endpoint degrades under window size, usually to 500 and
+  sometimes to a 200 whose `file_changes` leg is empty, and the wider the window
+  the more often it degrades. **There is no declared horizon** — ~7 days is just
+  where degradation becomes the common case.
+  Consequences for any detector over this feed:
+  - **An empty `file_changes` is never proof of quiet, at ANY window width.** It
+    is a degraded answer that is well-formed, fast, and indistinguishable from
+    truth by shape alone. `COORD_FEED_EMPTY_CORROBORATION` (below) checks it
+    against a recent sub-window, which catches every case wider than the
+    corroboration bound and **cannot** catch one narrower than it.
+  - **A populated `data_types` beside an empty `file_changes` is a CANDIDATE
+    signal, not a rule** — records-processed and file-changes are different legs
+    and may legitimately diverge over a quiet range. Do not build a hard check
+    on it without measuring that.
+  - **Raising `COORD_TRANSPORT_TIMEOUT` is still the wrong response**, but not
+    for the reason first recorded here: a longer bound does NOT turn a 500 into
+    a believed empty (our transport maps rc != 0 to None = UNKNOWN, correctly).
+    It is wrong because a longer bound lets WIDER requests complete, and wider
+    windows degrade more often — so it buys more exposure to the false empty,
+    not less. The earlier text in this file asserted a timeout-causes-200
+    mechanism inferred from one 30s-fails / 120s-returns-empty pair; repeated
+    sampling showed that pair was the endpoint's intermittency, not the bound's
+    effect. A plausible causal story read off two adjacent measurements.
 - **`health` freshness is SHARD RECENCY; the advance fact is separate.** EVERY
   reconcile exit writes a health shard, aborts included — `_write_health_shard`
   runs before the early `return` — so a host that has aborted every pass for

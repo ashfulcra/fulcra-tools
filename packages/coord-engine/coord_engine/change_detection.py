@@ -376,20 +376,22 @@ class ChangeDetector:
             return _unknown(feed_reason)
         feed_start, feed_watermark = feed_window
 
-        # An EMPTY answer over a long window is the one reading this detector
-        # cannot check from the envelope alone. Measured on the live store
-        # 2026-10-02: `after` out to -7d answered monotonically (up to 107287
-        # changes), while -15d/-25d/-30d returned 200 with `file_changes: []`
-        # and a `start_time` echoing the exact requested `after`. Every
-        # attestation above passes on that response -- it is well-formed, fast,
-        # and wrong, so a consumer has nothing to object to. A 25-day window
-        # reported zero changes while a 7-day window INSIDE it reported 107287.
+        # An EMPTY `file_changes` is not proof of quiet. Measured at the raw
+        # HTTP boundary 2026-10-02: the endpoint degrades under window size --
+        # usually HTTP 500 (-8d and beyond, which our transport correctly maps
+        # to None = UNKNOWN), and INTERMITTENTLY a 200 whose `file_changes` is
+        # empty while `data_types` is populated, on windows that otherwise
+        # return 100k+ changes (1 of 3 reps at -7d, 1 of 30 at -1d). There is
+        # no declared horizon; ~7 days is just where degradation becomes the
+        # common case. The bad answer is well-formed and fast and passes every
+        # attestation above, so shape alone cannot reject it.
         #
-        # The remedy needs no horizon constant, because it detects the
-        # contradiction instead of predicting where the horizon is: a superset
-        # window cannot hold fewer changes than a subset of itself, so one extra
-        # read over a recent sub-window either corroborates the empty or
-        # disproves it. It costs at most one read, and only on the empty path.
+        # This check needs no horizon constant because it tests the
+        # CONTRADICTION rather than predicting a limit: a window cannot hold
+        # fewer changes than a sub-window of itself, so one extra read over a
+        # recent sub-window either corroborates the empty or disproves it. It
+        # costs at most one read, only on the empty path, and it cannot catch a
+        # false empty on a window narrower than the corroboration bound.
         if not rows and _corroboration_enabled():
             corroborated, reason = self._corroborate_empty(
                 reader, feed_start, feed_watermark, deadline)

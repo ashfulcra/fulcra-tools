@@ -1,21 +1,26 @@
-"""A zero signal is not proof of CLEAR -- corroborate a long-window empty.
+"""A zero signal is not proof of CLEAR -- corroborate an empty feed answer.
 
-Measured on the live store 2026-10-02. ``data_updates`` answered correctly and
-monotonically out to ``after=-7d`` (up to 107287 changes), and past that either
-failed or returned **200 with an empty ``file_changes`` and a ``start_time``
-echoing the exact requested ``after``**. A 25-day window reported ZERO changes
-while a 7-day window inside it reported 107287 -- a superset holding fewer
-changes than its subset.
+Measured at the RAW HTTP boundary (`GET /data/v1/updates`) and through the CLI,
+2026-10-02: `-1d` returned 13135 file changes in 4.0 MB and `-7d` returned
+106187 in 32.7 MB, while `-8d` and beyond returned **HTTP 500 with an empty
+body** -- which our transport correctly maps to `None` = UNKNOWN. The defect
+this module is about is different and worse: a window WELL INSIDE the working
+range **intermittently** returns rc 0 with `file_changes: []` and a populated
+`data_types` map. 1 of 3 reps at `-7d`, 1 of 3 at `-25d`, 1 of 30 at `-1d`
+(one batch of 20 was entirely clean, so the rate is low and variable).
 
-Nothing in that envelope is objectionable: it is well-formed, fast, and wrong,
-and every attestation the detector already performs passes on it. So the naive
-remedy for the resulting reconcile stall -- raise ``COORD_TRANSPORT_TIMEOUT`` so
-the over-horizon read stops failing -- makes it WORSE: the read then succeeds and
-the detector believes a trusted, attested CLEAR saying nothing changed in 25
-days. A loud stall becomes a silent fleet-wide false clear.
+One explanation covers all of it: the endpoint degrades under window size,
+usually to 500 and sometimes to a 200 whose `file_changes` leg is empty, and
+the wider the window the more often it degrades. There is no declared horizon;
+~7 days is just where degradation becomes the common case.
 
-The check pinned here needs no horizon constant, because it detects the
-contradiction rather than predicting where the horizon is.
+So an empty `file_changes` is never proof of quiet **at any width**, and the
+bad answer is well-formed, fast, and passes every attestation the detector
+already performs -- shape alone cannot reject it.
+
+The check pinned here needs no horizon constant, because it tests the
+contradiction rather than predicting a limit. Its limit is explicit: it cannot
+catch a false empty on a window narrower than the corroboration bound.
 
 It is DORMANT BY DEFAULT and these tests pin both branches, because a gate that
 is only ever tested switched on is not a gate.
@@ -29,7 +34,7 @@ from coord_engine.budget import Deadline
 
 COORDINATION_TYPE = "MomentAnnotation/00000000-0000-4000-8000-000000000102"
 FRONTIER = "2026-10-02T18:00:00Z"
-LONG_AFTER = "2026-09-07T15:00:41Z"        # ~25 days back: past the measured horizon
+LONG_AFTER = "2026-09-07T15:00:41Z"        # wider than the corroboration bound
 RECENT_AFTER = "2026-10-02T12:00:00Z"      # inside the 24h corroboration window
 CHANGE = {"path": "team/r/task/a.md", "state": "uploaded",
           "uploaded_at": "2026-10-02T17:00:00Z", "update_id": "u1"}
@@ -106,7 +111,7 @@ def test_affirmative_spellings_enable_it(monkeypatch, value):
 # --- enabled: the live defect ---------------------------------------------
 
 def test_a_long_empty_is_disproven_by_a_nonempty_recent_sub_window(enabled):
-    """The exact live shape: -25d says nothing changed, a recent window disagrees."""
+    """The live shape: the wide window says nothing changed, a recent one disagrees."""
     feed = Feed(lambda after: EMPTY if after == LONG_AFTER else HAS_DATA)
     batch = _poll(feed)
     assert batch.trusted is False
