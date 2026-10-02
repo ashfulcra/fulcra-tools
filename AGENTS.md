@@ -335,6 +335,30 @@ under `skills/`, each package with its own README, build, and tests.
   the only way to stop a stale timestamp being believed; if it can be neither
   updated nor removed, the verb exits 3. Pointer updates are monotonic: an
   older snapshot must never move an agent's reported age backwards.
+- **A feed's EMPTY answer over a long window is the one reading the detector
+  cannot check from the envelope.** Measured on the live store 2026-10-02:
+  `data-updates` answered monotonically out to `after=-7d` (to 107287 changes),
+  and past that either failed or returned **200 with `file_changes: []` and a
+  `start_time` echoing the exact requested `after`**. A 25-day window reported
+  ZERO changes while a 7-day window INSIDE it reported 107287 — a superset
+  holding fewer changes than its subset. Nothing in that envelope is
+  objectionable: it is well-formed, fast, wrong, and passes every attestation
+  the detector already performs. **So never "fix" the resulting reconcile stall
+  by raising `COORD_TRANSPORT_TIMEOUT`**: the loud abort exists only because the
+  30s bound makes the over-horizon read fail, and a longer bound hands the
+  detector a trusted, attested CLEAR asserting nothing changed in 25 days — a
+  visible stall becomes a silent fleet-wide false clear. The remedy needs no
+  horizon constant because it detects the CONTRADICTION: one extra read over a
+  recent sub-window either corroborates the empty or disproves it, cut from the
+  FEED'S OWN frontier so clock skew cannot move the boundary. It ships
+  **DORMANT** behind `COORD_FEED_EMPTY_CORROBORATION` (any unrecognised value is
+  off) because the check can only turn CLEAR into UNKNOWN — the correct
+  direction, and exactly the direction that freezes a team if it misfires: an
+  unreadable *corroboration* read is `FEED_EMPTY_UNCORROBORATED` and fails
+  closed. Neither new reason joins `RECOVERABLE_FEED_WINDOW_REASONS`: whether a
+  feed caught lying should trigger the full-scan recovery is a separate ruling
+  from whether an unreadable coverage boundary should, and that is pinned by
+  test so it cannot drift in silently.
 - **`health` freshness is SHARD RECENCY; the advance fact is separate.** EVERY
   reconcile exit writes a health shard, aborts included — `_write_health_shard`
   runs before the early `return` — so a host that has aborted every pass for

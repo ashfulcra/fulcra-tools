@@ -9,14 +9,15 @@ watermark advance.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 from .budget import Deadline
-from . import records
+from . import config, records
 
 
 class Coverage(str, Enum):
@@ -78,10 +79,47 @@ class ChangeBatch:
 
 FEED_BOUNDARY_UNKNOWN = "data-updates coverage boundary unavailable or unparseable"
 FEED_FRONTIER_UNKNOWN = "data-updates coverage frontier unavailable or unparseable"
+#: A long-window empty whose recent sub-window is NOT empty. The wider answer is
+#: disproven: a superset cannot hold fewer changes than its subset.
+FEED_EMPTY_DISPROVEN = (
+    "data-updates reported no changes over a window whose recent sub-window has changes"
+)
+#: A long-window empty the corroboration read could not confirm. Not disproven,
+#: but not proven either, and "a zero signal is not proof of CLEAR".
+FEED_EMPTY_UNCORROBORATED = (
+    "data-updates reported no changes over a long window and corroboration could not be read"
+)
+#: Only BOUNDARY/FRONTIER license the established-cursor full-scan recovery. The
+#: two empty-corroboration reasons are deliberately NOT here: whether a feed
+#: caught lying should trigger a full scan is a separate decision from whether an
+#: unreadable coverage boundary should.
 RECOVERABLE_FEED_WINDOW_REASONS = frozenset({
     FEED_BOUNDARY_UNKNOWN,
     FEED_FRONTIER_UNKNOWN,
 })
+
+#: Corroborate a long-window empty against a recent sub-window. DORMANT BY
+#: DEFAULT -- see `_corroboration_enabled`.
+EMPTY_CORROBORATION_ENV = "COORD_FEED_EMPTY_CORROBORATION"
+#: How recent the corroborating sub-window is, measured BACK FROM THE FEED'S OWN
+#: FRONTIER rather than a local clock, so cross-host clock skew cannot move it.
+EMPTY_CORROBORATION_HOURS_ENV = "COORD_FEED_EMPTY_CORROBORATION_HOURS"
+DEFAULT_EMPTY_CORROBORATION_HOURS = 24.0
+
+
+def _corroboration_enabled() -> bool:
+    """Ships DORMANT: this check can only turn CLEAR into UNKNOWN, never the
+    reverse, so it is strictly fail-closed -- but that direction is exactly what
+    makes it able to freeze a team if it ever misfires. Off until a reviewer has
+    evaluated it live. Any unrecognised value is OFF."""
+    return (os.environ.get(EMPTY_CORROBORATION_ENV, "").strip().lower()
+            in {"1", "true", "yes", "on"})
+
+
+def _corroboration_window(frontier: datetime) -> datetime:
+    hours = config.env_float(EMPTY_CORROBORATION_HOURS_ENV,
+                             DEFAULT_EMPTY_CORROBORATION_HOURS)
+    return frontier - timedelta(hours=hours)
 
 
 def detector_recovery_reason(batch: ChangeBatch) -> Optional[str]:
@@ -271,6 +309,53 @@ class ChangeDetector:
     def __init__(self, transport: Any) -> None:
         self.transport = transport
 
+    def _corroborate_empty(
+        self, reader: Any, feed_start: str, feed_watermark: str, deadline: Deadline,
+    ) -> tuple[bool, str]:
+        """Check an empty long-window answer against a recent sub-window.
+
+        Returns ``(True, "")`` when the empty stands: either the window was not
+        long enough to be worth corroborating, or the sub-window was also empty.
+        Returns ``(False, reason)`` when the empty is DISPROVEN by a non-empty
+        sub-window, or when corroboration could not be read at all.
+
+        The sub-window is measured back from the FEED'S OWN frontier, never a
+        local clock, so cross-host skew cannot move the boundary.
+
+        The uncorroborated case is deliberately fail-closed, and it is the reason
+        this ships dormant: a transient failure on the EXTRA read turns a
+        genuinely clean pass into UNKNOWN. That is the correct direction per
+        "a zero signal is not proof of CLEAR", and it is also a real cost a
+        reviewer should weigh before it is switched on.
+        """
+        start = _instant({"uploaded_at": feed_start}, "uploaded")
+        frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")
+        if start is None or frontier is None:
+            # _feed_window already normalized both; unreachable in practice, and
+            # if it ever happens we have not proven anything.
+            return False, FEED_EMPTY_UNCORROBORATED
+        cutoff = _corroboration_window(frontier[0])
+        if start[0] >= cutoff:
+            # The window asked about is already within the recent bound. There is
+            # no wider-vs-narrower comparison to make, so the empty stands on the
+            # same evidence it always did.
+            return True, ""
+        if deadline.expired():
+            return False, FEED_EMPTY_UNCORROBORATED
+        try:
+            sub = reader(cutoff.isoformat().replace("+00:00", "Z"), deadline=deadline)
+        except Exception:
+            return False, FEED_EMPTY_UNCORROBORATED
+        if not isinstance(sub, Mapping):
+            return False, FEED_EMPTY_UNCORROBORATED
+        sub_rows = sub.get("file_changes")
+        if not isinstance(sub_rows, list):
+            return False, FEED_EMPTY_UNCORROBORATED
+        if sub_rows:
+            # A superset cannot hold fewer changes than its subset.
+            return False, FEED_EMPTY_DISPROVEN
+        return True, ""
+
     def poll(self, team: str, prior_watermark: Optional[str], deadline: Deadline) -> ChangeBatch:
         if deadline.expired():
             return _unknown()
@@ -290,6 +375,26 @@ class ChangeDetector:
         if feed_window is None:
             return _unknown(feed_reason)
         feed_start, feed_watermark = feed_window
+
+        # An EMPTY answer over a long window is the one reading this detector
+        # cannot check from the envelope alone. Measured on the live store
+        # 2026-10-02: `after` out to -7d answered monotonically (up to 107287
+        # changes), while -15d/-25d/-30d returned 200 with `file_changes: []`
+        # and a `start_time` echoing the exact requested `after`. Every
+        # attestation above passes on that response -- it is well-formed, fast,
+        # and wrong, so a consumer has nothing to object to. A 25-day window
+        # reported zero changes while a 7-day window INSIDE it reported 107287.
+        #
+        # The remedy needs no horizon constant, because it detects the
+        # contradiction instead of predicting where the horizon is: a superset
+        # window cannot hold fewer changes than a subset of itself, so one extra
+        # read over a recent sub-window either corroborates the empty or
+        # disproves it. It costs at most one read, and only on the empty path.
+        if not rows and _corroboration_enabled():
+            corroborated, reason = self._corroborate_empty(
+                reader, feed_start, feed_watermark, deadline)
+            if not corroborated:
+                return _unknown(reason)
 
         coverage = {name: Coverage.CLEAR for name in NAMESPACES}
         changes: list[Change] = []
