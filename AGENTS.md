@@ -1599,6 +1599,16 @@ Standing rules:
 
 ### Writing for upstream (issues & PRs to fulcradynamics/*)
 
+**Findings go to Linear, never to GitHub issues (operator rule, 2026-10-01).**
+File findings as Linear tickets on the appropriate board (Platform/PLAT unless
+clearly another team). Never open GitHub issues on fulcradynamics repos. Why:
+the engineers triage in Linear, and an issue opened on a product repository
+lands outside their queue and has to be migrated by hand (fulcra-api-python
+issue 115 was, on the day this rule was written). This covers every agent and
+courier on the fleet, whatever account it files under. Pull requests upstream
+are still allowed where a session has the access; the writing rules below apply
+to those and to the Linear ticket text.
+
 Upstream reports must be understandable without reading this repository.
 
 - **Succinct.** First sentence states the bug. Repro, expected, actual, one
