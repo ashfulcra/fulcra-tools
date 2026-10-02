@@ -93,6 +93,13 @@ class FulcraMenubarApp(rumps.App):
         try:
             self._nsapp.nsstatusitem.setMenu_(None)
             self._status_target = _install_click_target(self)
+            # Replacing the .app does not reload an existing launchd service.
+            # Reconcile in the background so upgrades actually run this build.
+            threading.Thread(
+                target=self._reconcile_daemon_install,
+                daemon=True,
+                name="collect-daemon-upgrade",
+            ).start()
         except AttributeError:
             # Defensive: if _nsapp still isn't ready (shouldn't happen), log
             # and skip.  Left-click will fall back to the default rumps menu.
@@ -100,6 +107,14 @@ class FulcraMenubarApp(rumps.App):
                 "post-launch setup couldn't access _nsapp; "
                 "left-click will use the default rumps menu",
             )
+
+    def _reconcile_daemon_install(self) -> None:
+        from . import daemon_lifecycle
+        try:
+            if daemon_lifecycle.reconcile_current_install(client=self.client):
+                logger.info("updated the installed daemon to the current app build")
+        except Exception:
+            logger.exception("could not reconcile the installed daemon build")
 
     # ── Popover ───────────────────────────────────────────────────────────────
 

@@ -25,9 +25,12 @@ what lets the bus leg (Task 3) dedupe retries to a single visible directive.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import logging
 import os
+import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,20 +134,78 @@ class Ledger:
         self.account_id = account_id
         base = root if root is not None else _default_root()
         self._path = base / "gmail" / account_id / "ledger.jsonl"
+        self._entries_cache: list[dict] | None = None
+        self._done_index: dict[tuple[str, str, int], set[str]] | None = None
+        self._relay_keys: set[str] | None = None
+        self._cache_signature: tuple[int, int, int] | None = None
 
     @property
     def path(self) -> Path:
         return self._path
 
-    def append(self, entry: LedgerEntry) -> None:
-        """Append one JSONL line, flushing + fsyncing before returning so the
-        record is durable before the next pipeline step."""
+    @property
+    def _lock_path(self) -> Path:
+        return self._path.with_suffix(".lock")
+
+    @contextmanager
+    def _locked(self):
+        """Serialize writers and compaction for this account's ledger."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a", encoding="utf-8") as lock_fh:
+            os.chmod(self._lock_path, 0o600)
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+    def _file_signature(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self._path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    def _append_unlocked(self, entry: LedgerEntry) -> None:
+        """Append while the caller holds ``_locked``."""
+        self.entries()  # refresh a cache made stale by another process
         line = json.dumps(entry.to_dict(), sort_keys=True) + "\n"
         with self._path.open("a", encoding="utf-8") as fh:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
+        os.chmod(self._path, 0o600)
+        assert self._entries_cache is not None
+        row = entry.to_dict()
+        self._entries_cache.append(row)
+        self._index_row(row)
+        self._cache_signature = self._file_signature()
+
+    def append(self, entry: LedgerEntry) -> None:
+        """Append one JSONL line, flushing + fsyncing before returning so the
+        record is durable before the next pipeline step."""
+        with self._locked():
+            self._append_unlocked(entry)
+
+    def _index_row(self, entry: dict) -> None:
+        if self._done_index is None or self._relay_keys is None:
+            return
+        if entry.get("status") == STATUS_DONE:
+            key = (
+                str(entry.get("message_id", "")),
+                str(entry.get("rule_id", "")),
+                int(entry.get("rule_version", 0)),
+            )
+            self._done_index.setdefault(key, set()).add(str(entry.get("action", "")))
+        outbox = entry.get("outbox_key")
+        if entry.get("action") == ACTION_RELAY and isinstance(outbox, str) and outbox:
+            self._relay_keys.add(outbox)
+
+    def _rebuild_indexes(self) -> None:
+        self._done_index = {}
+        self._relay_keys = set()
+        for entry in self._entries_cache or ():
+            self._index_row(entry)
 
     def entries(self) -> list[dict]:
         """Read every intact JSONL record, skipping any torn/unparseable line.
@@ -152,9 +213,15 @@ class Ledger:
         A partial final line (a crash mid-append) fails ``json.loads`` and is
         treated as ABSENT — never raised.
         """
+        signature = self._file_signature()
+        if self._entries_cache is not None and signature == self._cache_signature:
+            return list(self._entries_cache)
         try:
             text = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
+            self._entries_cache = []
+            self._cache_signature = None
+            self._rebuild_indexes()
             return []
         out: list[dict] = []
         for line in text.splitlines():
@@ -166,7 +233,86 @@ class Ledger:
                 # Torn/partial line — treat as absent (do not crash).
                 _log.debug("gmail ledger: skipping unparseable line (torn write)")
                 continue
-        return out
+        self._entries_cache = out
+        self._cache_signature = signature
+        self._rebuild_indexes()
+        return list(out)
+
+    def ensure_relay_pending(self, entry: LedgerEntry) -> bool:
+        """Persist a pending relay barrier once for its deterministic key.
+
+        A retry still re-emits the byte-identical directive, but it does not
+        append the same pending row forever. Returns ``True`` when a new row was
+        written and ``False`` when this outbox key was already journaled.
+        """
+        if entry.action != ACTION_RELAY or entry.status != STATUS_PENDING:
+            raise ValueError("ensure_relay_pending requires a pending relay entry")
+        with self._locked():
+            self.entries()
+            assert self._relay_keys is not None
+            if entry.outbox_key in self._relay_keys:
+                return False
+            self._append_unlocked(entry)
+            return True
+
+    @staticmethod
+    def _canonical_entries(entries: list[dict]) -> list[dict]:
+        """Collapse retry residue to one durable fact per task action."""
+        chosen: dict[tuple[str, str, int, str], dict] = {}
+        for entry in entries:
+            try:
+                key = (
+                    str(entry["message_id"]), str(entry["rule_id"]),
+                    int(entry["rule_version"]), str(entry["action"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            prior = chosen.get(key)
+            if prior is None or entry.get("status") == STATUS_DONE:
+                chosen[key] = entry
+        action_order = {ACTION_FILE: 0, ACTION_RELAY: 1}
+        return [
+            chosen[key]
+            for key in sorted(
+                chosen,
+                key=lambda value: (
+                    value[0], value[1], value[2], action_order.get(value[3], 99),
+                ),
+            )
+        ]
+
+    def compact_if_needed(
+        self, *, min_entries: int = 10_000, redundancy_ratio: float = 2.0,
+    ) -> bool:
+        """Atomically remove duplicate retry rows from an oversized ledger."""
+        with self._locked():
+            entries = self.entries()
+            if len(entries) < min_entries:
+                return False
+            canonical = self._canonical_entries(entries)
+            if not canonical or len(entries) < len(canonical) * redundancy_ratio:
+                return False
+            fd, raw_path = tempfile.mkstemp(
+                prefix="ledger-", suffix=".jsonl.tmp", dir=self._path.parent,
+            )
+            tmp = Path(raw_path)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    for entry in canonical:
+                        fh.write(json.dumps(entry, sort_keys=True) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, self._path)
+            finally:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+            self._entries_cache = canonical
+            self._cache_signature = self._file_signature()
+            self._rebuild_indexes()
+            return True
 
     # -- processed set ------------------------------------------------------
 
@@ -175,14 +321,9 @@ class Ledger:
     ) -> set[str]:
         """The set of actions marked ``done`` for this exact
         ``(message_id, rule_id, rule_version)`` key."""
-        done: set[str] = set()
-        for entry in self.entries():
-            if (entry.get("message_id") == message_id
-                    and entry.get("rule_id") == rule_id
-                    and entry.get("rule_version") == rule_version
-                    and entry.get("status") == STATUS_DONE):
-                done.add(entry.get("action"))
-        return done
+        self.entries()
+        assert self._done_index is not None
+        return set(self._done_index.get((message_id, rule_id, rule_version), set()))
 
     def is_fully_done(
         self, message_id: str, rule_id: str, rule_version: int,

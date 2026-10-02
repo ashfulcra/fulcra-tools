@@ -26,6 +26,7 @@ work without per-test changes.
 """
 from __future__ import annotations
 
+import errno
 import os
 import secrets
 import threading
@@ -34,10 +35,11 @@ from pathlib import Path
 
 import httpx  # noqa: F401 — re-exported for monkeypatching in tests; see module docstring
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import config as _config
 from ._resources import docs_dir as _resources_docs_dir
@@ -253,7 +255,39 @@ def build_app(daemon) -> FastAPI:
     Everything else is registered by the route modules in
     :mod:`fulcra_collect.routes`.
     """
-    app = FastAPI(title="Fulcra Collect")
+    app = FastAPI(
+        title="Fulcra Collect",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    # The server only listens on loopback, but browsers can still be induced
+    # to send requests to it through DNS rebinding. Reject any Host header
+    # that is not one of the loopback names we advertise. ``testserver`` is
+    # FastAPI's in-process TestClient host.
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost", "testserver"],
+    )
+
+    @app.middleware("http")
+    async def browser_security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-eval' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; "
+            "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+            "form-action 'self'"
+        )
+        return response
 
     @app.exception_handler(_config.ConfigConflictError)
     async def config_conflict(_request, _exc):
@@ -264,9 +298,15 @@ def build_app(daemon) -> FastAPI:
     token = _ensure_token()
     bearer = HTTPBearer(auto_error=False)
 
-    def require_token(creds: HTTPAuthorizationCredentials = Depends(bearer)):
+    def require_token(
+        request: Request,
+        creds: HTTPAuthorizationCredentials = Depends(bearer),
+    ):
         # Use secrets.compare_digest to prevent timing-based token oracle attacks.
-        if creds is None or not secrets.compare_digest(creds.credentials, token):
+        supplied = creds.credentials if creds is not None else request.cookies.get(
+            "fulcra_token"
+        )
+        if supplied is None or not secrets.compare_digest(supplied, token):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "auth required")
 
     def require_plugin(plugin_id: str) -> None:
@@ -324,7 +364,7 @@ def build_app(daemon) -> FastAPI:
         if not idx.exists():
             return {"error": "web UI not built", "expected_at": str(idx)}
         resp = FileResponse(str(idx))
-        resp.set_cookie("fulcra_token", token, httponly=False,
+        resp.set_cookie("fulcra_token", token, httponly=True,
                          samesite="strict", secure=False, path="/")
         # no-store, not just no-cache: this response carries the
         # Set-Cookie that bootstraps the SPA's auth. FileResponse otherwise
@@ -461,9 +501,14 @@ def serve(daemon, *, host: str = "127.0.0.1", port: int | None = None) -> tuple[
         try:
             probe.bind((host, port))
         except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                raise RuntimeError(
+                    f"port {port} is in use; set [daemon] web_port = ... in "
+                    f"~/.config/fulcra-collect/config.toml"
+                ) from exc
             raise RuntimeError(
-                f"port {port} is in use; set [daemon] web_port = ... in "
-                f"~/.config/fulcra-collect/config.toml"
+                f"cannot bind the loopback web server on port {port}: "
+                f"{exc.strerror or type(exc).__name__}"
             ) from exc
     finally:
         probe.close()

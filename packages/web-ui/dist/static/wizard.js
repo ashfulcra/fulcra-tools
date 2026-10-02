@@ -16,26 +16,36 @@
  */
 
 // ---------------------------------------------------------------------------
-// Markdown renderer — delegates to the `marked` library (loaded from CDN
-// in index.html). Replaces the former hand-rolled regex approach, which
+// Markdown renderer — delegates to the `marked` library packaged with the
+// app. Replaces the former hand-rolled regex approach, which
 // could not handle fenced code blocks or other CommonMark constructs.
 //
-// Security: marked's default renderer HTML-escapes content. We additionally
-// configure a link-sanitizer so only http(s) URLs become clickable anchors;
+// We configure a link sanitizer so only http(s) URLs become clickable anchors;
 // javascript: / data: / etc. are stripped to plain text.
 // ---------------------------------------------------------------------------
 
 (function _configureMarked() {
-  if (typeof marked === "undefined") return; // guard: CDN not loaded yet
+  if (typeof marked === "undefined") return; // guard: bundle did not load
   const renderer = new marked.Renderer();
-  const _baseLink = renderer.link.bind(renderer);
-  renderer.link = function(href, title, text) {
+  const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+  renderer.link = function(token) {
+    const href = token.href;
     // Reject non-http(s) schemes — they won't appear in plugin-authored copy
     // but this closes the door on javascript: / data: injection.
-    if (href && !/^https?:\/\//i.test(href)) return text;
-    const out = _baseLink(href, title, text);
-    // Ensure external links open in a new tab with safe referrer policy.
-    return out.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
+    if (href && !/^https?:\/\//i.test(href)) {
+      return this.parser.parseInline(token.tokens);
+    }
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+    const text = this.parser.parseInline(token.tokens);
+    return `<a target="_blank" rel="noopener noreferrer" href="${escapeHtml(href)}"${title}>${text}</a>`;
+  };
+  renderer.html = function(token) {
+    // Marked deliberately preserves raw HTML. Setup copy and local docs do
+    // not need it, so show the source as text rather than inserting active
+    // elements or event handlers into the control UI.
+    return escapeHtml(token.raw || token.text || "");
   };
   marked.use({ renderer });
 })();
@@ -45,7 +55,7 @@ function renderMd(text) {
   if (typeof marked !== "undefined") {
     return marked.parse(text);
   }
-  // Fallback: marked CDN failed to load — return escaped plain text so the
+  // Fallback: marked failed to load — return escaped plain text so the
   // wizard step is still readable rather than blank.
   return String(text).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1174,7 +1184,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         const result = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open("POST", url, true);
-          xhr.setRequestHeader("Authorization", `Bearer ${apiToken()}`);
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
               this.uploadProgress = Math.round((e.loaded / e.total) * 100);

@@ -47,6 +47,19 @@ poll rather than skipping it. Files writes are idempotent by path; relay
 directives are deduplicated by a deterministic key, so retries converge on one
 directive rather than a fan-out.
 
+A scheduled run performs at most five messages with unfinished file or relay
+actions in total, sharing that budget across every account and rule. A rule can
+still scan later candidates to determine its cursor frontier, but Collect leaves
+additional pairs and side effects for the next scheduled run. This keeps one
+broken or very large relay backlog from monopolizing the Collect worker timeout.
+The first pair rotates durably between runs, so a permanently failing backlog
+cannot keep later accounts or rules from getting a turn. A retry records a
+relay's deterministic pending key only
+once. At startup, a heavily duplicated ledger is compacted atomically to one
+durable fact per message, rule version, and action. An account-scoped file lock
+keeps daemon and manual runs from writing through compaction. The ledger remains
+local, mode `0600`, and contains metadata and hashes rather than message content.
+
 Accounts are keyed by an opaque `account_id` (a uuid minted when the account is
 added). The email address is metadata — never a path segment or a keychain key.
 One account failing auth is fail-soft: it is marked `auth_failed` and skipped
@@ -153,6 +166,8 @@ file-only rule.
 
 Search and preview fetch messages from Google; filtering and deterministic rule
 derivation happen locally. The builder does not write those previews to Fulcra.
+Its calls stay on the local Collect origin and use Collect's HttpOnly session
+cookie; the page never reads or stores the token in JavaScript.
 Optional AI suggestions send the consented example fields to the configured
 model provider. The
 plugin's own logs carry only opaque ids, rule ids, and decision reason-codes —
@@ -233,11 +248,11 @@ To wire it up, an operator sets the plugin's `relay_team` and adds `relay` +
 | `accounts` | `AccountRegistry`: opaque `account_id` ↔ email; shared client + per-account tokens in the OS keychain; the B4 add-account flow (single-use `state` nonce, `getProfile` binding). |
 | `rules` | Parse and validate rules; build the server query; apply post-filters to decide effective matches with privacy-safe reason codes. A `relay` action without `relay_to` is rejected at parse time. |
 | `convert` | Gmail payload → the selected-email JSON above. |
-| `ledger` | Append-only per-account JSONL; processed-set keyed by `(message_id, rule_id, rule_version)`; deterministic relay outbox key. |
+| `ledger` | Durable per-account JSONL; indexed processed-set keyed by `(message_id, rule_id, rule_version)`; deterministic relay outbox key; retry deduplication, writer locking, and atomic compaction. |
 | `cursors` | Per-`(account, rule)` contiguous-frontier watermark. |
 | `files_writer` | Writes the selected email to the deterministic Fulcra Files path. |
 | `relay` | Builds and posts the exactly-once-visible bus directive, then reads it back before the pipeline marks it done. |
-| `pipeline` | The crash-safe poll: paginate → refine → order oldest-first → file → ledger → relay → ledger → advance the watermark. |
+| `pipeline` | The crash-safe, bounded poll: paginate → refine → order oldest-first → file → ledger → relay → ledger → advance the watermark. |
 | `collect_plugin` | The scheduled plugin: setup wizard, per-account health, poll loop, `relay_team` config. |
 | `collect_routes` | The Gmail-specific add-account OAuth endpoints (start + callback). |
 | `rules_routes` / `rules_derive` / `rules_preview` / `rules_ai` / `rules_ui` | The rule builder: JSON endpoints, deterministic derivation, live preview, opt-in AI, and the served page. |

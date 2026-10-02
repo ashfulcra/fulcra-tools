@@ -6,6 +6,8 @@ a per-run timeout, and writes the result to the plugin's PluginState.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 from collections.abc import Callable
 from datetime import datetime
@@ -64,16 +66,28 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     newest_observed_at: datetime | None = None
     try:
         proc = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            # Plugins may start helper processes (for example, a CLI used to
+            # write to an external service). Give each run its own process
+            # group so a timeout stops the whole run rather than leaving a
+            # grandchild working after Collect records "timeout".
+            start_new_session=(os.name == "posix"),
         )
         if on_spawn is not None:
             on_spawn(proc)
         try:
-            stdout, _stderr = proc.communicate(timeout=timeout_s)
+            stdout, stderr = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            # Mirror subprocess.run's internal timeout handling: kill the
-            # worker, then drain its pipes so they are not left dangling.
-            proc.kill()
+            if os.name == "posix":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:  # pragma: no cover - Collect's shipped app is macOS
+                proc.kill()
             proc.communicate()
             raise
         for line in stdout.splitlines():
@@ -112,6 +126,12 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                     daemon.activity.add(
                         plugin_id=plugin_id, summary=summary, ok=ok,
                     )
+        if error == "worker emitted no result" and stderr.strip():
+            # A crash before the worker's JSON result used to discard the only
+            # useful diagnostic. Apply the same redaction and length bound as
+            # normal worker exceptions before it reaches state or the UI.
+            from .worker import _scrub_secrets
+            error = _scrub_secrets(stderr.strip())
     except subprocess.TimeoutExpired:
         outcome = "timeout"
         error = f"worker exceeded {timeout_s:.0f}s"

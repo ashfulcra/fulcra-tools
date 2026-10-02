@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import datetime
+import errno
+from pathlib import Path
 
 import pytest
 from collect_test_helpers import install_fake_httpx
@@ -11,6 +13,7 @@ from fulcra_collect import config as _config
 from fulcra_collect.daemon import Daemon, Config
 from fulcra_collect.registry import RegistryResult
 from fulcra_collect.web import build_app, _ensure_token, _web_token_path
+from fulcra_collect.web import serve as serve_web
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +90,74 @@ def test_root_sets_cookie_and_is_uncacheable(collect_home):
     assert r.status_code == 200
     # dist/index.html ships in the repo, so this is the HTML+cookie path.
     assert r.cookies.get("fulcra_token") == token
+    assert "httponly" in r.headers["set-cookie"].lower()
+    assert "samesite=strict" in r.headers["set-cookie"].lower()
     assert r.headers.get("cache-control") == "no-store"
+
+
+def test_cookie_auth_works_without_exposing_token_to_javascript(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = TestClient(build_app(daemon))
+    assert client.get("/").status_code == 200
+    assert client.get("/api/status").status_code == 200
+
+
+def test_untrusted_host_is_rejected_before_token_bootstrap(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = TestClient(build_app(daemon))
+    response = client.get("/", headers={"Host": "attacker.example"})
+    assert response.status_code == 400
+    assert "fulcra_token" not in response.headers.get("set-cookie", "")
+
+
+def test_interactive_api_docs_are_disabled(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = TestClient(build_app(daemon))
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_browser_security_headers_block_remote_code(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    response = TestClient(build_app(daemon)).get("/")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "https:" not in csp
+
+
+def test_web_bind_permission_error_is_not_reported_as_port_collision(
+    collect_home, monkeypatch,
+):
+    class RefusingSocket:
+        def setsockopt(self, *args):
+            pass
+
+        def bind(self, _address):
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("socket.socket", lambda *a, **k: RefusingSocket())
+    daemon = _build_test_daemon(collect_home)
+    with pytest.raises(RuntimeError, match="cannot bind the loopback") as caught:
+        serve_web(daemon, port=19392)
+    assert "in use" not in str(caught.value)
+
+
+def test_frontend_does_not_read_or_send_the_control_token():
+    root = Path(__file__).parents[2] / "web-ui" / "dist" / "static"
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("*.js"))
+    )
+    assert "document.cookie" not in source
+    assert "Authorization: `Bearer ${" not in source
+    assert 'setRequestHeader("Authorization"' not in source
 
 
 def test_token_file_has_0600_permissions(collect_home, tmp_path, monkeypatch):
@@ -1264,7 +1334,7 @@ def test_definition_recent_widens_window_progressively(
     """P2 #9: start with a short window and widen 7d → 30d → 365d,
     stopping at the first window with a hit — instead of always
     fetching a full year of events."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     import fulcra_collect.credentials as _creds_mod
     _creds_mod.set_user_secret("bearer-token", "valid-token")
 

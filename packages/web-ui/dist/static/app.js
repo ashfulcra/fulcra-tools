@@ -25,37 +25,8 @@
  *                  the client renders it with marked.
  */
 
-// Read the daemon's bearer token from the `fulcra_token` cookie on EVERY
-// call rather than caching it at module-parse time. The daemon re-issues
-// this cookie on every load of `/` (web.py), so a tab whose cookie was
-// missing or stale at first paint recovers the moment the cookie is
-// refreshed. The old module-level constant captured the value once, so
-// the error screen's Retry (which only re-runs boot(), not a reload)
-// could never pick up a corrected token — every Retry re-sent the same
-// stale value and 401'd again.
-//
-// slice() past the name (not split("=")[1]) so a token containing "="
-// survives intact — the daemon's urlsafe token has none today, but the
-// header must not silently truncate if that ever changes.
-function readToken() {
-  const match = document.cookie
-    .split("; ")
-    .find(r => r.startsWith("fulcra_token="));
-  return match ? match.slice("fulcra_token=".length) : undefined;
-}
-
-// Exposed for wizard.js's _submitFileUpload, which uses XHR (not fetch) so it
-// can surface upload-progress events for multi-GB takeouts. Keeping the token
-// resolution in one place avoids the two helpers drifting apart.
-function apiToken() {
-  return readToken();
-}
-
 async function api(path, opts = {}) {
-  const headers = {
-    Authorization: `Bearer ${readToken()}`,
-    ...((opts.headers) ?? {}),
-  };
+  const headers = { ...((opts.headers) ?? {}) };
   // Only set Content-Type to JSON if we have a body and it is not FormData
   if (opts.body && typeof opts.body === "string") {
     headers["Content-Type"] = "application/json";
@@ -262,9 +233,7 @@ function app() {
       this.docsLoading = true;
       this.route = "docs";
       try {
-        const res = await fetch(`/api/docs/${encodeURIComponent(name)}`, {
-          headers: { Authorization: `Bearer ${readToken()}` },
-        });
+        const res = await fetch(`/api/docs/${encodeURIComponent(name)}`);
         if (!res.ok) {
           let detail = "";
           try { detail = (await res.json()).detail || ""; } catch (_) {}
@@ -278,8 +247,8 @@ function app() {
       }
     },
 
-    // Computed: HTML of the loaded markdown. marked is loaded from CDN
-    // (with SRI) in index.html. Same renderer config as wizard.js's
+    // Computed: HTML of the loaded markdown. marked is packaged with the app.
+    // Same renderer config as wizard.js's
     // renderMd: links forced to http(s) and target=_blank rel=noopener.
     get docsHtml() {
       if (!this.docsMarkdown) return "";

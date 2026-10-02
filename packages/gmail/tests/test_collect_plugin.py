@@ -13,11 +13,14 @@ from fulcra_gmail.collect_plugin import PLUGIN
 from fulcra_gmail.relay import RelayResult
 
 
-def _ctx(config: dict, emit=None) -> RunContext:
+def _ctx(config: dict, emit=None, kv: dict | None = None) -> RunContext:
+    kv_store = {} if kv is None else kv
     return RunContext(
         plugin_id="gmail", config=config, credentials={},
         state=PluginState("gmail"), log=logging.getLogger("t"),
         _emit=emit or (lambda e: None),
+        _plugin_kv_get=lambda key, default: kv_store.get(key, default),
+        _plugin_kv_set=lambda key, value: kv_store.__setitem__(key, value),
     )
 
 
@@ -70,6 +73,11 @@ class FakeAccount:
         self.status = status
 
 
+class FakeLedger:
+    def compact_if_needed(self):
+        return False
+
+
 def test_run_polls_each_account_and_skips_auth_failed(tmp_path, monkeypatch):
     events: list[dict] = []
 
@@ -94,7 +102,7 @@ def test_run_polls_each_account_and_skips_auth_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
     monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
-    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "CoordEngineRelayEmitter", lambda team: object())
     monkeypatch.setattr(collect_plugin, "poll_account_rule", fake_poll)
@@ -112,6 +120,95 @@ def test_run_polls_each_account_and_skips_auth_failed(tmp_path, monkeypatch):
     assert polled == ["acct-ok"]
     statuses = [e for e in events if e.get("status") == "auth_failed"]
     assert statuses and statuses[0]["account"] == "acct-bad"
+
+
+def test_run_shares_one_effect_budget_across_all_accounts_and_rules(monkeypatch):
+    accounts = [
+        FakeAccount("acct-1", "a@example.com"),
+        FakeAccount("acct-2", "b@example.com"),
+    ]
+
+    class FakeRegistry:
+        def list_accounts(self):
+            return accounts
+
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_poll(**kw):
+        budget = kw["effect_budget"]
+        used = 0
+        while used < 3 and budget.consume():
+            used += 1
+        calls.append((kw["account_id"], kw["rule"].id, used))
+        from fulcra_gmail.pipeline import PollResult
+        return PollResult(
+            account_id=kw["account_id"], rule_id=kw["rule"].id,
+            rule_version=kw["rule"].version, candidates=used,
+            effective=used, processed=used, blocked=budget.exhausted,
+            cursor=1,
+        )
+
+    monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
+    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
+    monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "poll_account_rule", fake_poll)
+
+    config = {"rules": [
+        {"id": "r1", "version": 1, "name": "R1", "match": "x", "actions": ["file"]},
+        {"id": "r2", "version": 1, "name": "R2", "match": "y", "actions": ["file"]},
+    ]}
+    PLUGIN.run(_ctx(config))
+
+    assert calls == [("acct-1", "r1", 3), ("acct-1", "r2", 2)]
+
+
+def test_run_rotates_first_pair_so_a_permanent_backlog_cannot_starve_accounts(
+    monkeypatch,
+):
+    accounts = [
+        FakeAccount("acct-1", "a@example.com"),
+        FakeAccount("acct-2", "b@example.com"),
+    ]
+
+    class FakeRegistry:
+        def list_accounts(self):
+            return accounts
+
+    calls: list[str] = []
+
+    def fake_poll(**kw):
+        budget = kw["effect_budget"]
+        used = 0
+        while budget.consume():
+            used += 1
+        calls.append(kw["account_id"])
+        from fulcra_gmail.pipeline import PollResult
+        return PollResult(
+            account_id=kw["account_id"], rule_id=kw["rule"].id,
+            rule_version=kw["rule"].version, candidates=used,
+            effective=used, processed=0, blocked=True, cursor=None,
+            budget_exhausted=True,
+        )
+
+    monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
+    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
+    monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "poll_account_rule", fake_poll)
+
+    config = {"rules": [{
+        "id": "r1", "version": 1, "name": "R1", "match": "x",
+        "actions": ["file"],
+    }]}
+    kv: dict = {}
+
+    PLUGIN.run(_ctx(config, kv=kv))
+    PLUGIN.run(_ctx(config, kv=kv))
+
+    assert calls == ["acct-1", "acct-2"]
 
 
 def test_health_check_no_accounts(monkeypatch):
@@ -160,7 +257,7 @@ def test_run_raises_when_all_rule_polls_fail(monkeypatch):
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
     monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
-    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "poll_account_rule", exploding_poll)
 
@@ -192,7 +289,7 @@ def test_run_partial_poll_failure_stays_soft(monkeypatch):
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
     monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
-    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: object())
+    monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "poll_account_rule", flaky_poll)
 

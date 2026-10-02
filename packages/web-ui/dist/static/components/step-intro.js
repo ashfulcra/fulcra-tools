@@ -14,7 +14,7 @@
 // SRI for the directive subpath rides Lit's main-package pin — see the
 // comment block in _base.js.
 import { FulcraStepBase, html } from "./_base.js";
-import { unsafeHTML } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
+import { unsafeHTML } from "/static/vendor/lit-3.2.1.min.js";
 
 class FulcraStepIntro extends FulcraStepBase {
   render() {

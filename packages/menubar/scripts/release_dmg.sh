@@ -64,23 +64,33 @@ bash "$MENUBAR/scripts/verify_bundle.sh"
 python3 "$MENUBAR/scripts/sanitize_bundle.py" --check-only "$APP"
 
 echo "=== 2/7  sign the app inside-out via Briefcase (Developer ID, hardened runtime) ==="
-# `package -p zip … --no-notarize` runs Briefcase's signer over every nested
-# Mach-O with the macOS template's Python entitlements, then zips the signed
-# app. We only want the side effect: build/…/Fulcra Collect.app signed in place.
-# Briefcase signs its app stub and dependencies, but does not discover these
-# extra command executables in Contents/MacOS. Sign them before sealing the app.
-for launcher in fulcra-collect fulcra fulcra-api; do
-  codesign --force --timestamp --options runtime -s "$FULCRA_SIGN_IDENTITY" \
-    "$APP/Contents/MacOS/$launcher"
-done
+# `package -p zip … --no-notarize` runs Briefcase's signer over the app and its
+# dependencies with the macOS template's Python entitlements. Briefcase also
+# rewrites Mach-O files during packaging, so the custom command launchers must
+# be signed after it finishes, followed by a final seal of the outer app.
 cd "$MENUBAR"
 PIP_FIND_LINKS="$REPO/wheelhouse" uvx briefcase package macOS \
   -p zip -i "$FULCRA_SIGN_IDENTITY" --no-notarize
 cd "$REPO"
+for launcher in fulcra-collect fulcra fulcra-api; do
+  codesign --force --timestamp --options runtime -s "$FULCRA_SIGN_IDENTITY" \
+    "$APP/Contents/MacOS/$launcher"
+done
+codesign --force --timestamp --options runtime \
+  --entitlements "$MENUBAR/build/fulcra-menubar/macos/app/Entitlements.plist" \
+  -s "$FULCRA_SIGN_IDENTITY" "$APP"
 env PATH=/usr/bin:/bin "$APP/Contents/MacOS/fulcra-collect" --help >/dev/null
 echo "--- verify app signature ---"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=4 "$APP" 2>&1 | grep -iE "Authority|TeamIdentifier|Timestamp|flags" | head
+
+# Verify a fresh copy as well. macOS can cache validation on the inode that was
+# just signed; the copy forces a clean validation and catches post-sign Mach-O
+# rewrites before a broken app reaches the disk image.
+VERIFY_DIR="$(mktemp -d)"
+ditto "$APP" "$VERIFY_DIR/Fulcra Collect.app"
+codesign --verify --deep --strict --verbose=2 "$VERIFY_DIR/Fulcra Collect.app"
+rm -rf "$VERIFY_DIR"
 
 echo "=== 3/7  build the attention extension (dist/) ==="
 ( cd "$EXT_SRC" && npm ci --no-fund --no-audit >/dev/null 2>&1 && npm run build >/dev/null )
@@ -89,7 +99,7 @@ test -f "$EXT_SRC/dist/manifest.json" || { echo "ERROR: extension dist/ not buil
 echo "=== 4/7  stage .dmg contents ==="
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-cp -R "$APP" "$STAGE/Fulcra Collect.app"
+ditto "$APP" "$STAGE/Fulcra Collect.app"
 cp -R "$EXT_SRC/dist" "$STAGE/Fulcra Attention Extension"
 cp "$MENUBAR/resources/dmg/INSTALL.txt" "$STAGE/INSTALL.txt"
 ln -s /Applications "$STAGE/Applications"

@@ -48,7 +48,7 @@ from .client import GmailClient
 from .cursors import CursorStore
 from .files_writer import build_files_writer
 from .ledger import Ledger
-from .pipeline import poll_account_rule
+from .pipeline import EffectBudget, poll_account_rule
 from .relay import CoordEngineRelayEmitter
 from .rules import parse_rules
 
@@ -62,6 +62,7 @@ OAUTH_CALLBACK_PATH = "/api/oauth/callback"
 ADD_ACCOUNT_START_PATH = "/api/oauth/gmail/add-account/start"
 #: Full redirect URI baked into the Google OAuth client.
 REDIRECT_URI = f"http://127.0.0.1:9292{OAUTH_CALLBACK_PATH}"
+_NEXT_PAIR_KEY = "next-poll-pair"
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,20 @@ def _load_rules(ctx: RunContext):
     return parse_rules(list(raw))
 
 
+def _pair_identity(account, rule) -> list[object]:
+    """Stable, content-free identity used for durable poll rotation."""
+    return [account.account_id, rule.id, rule.version]
+
+
+def _rotate_pairs(ctx: RunContext, pairs: list[tuple]) -> list[tuple]:
+    """Start at the pair saved by the prior run, if it still exists."""
+    wanted = ctx.kv_get(_NEXT_PAIR_KEY, None)
+    for index, (account, rule) in enumerate(pairs):
+        if _pair_identity(account, rule) == wanted:
+            return pairs[index:] + pairs[:index]
+    return pairs
+
+
 def run(ctx: RunContext) -> None:
     """One poll pass across every authorized account × applicable rule."""
     rules = _load_rules(ctx)
@@ -121,41 +136,70 @@ def run(ctx: RunContext) -> None:
         CoordEngineRelayEmitter(relay_team) if relay_team else None
     )
 
-    attempted = 0
-    failed = 0
-    last_error = ""
+    pairs = []
     for account in accounts:
         if account.status == STATUS_AUTH_FAILED:
             ctx.log.warning("gmail: account %s is auth_failed — skipping (re-auth needed)",
                             account.account_id)
             ctx.progress(account=account.account_id, status="auth_failed")
             continue
-        client = GmailClient(account.account_id, registry=registry)
-        ledger = Ledger(account.account_id)
-        cursors = CursorStore(account.account_id)
         for rule in rules:
             if not rule.applies_to_account(account.account_id, account.email):
                 continue
             if not getattr(rule, "enabled", True):
                 continue
-            attempted += 1
-            try:
-                result = poll_account_rule(
-                    client=client, rule=rule, account_id=account.account_id,
-                    ledger=ledger, cursors=cursors, files_writer=files_writer,
-                    relay_emitter=relay_emitter,
-                )
-            except Exception as exc:  # noqa: BLE001 — one rule's failure is soft
-                failed += 1
-                last_error = f"{type(exc).__name__}: {exc}"
-                ctx.log.warning("gmail: poll failed account=%s rule=%s: %s",
-                                account.account_id, rule.id, type(exc).__name__)
-                continue
-            ctx.progress(
-                account=account.account_id, rule=rule.id,
-                candidates=result.candidates, effective=result.effective,
-                processed=result.processed, blocked=result.blocked,
+            pairs.append((account, rule))
+
+    pairs.sort(key=lambda pair: (
+        pair[0].account_id, pair[1].id, pair[1].version,
+    ))
+    if not pairs:
+        return
+
+    ordered_pairs = _rotate_pairs(ctx, pairs)
+    resources = {}
+    attempted = 0
+    failed = 0
+    last_error = ""
+    effect_budget = EffectBudget()
+    for index, (account, rule) in enumerate(ordered_pairs):
+        if effect_budget.exhausted:
+            break
+
+        # Advance before external work. If this worker is killed mid-poll, the
+        # next scheduled run still starts at a different pair rather than
+        # letting one permanent backlog monopolize every run.
+        next_account, next_rule = ordered_pairs[(index + 1) % len(ordered_pairs)]
+        ctx.kv_set(_NEXT_PAIR_KEY, _pair_identity(next_account, next_rule))
+
+        if account.account_id not in resources:
+            client = GmailClient(account.account_id, registry=registry)
+            ledger = Ledger(account.account_id)
+            if ledger.compact_if_needed():
+                ctx.log.info("gmail: compacted duplicate retry metadata")
+            resources[account.account_id] = (
+                client, ledger, CursorStore(account.account_id),
             )
+        client, ledger, cursors = resources[account.account_id]
+
+        attempted += 1
+        try:
+            result = poll_account_rule(
+                client=client, rule=rule, account_id=account.account_id,
+                ledger=ledger, cursors=cursors, files_writer=files_writer,
+                relay_emitter=relay_emitter, effect_budget=effect_budget,
+            )
+        except Exception as exc:  # noqa: BLE001 — one rule's failure is soft
+            failed += 1
+            last_error = f"{type(exc).__name__}: {exc}"
+            ctx.log.warning("gmail: poll failed account=%s rule=%s: %s",
+                            account.account_id, rule.id, type(exc).__name__)
+            continue
+        ctx.progress(
+            account=account.account_id, rule=rule.id,
+            candidates=result.candidates, effective=result.effective,
+            processed=result.processed, blocked=result.blocked,
+        )
     if attempted and failed == attempted:
         # Fail-soft is for ONE rule having a bad day while others proceed.
         # When EVERY poll failed, "Ran successfully — no new data" is a lie

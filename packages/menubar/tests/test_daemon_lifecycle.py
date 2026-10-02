@@ -8,6 +8,7 @@ module's lookup.
 from __future__ import annotations
 
 from pathlib import Path
+import plistlib
 
 import pytest
 
@@ -139,6 +140,33 @@ def test_start_bootstraps_then_kickstarts_on_first_failure(monkeypatch, tmp_path
     assert [c[0] for c in calls] == ["kickstart", "bootstrap", "kickstart"]
     # The bootstrap should reference the plist path.
     assert str(tmp_path / "x.plist") in calls[1]
+
+
+def test_start_retries_bootstrap_during_bootout_handoff(monkeypatch, tmp_path):
+    monkeypatch.setattr(dl, "plist_path", lambda: tmp_path / "x.plist")
+    calls: list[tuple[str, ...]] = []
+    outcomes = iter([
+        (1, "service is not loaded"),
+        (5, "Input/output error"),
+        (5, "Input/output error"),
+        (0, ""),
+        (0, ""),
+    ])
+
+    def fake_launchctl(*args):
+        calls.append(args)
+        return next(outcomes)
+
+    sleeps = []
+    monkeypatch.setattr(dl, "_launchctl", fake_launchctl)
+    monkeypatch.setattr(dl.time, "sleep", sleeps.append)
+
+    dl.start()
+
+    assert [call[0] for call in calls] == [
+        "kickstart", "bootstrap", "bootstrap", "bootstrap", "kickstart",
+    ]
+    assert sleeps == [0.25, 0.25]
 
 
 def test_start_raises_on_unrecoverable_failure(monkeypatch, tmp_path):
@@ -361,6 +389,114 @@ def test_install_tolerates_sm_failure(tmp_path, monkeypatch):
     # Should NOT raise — install is best-effort on the SM half.
     path = dl.install()
     assert path.exists()
+
+
+def test_reconcile_current_install_rewrites_legacy_plist_and_restarts(
+    tmp_path, monkeypatch,
+):
+    plist = tmp_path / "com.fulcra.collect.plist"
+    plist.write_bytes(plistlib.dumps({
+        "ProgramArguments": ["/old/source/.venv/bin/fulcra-collect", "daemon"],
+    }))
+    monkeypatch.setattr(dl, "plist_path", lambda: plist)
+    monkeypatch.setattr(dl, "expected_executable", lambda: "/Applications/Fulcra Collect.app/Contents/MacOS/fulcra-collect")
+    calls = []
+
+    from fulcra_collect import service_manager as _sm
+    monkeypatch.setattr(
+        _sm, "install",
+        lambda *, executable: calls.append(("install", executable)) or plist,
+    )
+    monkeypatch.setattr(
+        dl, "restart",
+        lambda *, require_stop=False: calls.append(("restart", require_stop)),
+    )
+
+    changed = dl.reconcile_current_install(client=_StubClient(reply={
+        "ok": True, "daemon_pid": 42, "daemon_version": "0.1.2",
+    }))
+
+    assert changed is True
+    assert calls == [
+        ("install", "/Applications/Fulcra Collect.app/Contents/MacOS/fulcra-collect"),
+        ("restart", True),
+    ]
+
+
+def test_reconcile_current_install_reloads_repaired_service_when_daemon_is_unresponsive(
+    tmp_path, monkeypatch,
+):
+    plist = tmp_path / "com.fulcra.collect.plist"
+    plist.write_bytes(plistlib.dumps({
+        "ProgramArguments": ["/missing/old/fulcra-collect", "daemon"],
+    }))
+    expected = "/Applications/Fulcra Collect.app/Contents/MacOS/fulcra-collect"
+    monkeypatch.setattr(dl, "plist_path", lambda: plist)
+    monkeypatch.setattr(dl, "expected_executable", lambda: expected)
+    calls = []
+
+    from fulcra_collect import service_manager as _sm
+    monkeypatch.setattr(
+        _sm, "install",
+        lambda *, executable: calls.append(("install", executable)) or plist,
+    )
+    monkeypatch.setattr(
+        dl, "restart",
+        lambda *, require_stop=False: calls.append(("restart", require_stop)),
+    )
+
+    changed = dl.reconcile_current_install(
+        client=_StubClient(raise_=DaemonUnavailable("old executable missing")),
+    )
+
+    assert changed is True
+    assert calls == [("install", expected), ("restart", True)]
+
+
+def test_reconcile_current_install_fails_closed_when_launchd_cannot_unload(
+    tmp_path, monkeypatch,
+):
+    plist = tmp_path / "com.fulcra.collect.plist"
+    plist.write_bytes(plistlib.dumps({
+        "ProgramArguments": ["/old/fulcra-collect", "daemon"],
+    }))
+    expected = "/Applications/Fulcra Collect.app/Contents/MacOS/fulcra-collect"
+    monkeypatch.setattr(dl, "plist_path", lambda: plist)
+    monkeypatch.setattr(dl, "expected_executable", lambda: expected)
+
+    from fulcra_collect import service_manager as _sm
+    monkeypatch.setattr(_sm, "install", lambda *, executable: plist)
+    calls = []
+
+    def fake_launchctl(*args):
+        calls.append(args)
+        if args[0] == "bootout":
+            return 1, "Operation not permitted"
+        return 0, ""
+
+    monkeypatch.setattr(dl, "_launchctl", fake_launchctl)
+
+    with pytest.raises(dl.DaemonLifecycleError, match="Operation not permitted"):
+        dl.reconcile_current_install(client=_StubClient(reply={
+            "ok": True, "daemon_pid": 42, "daemon_version": "0.1.2",
+        }))
+
+    assert [call[0] for call in calls] == ["bootout"]
+
+
+def test_reconcile_current_install_is_noop_when_path_and_version_match(
+    tmp_path, monkeypatch,
+):
+    expected = "/Applications/Fulcra Collect.app/Contents/MacOS/fulcra-collect"
+    plist = tmp_path / "com.fulcra.collect.plist"
+    plist.write_bytes(plistlib.dumps({"ProgramArguments": [expected, "daemon"]}))
+    monkeypatch.setattr(dl, "plist_path", lambda: plist)
+    monkeypatch.setattr(dl, "expected_executable", lambda: expected)
+    monkeypatch.setattr(dl, "local_daemon_version", lambda: "0.1.2")
+
+    assert dl.reconcile_current_install(client=_StubClient(reply={
+        "ok": True, "daemon_pid": 42, "daemon_version": "0.1.2",
+    })) is False
 
 
 def test_uninstall_removes_plist_and_unregisters(tmp_path, monkeypatch):
