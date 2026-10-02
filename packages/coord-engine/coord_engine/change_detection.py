@@ -377,14 +377,18 @@ class ChangeDetector:
         feed_start, feed_watermark = feed_window
 
         # An EMPTY `file_changes` is not proof of quiet. Measured at the raw
-        # HTTP boundary 2026-10-02: the endpoint degrades under window size --
-        # usually HTTP 500 (-8d and beyond, which our transport correctly maps
-        # to None = UNKNOWN), and INTERMITTENTLY a 200 whose `file_changes` is
-        # empty while `data_types` is populated, on windows that otherwise
-        # return 100k+ changes (1 of 3 reps at -7d, 1 of 30 at -1d). There is
-        # no declared horizon; ~7 days is just where degradation becomes the
-        # common case. The bad answer is well-formed and fast and passes every
-        # attestation above, so shape alone cannot reject it.
+        # HTTP boundary 2026-10-02: every rep at -8d through -15d returned HTTP
+        # 500 (which the transport correctly maps to None = UNKNOWN), and at
+        # widths that otherwise answer -- -1d, -7d, -25d -- some reps returned
+        # rc 0 with `file_changes: []` while `data_types` was populated. Two
+        # consecutive calls on the identical range gave 0 and 105768.
+        #
+        # No mechanism and no rate are asserted here. The samples do not
+        # isolate window width from other variables, the -1d case shows a
+        # comfortably-working width can fail, and clean batches of 6 and 20
+        # were also observed. The usable fact is the one this check acts on:
+        # an empty answer is well-formed, passes every attestation above, and
+        # is indistinguishable from a genuinely quiet range by shape.
         #
         # This check needs no horizon constant because it tests the
         # CONTRADICTION rather than predicting a limit: a window cannot hold

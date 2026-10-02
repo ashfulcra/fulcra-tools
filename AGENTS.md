@@ -336,37 +336,44 @@ under `skills/`, each package with its own README, build, and tests.
   updated nor removed, the verb exits 3. Pointer updates are monotonic: an
   older snapshot must never move an agent's reported age backwards.
 - **`data-updates` intermittently answers 200 with an EMPTY `file_changes` on a
-  window that otherwise works.** Measured at the RAW HTTP boundary
+  window that otherwise works.** MEASURED, at the raw HTTP boundary
   (`GET /data/v1/updates?start_time=&end_time=`) and through the CLI, 2026-10-02:
-  `-1d` returned 13135 file changes in 4.0 MB and `-7d` returned 106187 in
-  32.7 MB, but `-8d` and beyond returned **HTTP 500 with an empty body**, and —
-  the part that matters — a window WELL INSIDE the working range intermittently
-  returned **rc 0 with `file_changes: []` and a populated `data_types` map**:
-  1 of 3 reps at `-7d`, 1 of 3 at `-25d`, 1 of 30 at `-1d` (20 consecutive clean
-  reps in one batch, so the rate is low and variable). One explanation covers
-  all of it: the endpoint degrades under window size, usually to 500 and
-  sometimes to a 200 whose `file_changes` leg is empty, and the wider the window
-  the more often it degrades. **There is no declared horizon** — ~7 days is just
-  where degradation becomes the common case.
-  Consequences for any detector over this feed:
+  - `-1d` returned 13135 file changes (4.0 MB); `-7d` returned 106187 (32.7 MB).
+  - Every rep at `-8d`, `-9d`, `-10d`, `-12d` and `-15d` returned **HTTP 500
+    with an empty body**; `-20d`/`-25d` returned 500 in most reps.
+  - At widths that otherwise answer, some reps returned **rc 0 with
+    `file_changes: []` and a populated `data_types` map** — seen at `-1d`, `-7d`
+    and `-25d`. The strongest single observation is two consecutive calls on the
+    IDENTICAL range returning `0` and `105768`.
+  **What is NOT established, and must not be written as if it were:** any causal
+  mechanism, and any rate. These samples do not isolate window width from time
+  of day, endpoint state, or anything else, and the `-1d` false empty is direct
+  evidence that a comfortably-working width can fail — so "the endpoint degrades
+  under window size, more often the wider the window" is an inference, not a
+  measurement, and earlier revisions of this paragraph asserted it. Frequency is
+  likewise unestablished: batches of 6 and of 20 came back entirely clean.
+  **Observation requiring further measurement:** failure frequency looked higher
+  at some wider requests. That is all it is.
+  Consequences a detector over this feed can actually rely on:
   - **An empty `file_changes` is never proof of quiet, at ANY window width.** It
-    is a degraded answer that is well-formed, fast, and indistinguishable from
-    truth by shape alone. `COORD_FEED_EMPTY_CORROBORATION` (below) checks it
-    against a recent sub-window, which catches every case wider than the
-    corroboration bound and **cannot** catch one narrower than it.
+    is a well-formed answer indistinguishable from truth by shape.
+    `COORD_FEED_EMPTY_CORROBORATION` (below) checks it against a recent
+    sub-window, catching every case wider than the corroboration bound and
+    **not** one narrower than it.
   - **A populated `data_types` beside an empty `file_changes` is a CANDIDATE
     signal, not a rule** — records-processed and file-changes are different legs
     and may legitimately diverge over a quiet range. Do not build a hard check
     on it without measuring that.
-  - **Raising `COORD_TRANSPORT_TIMEOUT` is still the wrong response**, but not
-    for the reason first recorded here: a longer bound does NOT turn a 500 into
-    a believed empty (our transport maps rc != 0 to None = UNKNOWN, correctly).
-    It is wrong because a longer bound lets WIDER requests complete, and wider
-    windows degrade more often — so it buys more exposure to the false empty,
-    not less. The earlier text in this file asserted a timeout-causes-200
-    mechanism inferred from one 30s-fails / 120s-returns-empty pair; repeated
-    sampling showed that pair was the endpoint's intermittency, not the bound's
-    effect. A plausible causal story read off two adjacent measurements.
+  - **Do not raise `COORD_TRANSPORT_TIMEOUT` in response to this.** Two earlier
+    justifications for that advice were wrong and are withdrawn: a longer bound
+    cannot turn a 500 into a 200 (our transport maps rc != 0 to None = UNKNOWN,
+    correctly), and the width/frequency mechanism above is not established. The
+    reason that survives needs neither: a longer bound lets requests complete
+    that would otherwise be cut client-side, and since an empty answer is
+    indistinguishable from a quiet range, more completed requests means more
+    chances to record a false clear. The original error is worth keeping in
+    view — a timeout-causes-200 mechanism read off one 30s-fails / 120s-returns-
+    empty pair, which repeated sampling showed was the endpoint's intermittency.
 - **`health` freshness is SHARD RECENCY; the advance fact is separate.** EVERY
   reconcile exit writes a health shard, aborts included — `_write_health_shard`
   runs before the early `return` — so a host that has aborted every pass for

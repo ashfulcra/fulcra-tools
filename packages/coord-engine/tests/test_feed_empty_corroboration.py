@@ -1,26 +1,34 @@
 """A zero signal is not proof of CLEAR -- corroborate an empty feed answer.
 
-Measured at the RAW HTTP boundary (`GET /data/v1/updates`) and through the CLI,
-2026-10-02: `-1d` returned 13135 file changes in 4.0 MB and `-7d` returned
-106187 in 32.7 MB, while `-8d` and beyond returned **HTTP 500 with an empty
-body** -- which our transport correctly maps to `None` = UNKNOWN. The defect
-this module is about is different and worse: a window WELL INSIDE the working
-range **intermittently** returns rc 0 with `file_changes: []` and a populated
-`data_types` map. 1 of 3 reps at `-7d`, 1 of 3 at `-25d`, 1 of 30 at `-1d`
-(one batch of 20 was entirely clean, so the rate is low and variable).
+MEASURED at the raw HTTP boundary (`GET /data/v1/updates`) and through the CLI,
+2026-10-02:
 
-One explanation covers all of it: the endpoint degrades under window size,
-usually to 500 and sometimes to a 200 whose `file_changes` leg is empty, and
-the wider the window the more often it degrades. There is no declared horizon;
-~7 days is just where degradation becomes the common case.
+  -1d                  HTTP 200, 13135 file changes, 4.0 MB
+  -7d                  HTTP 200, 106187 file changes, 32.7 MB
+  -8d .. -15d          HTTP 500, empty body, every rep
+  -1d, -7d, -25d       SOME reps: rc 0, `file_changes: []`, `data_types` populated
 
-So an empty `file_changes` is never proof of quiet **at any width**, and the
-bad answer is well-formed, fast, and passes every attestation the detector
-already performs -- shape alone cannot reject it.
+The strongest single observation is two consecutive calls on the IDENTICAL range
+returning 0 and 105768. The 500s our transport already handles correctly, by
+mapping rc != 0 to None = UNKNOWN. The intermittent 200-with-empty is what this
+module is about.
 
-The check pinned here needs no horizon constant, because it tests the
-contradiction rather than predicting a limit. Its limit is explicit: it cannot
-catch a false empty on a window narrower than the corroboration bound.
+NO MECHANISM AND NO RATE ARE ASSERTED. The samples do not isolate window width
+from time or endpoint state; the -1d case is direct evidence that a comfortably
+working width can fail; and clean batches of 6 and of 20 were also observed. An
+earlier revision of this docstring claimed the endpoint "degrades under window
+size", which was an inference, not a measurement -- in a change whose own
+subject was retracting a different inference of the same shape. Higher failure
+frequency at some wider requests is an OBSERVATION REQUIRING FURTHER
+MEASUREMENT, and nothing here rests on it.
+
+What the check rests on instead is the one fact that is established: an empty
+`file_changes` is not proof of quiet, at any width. The bad answer is
+well-formed and passes every attestation the detector already performs, so
+shape alone cannot reject it -- but a contradiction can. One extra read over a
+recent sub-window either corroborates the empty or disproves it, and that needs
+no model of why the feed misbehaves. Its limit is explicit: it cannot catch a
+false empty on a window narrower than the corroboration bound.
 
 It is DORMANT BY DEFAULT and these tests pin both branches, because a gate that
 is only ever tested switched on is not a gate.
