@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import threading
+import time
 from threading import Lock
 
 import keyring
@@ -74,15 +75,103 @@ def _service(plugin_id: str) -> str:
     return f"{_SERVICE_PREFIX}:{plugin_id}"
 
 
+# ---------------------------------------------------------------------------
+# Read caching and blocked-item backoff
+#
+# macOS binds a keychain item's ACL to the code identity of the app that
+# created it, so re-signing or rebuilding the app invalidates every existing
+# grant and each read raises an "allow access" dialog.
+#
+# That alone would be a once-per-rebuild annoyance. What turns it into a
+# dialog STORM is that a blocked read was never remembered: `_keyring_get`
+# gives up after a few seconds (so one stuck read can't wedge the
+# single-threaded control server) but the dialog stays on screen AND the
+# abandoned worker thread stays parked on the OS call. Every later call --
+# every scheduled plugin run, every status poll, every token read -- issued a
+# fresh read, which stacked a fresh dialog. Observed in the field: a user
+# clicking dialogs faster than they could be dismissed, because answering one
+# only satisfied a read that had already been abandoned.
+#
+# Two defenses, both required:
+#   1. Cache a successful read for the process lifetime, so an authorized
+#      item is read ONCE per daemon run (the user-level token already did
+#      this; plugin secrets did not).
+#   2. After a blocked read, refuse to issue another read for that item until
+#      a cooldown expires. This is what actually stops the storm: no read,
+#      no dialog. The block is deliberately NOT cached as "absent forever" --
+#      the user may authorize it at any moment, so we retry after the
+#      cooldown rather than giving up permanently.
+_BLOCK_COOLDOWN_S = 900.0
+
+_secret_cache: dict[tuple[str, str], str] = {}
+_blocked_until: dict[tuple[str, str], float] = {}
+_cache_lock = Lock()
+
+
+def _now() -> float:
+    """Monotonic clock, as a seam so tests can control the cooldown."""
+    return time.monotonic()
+
+
+def _cached_keyring_get(service: str, key: str) -> str | None:
+    """Read a secret, honouring the cache and the blocked-item cooldown."""
+    ident = (service, key)
+    now = _now()
+    with _cache_lock:
+        if ident in _secret_cache:
+            return _secret_cache[ident]
+        until = _blocked_until.get(ident)
+        if until is not None and now < until:
+            # Still blocked. Returning without reading is the whole point:
+            # issuing the read here is what used to spawn another dialog.
+            return None
+    try:
+        value = _keyring_get(service, key)
+    except TimeoutError:
+        with _cache_lock:
+            _blocked_until[ident] = now + _BLOCK_COOLDOWN_S
+        _log.warning(
+            "keychain item %s/%s needs authorization; suppressing further "
+            "reads for %.0fs so the daemon stops stacking dialogs. Click "
+            "'Always Allow' on the macOS prompt (NOT 'Allow', which grants "
+            "one read and leaves the next one blocked again).",
+            service, key, _BLOCK_COOLDOWN_S,
+        )
+        return None
+    with _cache_lock:
+        _blocked_until.pop(ident, None)
+        if value is not None:
+            _secret_cache[ident] = value
+    return value
+
+
+def _invalidate(service: str, key: str) -> None:
+    with _cache_lock:
+        _secret_cache.pop((service, key), None)
+        _blocked_until.pop((service, key), None)
+
+
+def is_blocked(plugin_id: str, key: str) -> bool:
+    """True iff this item is in its post-dialog cooldown.
+
+    Lets callers report "needs keychain authorization" instead of the
+    misleading "credential is not set" -- the secret exists, we just are not
+    allowed to read it yet.
+    """
+    with _cache_lock:
+        until = _blocked_until.get((_service(plugin_id), key))
+    return until is not None and _now() < until
+
+
 def set_secret(plugin_id: str, key: str, value: str) -> None:
     keyring.set_password(_service(plugin_id), key, value)
+    _invalidate(_service(plugin_id), key)
+    with _cache_lock:
+        _secret_cache[(_service(plugin_id), key)] = value
 
 
 def get_secret(plugin_id: str, key: str) -> str | None:
-    try:
-        return _keyring_get(_service(plugin_id), key)
-    except TimeoutError:
-        return None
+    return _cached_keyring_get(_service(plugin_id), key)
 
 
 def delete_secret(plugin_id: str, key: str) -> None:
@@ -92,6 +181,7 @@ def delete_secret(plugin_id: str, key: str) -> None:
         keyring.delete_password(_service(plugin_id), key)
     except keyring.errors.PasswordDeleteError:
         pass
+    _invalidate(_service(plugin_id), key)
 
 
 def has_secret(plugin_id: str, key: str) -> bool:
@@ -126,6 +216,9 @@ def _clear_caches() -> None:
     can't leak into the next) and for a hard re-read after external changes."""
     with _user_secret_cache_lock:
         _user_secret_cache.clear()
+    with _cache_lock:
+        _secret_cache.clear()
+        _blocked_until.clear()
 
 
 def set_user_secret(key: str, value: str) -> None:
@@ -135,21 +228,20 @@ def set_user_secret(key: str, value: str) -> None:
     keyring.set_password(_USER_SERVICE, key, value)
     with _user_secret_cache_lock:
         _user_secret_cache[key] = value
+    _invalidate(_USER_SERVICE, key)
+    with _cache_lock:
+        _secret_cache[(_USER_SERVICE, key)] = value
 
 
 def get_user_secret(key: str) -> str | None:
     with _user_secret_cache_lock:
         if key in _user_secret_cache:
             return _user_secret_cache[key]
-    try:
-        value = _keyring_get(_USER_SERVICE, key)
-    except TimeoutError:
-        # Keychain is blocked on an ACL prompt — transient. Degrade to absent
-        # but DON'T cache, so the next call retries once the prompt clears.
-        return None
-    with _user_secret_cache_lock:
-        _user_secret_cache[key] = value
-    return value
+    # Shares the blocked-item cooldown with plugin secrets. The bearer token
+    # is read from 8+ call sites on nearly every daemon operation, so without
+    # a cooldown a single unanswered dialog produced a new prompt on every
+    # one of them -- the worst instance of the storm this fixes.
+    return _cached_keyring_get(_USER_SERVICE, key)
 
 
 def has_user_secret(key: str) -> bool:
@@ -165,6 +257,7 @@ def delete_user_secret(key: str) -> None:
         pass
     with _user_secret_cache_lock:
         _user_secret_cache.pop(key, None)
+    _invalidate(_USER_SERVICE, key)
 
 
 # ---------------------------------------------------------------------------
