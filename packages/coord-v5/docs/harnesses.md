@@ -62,15 +62,15 @@ without copying them into public artifacts. No sign-in, new-session creation or
 force takeover is performed. Fixture and packed-install success are local tests,
 not authenticated native acceptance or restart/outage evidence.
 
-### Claude cloud: observed behaviour
+### Claude cloud: verify before placing a listener
 
-Measured on one account on 2026-10-03. These are platform behaviours that can change; re-probe them in your own environment and record what you observe in its acceptance record.
+These platform behaviours decide where a Claude-cloud listener can live and how it wakes a worker. They change faster than this guide (last checked 2026-10-03): probe each one in your own environment and record the result in that environment's acceptance record, not here.
 
-- Recurring cloud routines accepted a one-hour minimum interval; a 15-minute schedule was refused. One-shot scheduled runs, including a session's own scheduled follow-up messages, resolve to roughly the minute.
-- A scheduled run of a routine bound to an existing session was delivered into that session, queued while the session was busy. A manual "run now" of the same kind of routine started a new session instead. To wake a specific worker, schedule a one-shot run bound to its session; a manual run hands the work to a fresh session without that worker's context.
-- A session started directly had no connector tools; routines can attach connectors to the sessions they start. A listener that must schedule wakes for other sessions therefore needs the session-management connector attached through its routine.
-- A reclaimed container loses everything written inside it, including a file-based login. A listener that runs in fresh containers must authenticate through an attached connector or a credential the environment supplies on every start, not through a login performed once in an earlier container.
-- Cross-session messaging from a cloud container reached only sessions on the same machine; other cloud sessions were not listed as recipients.
+- The minimum interval for a recurring cloud routine (last checked: one hour; shorter schedules were refused). One-shot scheduled runs, including a session's own scheduled follow-up messages, resolve to roughly the minute.
+- Whether a scheduled run of a routine bound to an existing session is delivered into that session (last checked: yes, queued while busy) and whether a manual "run now" starts a new session instead (last checked: yes). To wake a specific worker, schedule a one-shot run bound to its session; a manual run hands the work to a fresh session without that worker's context.
+- Which connector tools a directly started session receives (last checked: none) versus a session a routine starts with connectors attached. A listener that must schedule wakes for other sessions therefore needs the session-management connector attached through its routine.
+- Whether anything written inside a container survives its reclamation (last checked: nothing, including a file-based login). A listener that runs in fresh containers must authenticate through an attached connector or a credential the environment supplies on every start, not through a login performed once in an earlier container.
+- Which sessions cross-session messaging can reach from a cloud container (last checked: only sessions on the same machine).
 
 No Claude-cloud listener has passed end-to-end acceptance yet. Until one does, Claude-cloud workers rely on the worker wake described at the top of this guide.
 
@@ -78,7 +78,7 @@ No Claude-cloud listener has passed end-to-end acceptance yet. Until one does, C
 |---|---|
 | Claude Code live session | Inspect native loop/scheduled-task and channel tools in that session. Verify workspace access, busy delivery, expiration and resume behavior. A session loop shares the session's lifetime. |
 | Claude desktop | Inspect desktop-native scheduling and messaging separately from CLI capabilities. Verify the receiving session and its tool permissions. |
-| Claude cloud | See [observed behaviour](#claude-cloud-observed-behaviour) above. Inspect routines, attached connectors and the new-session path in the environment itself; rehydrate role/job context rather than assuming a session is resumed. |
+| Claude cloud | See [what to verify](#claude-cloud-verify-before-placing-a-listener) above. Inspect routines, attached connectors and the new-session path in the environment itself; rehydrate role/job context rather than assuming a session is resumed. |
 | Codex cloud / ChatGPT web | Probe scheduling and connected record/file tools in the scheduled environment itself; desktop tool availability does not prove cloud access. |
 | Regular Claude web | Start interactive with verified tools. Upgrade only after an idle invocation and cross-session delivery are demonstrated. |
 | OpenClaw / Hermes | Inspect the installed gateway's native scheduling and notification tools; test lifecycle and credential access in that environment. Keep gateway health separate from worker progress. |
