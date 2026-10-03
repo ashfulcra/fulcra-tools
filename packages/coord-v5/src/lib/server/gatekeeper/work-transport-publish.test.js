@@ -40,7 +40,7 @@ const metadata = {
 };
 /** @param {any} [value] */
 const row = (value = event) => ({
-  id: '91fe3dd7-8f9f-5267-b5d7-eb8187c349f6',
+  id: '00000000-0000-4000-8000-0000000009f6',
   source_id: sourceId,
   note: serializeWorkEvent(value),
   metadata
@@ -218,7 +218,7 @@ describe('single-attempt synthetic work publisher', () => {
     const changed = { ...event, payload: { item: { ...event.payload.item, title: 'Changed' } } };
     const result = await trustedRead(undefined, [
       row(),
-      { ...row(changed), id: '91fe3dd7-8f9f-5267-b5d7-eb8187c349f7' }
+      { ...row(changed), id: '00000000-0000-4000-8000-0000000009f7' }
     ]);
     expect(reconcileWorkReadback({ store, readResult: result, eventId: event.event_id })).toEqual({
       status: 'conflict',
