@@ -5,6 +5,14 @@ import keyring
 import pytest
 from keyring.backend import KeyringBackend
 
+from fulcra_collect import credentials
+
+
+class _Clock:
+    def __init__(self): self.t = 1000.0
+    def __call__(self): return self.t
+    def advance(self, dt): self.t += dt
+
 
 class InMemoryKeyring(KeyringBackend):
     """A keyring backend that stores secrets in a dict — for tests only."""
@@ -31,6 +39,9 @@ def _in_memory_keyring(monkeypatch):
     monkeypatch.setattr(keyring, "set_password", backend.set_password)
     monkeypatch.setattr(keyring, "get_password", backend.get_password)
     monkeypatch.setattr(keyring, "delete_password", backend.delete_password)
+    # The read cache and blocked-item cooldown live at module scope, so they
+    # would otherwise leak between tests and serve a previous test's value.
+    credentials._clear_caches()
     return backend
 
 
@@ -79,14 +90,23 @@ def test_keyring_read_that_blocks_times_out(monkeypatch):
     assert elapsed < 2.0  # gave up promptly, didn't wait out the 5s block
 
 
-def test_get_user_secret_returns_none_on_blocked_read_without_caching(monkeypatch):
-    """A blocked keychain read degrades get_user_secret to None and must NOT
-    cache that transient failure — a later read (once the prompt clears) must
-    retry rather than return a stale 'absent'."""
+def test_get_user_secret_retries_after_the_cooldown_not_immediately(monkeypatch):
+    """A blocked keychain read degrades to None and must NOT be cached as a
+    permanent absence — a later read must retry once the prompt clears.
+
+    CHANGED (keychain dialog storm): the retry now waits out a cooldown
+    instead of happening on the very next call. Retrying immediately is what
+    produced the storm — every call issued a fresh keychain read, and each
+    read stacked another macOS dialog that the user could not dismiss faster
+    than the daemon created them. The original intent (never give up
+    permanently) is preserved and asserted below; only the timing changed.
+    """
     import threading
 
     from fulcra_collect import credentials
 
+    clock = _Clock()
+    monkeypatch.setattr(credentials, "_now", clock)
     blocking = threading.Event()
 
     def _blocking_get(service, account):
@@ -96,9 +116,15 @@ def test_get_user_secret_returns_none_on_blocked_read_without_caching(monkeypatc
     monkeypatch.setattr(keyring, "get_password", _blocking_get)
     monkeypatch.setattr(credentials, "_KEYCHAIN_READ_TIMEOUT_S", 0.3)
     assert credentials.get_user_secret("bearer-token") is None
-    # Transient failure wasn't cached: the prompt "clears", reads succeed.
+
     blocking.set()
     monkeypatch.setattr(keyring, "get_password", lambda s, a: "real-token")
+
+    # Within the cooldown we deliberately do NOT touch the keychain again.
+    assert credentials.get_user_secret("bearer-token") is None
+
+    # Once it lapses, the read is retried and succeeds.
+    clock.advance(credentials._BLOCK_COOLDOWN_S + 1)
     assert credentials.get_user_secret("bearer-token") == "real-token"
 
 
@@ -227,3 +253,126 @@ def test_user_secret_is_separate_from_plugin_secret(_in_memory_keyring):
     credentials.set_user_secret("bearer-token", "user-value")
     assert credentials.get_secret("lastfm", "bearer-token") == "plugin-value"
     assert credentials.get_user_secret("bearer-token") == "user-value"
+
+
+# ---------------------------------------------------------------------------
+# Blocked-item cooldown — the dialog-storm fix.
+# ---------------------------------------------------------------------------
+
+def _count_reads(monkeypatch, *, behaviour):
+    """Install a fake _keyring_get that records every call."""
+    calls = []
+
+    def fake(service, account, **kw):
+        calls.append((service, account))
+        return behaviour(service, account)
+
+    monkeypatch.setattr(credentials, "_keyring_get", fake)
+    return calls
+
+
+def test_a_blocked_read_suppresses_further_reads_for_the_cooldown(monkeypatch):
+    """THE fix: while blocked we must not touch the keychain again.
+
+    Each read is what raises a macOS dialog, so a caller that keeps reading
+    keeps stacking dialogs the user cannot dismiss fast enough.
+    """
+    credentials._clear_caches()
+    clock = _Clock()
+    monkeypatch.setattr(credentials, "_now", clock)
+
+    def always_blocked(service, account):
+        raise TimeoutError("dialog pending")
+
+    calls = _count_reads(monkeypatch, behaviour=always_blocked)
+
+    assert credentials.get_secret("lastfm", "api-key") is None
+    assert len(calls) == 1, "first read should reach the keychain"
+
+    for _ in range(50):
+        assert credentials.get_secret("lastfm", "api-key") is None
+    assert len(calls) == 1, "blocked item must not be read again (each read = a dialog)"
+
+
+def test_the_cooldown_expires_so_authorizing_the_item_takes_effect(monkeypatch):
+    credentials._clear_caches()
+    clock = _Clock()
+    monkeypatch.setattr(credentials, "_now", clock)
+
+    state = {"blocked": True}
+
+    def behaviour(service, account):
+        if state["blocked"]:
+            raise TimeoutError("dialog pending")
+        return "secret-value"
+
+    calls = _count_reads(monkeypatch, behaviour=behaviour)
+    assert credentials.get_secret("lastfm", "api-key") is None
+    assert len(calls) == 1
+
+    # User clicks "Always Allow"; we must retry once the cooldown lapses,
+    # never give up permanently.
+    state["blocked"] = False
+    clock.advance(credentials._BLOCK_COOLDOWN_S + 1)
+    assert credentials.get_secret("lastfm", "api-key") == "secret-value"
+    assert len(calls) == 2
+
+
+def test_a_successful_read_is_cached_for_the_process_lifetime(monkeypatch):
+    credentials._clear_caches()
+    calls = _count_reads(monkeypatch, behaviour=lambda s, a: "v")
+    for _ in range(25):
+        assert credentials.get_secret("lastfm", "api-key") == "v"
+    assert len(calls) == 1, "an authorized item should be read once per daemon run"
+
+
+def test_user_secrets_share_the_cooldown(monkeypatch):
+    # The bearer token is read from many call sites; without the cooldown one
+    # unanswered dialog produced a prompt on every one of them.
+    credentials._clear_caches()
+    clock = _Clock()
+    monkeypatch.setattr(credentials, "_now", clock)
+    calls = _count_reads(
+        monkeypatch,
+        behaviour=lambda s, a: (_ for _ in ()).throw(TimeoutError("pending")))
+    for _ in range(20):
+        assert credentials.get_user_secret("bearer-token") is None
+    assert len(calls) == 1
+
+
+def test_is_blocked_distinguishes_needs_authorization_from_absent(monkeypatch):
+    credentials._clear_caches()
+    clock = _Clock()
+    monkeypatch.setattr(credentials, "_now", clock)
+    _count_reads(monkeypatch,
+                 behaviour=lambda s, a: (_ for _ in ()).throw(TimeoutError()))
+    credentials.get_secret("trakt", "client_id")
+    assert credentials.is_blocked("trakt", "client_id") is True
+    # A genuinely-absent item is NOT blocked.
+    assert credentials.is_blocked("trakt", "never-set") is False
+    clock.advance(credentials._BLOCK_COOLDOWN_S + 1)
+    assert credentials.is_blocked("trakt", "client_id") is False
+
+
+def test_absent_items_are_not_cached_as_present(monkeypatch):
+    credentials._clear_caches()
+    calls = _count_reads(monkeypatch, behaviour=lambda s, a: None)
+    assert credentials.get_secret("lastfm", "api-key") is None
+    assert credentials.get_secret("lastfm", "api-key") is None
+    # Absence must stay re-readable so a newly-set secret is picked up.
+    assert len(calls) == 2
+
+
+def test_setting_a_secret_clears_a_block_and_serves_the_new_value(monkeypatch):
+    credentials._clear_caches()
+    clock = _Clock()
+    monkeypatch.setattr(credentials, "_now", clock)
+    _count_reads(monkeypatch,
+                 behaviour=lambda s, a: (_ for _ in ()).throw(TimeoutError()))
+    credentials.get_secret("lastfm", "api-key")
+    assert credentials.is_blocked("lastfm", "api-key") is True
+
+    monkeypatch.setattr(credentials.keyring, "set_password", lambda *a, **k: None)
+    credentials.set_secret("lastfm", "api-key", "fresh")
+    assert credentials.is_blocked("lastfm", "api-key") is False
+    assert credentials.get_secret("lastfm", "api-key") == "fresh"
