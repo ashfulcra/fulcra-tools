@@ -1473,7 +1473,10 @@ package only; Collect and the web application are not prerequisites.
 
 For new v5 enrollment, use the package's [onboarding guide](packages/coord-v5/docs/onboarding.md)
 and capability-evidenced `coord-v5 enrollment plan`; keep one native listener
-registration per environment/harness. Its plan is not an installed schedule or
+registration per environment/harness. A worker keeps its own native wake until that
+environment's listener wake is verified end to end, and keeps it afterwards as a
+coarse backstop; never retire a worker wake on registration or delivery evidence
+alone ([harness guide](packages/coord-v5/docs/harnesses.md)). Its plan is not an installed schedule or
 a membership grant. Current verified event ingress selects `native-event` without
 requiring a schedule/loop when read, publish, checkpoint, dispatch and explicit
 unattended opt-in are satisfied; a verified schedule is a backstop. A reporting

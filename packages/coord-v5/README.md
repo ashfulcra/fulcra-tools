@@ -54,6 +54,9 @@ operator intervals. With explicit unattended opt-in and current read, publish,
 checkpoint and dispatch evidence, verified event ingress selects `native-event`
 without scheduling; a verified schedule adds a backstop. Scheduling/loops remain
 fallbacks without ingress. This is a plan, not an event adapter or idle-wake proof.
+Until a listener's wake is verified in an environment, each addressed worker keeps
+its own native wake; a verified listener relaxes that wake to a coarse backstop
+rather than removing it ([harness guide](docs/harnesses.md)).
 The reporting listener routes attention to separate workers; owned-task self-ticking
 execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
 instructions command returns `{content}` without editing files. Its stdin is
