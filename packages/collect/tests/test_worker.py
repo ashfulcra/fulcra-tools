@@ -497,3 +497,44 @@ def test_set_credential_writes_to_declared_scope(
     assert events[-1]["outcome"] == "done", events[-1]
     assert ("user", "shared-tok", "new-user-val") in writes
     assert ("plugin", "scopetest", "api-key", "new-plugin-val") in writes
+
+
+def test_a_blocked_credential_is_reported_as_needing_authorization(
+        collect_home: Path, monkeypatch):
+    """A stored-but-unreadable credential must not be reported as unset.
+
+    Saying "credential is not set" sends the user to re-enter a secret that
+    is already there, and hides the real cause: the keychain ACL no longer
+    matches this build of the app after a rebuild/re-sign.
+    """
+    from fulcra_collect import credentials
+    from fulcra_collect.plugin import Credential
+
+    monkeypatch.setattr(credentials, "is_blocked",
+                        lambda plugin_id, key: key == "api-key")
+    plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
+                    collect_mode="historical",
+                    run=lambda ctx: None,
+                    required_credentials=(Credential(key="api-key", label="K", help="h"),))
+    events = _run_capturing(plugin, collect_home)
+    err = events[-1]["error"]
+    assert events[-1]["outcome"] == "error"
+    assert "authorization" in err.lower()
+    assert "Always Allow" in err
+    assert "set-credential" not in err, "must not tell the user to re-enter a stored secret"
+
+
+def test_an_actually_unset_credential_still_says_how_to_set_it(
+        collect_home: Path, monkeypatch):
+    from fulcra_collect import credentials
+    from fulcra_collect.plugin import Credential
+
+    monkeypatch.setattr(credentials, "is_blocked", lambda plugin_id, key: False)
+    plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
+                    collect_mode="historical",
+                    run=lambda ctx: None,
+                    required_credentials=(Credential(key="api-key", label="K", help="h"),))
+    events = _run_capturing(plugin, collect_home)
+    err = events[-1]["error"]
+    assert "set-credential" in err
+    assert "authorization" not in err.lower()

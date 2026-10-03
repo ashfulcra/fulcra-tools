@@ -133,8 +133,8 @@ def _cached_keyring_get(service: str, key: str) -> str | None:
         _log.warning(
             "keychain item %s/%s needs authorization; suppressing further "
             "reads for %.0fs so the daemon stops stacking dialogs. Click "
-            "'Always Allow' on the prompt (NOT 'Allow'), or run "
-            "`fulcra-collect repair-keychain`.",
+            "'Always Allow' on the macOS prompt (NOT 'Allow', which grants "
+            "one read and leaves the next one blocked again).",
             service, key, _BLOCK_COOLDOWN_S,
         )
         return None
