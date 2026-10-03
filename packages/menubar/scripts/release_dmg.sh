@@ -61,6 +61,7 @@ OUT_DMG="$REPO/dist/Fulcra Collect.dmg"
 echo "=== 1/7  build the unsigned app (wheelhouse + briefcase create/build) ==="
 bash "$MENUBAR/scripts/build_macos_app.sh"
 bash "$MENUBAR/scripts/verify_bundle.sh"
+python3 "$MENUBAR/scripts/sanitize_bundle.py" "$APP"
 python3 "$MENUBAR/scripts/sanitize_bundle.py" --check-only "$APP"
 
 echo "=== 2/7  sign the app inside-out via Briefcase (Developer ID, hardened runtime) ==="

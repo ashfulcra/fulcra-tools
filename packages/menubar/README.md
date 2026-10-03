@@ -75,7 +75,10 @@ bash packages/menubar/scripts/verify_bundle.sh
 The Briefcase build includes workspace wheels, Python, native command launchers,
 and the web setup interface. It writes the app under
 `packages/menubar/build/fulcra-menubar/macos/app/`. The build rejects embedded
-builder-home paths and removes nonportable pip scripts before signing.
+builder-home paths and removes nonportable pip scripts before signing. It also
+removes generated Python bytecode after build and bundle verification because
+bytecode can retain a source path from the build machine. A final read-only
+privacy check runs before signing.
 
 For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,
