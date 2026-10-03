@@ -4654,9 +4654,10 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     """File a verdict for a review round.
 
     SUGAR OVER THE EXISTING ARTIFACT, deliberately (coord-boss constraint a):
-    this writes exactly the canonical `<head>--<reviewer>.md` shard at the path
-    `review request` already prints, with the frontmatter the tally already
-    reads. Nothing downstream — tally, settle, retention — learns that a verb
+    this writes the append-only `<head>--<reviewer>--<ts>-<digest>.md` shard in
+    the verdicts directory `review request` already prints, with the frontmatter
+    the tally already reads (the plain `<head>--<reviewer>.md` form stays valid
+    for hand-writers). Nothing downstream — tally, settle, retention — learns that a verb
     exists, and DIRECT shard-writing stays valid (constraint b): reviewers who
     write the file themselves are unaffected the day this ships.
 

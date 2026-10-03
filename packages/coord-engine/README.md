@@ -229,7 +229,22 @@ disable a bound or make an op hang. Retention is the deliberate exception:
 | `COORD_THREADS_INTENT_GRACE_HOURS` | `48` | hours | `threads` intent grace when an intent declares no window (flag `--intent-grace-hours` wins). |
 | `COORD_RECONCILE_FULL_EVERY` | `72` | count | Incremental reconcile passes between forced task-listing drift checks; `1` full-scans every pass. Missing/corrupt cursor state, feed doubt, an unreadable changed shard, or an aggregate older than `MAX_FAST_PATH_HOURS` full-scans regardless. |
 | `COORD_ACKS_FULL_EVERY` | `72` | count | Passes between FORCED full ack folds in `reconcile`. The fold is change-driven (it asks the store what changed and re-folds only those slugs); this bounds how long a change the query never reported can persist, and carries the orphan-shard GC, which only rides the full fold. `1` disables the incremental path (every pass lists every ack dir). Default 72 is roughly daily on a 20-minute heartbeat. Forced full folds cost more than incremental passes; tune this interval to your workload while retaining the correctness backstop. Any doubt — no change query, a query error, no anchor, a changed slug that wouldn't list — full-folds regardless of this knob, and does not advance the fold's anchor (`acks_folded_through`), so the unread change stays in the next pass's window. |
+| `COORD_FORGE_BUILD_BUDGET` | `300` | seconds | Per-`reconcile`-pass budget for building the forge projection section; its own budget, never shared with the review build. |
+| `COORD_PRESENCE_WORK_BUDGET` | `20` | seconds | Deadline for the work-evidence scan in `presence show` / `briefing`. A cut makes the scan PARTIAL, which suppresses the absence nudge. |
+| `COORD_ATTENDANCE_SCAN_BUDGET` | `30` | seconds | Wall-clock bound on `escalate`'s one shared verdict-activity scan (count budget 40). Only a wall-clock cut exits 3. |
+| `COORD_OBLIGATION_BUDGET` | `90` | seconds | Deadline for the `obligations` fold. |
+| `COORD_READ_RETRY_MS` | `2000` | milliseconds | Backoff before the single retry of a read that returned an error. `0` or negative disables the retry; unparseable falls back to the default. |
+| `COORD_RECORDS_API_VERSION` | `v1alpha1` | — | Records API version override; env wins over the store's `_coord/bus-v3/records.json`. |
 | `COORD_RETENTION_DAYS` | `14` | days | `reconcile` cold-archives quiet terminal (`done`/`abandoned`) and stale `proposed` tasks after 14 days by default (flag/env overrides). Settled reviews are archived wholesale after 7 days and indexed so hot folds skip their soft-delete tombstones; presence dead over 7 days is pruned; legacy `artifact/` is consolidated into `artifacts/`. Set to `0` to disable retention. Moves are copy-verified and fail closed. Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins). |
+
+### Wake router (host-local)
+
+| Variable | Default | Bounds |
+|---|---|---|
+| `COORD_WAKE_DIR` | `$XDG_STATE_HOME/coord-engine/wakes` (else `~/.local/state/coord-engine/wakes`) | Local wake-queue root. |
+| `COORD_WAKE_ADAPTER_DIR` | *(unset)* | Directory holding `<adapter>.sh`. Unset means this host runs no host-local adapter script. |
+| `COORD_WAKE_ADAPTER_TIMEOUT` | `10` | Seconds; hard bound on one adapter run. The process group is killed at the bound and the wake reports `failed`. |
+| `COORD_ROUTER_STATE_PREFIX` | *(unset: canonical `router/`)* | Alternate router state prefix (flag `--state-prefix` wins). An explicitly empty value is refused rc 2, never read as canonical. |
 
 ### Identity, state & logging
 

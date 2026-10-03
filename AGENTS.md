@@ -267,8 +267,9 @@ under `skills/`, each package with its own README, build, and tests.
     the menu-bar can't import. Any sync must keep `--all-extras` or it prunes
     pytest + PyObjC back out.
   - **Linux**: `uv sync --all-packages`, then select the dev extra at RUN time:
-    `uv run --all-packages --extra dev python -m pytest packages/ -q`. This is
-    what the Linux workflows do (`uv-workspace.yml`, `coord-fold-proof.yml`).
+    `uv run --all-packages --extra dev python -m pytest packages/ -q`. The Linux
+    CI job (`uv-workspace.yml`) uses the same extra selection over an explicit
+    list of package test paths.
     Do NOT use `--all-extras` here: it pulls the `macos` extra, whose PyObjC
     wheels build by shelling out to `/usr/bin/sw_vers`, which does not exist on
     Linux. The build dies with `FileNotFoundError` and **nothing is installed**.
@@ -939,7 +940,7 @@ it (not on PyPI).
   "reason": …}` (inside the one `--json` value; a stderr notice in text mode) while retaining any
   partial rows, and `reason` preserves every independent failure in the pass. The hazard it closes: a
   silently-empty fold reading "all clear" while a live unacked directive is merely unreadable.
-  **Ship-gate: a new aggregate-backed read consumes `_load_rows_status` (never `_load_rows`) and
+  **Ship-gate: a new aggregate-backed read consumes `_load_rows_status` (never a fold that drops its `ok` bit) and
   surfaces the marker on `ok is False`, with a red-first test asserting no clean-empty under a
   degraded transport.**
 - **`--json` purity: stdout is ALWAYS one parseable value.** Under `--json`, NO prose ever reaches
@@ -1160,9 +1161,10 @@ it (not on PyPI).
   filename ts, then frontmatter ts, then normalized listing mtime.
   **`review verdict`** exists so that filing a verdict IS an engine write (it was the one act with
   no verb, which left reviewers invisible to every liveness fix). It is SUGAR over the same
-  artifact — it writes exactly the canonical `<head>--<reviewer>.md` shard at the printed path, and
-  DIRECT shard-writing stays valid — and it REFUSES to overwrite an existing verdict: a verdict is
-  evidence a merge may rest on; a changed head is a new round, the supported way to revise.
+  artifact — it writes the append-only `<head>--<reviewer>--<iso>-<digest>.md` form in the round's
+  verdicts directory, and DIRECT shard-writing of the plain form stays valid. It never overwrites:
+  the name is unique, so a second filing is a NEW shard that supersedes the prior one (below), never
+  a replacement of evidence a merge may rest on; a changed head is a new round.
   **Every registered command must be CLASSIFIED**, read or write or mixed:
   `tests/test_activity_covers_every_write_verb.py` walks the real argparse tree and fails on any
   unclassified command (a regex cannot decide this — several verbs persist only through helpers).
@@ -1179,7 +1181,8 @@ it (not on PyPI).
   session's `until` and never writes `state`/`lapsed_at` (sweep-owned). The minimal-beat fallback
   fires ONLY on `list_dir`-CONFIRMED absence and FAILS CLOSED on any UNKNOWN — failure isolation
   never means destructive fallback. **Ship-gate: the throttle memo is process-global state — reset
-  it between tests; a new write verb joins `_ACTIVITY_WRITE_FUNCS` (or the omission is justified);
+  it between tests; a new write verb is activity by default (denylist), a new READ verb joins
+  `_ACTIVITY_READ_FUNCS`, and a mixed handler joins `_MIXED_MODE_ACTIVITY`;
   the preserve-everything-but-timestamp rule stays red-first pinned.**
 - **A CHANGES is lifted only by a shard that NAMES it (`supersedes:`), never by the clock
   (2026-09-05, codex-coder, review-winning-envelope r4).** Client timestamps cannot carry the
@@ -1197,8 +1200,8 @@ it (not on PyPI).
   superseder — same minute or unknown fails closed; a bare legacy name needs the same mtime proof.
   The verb quotes the content digest of each prior it can list AND read; a prior it cannot read is
   not named; on a degraded listing it names NOTHING (if you cannot enumerate the priors you cannot
-  claim to supersede them). The random `nonce:` now also sits in the shard NAME
-  so identical same-second filings cannot collide. **Invalid edges:** a shard can never resolve
+  claim to supersede them). The random `nonce:` also feeds the digest in the shard
+  NAME, so identical same-second filings cannot collide. **Invalid edges:** a shard can never resolve
   ITSELF (a self-link let a CHANGES erase its own withdrawal); self-links and names
   that resolve nothing are reported in the tally as `malformed_supersedes`, never folded around silently;
   a cycle fails closed to CHANGES; a forward edge cannot be forged (the name embeds a content digest).
@@ -1571,11 +1574,11 @@ current generation as public authority, or infer that authority from the release
 Cursor schema 2 remains a separate activation that requires its own fleet
 version fence and proven CAS transport.
 
-The tagged release still sets `FulcraFileTransport.public_read_v2_enabled` to
-true, so migrated folds currently enter the unverified generation wrapper and
-return `UNKNOWN` before their canonical handlers run. That is an adoption
-blocker, not a reason to revive epsilon: an exact-head follow-up must make
-dormant serving real before any host claims functional `2.0.0` adoption.
+The `2.0.0` tag set `FulcraFileTransport.public_read_v2_enabled` to true, so
+migrated folds entered the unverified generation wrapper and returned
+`UNKNOWN` before their canonical handlers ran. `2.0.1` and later set it to
+false, making dormant serving real; adopt a later release, never `2.0.0`.
+This is a source fact, not evidence of which build any live host runs.
 
 Fleet adoption is functional, not epsilon-based. Every live host within the
 recorded SLA must run the exact released build (with named, evidenced
@@ -1873,7 +1876,7 @@ Diagnose a live install with `uv run fulcra-collect doctor`.
 
 ## coord-fold — the coord-on-annotations fold engine (packages/coord-fold)
 
-Canonical home for the durable facts about `packages/coord-fold` (plan `docs/superpowers/plans/2026-09-04-coord-fold.md`, spec `docs/superpowers/specs/2026-09-04-coord-annotation-bus-design.md`). Ship-gate rule: every PR touching the package updates this section or states "no change needed".
+Canonical home for the durable facts about `packages/coord-fold` (its plan `docs/superpowers/plans/2026-09-04-coord-fold.md` and spec `docs/superpowers/specs/2026-09-04-coord-annotation-bus-design.md` exist only on the unmerged `coord-fold-plan` branch, not on main). Ship-gate rule: every PR touching the package updates this section or states "no change needed".
 
 **What it is.** A SEPARATE package (not a module inside coord-engine): `coord_fold/{events,transport,channel,checkpoint,fold,cli}.py`, each owning exactly the symbols the ownership manifest in `tests/test_structural.py` names. Its import graph never reaches `coord_engine`; `pyproject.toml` declares no dependency on it. Dependency direction is one way: coord-engine's old side (Tasks 12–14: seed export, dual-emit, comparator) may import nothing from here and here imports nothing from there.
 
@@ -1889,7 +1892,7 @@ Canonical home for the durable facts about `packages/coord-fold` (plan `docs/sup
 
 **Record write shape (G13 drill finding, 2026-09-05).** coord-fold's writer invokes the real CLI exactly as the engine's `record_write` does: `record <data_type> --api-version <v> --source <sender>` with only `{note, recorded_at}` on stdin. The first cut passed no positional and five stdin keys; the real CLI refused every write (rc 2, `Missing argument 'DATA_TYPE'`) while the proof's fake accepted it, so every `coord-fold emit/claim/release/close` on the live store returned UNKNOWN until the drill tried one. The proof's store server now refuses the same shapes the CLI refuses; a fake that accepts what the real thing rejects proves nothing.
 
-**The four gate files** (CI, `uv-workspace.yml` gates step and `scripts/materialize_plan.py` GATES): `tests/test_structural.py` (ownership manifest, no enumeration, import graph, two-method Protocol, disjoint reader/writer), `tests/test_tripwire.py`, `tests/test_ship_check.py`, `tests/test_ci_wiring.py`; plus `tests/test_file_size_ceiling.py` (G8: 400 lines per `.py` under `coord_fold/`, recursive; the ceiling is documented in `packages/coord-fold/README.md`) and `tests/test_no_degraded_vocabulary.py`.
+**The four gate files** (CI: the always-on Linux `uv-workspace.yml` test step, plus macOS `pytest packages/`; and `scripts/materialize_plan.py` GATES): `tests/test_structural.py` (ownership manifest, no enumeration, import graph, two-method Protocol, disjoint reader/writer), `tests/test_tripwire.py`, `tests/test_ship_check.py`, `tests/test_ci_wiring.py`; plus `tests/test_file_size_ceiling.py` (G8: 400 lines per `.py` under `coord_fold/`, recursive; the ceiling is documented in `packages/coord-fold/README.md`) and `tests/test_no_degraded_vocabulary.py`.
 
 **The tripwire is demoted (G30).** `tests/test_tripwire.py` is a syntactic scan for enumeration identifiers and modules (`os.listdir`, `iterdir`, `glob`, …). It catches the plain spelling and nothing else — an alias, a `getattr`-built name, or a subprocess escapes it by construction. It is kept because it is cheap and true about what it names; it is NOT the guarantee and a green tripwire proves nothing about behaviour.
 
@@ -1961,6 +1964,6 @@ acts on today.
   both public reads **UNKNOWN (rc 3) with the known rows retained as partial data** (codex-reviewer P0, same
   register). Rollback is `--serve files`, one write, fleet-wide. `cutover` is MIXED: `show` is a read, `set` is
   activity.
-- **Forge projection cost (ruling 30be1f8e, 2026-09-05).** `build_forge_projection` lists the parent `_coord/forge/feedback/` ONCE and lists per PR only the PRs that appear there; measured on the live store 125 responsible PRs cost ~77 s of per-PR listings that almost all returned empty, against a sub-second parent listing naming two directories. An EMPTY or FAILED parent listing proves nothing (a listing answers identically for a real empty dir and a bad path) and falls back to the per-PR loop unchanged: the pruning only removes work it has positive evidence for. `COORD_FORGE_BUILD_BUDGET` (default 60 s) is then a ceiling, not a requirement; the reconciling host carries 180 in its launchd plist.
+- **Forge projection cost (ruling 30be1f8e, 2026-09-05).** `build_forge_projection` lists the parent `_coord/forge/feedback/` ONCE and lists per PR only the PRs that appear there; measured on the live store 125 responsible PRs cost ~77 s of per-PR listings that almost all returned empty, against a sub-second parent listing naming two directories. An EMPTY or FAILED parent listing proves nothing (a listing answers identically for a real empty dir and a bad path) and falls back to the per-PR loop unchanged: the pruning only removes work it has positive evidence for. `COORD_FORGE_BUILD_BUDGET` (default 300 s, raised from 60 on 2026-09-07) is then a ceiling, not a requirement; the reconciling host carries 180 in its launchd plist.
 - **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
   each write (two of those already did while the verb classified as a read).
