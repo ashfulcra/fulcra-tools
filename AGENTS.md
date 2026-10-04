@@ -18,6 +18,11 @@ Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
 
+Coord V5 has an opt-in parallel `transport read-updates` route. Use shadow mode
+before gated deployment; update watermarks are not record cursors or complete-history
+proof. Quiet hints never cancel retained delivery obligations. Preserve the direct
+route, private journals and per-source scope; see the package README for audit/fallback limits.
+
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
 fixes, plugins, installers, commands, and workflows. If a package has no README,
