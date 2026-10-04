@@ -4654,9 +4654,10 @@ def cmd_review_verdict(args: argparse.Namespace, transport: Any) -> int:
     """File a verdict for a review round.
 
     SUGAR OVER THE EXISTING ARTIFACT, deliberately (coord-boss constraint a):
-    this writes exactly the canonical `<head>--<reviewer>.md` shard at the path
-    `review request` already prints, with the frontmatter the tally already
-    reads. Nothing downstream — tally, settle, retention — learns that a verb
+    this writes the append-only `<head>--<reviewer>--<ts>-<digest>.md` shard in
+    the verdicts directory `review request` already prints, with the frontmatter
+    the tally already reads (the plain `<head>--<reviewer>.md` form stays valid
+    for hand-writers). Nothing downstream — tally, settle, retention — learns that a verb
     exists, and DIRECT shard-writing stays valid (constraint b): reviewers who
     write the file themselves are unaffected the day this ships.
 
@@ -11375,13 +11376,32 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
         return code
     print(f"health — team/{args.team}: {view['fresh']}/{view['total']} host(s) fresh"
           + ("" if view["healthy"] else "  [NO FRESH RECONCILER]"))
+    # A fresh host that did not ADVANCE the index is the failure this headline
+    # used to hide: every reconcile exit writes a shard, aborts included, so a
+    # team can read `4/7 host(s) fresh` with four [ok] rows while the index has
+    # not moved for hours (measured on team/fulcra, 2026-10-02: ~16h frozen,
+    # four [ok] hosts, the only trace an unlabelled `1 warn`).
+    if view.get("aborting"):
+        print(f"  WARNING: {view['aborting']} of {view['fresh']} fresh host(s)"
+              f" did not advance the index — the board may be stale")
+    if view.get("unknown_advance"):
+        print(f"  note: {view['unknown_advance']} fresh host(s) on an engine too old"
+              f" to report whether the pass advanced — UNKNOWN, not fine")
     if view["total"] == 0:
         print("  (no health shards at all — nobody has ever reconciled this team)")
     for h in view["hosts"]:
         age = "?" if h["age_hours"] is None else f"{h['age_hours']:g}h"
         flag = "STALE" if h["stale"] else "ok"
+        advance = ""
+        if not h["stale"]:
+            if h["advanced"] is False:
+                reason = h.get("degraded_reason") or "reason not recorded"
+                advance = f"  DID NOT ADVANCE: {reason}"
+            elif h["advanced"] is None:
+                advance = "  advance UNKNOWN (engine predates the field)"
         print(f"  [{flag:5}] {h['host']} — last reconcile {age} ago"
-              f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)")
+              f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)"
+              f"{advance}")
     # Tier-1 continuity audit (computed above): an agent beating presence but
     # with no fresh snapshot is working without a recoverable trail.
     for flagged in flagged_agents:

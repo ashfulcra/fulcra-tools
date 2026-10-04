@@ -50,6 +50,9 @@ jobs:
         # (incl. the bash installer tests, which shim uname/launchctl/crontab
         # so both platform branches run anywhere), and the FULL media-helpers
         # suite. Keeps "drift is caught at commit time" true for skill-only PRs.
+        # The six coord-fold GATES (materialize_plan.py) run here too, so a
+        # change outside packages/** — e.g. deleting coord-fold-proof.yml —
+        # still turns a required gate red; macOS CI path-filters that away.
         # media-helpers runs in full here since PR 656: its 16 red-on-main
         # failures were a macOS-only-ism (`cp -c`) that this gate never saw
         # because it ran only the skill-contract file while macOS CI stayed
@@ -64,5 +67,8 @@ jobs:
             packages/netflix-skill/tests packages/coord-engine/tests \
             packages/csv-importer/tests/test_skill_contract.py \
             packages/media-helpers/tests \
+            packages/coord-fold/tests/test_structural.py packages/coord-fold/tests/test_tripwire.py \
+            packages/coord-fold/tests/test_ship_check.py packages/coord-fold/tests/test_ci_wiring.py \
+            packages/coord-fold/tests/test_file_size_ceiling.py packages/coord-fold/tests/test_no_degraded_vocabulary.py \
             --deselect "packages/media-helpers/tests/test_webhook_cli.py::test_webhook_starts_and_shuts_down_on_sigint" \
             -q

@@ -107,11 +107,10 @@ recovery action and a nonzero exit. The mutable pointer is read again after the
 overlay, and changed bytes reject the read. These mechanics specify the dormant
 candidate, not the active `2.0.0` serving path.
 
-The tagged `2.0.0` build still sets the deployed transport's
-`public_read_v2_enabled` flag to true. As a result, migrated folds currently
-return `UNKNOWN` on unverified epsilon before their canonical handlers run.
-That mismatch blocks fleet adoption until an exact-head follow-up disables the
-wrapper. It does not turn epsilon into a `2.0.0` prerequisite.
+The tagged `2.0.0` build set the deployed transport's `public_read_v2_enabled`
+flag to true, so migrated folds returned `UNKNOWN` on unverified epsilon before
+their canonical handlers ran. `2.0.1` and later set it to false; `2.0.0` itself
+should not be adopted. This never made epsilon a release prerequisite.
 
 The public envelope adds `state`, sorted `coverage`, `coverage_horizon`,
 `generation`, `watermark`, and `result` without narrowing the result's existing

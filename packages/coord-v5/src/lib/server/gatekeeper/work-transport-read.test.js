@@ -23,7 +23,7 @@ const configValue = {
 };
 const streamId = annotationId;
 const source = `com.fulcradynamics.annotation.${annotationId}`;
-const recordId = '91fe3dd7-8f9f-5267-b5d7-eb8187c349f6';
+const recordId = '00000000-0000-4000-8000-0000000009f6';
 const start = '2026-09-26T00:00:00Z';
 const end = '2026-09-27T00:00:00Z';
 const receivedAt = '2026-09-27T01:00:00.000Z';
@@ -198,9 +198,9 @@ describe('bounded synthetic work transport reader', () => {
     };
     const rows = [
       row(JSON.stringify(v1)),
-      { ...row('{"protocol":"gatekeeper-work/1",'), id: '91fe3dd7-8f9f-5267-b5d7-eb8187c349f7' },
-      { ...row(), id: '91fe3dd7-8f9f-5267-b5d7-eb8187c349f8', source_id: 'foreign' },
-      { ...row(serializeWorkEvent(forged)), id: '91fe3dd7-8f9f-5267-b5d7-eb8187c349f9' }
+      { ...row('{"protocol":"gatekeeper-work/1",'), id: '00000000-0000-4000-8000-0000000009f7' },
+      { ...row(), id: '00000000-0000-4000-8000-0000000009f8', source_id: 'foreign' },
+      { ...row(serializeWorkEvent(forged)), id: '00000000-0000-4000-8000-0000000009f9' }
     ];
     const { result } = await read({ records: rows });
     expect(result.records).toHaveLength(1);

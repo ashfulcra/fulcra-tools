@@ -4,6 +4,8 @@ One reporting listener serves an enrolled environment/harness; addressed role/jo
 
 Verified native event ingress is the preferred enrollment path when dispatch, recovery and scoped read/publish are also current and unattended operation was requested. A schedule can backstop that path; verified ticks or session loops are fallbacks when event ingress is absent, unsupported or unknown. The planner's `native-event` mode does not implement an event adapter or prove that a product supports event ingress. Verify actual reception and idle worker delivery in the enrolled environment before advertising them.
 
+Until a listener's wake has been verified in an environment, each addressed worker there keeps its own native wake — a scheduled run, thread heartbeat or session loop that re-enters it to read its obligations — so no worker goes unattended while the listener is absent, unproven or down. A verified listener lets that worker wake relax to a coarse backstop; it does not remove it. Retire a working wake only after its replacement has been shown to re-enter the worker: a registration, a delivered schedule or an accepted native send proves the mechanism ran, not that the worker did. This obligation-reading wake is not the self-ticking executor mode above — it reads and routes attention; it does not execute owned work.
+
 Generate `instruction_mode:"listener"` through the [instructions command](onboarding.md#capability-assessment)
 for this reporting session; use `executor` only for separately authorized owned-task execution.
 Keep these role blocks in listener/executor local/session instructions, never shared repository-wide
@@ -60,11 +62,23 @@ without copying them into public artifacts. No sign-in, new-session creation or
 force takeover is performed. Fixture and packed-install success are local tests,
 not authenticated native acceptance or restart/outage evidence.
 
+### Claude cloud: verify before placing a listener
+
+These platform behaviours decide where a Claude-cloud listener can live and how it wakes a worker. They change faster than this guide (last checked 2026-10-03): probe each one in your own environment and record the result in that environment's acceptance record, not here.
+
+- The minimum interval for a recurring cloud routine (last checked: one hour; shorter schedules were refused). One-shot scheduled runs, including a session's own scheduled follow-up messages, resolve to roughly the minute.
+- Whether a scheduled run of a routine bound to an existing session is delivered into that session (last checked: yes, queued while busy) and whether a manual "run now" starts a new session instead (last checked: yes). To wake a specific worker, schedule a one-shot run bound to its session; a manual run hands the work to a fresh session without that worker's context.
+- Which connector tools a directly started session receives (last checked: none) versus a session a routine starts with connectors attached. A listener that must schedule wakes for other sessions therefore needs the session-management connector attached through its routine.
+- Whether anything written inside a container survives its reclamation (last checked: nothing, including a file-based login). A listener that runs in fresh containers must authenticate through an attached connector or a credential the environment supplies on every start, not through a login performed once in an earlier container.
+- Which sessions cross-session messaging can reach from a cloud container (last checked: only sessions on the same machine).
+
+No Claude-cloud listener has passed end-to-end acceptance yet. Until one does, Claude-cloud workers rely on the worker wake described at the top of this guide.
+
 | Harness | Self-assessment path |
 |---|---|
 | Claude Code live session | Inspect native loop/scheduled-task and channel tools in that session. Verify workspace access, busy delivery, expiration and resume behavior. A session loop shares the session's lifetime. |
 | Claude desktop | Inspect desktop-native scheduling and messaging separately from CLI capabilities. Verify the receiving session and its tool permissions. |
-| Claude cloud | Inspect cloud routines and the new-session recovery path, including its actual minimum interval. Rehydrate role/job context rather than assuming a local session is resumed. |
+| Claude cloud | See [what to verify](#claude-cloud-verify-before-placing-a-listener) above. Inspect routines, attached connectors and the new-session path in the environment itself; rehydrate role/job context rather than assuming a session is resumed. |
 | Codex cloud / ChatGPT web | Probe scheduling and connected record/file tools in the scheduled environment itself; desktop tool availability does not prove cloud access. |
 | Regular Claude web | Start interactive with verified tools. Upgrade only after an idle invocation and cross-session delivery are demonstrated. |
 | OpenClaw / Hermes | Inspect the installed gateway's native scheduling and notification tools; test lifecycle and credential access in that environment. Keep gateway health separate from worker progress. |

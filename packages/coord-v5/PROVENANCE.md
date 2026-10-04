@@ -48,8 +48,10 @@ Copied fixtures in `tests/fixtures/`: `conversation.json`,
 Privacy transformation applied consistently to copied code and tests: the source
 probe's account UUID and stream UUID were replaced with reserved synthetic UUIDs
 ending in `000000000900` and `000000000901`. This retains a pinned synthetic
-transport without shipping a personal account/source binding. No other semantic
-rewrite was made. No intake/admission, web app, deployment, private database,
+transport without shipping a personal account/source binding. A later pass
+(2026-10-03) also replaced a name-based record-id series in the transport read
+and publish tests, whose origin could not be shown to be synthetic, with
+`00000000-0000-4000-8000-0000000009f6`–`9f9`. No other semantic rewrite was made. No intake/admission, web app, deployment, private database,
 credential, or real-agent evidence was extracted.
 
 Task2 generalizes synthetic transport pins to explicit validated configuration,
