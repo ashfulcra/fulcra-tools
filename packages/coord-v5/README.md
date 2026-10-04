@@ -47,7 +47,25 @@ coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable
 
 ## Explicit enrollment
 
+Hosted connector names and schemas can change independently of this package.
+The managed listener instructions require checking the currently advertised
+transport interface and binding its existing account connection to the configured
+principal/source. Missing or ambiguous bindings and `Unknown tool` failures mean
+unavailable transport, not an empty source or a demonstrated authentication failure.
+Retain cursors, deduplication and delivery intents. A separately authorized existing
+transport can recover access only after a bounded read and checkpoint readback;
+that does not prove the original hosted connector recovered or a scheduled wake ran.
+No refresh, credential/grant change or host-service restart is installed by this guidance.
+Shared enrollment remains additive within the exact listener scope: preserve existing
+private routes and per-source watermarks, and bind each new account/source/protocol
+to its authorized worker. These are agent instructions, not automatic connector repair
+or enforced routing behavior; native receiver evidence is still required.
+
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+The harness guide includes [centralized-listener recommendations](docs/harnesses.md#choose-a-centralized-listener)
+for desktop, CLI, cloud, browser, Gateway, IDE and API/CI environments. Each recipe
+names the central owner, delivery path, setup checks and fallback; recommendations
+are distinct from shipped adapters and do not install services or grant permissions.
 The enrollment planner selects an interactive or native-listener path from dated
 local capability evidence, reuses exact native registrations, and preserves faster
 operator intervals. With explicit unattended opt-in and current read, publish,
