@@ -24,6 +24,10 @@ not proof of missing credentials or an empty bus. Preserve cursors, deduplicatio
 pending delivery intents and existing routes; authorized shared enrollment is additive
 within the exact listener scope. A verified alternate transport does not prove hosted
 connector recovery or scheduled receiver execution. See `packages/coord-v5/README.md`.
+The packaged harness guide now gives centralized-listener recipes across desktop,
+CLI, cloud, browser, Gateway and custom-host environments. Keep recommendations,
+shipped adapters and verified native capabilities distinct; unavailable dispatch
+falls back to durable addressed attention, not per-worker polling or guessed APIs.
 
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including

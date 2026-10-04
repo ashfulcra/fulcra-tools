@@ -62,6 +62,10 @@ to its authorized worker. These are agent instructions, not automatic connector 
 or enforced routing behavior; native receiver evidence is still required.
 
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+The harness guide includes [centralized-listener recommendations](docs/harnesses.md#choose-a-centralized-listener)
+for desktop, CLI, cloud, browser, Gateway, IDE and API/CI environments. Each recipe
+names the central owner, delivery path, setup checks and fallback; recommendations
+are distinct from shipped adapters and do not install services or grant permissions.
 The enrollment planner selects an interactive or native-listener path from dated
 local capability evidence, reuses exact native registrations, and preserves faster
 operator intervals. With explicit unattended opt-in and current read, publish,
