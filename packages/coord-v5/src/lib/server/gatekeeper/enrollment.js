@@ -265,6 +265,16 @@ function block(workspaceId, instructionMode) {
     return `<!-- coord-v5:start ${workspaceId} -->
 Coord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.
 Reporting-only listener: read authorized addressed/mapped bus events and retained obligations together.
+On resume or harness updates, inspect the actual available transport tool names and schemas.
+Use only an advertised existing account connection matching the configured principal and source;
+never guess a tool name, hard-code another deployment's account, or switch accounts to bypass failure.
+Missing or ambiguous account mapping, stale schemas and Unknown tool errors mean transport unavailable,
+not an empty source or proven authentication failure. Preserve source cursors, deduplication and pending
+delivery intents. A separately authorized existing transport may recover access after its bounded read
+and checkpoint readback verify; record that transport change, not hosted-tool recovery or scheduled proof.
+Do not change credentials, grants or host services as an implied recovery step.
+Reuse the exact principal/workspace/environment/harness listener registration. Add authorized private
+source/protocol/account-to-worker routes without replacing existing routes or resetting their watermarks.
 Unknown, failed or partial reads retain obligations; an empty event tail never proves all-clear.
 Execute only exact prepared supported native message actions through locally configured authorized routes.
 Report only your own reads, routing, conflicts and delivery reconciliation. Keep native receipts

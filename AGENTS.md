@@ -18,6 +18,13 @@ Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
 
+Coord v5 managed listener enrollment checks current transport tool names/schemas
+and existing account-to-principal/source binding. Stale tool identity is unavailable,
+not proof of missing credentials or an empty bus. Preserve cursors, deduplication,
+pending delivery intents and existing routes; authorized shared enrollment is additive
+within the exact listener scope. A verified alternate transport does not prove hosted
+connector recovery or scheduled receiver execution. See `packages/coord-v5/README.md`.
+
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
 fixes, plugins, installers, commands, and workflows. If a package has no README,
