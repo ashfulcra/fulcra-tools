@@ -27,11 +27,26 @@ What is pinned here:
 """
 
 import json
+from datetime import datetime, timezone
+
+import pytest
 
 from coord_engine import cli, health
 from coord_engine.tasks import agent_key
 
 from coord_engine_test_helpers import FakeTransport
+
+
+#: The shards in this module are stamped at NOW; `health` ages them against
+#: `cli._now()`, so the clock is pinned just after NOW (tests/test_clock_pin_convention.py).
+NOW = "2026-10-02T16:00:00Z"
+NOW_PLUS_5M = "2026-10-02T16:05:00Z"
+PINNED_NOW = datetime(2026, 10, 2, 16, 5, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _pin_module_clock(monkeypatch):
+    monkeypatch.setattr(cli, "_now", lambda: PINNED_NOW)
 
 
 SUCCESS_RESULT = {"tasks": 7, "parsed": 2, "reused": 5, "warnings": []}
@@ -45,20 +60,20 @@ ABORT_RESULT = {
 
 
 def _shard(**over):
-    base = {"schema": "coord.teams.health.v1", "host": "h", "at": "2026-10-02T16:00:00Z"}
+    base = {"schema": "coord.teams.health.v1", "host": "h", "at": NOW}
     base.update(over)
     return base
 
 
 def test_build_shard_records_that_a_successful_pass_advanced():
-    got = health.build_shard(host="h", now="2026-10-02T16:00:00Z",
+    got = health.build_shard(host="h", now=NOW,
                              engine_version="2.0.6", result=SUCCESS_RESULT)
     assert got["advanced"] is True
     assert got["degraded_reason"] is None
 
 
 def test_build_shard_records_that_an_aborted_pass_did_not_advance():
-    got = health.build_shard(host="h", now="2026-10-02T16:00:00Z",
+    got = health.build_shard(host="h", now=NOW,
                              engine_version="2.0.6", result=ABORT_RESULT)
     assert got["advanced"] is False
     assert got["degraded_reason"] == (
@@ -66,7 +81,7 @@ def test_build_shard_records_that_an_aborted_pass_did_not_advance():
 
 
 def test_fold_carries_the_advance_fact_and_counts_fresh_hosts_that_did_not():
-    now = "2026-10-02T16:05:00Z"
+    now = NOW_PLUS_5M
     view = health.fold(
         [
             _shard(host="advancing", advanced=True, degraded_reason=None),
@@ -86,7 +101,7 @@ def test_fold_carries_the_advance_fact_and_counts_fresh_hosts_that_did_not():
 
 def test_a_shard_from_an_older_engine_folds_to_unknown_not_advanced():
     """A missing field is never evidence that a pass succeeded."""
-    view = health.fold([_shard(host="old")], now="2026-10-02T16:05:00Z")
+    view = health.fold([_shard(host="old")], now=NOW_PLUS_5M)
     assert view["hosts"][0]["advanced"] is None
     assert view["unknown_advance"] == 1
     assert view["advancing"] == 0
@@ -98,7 +113,7 @@ def test_a_stale_host_is_not_counted_in_any_advance_rollup():
     view = health.fold(
         [_shard(host="dead", at="2020-01-01T00:00:00Z", advanced=False,
                 degraded_reason="change detection UNKNOWN")],
-        now="2026-10-02T16:05:00Z",
+        now=NOW_PLUS_5M,
     )
     assert view["hosts"][0]["stale"] is True
     assert (view["advancing"], view["aborting"], view["unknown_advance"]) == (0, 0, 0)
@@ -108,7 +123,7 @@ def test_fresh_stale_and_healthy_keep_their_existing_meaning():
     """The new facts are additive. Redefining `fresh` would shift every reader."""
     view = health.fold(
         [_shard(host="aborting", advanced=False, degraded_reason="change detection UNKNOWN")],
-        now="2026-10-02T16:05:00Z",
+        now=NOW_PLUS_5M,
     )
     assert view["fresh"] == 1 and view["total"] == 1
     assert view["healthy"] is True, (
@@ -121,7 +136,7 @@ def test_health_text_names_a_fresh_host_that_did_not_advance(capsys):
     transport = FakeTransport()
     transport.put(
         f"team/r/_coord/health/{agent_key('frozen-host')}.json",
-        json.dumps(_shard(host="frozen-host", at="2026-10-02T16:00:00Z", advanced=False,
+        json.dumps(_shard(host="frozen-host", at=NOW, advanced=False,
                           degraded_reason="change detection UNKNOWN; current generation preserved")),
     )
     cli.main(["health", "r"], transport=transport)
@@ -136,7 +151,7 @@ def test_health_text_stays_quiet_for_a_host_that_did_advance(capsys):
     transport = FakeTransport()
     transport.put(
         f"team/r/_coord/health/{agent_key('good-host')}.json",
-        json.dumps(_shard(host="good-host", at="2026-10-02T16:00:00Z", advanced=True,
+        json.dumps(_shard(host="good-host", at=NOW, advanced=True,
                           degraded_reason=None)),
     )
     cli.main(["health", "r"], transport=transport)
