@@ -50,7 +50,8 @@ def test_plugin_declares_no_credentials():
 
 
 def test_plugin_declares_no_setup_steps():
-    """No pairing, no definition picker — the plugin is purely informational."""
+    """The pointer must not enter the wizard, whose final action enables and
+    runs plugins; its description and Run Now receipt carry the instructions."""
     assert PLUGIN.setup_steps == ()
 
 
@@ -65,7 +66,8 @@ def test_description_points_at_the_browser_extension():
     in via the browser — and must not reference the dead relay machinery."""
     desc = PLUGIN.description.lower()
     assert "browser extension" in desc
-    assert "packages/attention/chrome" in PLUGIN.description
+    assert "disk image" in desc
+    assert "packages/attention/chrome" not in PLUGIN.description
     # No residue of the retired relay/pairing machinery.
     assert "extension-token" not in desc
     assert "pair" not in desc
@@ -87,7 +89,9 @@ def test_run_emits_a_single_informational_message():
     assert event["ok"] is True
     detail = event["detail"]
     assert "browser" in detail.lower()
-    assert "packages/attention/chrome/dist" in detail
+    assert "Fulcra Attention Extension" in detail
+    assert "Fulcra-Collect-macOS-arm64.dmg" in detail
+    assert "packages/attention/chrome" not in detail
 
 
 def test_run_does_not_touch_credentials_or_fulcra():

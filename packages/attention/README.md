@@ -22,19 +22,26 @@ For a source build, see the [Chrome README](chrome/README.md).
 
 This package holds:
 
-- **`fulcra_attention/`** — the Fulcra Collect pointer plugin (`collect_plugin.py`). It does no collection: it exists only so Collect still surfaces an "Attention" entry whose `run()` emits one informational message directing the user to build/load the extension and sign in via the browser. No credentials, no setup steps, no definition binding.
+- **`fulcra_attention/`** — the Fulcra Collect pointer plugin (`collect_plugin.py`). It does no collection: its description and Run Now receipt give installer users the steps for loading the extension folder from the disk image and signing in through the browser. No credentials, setup wizard, or definition binding.
 - **`chrome/`** — Chrome MV3 extension. Foreground-only capture, optional sharper-AFK content script, onboarding wizard, right-click context menu, branded UI. This is where all the real work happens — sign-in, definition resolution, and direct-to-Fulcra ingest. See [chrome/README.md](chrome/README.md) for build + load instructions.
 - **[`safari/`](safari/)** — macOS and iOS containing apps and Safari extensions,
   sharing the browser capture code with native authentication and device identity.
 
 ## Setup
 
-Setup happens entirely in the browser extension — there is nothing to configure in Fulcra Collect.
+Setup happens entirely in the browser extension. Collect only shows the loading
+instructions in the plugin description and its **Run Now** receipt.
 
-1. Build the extension: `npm ci && npm run build` in [`chrome/`](chrome/) (the unpacked output lands in `chrome/dist/`).
-2. Load `chrome/dist/` as an unpacked extension (`chrome://extensions` → Developer mode → Load unpacked).
-3. Open the extension and click **Connect to Fulcra**. Approve the browser sign-in page (Auth0 device flow); you're returned to the wizard.
-4. Choose the **destination** — the Fulcra "Attention" annotation definition to save into, or create a fresh one — and **name this browser** (its per-browser identity label). Finish the wizard.
+With the Collect download, reopen `Fulcra-Collect-macOS-arm64.dmg`. Open
+`chrome://extensions`, turn on **Developer mode**, choose **Load unpacked**, and
+select the **Fulcra Attention Extension** folder in the disk image.
+
+For a source checkout, run `npm ci && npm run build` in [`chrome/`](chrome/),
+then load `chrome/dist/` instead.
+
+Open the extension and click **Connect to Fulcra**. Approve the browser sign-in
+page, choose the Fulcra Attention definition to use or create a new one, and
+name this browser. Finish the wizard.
 
 From then on the extension captures and ingests on its own, straight to the Fulcra API.
 
