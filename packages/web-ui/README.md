@@ -85,8 +85,7 @@ If you change the contract here, update both.
 ## Setup-step component model
 
 The wizard renders one of N kinds of setup step (`intro`, `input`,
-`oauth`, `file_upload`, `permission_request`, `browser_extension`,
-`test_connection`, `definition_picker`,
+`oauth`, `file_upload`, `permission_request`, `test_connection`, `definition_picker`,
 `external_action`, `done`). Up to refactor #68 (2026-05-27) those
 kinds were rendered by `<template x-if="current_step.kind === '...'">`
 blocks inline in `index.html` — duplicated at two render sites
@@ -265,7 +264,6 @@ dist/static/components/
 ├── step-oauth.js                  — kind="oauth"
 ├── step-file_upload.js            — kind="file_upload"
 ├── step-permission_request.js     — kind="permission_request"
-├── step-browser_extension.js      — kind="browser_extension"
 ├── step-test_connection.js        — kind="test_connection"
 ├── step-definition_picker.js      — kind="definition_picker" (the original drift offender)
 └── step-done.js                   — kind="done"
