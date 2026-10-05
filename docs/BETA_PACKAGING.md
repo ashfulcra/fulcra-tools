@@ -40,9 +40,12 @@ App-Specific Passwords. Then store a reusable notarytool profile:
 ```
 xcrun notarytool store-credentials "fulcra-notary" \
   --apple-id "<your-apple-id>" \
-  --team-id "<TEAMID>" \
-  --password "<app-specific-password>"
+  --team-id "<TEAMID>"
 ```
+
+Paste the app-specific password at the secure prompt. Do not add it to the
+command: command-line arguments can be saved in shell history or exposed to
+other local processes.
 
 (Alternatively use an App Store Connect API key; pass `--key`/`--key-id`/
 `--issuer` to `store-credentials` instead.)

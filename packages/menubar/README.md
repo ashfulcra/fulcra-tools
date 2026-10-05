@@ -65,6 +65,8 @@ have passed disposable-task completion checks against real Fulcra Files.
 
 ## Build the .app
 
+The current beta bundle version is 0.1.4.
+
 From the repository root on an Apple silicon Mac:
 
 ```sh
