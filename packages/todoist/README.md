@@ -6,7 +6,7 @@ awake, online, and running Collect. Complete an ordinary task in Todoist and its
 Fulcra copy becomes resolved. Resolve the Fulcra copy and Collect completes the
 Todoist task.
 
-Included in [Collect 0.1.2](../../docs/collect.md#get-started-new-user). Live
+Included in [Collect 0.1.3](../../docs/collect.md#get-started-new-user). Live
 checks used a disposable Todoist project and real Fulcra Files. Discovery,
 preview, import, completion in both directions, and repeat sync passed. Bot
 annotations survived, and the test data was removed afterward. This is an
