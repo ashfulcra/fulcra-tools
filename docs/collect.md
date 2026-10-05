@@ -17,11 +17,11 @@ imports and saves progress between runs. This page is the installation guide;
 
 ### Mac app (Apple silicon)
 
-**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.2-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.3-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The current download is **0.1.2 beta**, released September 9, 2026. It is signed,
+The current download is **0.1.3 beta**, released October 5, 2026. It is signed,
 notarized, and includes Apple Notes, Apple Reminders, and Todoist.
-[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.2-macos-arm64).
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.3-macos-arm64).
 
 1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
 2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.

@@ -252,12 +252,12 @@ The contract exposes `permission_request_available`. The authenticated
 Unsupported actions return 404; provider, credential-access, or malformed-result
 failures return `granted: false` with a generic hint, without exception details.
 Full Disk Access continues to use **Open System Settings** and **Verify access**
-when no native request callback is declared. This contract is in the 0.1.2 app.
+when no native request callback is declared. This contract is in the 0.1.3 app.
 
 ### Discovered multiselect settings
 
 Collect supports a reusable list picker through `Setting(kind="multiselect")`
-and `Plugin.setting_options`. This is in the 0.1.2 app.
+and `Plugin.setting_options`. This is in the 0.1.3 app.
 
 Declare a setting and include its key in an `input` setup step:
 
