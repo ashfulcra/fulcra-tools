@@ -64,6 +64,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     # "Ran successfully — no new data" feed entry it also drives.
     accepted_count = 0
     newest_observed_at: datetime | None = None
+    spawned = False
     try:
         proc = subprocess.Popen(
             command,
@@ -76,6 +77,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
             # grandchild working after Collect records "timeout".
             start_new_session=(os.name == "posix"),
         )
+        spawned = True
         if on_spawn is not None:
             on_spawn(proc)
         try:
@@ -135,6 +137,17 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     except subprocess.TimeoutExpired:
         outcome = "timeout"
         error = f"worker exceeded {timeout_s:.0f}s"
+    except OSError as exc:
+        if spawned:
+            raise
+        # The daemon accepts a run before this background path reaches Popen.
+        # A missing, quarantined, or otherwise unlaunchable worker therefore
+        # has to become durable failed-run state here instead of escaping the
+        # thread and leaving the dashboard stuck on the prior run forever.
+        from .worker import _scrub_secrets
+        error = _scrub_secrets(
+            f"worker launch failed: {type(exc).__name__}: {exc}"
+        )
 
     st = state.load(plugin_id)
     # Persist values the plugin advanced in the worker process. The runner
