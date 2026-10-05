@@ -70,3 +70,19 @@ def test_missing_certifi_degrades_without_raising(monkeypatch):
     env: dict = {}
     assert ssl_bootstrap.ensure_ca_bundle(env=env) is None
     assert env == {}
+
+
+def test_an_operator_supplied_requests_bundle_is_also_preserved(monkeypatch):
+    """Covers the var the early return does NOT guard.
+
+    SSL_CERT_FILE short-circuits at the top, so only REQUESTS_CA_BUNDLE
+    exercises the setdefault. Without this, replacing setdefault with a
+    plain assignment would silently clobber an operator's corporate bundle
+    and no test would notice.
+    """
+    _no_platform_store(monkeypatch)
+    env = {"REQUESTS_CA_BUNDLE": "/corp/requests-ca.pem"}
+    result = ssl_bootstrap.ensure_ca_bundle(env=env)
+    assert result is not None
+    assert env["REQUESTS_CA_BUNDLE"] == "/corp/requests-ca.pem"
+    assert env["SSL_CERT_FILE"] == result
