@@ -27,7 +27,9 @@ the local app database requires the Mac that has that database.
 Day One is included in the [Mac installer](../../docs/collect.md#get-started-new-user).
 Choose **Day One → Set up** in the dashboard, select a local database or export,
 and follow the access and destination steps. Local database import requires Full
-Disk Access; keep Day One open so entries from other devices can reach this Mac.
+Disk Access for **Fulcra Collect** from Applications. A source install needs the
+same access for the terminal app that starts the daemon. Keep Day One open so
+entries from other devices can reach this Mac.
 See the [source guide](../../docs/how-do-i-get-my-data.md#day-one) for details.
 
 The commands below describe the standalone CLI, including its filtering options.

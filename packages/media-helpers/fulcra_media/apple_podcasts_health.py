@@ -153,9 +153,10 @@ def apple_podcasts_health_check(ctx) -> HealthResult:
                 ok=False,
                 summary=(
                     "Can't open the Podcasts database. Grant Full Disk "
-                    "Access to the terminal running fulcra-collect in "
-                    "System Settings -> Privacy & Security -> Full Disk "
-                    "Access, then try again."
+                    "Access to Fulcra Collect from Applications in System "
+                    "Settings -> Privacy & Security -> Full Disk Access. "
+                    "For a source install, grant access to the terminal app "
+                    "that starts the daemon. Then try again."
                 ),
             )
         return HealthResult(

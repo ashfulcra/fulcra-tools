@@ -61,6 +61,17 @@ def test_lastfm_plugin_metadata_is_scheduled():
     assert {c.key for c in LASTFM_PLUGIN.required_credentials} == {"api-key"}
 
 
+@pytest.mark.parametrize("plugin", [
+    APPLE_PODCASTS_PLUGIN,
+    APPLE_PODCASTS_TIMEMACHINE_PLUGIN,
+])
+def test_apple_plugin_full_disk_access_guidance_names_installed_app(plugin):
+    body = "\n".join(step.body_md for step in plugin.setup_steps)
+    assert "Fulcra Collect" in body
+    assert "terminal running" not in body
+    assert "once it exists" not in body
+
+
 def test_lastfm_setup_steps_contain_a_test_connection_step():
     """The Last.fm wizard must verify entered creds before letting the
     user advance to definition_picker / done. Without this step, bad
