@@ -113,12 +113,28 @@ class _QuickRecordClient(BaseFulcraClient):
 
 
 def is_online(*, timeout: float = 2.0) -> bool:
-    """Best-effort connectivity probe — can a TCP connection to a
-    well-known host be opened? Used to defer (not fail) network-requiring
-    scheduled plugins while the machine is offline."""
+    """Best-effort connectivity probe on ports normal networks permit.
+
+    Used to defer (not fail) network-requiring scheduled plugins while the
+    machine is offline. Probe the configured Fulcra endpoint first, then an
+    ordinary HTTPS host. Direct TCP to public DNS resolvers produced false
+    "offline" results on managed networks that correctly block port 53 while
+    allowing HTTPS.
+    """
     import socket
-    # Well-known anycast DNS resolvers, used only as reachability probes.
-    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):  # guard-ok: public-ip
+    from urllib.parse import urlsplit
+
+    from fulcra_common import DEFAULT_BASE_URL
+
+    parts = urlsplit(DEFAULT_BASE_URL)
+    targets: list[tuple[str, int]] = []
+    if parts.hostname:
+        default_port = 443 if parts.scheme == "https" else 80
+        targets.append((parts.hostname, parts.port or default_port))
+    fallback = ("example.com", 443)
+    if fallback not in targets:
+        targets.append(fallback)
+    for host, port in targets:
         try:
             with socket.create_connection((host, port), timeout=timeout):
                 return True

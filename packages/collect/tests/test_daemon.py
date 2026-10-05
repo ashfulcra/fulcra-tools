@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from fulcra_collect.daemon import Daemon
 from fulcra_collect.plugin import Plugin
 from fulcra_collect.registry import RegistryResult
 from fulcra_collect import state
+import fulcra_collect.daemon as daemon_module
 
 
 def _registry() -> RegistryResult:
@@ -86,6 +88,53 @@ def test_service_workers_start_in_their_own_process_group(
 
     assert captured["command"][-2:] == ["_worker", "relay"]
     assert captured["kwargs"]["start_new_session"] is (os.name == "posix")
+
+
+def test_online_probe_uses_the_fulcra_https_endpoint_not_public_dns(
+    monkeypatch,
+):
+    attempted = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def connect(address, *, timeout):
+        attempted.append((address, timeout))
+        return Connection()
+
+    monkeypatch.setattr(
+        "fulcra_common.DEFAULT_BASE_URL", "https://fulcra.example:8443/api",
+    )
+    monkeypatch.setattr(socket, "create_connection", connect)
+
+    assert daemon_module.is_online(timeout=0.25) is True
+    assert attempted == [(('fulcra.example', 8443), 0.25)]
+
+
+def test_online_probe_falls_back_to_a_normal_https_host(monkeypatch):
+    attempted = []
+
+    def connect(address, *, timeout):
+        attempted.append(address)
+        if len(attempted) == 1:
+            raise OSError("primary unavailable")
+        return type("Connection", (), {
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *exc: False,
+        })()
+
+    monkeypatch.setattr(
+        "fulcra_common.DEFAULT_BASE_URL", "https://fulcra.example/api",
+    )
+    monkeypatch.setattr(socket, "create_connection", connect)
+
+    assert daemon_module.is_online(timeout=0.25) is True
+    assert attempted[0] == ("fulcra.example", 443)
+    assert all(port == 443 for _host, port in attempted)
 
 
 def test_status_lists_every_plugin_with_enabled_flag(collect_home: Path):
