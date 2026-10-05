@@ -53,7 +53,11 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   its own process group, so a timeout also stops helper commands started by
   the plugin. If a worker cannot start, Collect records a failed run and shows
   it in Recently. If it dies before emitting a structured result, Collect keeps
-  a bounded, secret-scrubbed copy of stderr as the diagnostic.
+  a bounded, secret-scrubbed copy of stderr as the diagnostic. The parent drains
+  stdout and stderr concurrently while retaining only a 4 MiB stdout tail and a
+  512 KiB stderr tail, so a noisy or stuck plugin cannot grow the daemon's memory
+  until the 15-minute timeout. The structured result event belongs at the end of
+  stdout and remains visible when earlier output is discarded.
 * **Defers network work while the Mac is offline.** The scheduler probes the
   configured Fulcra API endpoint and an ordinary HTTPS fallback before firing a
   network-required plugin. Both probes use normal web-service ports, which keeps

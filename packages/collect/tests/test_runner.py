@@ -1,6 +1,7 @@
 """The runner — spawns a worker subprocess for one run, records outcome."""
 from __future__ import annotations
 
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,52 @@ def test_runner_times_out_a_hung_worker(collect_home: Path):
                          timeout_s=1.0)
     assert outcome == "timeout"
     assert state.load("p").last_outcome == "timeout"
+
+
+def test_bounded_capture_keeps_result_tail_without_unbounded_memory():
+    result = b'\n{"type":"result","outcome":"done","error":null}\n'
+    script = (
+        "import sys;"
+        f"sys.stdout.buffer.write(b'x'*{runner.MAX_STDOUT_CAPTURE_BYTES + 4096});"
+        f"sys.stdout.buffer.write({result!r});"
+        "sys.stdout.flush();"
+        f"sys.stderr.buffer.write(b'e'*{runner.MAX_STDERR_CAPTURE_BYTES + 4096});"
+        "sys.stderr.buffer.write(b'\\nuseful stderr tail\\n');"
+        "sys.stderr.flush()"
+    )
+    proc = subprocess.Popen(
+        _python_worker(script),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    captured = runner._bounded_communicate(proc, timeout_s=10)
+
+    assert captured.stdout_truncated is True
+    assert captured.stderr_truncated is True
+    assert len(captured.stdout) <= runner.MAX_STDOUT_CAPTURE_BYTES
+    assert len(captured.stderr) <= runner.MAX_STDERR_CAPTURE_BYTES
+    assert captured.stdout.endswith(result)
+    assert captured.stderr.endswith(b"useful stderr tail\n")
+
+
+def test_runner_reads_a_final_result_after_noisy_output(collect_home: Path):
+    script = (
+        "import json,sys;"
+        f"sys.stdout.write('noise'*{runner.MAX_STDOUT_CAPTURE_BYTES // 5 + 2048});"
+        "sys.stdout.write(chr(10));"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done','error':None})+chr(10));"
+        "sys.stdout.flush()"
+    )
+
+    outcome = runner.run(
+        "p",
+        _python_worker(script),
+        now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+    )
+
+    assert outcome == "done"
 
 
 def test_runner_treats_a_worker_that_emits_no_result_as_error(collect_home: Path):

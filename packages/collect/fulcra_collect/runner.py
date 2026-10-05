@@ -9,7 +9,9 @@ import json
 import os
 import signal
 import subprocess
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -19,6 +21,98 @@ if TYPE_CHECKING:
     from .daemon import Daemon
 
 DEFAULT_TIMEOUT_S = 15 * 60
+MAX_STDOUT_CAPTURE_BYTES = 4 * 1024 * 1024
+MAX_STDERR_CAPTURE_BYTES = 512 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+
+
+class _TailCapture:
+    """Keep only the most recent bytes while continuously draining a pipe."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+        self.total = 0
+
+    def append(self, chunk: bytes) -> None:
+        self.total += len(chunk)
+        if len(chunk) >= self.limit:
+            self.data[:] = chunk[-self.limit:]
+            return
+        self.data.extend(chunk)
+        excess = len(self.data) - self.limit
+        if excess > 0:
+            del self.data[:excess]
+
+    @property
+    def truncated(self) -> bool:
+        return self.total > self.limit
+
+
+@dataclass(frozen=True)
+class _CapturedOutput:
+    stdout: bytes
+    stderr: bytes
+    stdout_truncated: bool
+    stderr_truncated: bool
+
+
+def _bounded_communicate(
+    proc: subprocess.Popen, *, timeout_s: float,
+) -> _CapturedOutput:
+    """Drain both worker pipes concurrently into bounded tail buffers."""
+    stdout_capture = _TailCapture(MAX_STDOUT_CAPTURE_BYTES)
+    stderr_capture = _TailCapture(MAX_STDERR_CAPTURE_BYTES)
+
+    def drain(stream, capture: _TailCapture) -> None:
+        try:
+            while True:
+                chunk = stream.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    return
+                capture.append(chunk)
+        finally:
+            stream.close()
+
+    if proc.stdout is None or proc.stderr is None:
+        raise ValueError("worker process must expose stdout and stderr pipes")
+    threads = (
+        threading.Thread(target=drain, args=(proc.stdout, stdout_capture)),
+        threading.Thread(target=drain, args=(proc.stderr, stderr_capture)),
+    )
+    for thread in threads:
+        thread.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - Collect's shipped app is macOS
+            proc.kill()
+        proc.wait()
+    finally:
+        for thread in threads:
+            thread.join()
+
+    captured = _CapturedOutput(
+        stdout=bytes(stdout_capture.data),
+        stderr=bytes(stderr_capture.data),
+        stdout_truncated=stdout_capture.truncated,
+        stderr_truncated=stderr_capture.truncated,
+    )
+    if timed_out:
+        raise subprocess.TimeoutExpired(
+            getattr(proc, "args", "worker"), timeout_s,
+            output=captured.stdout,
+            stderr=captured.stderr,
+        )
+    return captured
 
 
 def worker_command(plugin_id: str) -> list[str]:
@@ -70,7 +164,6 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             # Plugins may start helper processes (for example, a CLI used to
             # write to an external service). Give each run its own process
             # group so a timeout stops the whole run rather than leaving a
@@ -80,18 +173,11 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
         spawned = True
         if on_spawn is not None:
             on_spawn(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            if os.name == "posix":
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            else:  # pragma: no cover - Collect's shipped app is macOS
-                proc.kill()
-            proc.communicate()
-            raise
+        captured = _bounded_communicate(proc, timeout_s=timeout_s)
+        stdout = captured.stdout.decode("utf-8", errors="replace")
+        stderr = captured.stderr.decode("utf-8", errors="replace")
+        if captured.stderr_truncated:
+            stderr = "[earlier stderr truncated]\n" + stderr
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
