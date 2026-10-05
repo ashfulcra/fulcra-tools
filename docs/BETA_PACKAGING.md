@@ -79,8 +79,10 @@ Environment variables:
 5. Creates the `.dmg` (`hdiutil`).
 6. Signs the `.dmg` (`codesign --timestamp`).
 7. Notarizes (`notarytool submit --wait`), staples (`stapler staple`), and
-   validates the staple. If any of those Apple steps fails, the image moves to
-   `<name>.NOT_NOTARIZED.dmg` and the canonical release path is left empty.
+   validates the staple. If any of those Apple steps fails, the script tries to
+   move the image to `<name>.NOT_NOTARIZED.dmg`. If the move fails, it deletes
+   the canonical image. If the filesystem blocks both operations, the run still
+   fails and prints the exact canonical path that must not be distributed.
 8. Runs the Gatekeeper assessment (`spctl`, in `gatekeeper_gate.sh`) as the
    **release gate**. A dmg can be notarized and stapled and still be rejected,
    and a rejected dmg is one a beta tester cannot open — so a rejection fails
