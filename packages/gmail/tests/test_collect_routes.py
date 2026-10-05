@@ -38,7 +38,12 @@ def _oauth_transport(*, email: str, refresh_token: str, on_exchange=None):
 
 def _app(registry):
     app = FastAPI()
-    collect_routes.register(app, ctx=None, registry_factory=lambda: registry)
+
+    class Ctx:
+        def require_token(self):
+            return None
+
+    collect_routes.register(app, ctx=Ctx(), registry_factory=lambda: registry)
     return TestClient(app, follow_redirects=False)
 
 

@@ -108,11 +108,13 @@ def register(app, ctx, *, registry_factory=None) -> None:
     (default: the production keychain + JSON store). Tests inject a
     fake-backed factory.
     """
+    from fastapi import Depends
     from fastapi.responses import HTMLResponse, RedirectResponse
 
     make_registry = registry_factory or (lambda: _registry())
+    guard = [Depends(ctx.require_token)]
 
-    @app.get(START_PATH)
+    @app.get(START_PATH, dependencies=guard)
     def gmail_add_account_start():  # pragma: no cover - exercised via TestClient
         session = start_add_account(make_registry())
         # 302 to Google's consent screen; the nonce rides in ``state``.

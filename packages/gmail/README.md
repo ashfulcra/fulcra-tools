@@ -99,8 +99,10 @@ into the wizard when prompted.
 ### Per account: add it
 
 Run the wizard's **Add account** step (or open
-`http://127.0.0.1:9292/api/oauth/gmail/add-account/start`). Pick the Google
-account, click through the unverified-app warning, and grant `gmail.readonly`.
+`http://127.0.0.1:9292/api/oauth/gmail/add-account/start` after opening the
+Collect dashboard in that browser). The start page requires Collect's local
+session cookie; Google's callback uses its single-use OAuth state. Pick the
+Google account, click through the unverified-app warning, and grant `gmail.readonly`.
 The relay discovers the authorized address from the token itself, so the account
 is bound to whatever you actually approved. Re-authorizing a known address
 rotates its token in place; a new address is added alongside the others.
@@ -112,7 +114,8 @@ that issued them.
 ### Build a rule
 
 Open the rule builder at `http://127.0.0.1:9292/api/gmail/rules/ui` (reachable
-from the Collect dashboard's Gmail plugin). The builder is example-first:
+from the Collect dashboard's Gmail plugin). It requires the same local Collect
+session cookie as the rest of the API. The builder is example-first:
 
 1. Search a bound account with a Gmail query (`from:otter.ai`, `subject:invoice`,
    `receipt`, and so on).
