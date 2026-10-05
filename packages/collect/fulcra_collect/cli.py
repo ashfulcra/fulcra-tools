@@ -14,7 +14,7 @@ import sys
 import click
 
 from . import config as config_mod
-from . import credentials, registry, worker
+from . import credentials, registry, ssl_bootstrap, worker
 from .control import send_request
 from .daemon import Daemon
 
@@ -57,6 +57,10 @@ def _configure_logging() -> None:
 @click.group()
 def cli() -> None:
     """Background hub for the Fulcra local helpers."""
+    # Must run before anything makes an HTTPS request or shells out to
+    # the bundled fulcra CLI: inside the macOS app bundle the platform CA
+    # store is absent and every TLS verification fails without this.
+    ssl_bootstrap.ensure_ca_bundle()
 
 
 def _stderr_is_a_tty() -> bool:
