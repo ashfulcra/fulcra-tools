@@ -46,8 +46,9 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   parent records them in the unified state store and in an in-memory
   ring buffer that powers the dashboard's "Recently" feed. Each run gets
   its own process group, so a timeout also stops helper commands started by
-  the plugin. If a worker dies before it can emit a structured result, Collect
-  keeps a bounded, secret-scrubbed copy of stderr as the diagnostic.
+  the plugin. If a worker cannot start, Collect records a failed run and shows
+  it in Recently. If it dies before emitting a structured result, Collect keeps
+  a bounded, secret-scrubbed copy of stderr as the diagnostic.
 * **Stores secrets in the OS keychain.** Per-plugin credentials live
   under a `fulcra-collect:<plugin-id>` service name; the user-level
   Fulcra bearer token shares one namespace (`fulcra-collect:user`)

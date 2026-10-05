@@ -56,6 +56,45 @@ def test_runner_treats_a_worker_that_emits_no_result_as_error(collect_home: Path
     assert outcome == "error"
 
 
+def test_runner_records_worker_launch_failure(collect_home: Path, monkeypatch):
+    """A missing/broken worker executable must become visible state.
+
+    The daemon reports a run as started before its background thread calls
+    Popen. If Popen then raises and the runner lets that exception escape, the
+    user gets neither a failed run nor a dashboard receipt.
+    """
+    from fulcra_collect.activity import RecentActivity
+
+    def fail_to_start(*args, **kwargs):
+        raise FileNotFoundError("synthetic worker executable is missing")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", fail_to_start)
+    activity = RecentActivity()
+
+    class MockDaemon:
+        pass
+
+    daemon = MockDaemon()
+    daemon.activity = activity
+
+    outcome = runner.run(
+        "p",
+        ["missing-worker", "_worker", "p"],
+        now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+        daemon=daemon,
+    )
+
+    assert outcome == "error"
+    saved = state.load("p")
+    assert saved.last_outcome == "error"
+    assert "worker launch failed" in saved.last_error
+    assert "FileNotFoundError" in saved.last_error
+    entries = activity.recent()
+    assert len(entries) == 1
+    assert entries[0].ok is False
+    assert "worker launch failed" in entries[0].summary
+
+
 def test_runner_keeps_scrubbed_stderr_when_worker_crashes(collect_home: Path):
     script = (
         "import sys;"
