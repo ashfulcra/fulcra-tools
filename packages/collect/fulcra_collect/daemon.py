@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.metadata as _im
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -1428,7 +1429,38 @@ class Daemon:
     def _spawn_service(self, plugin_id: str):
         """Spawn a service plugin's worker subprocess (kept alive by the
         ServiceSupervisor)."""
-        return subprocess.Popen(runner.worker_command(plugin_id))
+        return subprocess.Popen(
+            runner.worker_command(plugin_id),
+            start_new_session=(os.name == "posix"),
+        )
+
+    def _record_service_launch_failure(
+        self, plugin_id: str, exc: OSError, *, when: datetime,
+    ) -> None:
+        """Persist a service spawn failure without taking down the daemon."""
+        from .worker import _scrub_secrets
+
+        error = _scrub_secrets(
+            f"service worker launch failed: {type(exc).__name__}: {exc}"
+        )
+        plugin_state = state.load(plugin_id)
+        plugin_state.record_finish(outcome="error", when=when, error=error)
+        state.save(plugin_state)
+
+        first_line = error.splitlines()[0]
+        if len(first_line) > 200:
+            first_line = first_line[:200].rstrip() + "…"
+        self.activity.add(
+            plugin_id=plugin_id,
+            summary=first_line,
+            ok=False,
+            timestamp=when,
+        )
+        logging.getLogger("fulcra_collect").error(
+            "service worker launch failed for plugin=%s: %s",
+            plugin_id,
+            error,
+        )
 
     # ---- the run loop --------------------------------------------------
 
@@ -1513,8 +1545,16 @@ class Daemon:
                     if pid in self.registry.plugins
                     and self.registry.plugins[pid].kind == "service"
                 }
-                supervisor.tick(now=now, enabled_ids=service_ids,
-                                spawn=self._spawn_service)
+                supervisor.tick(
+                    now=now,
+                    enabled_ids=service_ids,
+                    spawn=self._spawn_service,
+                    on_spawn_error=lambda plugin_id, exc: (
+                        self._record_service_launch_failure(
+                            plugin_id, exc, when=now,
+                        )
+                    ),
+                )
                 states = {pid: state.load(pid) for pid in self.registry.plugins}
                 online = is_online()
                 for pid in due_plugins(self.registry.plugins, self.config,
