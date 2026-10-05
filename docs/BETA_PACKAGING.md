@@ -79,7 +79,8 @@ Environment variables:
 5. Creates the `.dmg` (`hdiutil`).
 6. Signs the `.dmg` (`codesign --timestamp`).
 7. Notarizes (`notarytool submit --wait`), staples (`stapler staple`), and
-   validates the staple.
+   validates the staple. If any of those Apple steps fails, the image moves to
+   `<name>.NOT_NOTARIZED.dmg` and the canonical release path is left empty.
 8. Runs the Gatekeeper assessment (`spctl`, in `gatekeeper_gate.sh`) as the
    **release gate**. A dmg can be notarized and stapled and still be rejected,
    and a rejected dmg is one a beta tester cannot open — so a rejection fails
@@ -100,7 +101,10 @@ spctl -a -t open --context context:primary-signature -v "dist/Fulcra Collect.dmg
 - **`security find-identity` shows only "Apple Development"** — the Developer ID
   Application cert isn't installed; redo one-time step 1.
 - **`notarytool` auth error** — the profile is missing or the app-specific
-  password was rotated; recreate it (one-time step 2).
+  password was rotated; recreate it (one-time step 2). A missing or expired
+  Apple Developer agreement also blocks submission; the Account Holder must
+  accept it before retrying. The failed image is kept as
+  `*.NOT_NOTARIZED.dmg` for diagnosis and must not be distributed.
 - **Notarization "Invalid" with signing errors** — usually a nested binary
   signed without the hardened runtime. The script signs via Briefcase precisely
   to avoid this; if it recurs, fetch the log with

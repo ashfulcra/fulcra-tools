@@ -123,9 +123,7 @@ if [ "${FULCRA_SKIP_NOTARIZE:-0}" = "1" ]; then
 fi
 
 echo "=== 7/7  notarize + staple (profile: $NOTARY_PROFILE) ==="
-xcrun notarytool submit "$OUT_DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-xcrun stapler staple "$OUT_DMG"
-xcrun stapler validate "$OUT_DMG"
+bash "$MENUBAR/scripts/notarize_dmg.sh" "$OUT_DMG" "$NOTARY_PROFILE"
 
 # The release gate. A rejected dmg is a build failure AND must not be left at
 # the canonical release path — see gatekeeper_gate.sh for the retention rule.

@@ -84,8 +84,10 @@ For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,
 staples, and checks the installer. The build also verifies a fresh copy of the
 signed app, which catches invalid nested launcher signatures before the disk
-image is made. An unnotarized development build is not the normal installer;
-do not ask users to bypass Gatekeeper.
+image is made. If Apple rejects notarization or stapling, the script moves the
+image to `*.NOT_NOTARIZED.dmg` so it cannot be mistaken for a release. An
+unnotarized development build is not the normal installer; do not ask users to
+bypass Gatekeeper.
 
 ## Manual smoke checklist
 
