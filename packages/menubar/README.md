@@ -190,3 +190,5 @@ destination. If you add a new deep-link here, update the contract there too.
 
 The current app uses Python, PyObjC, and rumps. A Swift port is a design direction;
 it is not part of the released installer.
+
+Bundle sanitization refuses test-only payloads whose leaf or any ancestor inside app_packages is a symlink, or whose resolved path escapes app_packages. This prevents pyarrow test pruning from deleting outside the bundle; check-only mode also fails closed.

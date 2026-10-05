@@ -462,3 +462,5 @@ The CLI accepts multiselect values as JSON arrays of unique, nonempty string IDs
 `fulcra-collect set-setting apple-reminders selected_lists '["example-list-id"]'`.
 Use `[]` to clear the selection; a required empty selection cannot be enabled.
 The dashboard discovers IDs and labels for you, so it is the easier setup path.
+
+OAuth completion uses a packaged same-origin script and inert escaped plugin data, so the strict browser CSP allows the wizard to advance after sign-in. Failed or expired callbacks do not signal completion.

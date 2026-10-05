@@ -104,7 +104,7 @@ def _save_rules_list(config_module, ctx, rule_dicts: list[dict]) -> None:
 
 def register(app, ctx, *, registry_factory=None, client_factory=None,
              config_module=None, call_model_factory=None) -> None:
-    from .rules_ui import RULES_UI_HTML  # Task 6 provides this; import lazily
+    from .rules_ui import RULES_UI_HTML, RULES_UI_JS  # Task 6 provides this; import lazily
 
     make_registry = registry_factory or _registry
     make_client = client_factory or (lambda account_id, registry: GmailClient(
@@ -307,6 +307,12 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
     def ui():
         from fastapi.responses import HTMLResponse
         return HTMLResponse(RULES_UI_HTML)
+
+    @app.get("/api/gmail/rules/ui.js", dependencies=guard)
+    def ui_script():
+        from fastapi.responses import Response
+        return Response(RULES_UI_JS, media_type="application/javascript",
+                        headers={"Cache-Control": "no-store"})
 
     # Registered LAST so the literal GET routes above (``/accounts``, ``/ui``)
     # win over this catch-all path parameter.

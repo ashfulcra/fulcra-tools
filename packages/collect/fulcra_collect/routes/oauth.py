@@ -17,7 +17,7 @@ def _oauth_success_html(plugin_id: str) -> str:
     "*" to prevent message interception by cross-origin frames.
     """
     import html as _html
-    safe_id = _html.escape(plugin_id)
+    safe_id = _html.escape(plugin_id, quote=True)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Signed in — Fulcra Collect</title>
@@ -28,18 +28,10 @@ def _oauth_success_html(plugin_id: str) -> str:
   p {{ color: #555; }}
 </style>
 </head>
-<body>
+<body data-plugin-id="{safe_id}">
   <h1>Signed in to {safe_id}</h1>
   <p>This tab will close automatically…</p>
-  <script>
-    if (window.opener) {{
-      window.opener.postMessage(
-        {{ type: "oauth_complete", plugin_id: {plugin_id!r} }},
-        window.location.origin
-      );
-      setTimeout(() => window.close(), 2000);
-    }}
-  </script>
+  <script src="/static/oauth-complete.js" defer></script>
 </body>
 </html>
 """

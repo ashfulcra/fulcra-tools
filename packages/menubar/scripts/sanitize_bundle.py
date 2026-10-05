@@ -45,7 +45,10 @@ def sanitize(app: Path, *, home: Path | None = None, check_only: bool = False) -
             raise RuntimeError('Nonportable package scripts remain in bundle')
         shutil.rmtree(scripts)
     test_payloads = _test_only_payloads(packages)
-    if any(path.is_symlink() for path in test_payloads):
+    if any(any(parent.is_symlink() for parent in (path, *path.parents)
+               if parent != packages and packages in parent.parents)
+           or not path.resolve().is_relative_to(packages.resolve())
+           for path in test_payloads):
         raise RuntimeError('Refusing symlinked test-only payload in bundle')
     if test_payloads and check_only:
         raise RuntimeError('Test-only payloads remain in bundle')

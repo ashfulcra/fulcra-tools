@@ -186,3 +186,16 @@ def test_refuses_symlinked_test_payload_before_deleting_anything(tmp_path):
 
     assert ordinary.exists()
     assert (outside / 'keep').read_text() == 'keep'
+
+@pytest.mark.parametrize('check_only', [False, True])
+def test_refuses_symlinked_pyarrow_parent_without_touching_outside(tmp_path, check_only):
+    app = _app(tmp_path)
+    packages = app / 'Contents/Resources/app_packages'
+    outside = tmp_path / 'outside-arrow'
+    outside.mkdir()
+    payload = outside / '_pyarrow_cpp_tests.synthetic.so'
+    payload.write_text('must survive')
+    (packages / 'pyarrow').symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match='symlinked test-only payload'):
+        _module().sanitize(app, home=Path('/Users/tester'), check_only=check_only)
+    assert payload.read_text() == 'must survive'
