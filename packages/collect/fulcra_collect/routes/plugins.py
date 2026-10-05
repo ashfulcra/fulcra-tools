@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -304,20 +305,21 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             pass
 
         target = target_dir / safe_name
-        tmp = target.with_suffix(target.suffix + ".tmp")
 
-        # Atomic write: stream into a sibling .tmp file, then os.rename onto
-        # the target. Avoids leaving a half-written file behind on a crash
-        # or upload-cap trip, and avoids the small window where another
-        # reader could see a partial file at the final path.
+        # Atomic write: each request gets a private sibling .tmp file, then
+        # os.replace publishes it onto the target. A deterministic
+        # ``<target>.tmp`` lets concurrent same-name uploads truncate or
+        # consume each other's source file. mkstemp's O_EXCL allocation keeps
+        # the streams separate while retaining atomic publication.
         written = 0
+        tmp: Path | None = None
         try:
-            fd = os.open(
-                str(tmp),
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{safe_name}.", suffix=".tmp", dir=target_dir,
             )
+            tmp = Path(tmp_name)
             with os.fdopen(fd, "wb") as out:
+                os.fchmod(out.fileno(), 0o600)
                 while True:
                     chunk = await file.read(_UPLOAD_CHUNK_BYTES)
                     if not chunk:
@@ -337,7 +339,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         except HTTPException:
             # Clean up the partial .tmp file on a size-cap trip etc.
             try:
-                if tmp.exists():
+                if tmp is not None and tmp.exists():
                     tmp.unlink()
             except OSError:
                 pass
@@ -347,7 +349,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                 "upload failed for plugin=%s key=%s", plugin_id, key,
             )
             try:
-                if tmp.exists():
+                if tmp is not None and tmp.exists():
                     tmp.unlink()
             except OSError:
                 pass

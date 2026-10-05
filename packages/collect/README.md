@@ -377,6 +377,7 @@ Everything lives under `~/.config/fulcra-collect/` (override via
 | `web-url`                      | The currently-bound web URL — read by the menubar and ad-hoc tools. |
 | `auth-fingerprint`             | SHA-256 prefix of the stable account identity (JWT `sub`; token-based fallback for opaque tokens). Detects account changes and invalidates cached definition IDs without treating routine token refresh as an account switch. |
 | `quick_record_favorites.json`  | The user's pinned annotation defs for the menubar popover. |
+| `uploads/<plugin-id>/`         | Source files submitted through a wizard `file_upload` step. Files are owner-only; each request streams through a private temporary file and publishes atomically. Concurrent uploads with the same name cannot mix bytes; the last completed upload becomes the saved file. |
 | `state/<plugin-id>.json.migrated` | Leftovers from the JSON → SQLite migration in `db.py:_migration_002`. Safe to delete once the soak period is over. |
 
 Plugin credentials managed by Collect go to the OS keychain via
