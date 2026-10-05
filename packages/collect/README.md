@@ -54,6 +54,11 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   the plugin. If a worker cannot start, Collect records a failed run and shows
   it in Recently. If it dies before emitting a structured result, Collect keeps
   a bounded, secret-scrubbed copy of stderr as the diagnostic.
+* **Defers network work while the Mac is offline.** The scheduler probes the
+  configured Fulcra API endpoint and an ordinary HTTPS fallback before firing a
+  network-required plugin. Both probes use normal web-service ports, which keeps
+  managed networks that block direct public DNS traffic from being mistaken for
+  an offline Mac. Local-only scheduled plugins still run while offline.
 * **Stores secrets in the OS keychain.** Per-plugin credentials live
   under a `fulcra-collect:<plugin-id>` service name; the user-level
   Fulcra bearer token shares one namespace (`fulcra-collect:user`)
