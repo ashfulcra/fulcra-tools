@@ -135,6 +135,19 @@ current selections again so a skipped edit cannot leave a different scope on
 file. Next, Back, and Skip navigation never enable or run a plugin; the final
 **Enable & start sync** / **Enable & run preview** action grants that consent.
 
+### Setting value types
+
+The wizard keeps setting values in the types declared by the plugin contract.
+Checkboxes submit JSON booleans, port fields submit numbers, multiselects submit
+arrays, and text fields submit strings. Numeric interval input becomes seconds;
+ISO 8601 input such as `PT5M` stays a string. Declared boolean and numeric
+defaults keep those types instead of being stringified. The daemon rejects a
+wrong type instead of saving a value that the plugin will misread later.
+
+The settings response also normalizes the exact string forms written by older
+wizards, so reopening Configure repairs the display and the next save writes the
+native type.
+
 ### Why Lit (not a build step, not Alpine partials)
 
 - **No build step.** Lit ships as a local ES module under `dist/static/vendor/`.

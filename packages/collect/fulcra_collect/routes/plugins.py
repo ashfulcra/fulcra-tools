@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from .. import config as _config
 from .. import freshness, state
+from ..plugin import normalize_legacy_plugin_settings, validate_setting_value
 from ._deps import RouteContext, SecretBody
 
 
@@ -144,10 +145,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.get("/api/plugin/{plugin_id}/settings", dependencies=[Depends(require_token)])
     def get_settings(plugin_id: str):
-        if plugin_id not in daemon.registry.plugins:
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
         cfg = _config.load()
-        return cfg.plugin_settings.get(plugin_id, {})
+        return normalize_legacy_plugin_settings(
+            plugin, cfg.plugin_settings.get(plugin_id, {}),
+        )
 
     @app.get("/api/plugin/{plugin_id}/setting_options/{key}", dependencies=[Depends(require_token)])
     def setting_options(plugin_id: str, key: str):
@@ -191,15 +195,15 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         unknown = [k for k in body if k not in declared]
         if unknown:
             raise HTTPException(400, f"unknown setting keys: {unknown}")
-        # Validate enum values for enum-kind settings + URL scheme/host
-        # for url-kind settings. Enum gates user picks from a list;
-        # URL gates self-SSRF — see _validate_url_setting above.
+        # Validate every value against its declared kind before it can reach
+        # config.toml or a plugin. URL settings get the additional public-host
+        # gate below — see _validate_url_setting above.
         for k, v in body.items():
             s = declared[k]
-            if s.kind == "enum" and s.enum_values and v not in s.enum_values:
-                raise HTTPException(400, f"setting {k!r}: value {v!r} not in {s.enum_values}")
-            if s.kind == "multiselect":
-                _validate_multiselect(k, v)
+            try:
+                validate_setting_value(s, v)
+            except ValueError as exc:
+                raise HTTPException(400, f"setting {k!r}: {exc}") from None
             if s.kind == "url":
                 _validate_url_setting(k, v)
         # Persist

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from fulcra_common import BaseFulcraClient
 
 from . import config, credentials, db, state
-from .plugin import Plugin, RunContext
+from .plugin import Plugin, RunContext, normalize_legacy_plugin_settings
 from .registry import RegistryResult, discover
 
 
@@ -194,7 +194,9 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     cfg = config.load()
     ctx = RunContext(
         plugin_id=plugin.id,
-        config=cfg.plugin_settings.get(plugin.id, {}),
+        config=normalize_legacy_plugin_settings(
+            plugin, cfg.plugin_settings.get(plugin.id, {}),
+        ),
         config_epoch=cfg.plugin_epochs.get(plugin.id, ""),
         # Route each credential to the keychain scope the plugin declared —
         # user_level creds live in the account-scoped store (get_user_secret),

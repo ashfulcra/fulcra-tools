@@ -308,7 +308,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           next[key] = Array.isArray(def.default) ? [...def.default] : [];
           changed = true;
         } else if (def && def.default !== null && def.default !== undefined) {
-          next[key] = String(def.default);
+          next[key] = def.default;
           changed = true;
         }
       }
@@ -369,7 +369,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           _kind: def._kind || "setting",
           value: this.inputValues[key] ?? (def.kind === "multiselect"
             ? (Array.isArray(def.default) ? [...def.default] : [])
-            : (def.default !== null && def.default !== undefined ? String(def.default) : "")),
+            : (def.default !== null && def.default !== undefined ? def.default : "")),
           ...(def.kind === "multiselect" ? this._selectionOptions(key) : {}),
         };
       });
