@@ -1,8 +1,10 @@
 """The supervisor — pure service restart-decision logic."""
 from __future__ import annotations
 
+import signal
 from datetime import datetime, timedelta, timezone
 
+import fulcra_collect.supervisor as supervisor_mod
 from fulcra_collect.supervisor import (
     DEGRADED_RECOVERY_COOLDOWN,
     ServiceSupervisor,
@@ -65,6 +67,63 @@ def test_supervisor_spawns_an_enabled_service_on_the_first_tick():
 
     sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
     assert spawned == ["relay"]
+
+
+def test_launch_failure_is_reported_and_backed_off_without_escaping():
+    sup = ServiceSupervisor()
+    failures = []
+
+    def spawn(pid):
+        raise OSError("worker is quarantined")
+
+    sup.tick(
+        now=T0,
+        enabled_ids={"relay"},
+        spawn=spawn,
+        on_spawn_error=lambda pid, exc: failures.append((pid, str(exc))),
+    )
+
+    assert failures == [("relay", "worker is quarantined")]
+    assert "relay" not in sup._procs
+    assert sup._exits["relay"] == [T0]
+    assert sup._backoff_until["relay"] == T0 + timedelta(seconds=1)
+    assert "relay" not in sup.degraded
+
+
+def test_repeated_launch_failures_use_the_crash_loop_budget():
+    sup = ServiceSupervisor()
+    failures = []
+
+    def spawn(pid):
+        raise OSError("missing executable")
+
+    for seconds in (0, 1, 3, 7, 15, 31):
+        sup.tick(
+            now=T0 + timedelta(seconds=seconds),
+            enabled_ids={"relay"},
+            spawn=spawn,
+            on_spawn_error=lambda pid, exc: failures.append(pid),
+        )
+
+    assert failures == ["relay"] * 6
+    assert "relay" in sup.degraded
+    assert "relay" not in sup._procs
+
+
+def test_clean_exit_respawn_failure_is_reported_instead_of_escaping():
+    sup = ServiceSupervisor()
+    sup._procs["relay"] = CleanExitProc()
+    failures = []
+
+    sup.tick(
+        now=T0,
+        enabled_ids={"relay"},
+        spawn=lambda pid: (_ for _ in ()).throw(OSError("cannot restart")),
+        on_spawn_error=lambda pid, exc: failures.append((pid, str(exc))),
+    )
+
+    assert failures == [("relay", "cannot restart")]
+    assert sup._exits["relay"] == [T0]
 
 
 def test_supervisor_leaves_a_running_service_alone():
@@ -138,6 +197,27 @@ def test_supervisor_terminates_a_service_that_becomes_disabled():
     sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
     sup.tick(now=T0 + timedelta(seconds=30), enabled_ids=set(), spawn=spawn)
     assert procs[0].terminated is True
+
+
+def test_shutdown_terminates_the_service_process_group_on_posix(monkeypatch):
+    class GroupProc(FakeProc):
+        pid = 4242
+
+    killed = []
+    proc = GroupProc()
+    sup = ServiceSupervisor()
+    sup._procs["relay"] = proc
+    monkeypatch.setattr(supervisor_mod.os, "name", "posix")
+    monkeypatch.setattr(
+        supervisor_mod.os,
+        "killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    sup.shutdown_all()
+
+    assert killed == [(4242, signal.SIGTERM)]
+    assert proc.terminated is False
 
 
 class CleanExitProc:

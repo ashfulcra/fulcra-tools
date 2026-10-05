@@ -1,6 +1,8 @@
 """The daemon request handler + status snapshot."""
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from collect_test_helpers import FakeHttpxClient, FakeHttpxResponse, install_fake_httpx
@@ -8,6 +10,7 @@ from fulcra_collect.config import Config
 from fulcra_collect.daemon import Daemon
 from fulcra_collect.plugin import Plugin
 from fulcra_collect.registry import RegistryResult
+from fulcra_collect import state
 
 
 def _registry() -> RegistryResult:
@@ -43,6 +46,46 @@ def test_construction_never_reads_the_keychain(collect_home: Path, monkeypatch):
     monkeypatch.setattr(creds, "get_user_secret", _boom)
     # Must not raise — i.e. construction touches no keychain item.
     Daemon(registry=_registry(), config=Config())
+
+
+def test_service_launch_failure_becomes_state_and_activity(collect_home: Path):
+    daemon = Daemon(registry=_registry(), config=Config())
+    when = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+
+    daemon._record_service_launch_failure(
+        "relay",
+        OSError("Authorization: Bearer should-not-survive"),
+        when=when,
+    )
+
+    saved = state.load("relay")
+    assert saved.last_outcome == "error"
+    assert saved.last_run == when
+    assert "service worker launch failed" in saved.last_error
+    assert "should-not-survive" not in saved.last_error
+    entry = daemon.activity.recent(limit=1)[0]
+    assert entry.plugin_id == "relay"
+    assert entry.ok is False
+    assert "service worker launch failed" in entry.summary
+    assert "should-not-survive" not in entry.summary
+
+
+def test_service_workers_start_in_their_own_process_group(
+    collect_home: Path, monkeypatch,
+):
+    captured = {}
+    daemon = Daemon(registry=_registry(), config=Config())
+
+    def popen(command, **kwargs):
+        captured.update(command=command, kwargs=kwargs)
+        return object()
+
+    monkeypatch.setattr("fulcra_collect.daemon.subprocess.Popen", popen)
+
+    daemon._spawn_service("relay")
+
+    assert captured["command"][-2:] == ["_worker", "relay"]
+    assert captured["kwargs"]["start_new_session"] is (os.name == "posix")
 
 
 def test_status_lists_every_plugin_with_enabled_flag(collect_home: Path):

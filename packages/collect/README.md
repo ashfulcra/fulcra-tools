@@ -38,7 +38,12 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   picked up at startup. A plugin declares one of three kinds:
   `scheduled` (an importer fired on a default interval), `service`
   (a long-running process the daemon supervises with restart-back-off),
-  or `manual` (only fires when the user clicks Run).
+  or `manual` (only fires when the user clicks Run). A service worker that
+  cannot launch is recorded as a failed run, shown in Recently, and folded
+  into the same back-off / degraded policy as a crashed worker; it cannot
+  terminate the daemon loop or stop unrelated plugins. Service workers also
+  run in their own process groups, so disabling Collect or shutting it down
+  terminates helper commands started by the service.
 * **Runs them in worker subprocesses.** Each scheduled or manual run
   spawns a fresh `fulcra-collect _worker <id>` process, isolating ordinary
   importer crashes from the daemon. The worker streams structured
