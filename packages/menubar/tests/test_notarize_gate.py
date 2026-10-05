@@ -25,9 +25,25 @@ def _stub_xcrun(bin_dir: Path) -> None:
     stub.chmod(0o755)
 
 
-def _run(tmp_path: Path, *, fail_on: str = ""):
+def _failing_command(bin_dir: Path, name: str) -> None:
+    stub = bin_dir / name
+    stub.write_text("#!/bin/sh\nexit 13\n")
+    stub.chmod(0o755)
+
+
+def _run(
+    tmp_path: Path,
+    *,
+    fail_on: str = "",
+    mv_fails: bool = False,
+    rm_fails: bool = False,
+):
     bin_dir = tmp_path / "bin"
     _stub_xcrun(bin_dir)
+    if mv_fails:
+        _failing_command(bin_dir, "mv")
+    if rm_fails:
+        _failing_command(bin_dir, "rm")
     dmg = tmp_path / "Fulcra Collect.dmg"
     dmg.write_text("pretend-dmg")
     log = tmp_path / "xcrun.log"
@@ -80,3 +96,30 @@ def test_apple_failure_quarantines_image_off_release_path(
     assert quarantined.read_text() == "pretend-dmg"
     assert len(calls) == expected_calls
     assert "NOT DISTRIBUTABLE" in proc.stderr
+
+
+def test_failed_quarantine_move_deletes_canonical_artifact(tmp_path):
+    proc, dmg, quarantined, _ = _run(
+        tmp_path, fail_on="notarytool submit", mv_fails=True
+    )
+
+    assert proc.returncode != 0
+    assert not dmg.exists()
+    assert not quarantined.exists()
+    assert "deleted instead" in proc.stderr
+    assert "retained at" not in proc.stderr
+
+
+def test_reports_canonical_artifact_when_move_and_delete_both_fail(tmp_path):
+    proc, dmg, quarantined, _ = _run(
+        tmp_path,
+        fail_on="notarytool submit",
+        mv_fails=True,
+        rm_fails=True,
+    )
+
+    assert proc.returncode != 0
+    assert dmg.exists()
+    assert not quarantined.exists()
+    assert f"still exists at {dmg}" in proc.stderr
+    assert "retained at" not in proc.stderr
