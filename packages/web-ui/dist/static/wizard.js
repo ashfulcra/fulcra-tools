@@ -11,8 +11,7 @@
  * on_complete() is called when the "done" step is reached and confirmed.
  *
  * Supports step kinds: intro, external_action, input, file_upload,
- * permission_request, browser_extension, test_connection,
- * definition_picker, oauth, done.
+ * permission_request, test_connection, definition_picker, oauth, done.
  */
 
 // ---------------------------------------------------------------------------
@@ -697,9 +696,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       this._loadStepOptions();
       if (this.current_step.kind === "test_connection") {
         this.runHealthCheck();
-      }
-      if (this.current_step.kind === "browser_extension") {
-        this.nextBlocked = true;
       }
       if (this.current_step.kind === "definition_picker") {
         // Block Next until the user has made a choice (or explicitly clicked

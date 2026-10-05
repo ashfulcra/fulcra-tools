@@ -130,13 +130,13 @@ test('late permission verification cannot unblock a different step', async () =>
   let finish;
   const {wizard} = setup({hook: url => url.endsWith('/check_permission')
     ? new Promise(resolve => { finish = resolve; }) : undefined});
-  wizard.steps[2] = {kind: 'browser_extension'};
+  wizard.steps[2] = {kind: 'oauth'};
   await wizard.next();
   wizard.skipStep();
   assert.equal(wizard.nextBlocked, true);
   finish({granted: true});
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(wizard.current_step.kind, 'browser_extension');
+  assert.equal(wizard.current_step.kind, 'oauth');
   assert.equal(wizard.nextBlocked, true);
   assert.equal(wizard.permissionResult, null);
 });
