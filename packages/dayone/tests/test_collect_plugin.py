@@ -8,7 +8,7 @@ import pytest
 from fulcra_collect.plugin import RunContext
 from fulcra_collect.state import PluginState
 
-from fulcra_dayone.collect_plugin import PLUGIN
+from fulcra_dayone.collect_plugin import PLUGIN, dayone_permission_check
 
 
 def _ctx(config: dict) -> RunContext:
@@ -25,6 +25,33 @@ def test_plugin_metadata_is_scheduled():
     assert PLUGIN.id == "dayone"
     assert PLUGIN.kind == "scheduled"
     assert PLUGIN.default_interval == timedelta(hours=6)
+
+
+def test_full_disk_access_guidance_names_the_installed_app():
+    body = "\n".join(step.body_md for step in PLUGIN.setup_steps)
+    assert "Fulcra Collect" in body
+    assert "terminal you're running" not in body
+    assert "once it exists" not in body
+
+
+def test_permission_failure_names_the_installed_app(tmp_path, monkeypatch):
+    db = tmp_path / "DayOne.sqlite"
+    db.touch()
+
+    def deny_access(*args, **kwargs):
+        import sqlite3
+        raise sqlite3.OperationalError("authorization denied")
+
+    monkeypatch.setattr("sqlite3.connect", deny_access)
+
+    result = dayone_permission_check(_ctx({
+        "local_db": "live_app",
+        "db_path": str(db),
+    }))
+
+    assert result["granted"] is False
+    assert "Fulcra Collect" in result["hint"]
+    assert "source install" in result["hint"]
 
 
 def test_local_db_mode_runs_the_pipeline(monkeypatch):

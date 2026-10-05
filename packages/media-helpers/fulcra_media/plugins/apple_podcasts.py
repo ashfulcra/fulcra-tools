@@ -189,8 +189,9 @@ PLUGIN = Plugin(
                 "Next to test whether access works already. If the test "
                 "fails, grant Full Disk Access in **System Settings -> "
                 "Privacy & Security -> Full Disk Access** by clicking "
-                "**+** and adding the terminal you're running the daemon "
-                "from (or the bundled fulcra-collect.app once it exists)."
+                "**+** and adding **Fulcra Collect** from Applications. If "
+                "you run Collect from source, add the terminal app that "
+                "starts the daemon instead."
             ),
         ),
         # Verify the DB is readable before letting the user advance. The
