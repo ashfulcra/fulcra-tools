@@ -932,6 +932,34 @@ def test_new_routes_require_auth(collect_home):
         assert r.status_code == 401, f"{method} {path} should require auth"
 
 
+def test_every_api_route_requires_auth_except_oauth_callbacks(collect_home):
+    """Plugin-mounted routes must not slip around the local API boundary.
+
+    Third-party OAuth callbacks cannot carry Collect's cookie on the
+    cross-site redirect, so those two landing paths are the whole allowlist.
+    Every other /api route must declare the shared require_token dependency.
+    """
+    from fastapi.routing import APIRoute
+
+    app = build_app(_build_test_daemon(collect_home))
+    public_callbacks = {
+        "/api/oauth/{plugin_id}/callback",
+        "/api/oauth/callback",
+    }
+    missing = []
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.path.startswith("/api/"):
+            continue
+        guarded = any(
+            getattr(dependency.call, "__name__", "") == "require_token"
+            for dependency in route.dependant.dependencies
+        )
+        if not guarded and route.path not in public_callbacks:
+            missing.append((route.path, sorted(route.methods)))
+
+    assert missing == []
+
+
 # ---------------------------------------------------------------------------
 # OAuth routes
 # ---------------------------------------------------------------------------

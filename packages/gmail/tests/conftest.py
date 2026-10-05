@@ -19,6 +19,38 @@ import pytest
 from fulcra_gmail.accounts import AccountRegistry
 
 
+@pytest.fixture(autouse=True)
+def isolate_collect_keyring(monkeypatch):
+    """Never let Gmail unit tests reach the operator's macOS Keychain.
+
+    AccountRegistry tests inject ``FakeKeychain`` directly, while plugin-run
+    tests call ``RunContext.fulcra_token()``, whose first lookup goes through
+    Collect's user-level keyring. Keep that second path hermetic too.
+    """
+    from fulcra_collect import credentials as collect_credentials
+
+    values: dict[tuple[str, str], str] = {}
+
+    monkeypatch.setattr(
+        collect_credentials.keyring,
+        "get_password",
+        lambda service, account: values.get((service, account)),
+    )
+    monkeypatch.setattr(
+        collect_credentials.keyring,
+        "set_password",
+        lambda service, account, value: values.__setitem__(
+            (service, account), value
+        ),
+    )
+    monkeypatch.setattr(
+        collect_credentials.keyring,
+        "delete_password",
+        lambda service, account: values.pop((service, account), None),
+    )
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Synthetic Gmail messages.get(full) payload builders (rules/convert/ledger)
 # ---------------------------------------------------------------------------

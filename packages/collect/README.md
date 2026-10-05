@@ -307,12 +307,14 @@ removal, and requires an explicit Enable action after configuration.
 
 ## HTTP API surface
 
-Protected JSON routes require the local token from
-`~/.config/fulcra-collect/web-token`. The browser uses the HttpOnly cookie set
-by the HTML root; native and command-line clients can send the same value as a
-Bearer token. It is separate from the Fulcra account token. HTML/static resources and OAuth
-callbacks have their own access paths; see [web.py](fulcra_collect/web.py) and
-[routes/](fulcra_collect/routes/) for exact guards and request shapes.
+Every `/api` route requires the local token from
+`~/.config/fulcra-collect/web-token` except the two OAuth callback landing
+paths. The browser uses the HttpOnly cookie set by the HTML root; native and
+command-line clients can send the same value as a Bearer token. It is separate
+from the Fulcra account token. The root and static assets are public on the
+loopback server. OAuth callbacks validate their single-use state instead of a
+cookie because the provider redirects from another site. A route-inventory test
+enforces this allowlist for core and plugin-mounted routes.
 
 * **Status / version** (`routes/status.py`) — `GET /api/status`,
   `GET /api/version`, `POST /api/reload`.

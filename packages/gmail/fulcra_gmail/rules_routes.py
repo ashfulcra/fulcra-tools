@@ -303,7 +303,7 @@ def register(app, ctx, *, registry_factory=None, client_factory=None,
         except ValueError as e:
             raise HTTPException(502, f"AI suggestion failed: {e}") from e
 
-    @app.get("/api/gmail/rules/ui")
+    @app.get("/api/gmail/rules/ui", dependencies=guard)
     def ui():
         from fastapi.responses import HTMLResponse
         return HTMLResponse(RULES_UI_HTML)
