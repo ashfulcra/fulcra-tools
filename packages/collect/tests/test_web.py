@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime
 import errno
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -2560,6 +2562,47 @@ def test_upload_happy_path_writes_file_and_updates_setting(collect_home):
     r2 = client.get(f"/api/plugin/{plugin.id}/settings")
     assert r2.status_code == 200
     assert r2.json()["path"] == str(target.resolve())
+
+
+def test_concurrent_same_name_uploads_use_private_temp_files(
+    collect_home, monkeypatch,
+):
+    """Two requests may choose the same source filename.
+
+    Hold both at publication so the temporary files overlap. Each request
+    must still finish from its own complete file; a shared ``name.tmp`` makes
+    one replace consume the other request's source and leaves a 500 behind.
+    """
+    from fulcra_collect.routes import plugins as plugin_routes
+
+    plugin = _upload_plugin()
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+    clients = (_client(daemon), _client(daemon))
+    publish = threading.Barrier(2)
+    real_replace = plugin_routes.os.replace
+    filename = "same-name.csv"
+
+    def synchronized_replace(source, target):
+        if Path(target).name == filename:
+            publish.wait(timeout=5)
+        return real_replace(source, target)
+
+    monkeypatch.setattr(plugin_routes.os, "replace", synchronized_replace)
+    bodies = (b"first request\n", b"second request with other bytes\n")
+
+    def upload(client, body):
+        return client.post(
+            f"/api/plugin/{plugin.id}/upload?key=path",
+            files={"file": (filename, body, "text/csv")},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(upload, clients, bodies))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    target_dir = collect_home / "uploads" / plugin.id
+    assert (target_dir / filename).read_bytes() in bodies
+    assert list(target_dir.glob("*.tmp")) == []
 
 
 # ---------------------------------------------------------------------------
