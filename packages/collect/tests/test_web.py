@@ -442,6 +442,33 @@ def test_get_settings_empty_initially(collect_home):
     assert r.json() == {}
 
 
+def test_get_settings_normalizes_values_written_by_older_wizards(collect_home):
+    from fulcra_collect.plugin import Plugin, Setting
+
+    plugin = Plugin(
+        id="legacy", name="Legacy", kind="manual", collect_mode="historical",
+        run=lambda c: None,
+        required_settings=(
+            Setting("dry_run", "Preview", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+    cfg = _config.load()
+    cfg.update_plugin_settings("legacy", {
+        "dry_run": "true", "listen_port": "9292", "poll_every": "300",
+    })
+    _config.save(cfg)
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+
+    response = _client(daemon).get("/api/plugin/legacy/settings")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "dry_run": True, "listen_port": 9292, "poll_every": 300,
+    }
+
+
 def test_plugin_settings_put_validates_against_required_settings(collect_home):
     from fulcra_collect.plugin import Plugin, Setting
     plugin = Plugin(
@@ -479,6 +506,93 @@ def test_plugin_settings_put_validates_against_required_settings(collect_home):
     body = r.json()
     assert body["feed_url"] == "https://example.com/feed.xml"
     assert body["category"] == "watched"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("title", 123),
+        ("notes", ["not", "text"]),
+        ("source_path", {"path": "/tmp/file"}),
+        ("callback_secret", False),
+        ("category", 1),
+        ("enabled", "false"),
+        ("enabled", 0),
+        ("listen_port", "9292"),
+        ("listen_port", True),
+        ("listen_port", 0),
+        ("listen_port", 65536),
+        ("poll_every", True),
+        ("poll_every", 0),
+        ("poll_every", 10**1000),
+        ("poll_every", "five minutes"),
+    ],
+)
+def test_plugin_settings_put_rejects_wrong_declared_types(collect_home, key, value):
+    from fulcra_collect.plugin import Plugin, Setting
+
+    plugin = Plugin(
+        id="typed",
+        name="Typed",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda c: None,
+        required_settings=(
+            Setting("title", "Title", "text"),
+            Setting("notes", "Notes", "long_text"),
+            Setting("source_path", "Source", "path"),
+            Setting("callback_secret", "Callback secret", "secret"),
+            Setting("category", "Category", "enum", enum_values=("one", "two")),
+            Setting("enabled", "Enabled", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+    response = _client(daemon).put(
+        f"/api/plugin/{plugin.id}/settings", json={key: value},
+    )
+
+    assert response.status_code == 400
+
+
+def test_plugin_settings_put_accepts_native_declared_types(collect_home):
+    from fulcra_collect.plugin import Plugin, Setting
+
+    plugin = Plugin(
+        id="typed",
+        name="Typed",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda c: None,
+        required_settings=(
+            Setting("title", "Title", "text"),
+            Setting("notes", "Notes", "long_text"),
+            Setting("source_path", "Source", "path"),
+            Setting("callback_secret", "Callback secret", "secret"),
+            Setting("category", "Category", "enum", enum_values=("one", "two")),
+            Setting("enabled", "Enabled", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+    body = {
+        "title": "Example",
+        "notes": "Line one\nLine two",
+        "source_path": "/tmp/example",
+        "callback_secret": "short-lived",
+        "category": "one",
+        "enabled": False,
+        "listen_port": 9292,
+        "poll_every": "PT5M",
+    }
+    client = _client(daemon)
+
+    response = client.put(f"/api/plugin/{plugin.id}/settings", json=body)
+
+    assert response.status_code == 200, response.text
+    assert client.get(f"/api/plugin/{plugin.id}/settings").json() == body
 
 
 def test_plugin_settings_put_unknown_plugin(collect_home):

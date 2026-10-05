@@ -17,6 +17,7 @@ from . import config as config_mod
 from . import credentials, registry, worker
 from .control import send_request
 from .daemon import Daemon
+from .plugin import validate_setting_value
 
 
 def _socket_path():
@@ -188,25 +189,20 @@ def _coerce_setting(setting, raw: str):
     if setting.kind == "toggle":
         low = raw.strip().lower()
         if low in _TRUE:
-            return True
-        if low in _FALSE:
-            return False
-        raise click.ClickException(
-            f"{setting.key}: expected a true/false value, got {raw!r} "
-            f"(accepted: {', '.join(sorted(_TRUE | _FALSE))})"
-        )
-    if setting.kind == "port":
+            value = True
+        elif low in _FALSE:
+            value = False
+        else:
+            raise click.ClickException(
+                f"{setting.key}: expected a true/false value, got {raw!r} "
+                f"(accepted: {', '.join(sorted(_TRUE | _FALSE))})"
+            )
+    elif setting.kind == "port":
         try:
-            return int(raw)
+            value = int(raw)
         except ValueError:
             raise click.ClickException(f"{setting.key}: expected a port number, got {raw!r}")
-    if setting.kind == "enum":
-        allowed = setting.enum_values or ()
-        if raw not in allowed:
-            raise click.ClickException(
-                f"{setting.key}: {raw!r} is not one of {', '.join(allowed)}"
-            )
-    if setting.kind == "multiselect":
+    elif setting.kind == "multiselect":
         try:
             values = json.loads(raw)
         except (ValueError, TypeError):
@@ -217,8 +213,22 @@ def _coerce_setting(setting, raw: str):
             raise click.ClickException(
                 f"{setting.key}: expected a JSON array of unique, nonempty string IDs"
             )
-        return values
-    return raw
+        value = values
+    elif setting.kind == "interval":
+        try:
+            numeric = float(raw)
+        except ValueError:
+            value = raw
+        else:
+            value = int(numeric) if numeric.is_integer() else numeric
+    else:
+        value = raw
+
+    try:
+        validate_setting_value(setting, value)
+    except ValueError as exc:
+        raise click.ClickException(f"{setting.key}: {exc}") from None
+    return value
 
 
 @cli.command(name="set-setting")

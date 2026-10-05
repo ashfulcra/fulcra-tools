@@ -134,8 +134,11 @@ convenience: secrets go to the OS keychain, everything else to a plaintext
 as a `Credential` and points you at `set-credential` instead. It also
 validates against the plugin's declared contract — unknown plugin id,
 unknown setting key, a value outside an `enum`'s declared values, or a
-non-numeric `port` are all rejected rather than written, because every one
-of those writes succeeds silently and then is never read by anything.
+`port` outside 1–65535 are all rejected rather than written. Toggles accept
+the usual true/false words and are stored as booleans. Intervals accept
+positive seconds or an ISO 8601 duration such as `PT5M`. Every one of these
+bad writes otherwise succeeds silently and is only discovered when a plugin
+runs.
 
 ```console
 $ fulcra-collect set-credential purpleair api_key   # prompts, hidden
@@ -304,6 +307,14 @@ must enforce selection scope in their own run logic as well. Use the wizard or
 JSON settings API for these arrays; the text-oriented CLI is not an array editor.
 The shared wizard preserves selected IDs, displays missing selections for
 removal, and requires an explicit Enable action after configuration.
+
+The same endpoint checks every other declared kind before writing: toggles are
+JSON booleans, ports are integers from 1 through 65535, text/path/URL/secret
+fields are strings, enums are declared string values, and intervals are
+positive numeric seconds or ISO 8601 duration strings. Collect still reads the
+exact `"true"` / `"false"` and numeric strings written by older setup wizards
+as their native types, so upgrading does not leave an existing preview switch
+stuck on.
 
 ## HTTP API surface
 

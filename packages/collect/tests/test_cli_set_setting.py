@@ -49,6 +49,7 @@ def _plugin() -> Plugin:
             Setting(key="sensor_index", label="Sensor index", kind="text"),
             Setting(key="verbose", label="Verbose", kind="toggle"),
             Setting(key="web_port", label="Port", kind="port"),
+            Setting(key="poll_every", label="Polling interval", kind="interval"),
             Setting(key="lists", label="Lists", kind="multiselect"),
         ),
     )
@@ -133,9 +134,30 @@ class TestItRefusesWhatWouldNeverBeRead:
         res = run("demo", "web_port", "eighty")
         assert res.exit_code != 0
 
+    @pytest.mark.parametrize("value", ["0", "65536"])
+    def test_port_outside_tcp_range(self, env, value):
+        res = run("demo", "web_port", value)
+        assert res.exit_code != 0
+
+    def test_invalid_interval(self, env):
+        res = run("demo", "poll_every", "five minutes")
+        assert res.exit_code != 0
+
     def test_toggle_that_is_not_a_boolean(self, env):
         res = run("demo", "verbose", "sometimes")
         assert res.exit_code != 0
+
+
+class TestTypedValues:
+    def test_interval_seconds_are_stored_as_a_number(self, env):
+        res = run("demo", "poll_every", "300")
+        assert res.exit_code == 0, res.output
+        assert settings(env)["poll_every"] == 300
+
+    def test_iso_interval_is_stored_as_a_string(self, env):
+        res = run("demo", "poll_every", "PT5M")
+        assert res.exit_code == 0, res.output
+        assert settings(env)["poll_every"] == "PT5M"
 
 
 class TestItRefusesToPutSecretsInAPlaintextFile:

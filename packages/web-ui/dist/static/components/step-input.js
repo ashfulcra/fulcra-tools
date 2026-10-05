@@ -5,8 +5,7 @@
 // field based on field.kind:
 //   multiselect → discovered checkbox choices bound to arrays of IDs
 //   enum     → <select> with optional enum_labels[]
-//   toggle   → <input type=checkbox> bound to "true"/"false" strings
-//              (the daemon wants strings, not booleans — see updateField)
+//   toggle   → <input type=checkbox> bound to JSON booleans
 //   password / secret → masked input + "currently set — leave blank to
 //              keep" placeholder when _credPresent[key] is true
 //   default  → text/url/number input (type derived from field.kind)
@@ -90,13 +89,12 @@ class FulcraStepInput extends FulcraStepBase {
 
     // toggle → checkbox
     if (field.kind === "toggle") {
-      const checked = field.value === "true" || field.value === true;
+      const checked = field.value === true;
       return html`
         <label class="inline-flex items-center gap-2 cursor-pointer">
           <input type="checkbox"
                  .checked=${checked}
-                 @change=${(e) =>
-                   c.updateField(field.key, e.target.checked ? "true" : "false")}
+                 @change=${(e) => c.updateField(field.key, e.target.checked)}
                  class="h-4 w-4 rounded border-slate-300 text-violet-600">
           <span class="text-sm text-slate-600">Enabled</span>
         </label>
@@ -125,7 +123,14 @@ class FulcraStepInput extends FulcraStepBase {
     return html`
       <input type=${inputType}
              .value=${field.value || ""}
-             @input=${(e) => c.updateField(field.key, e.target.value)}
+             @input=${(e) => c.updateField(
+               field.key,
+               field.kind === "port"
+                 ? (e.target.value === "" ? "" : e.target.valueAsNumber)
+                 : field.kind === "interval" && /^\d+(?:\.\d+)?$/.test(e.target.value)
+                   ? Number(e.target.value)
+                 : e.target.value,
+             )}
              placeholder=${field.placeholder || ""}
              class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
     `;

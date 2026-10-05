@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from fulcra_collect import worker
-from fulcra_collect.plugin import Plugin, RunContext
+from fulcra_collect.plugin import Plugin, RunContext, Setting
 from fulcra_collect.registry import RegistryResult
 from fulcra_collect.worker import _scrub_secrets
 
@@ -37,6 +37,35 @@ def test_worker_captures_epoch_with_settings(collect_home: Path):
                     run=lambda ctx: captured.append((ctx.config_epoch, ctx.config)))
     _run_capturing(plugin, collect_home)
     assert captured == [(cfg.plugin_epochs['tasks'], {'selected': ['one']})]
+
+
+def test_worker_normalizes_values_written_by_older_wizards(collect_home: Path):
+    from fulcra_collect import config
+
+    cfg = config.load()
+    cfg.plugin_settings["legacy"] = {
+        "dry_run": "false",
+        "listen_port": "9292",
+        "poll_every": "300",
+    }
+    config.save(cfg)
+    captured = []
+    plugin = Plugin(
+        id="legacy",
+        name="Legacy",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda ctx: captured.append(ctx.config),
+        required_settings=(
+            Setting("dry_run", "Preview", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+
+    _run_capturing(plugin, collect_home)
+
+    assert captured == [{"dry_run": False, "listen_port": 9292, "poll_every": 300}]
 
 
 def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
