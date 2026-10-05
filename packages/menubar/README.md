@@ -77,8 +77,14 @@ and the web setup interface. It writes the app under
 `packages/menubar/build/fulcra-menubar/macos/app/`. The build rejects embedded
 builder-home paths and removes nonportable pip scripts before signing. It also
 removes generated Python bytecode after build and bundle verification because
-bytecode can retain a source path from the build machine. A final read-only
-privacy check runs before signing.
+bytecode can retain a source path from the build machine. Dependency wheels can
+include their upstream test suites, so the same sanitizer removes those files
+while keeping runtime helpers such as `numpy.testing`. That currently trims
+about 36 MiB from the arm64 app. A final read-only privacy check runs before
+signing. The dock/Finder icon is the checked-in native `menubar-icon.icns`;
+the smaller PNG beside it remains the monochrome menu-bar template. A release
+asset test catches a missing native icon before Briefcase can substitute its
+default.
 
 For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,

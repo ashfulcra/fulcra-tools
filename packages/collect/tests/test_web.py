@@ -129,6 +129,11 @@ def test_browser_security_headers_block_remote_code(collect_home):
     assert "default-src 'self'" in csp
     assert "object-src 'none'" in csp
     assert "https:" not in csp
+    script_policy = next(
+        part.strip() for part in csp.split(";")
+        if part.strip().startswith("script-src ")
+    )
+    assert script_policy == "script-src 'self' 'unsafe-eval'"
 
 
 def test_web_bind_permission_error_is_not_reported_as_port_collision(

@@ -76,7 +76,8 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   Requests must also carry a loopback Host header. The browser receives the
   local control token in an HttpOnly, SameSite cookie; JavaScript cannot read
   it. Browser libraries are packaged with Collect rather than loaded from a
-  CDN, and the server sends a policy that blocks remote scripts.
+  CDN. The server's content policy allows local scripts and Alpine's expression
+  evaluator, but blocks remote and inline script execution.
 * **Auto-launches the macOS menubar app** on startup when one is
   installed, so the user always has a visible status indicator
   without remembering a second command.

@@ -4,6 +4,32 @@ import argparse
 import shutil
 
 
+def _test_only_payloads(packages: Path) -> list[Path]:
+    """Return dependency test code that the installed app cannot execute.
+
+    Several binary wheels ship their entire upstream test suites.  They are
+    useful to dependency maintainers but add tens of megabytes to Collect's
+    signed app.  Keep public runtime helpers such as ``numpy.testing``; remove
+    only directories named ``tests`` and the known top-level pytest/PyObjC test
+    packages installed by Collect's dependency graph.
+    """
+    candidates = [
+        packages / 'PyObjCTest',
+        packages / '_pytest',
+        packages / 'pytest',
+        packages / '.pytest_cache',
+        *packages.glob('pytest-*.dist-info'),
+        *packages.glob('pytest_mock-*.dist-info'),
+        *packages.rglob('tests'),
+        *packages.glob('pyarrow/_pyarrow_cpp_tests.*'),
+    ]
+    return sorted(
+        {path for path in candidates if path.exists() or path.is_symlink()},
+        key=lambda path: (len(path.parts), str(path)),
+        reverse=True,
+    )
+
+
 def sanitize(app: Path, *, home: Path | None = None, check_only: bool = False) -> None:
     packages = app / 'Contents' / 'Resources' / 'app_packages'
     if (not packages.is_dir() or any(p.is_symlink() for p in
@@ -18,6 +44,16 @@ def sanitize(app: Path, *, home: Path | None = None, check_only: bool = False) -
         if check_only:
             raise RuntimeError('Nonportable package scripts remain in bundle')
         shutil.rmtree(scripts)
+    test_payloads = _test_only_payloads(packages)
+    if any(path.is_symlink() for path in test_payloads):
+        raise RuntimeError('Refusing symlinked test-only payload in bundle')
+    if test_payloads and check_only:
+        raise RuntimeError('Test-only payloads remain in bundle')
+    for path in test_payloads:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
     # Imports performed while assembling or verifying the app can write .pyc
     # files after pip has installed otherwise portable source. Python embeds the
     # compiler's source filename in that bytecode, which can disclose the build
