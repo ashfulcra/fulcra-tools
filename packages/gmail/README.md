@@ -275,3 +275,5 @@ asserted by [test_operator_docs_agree.py](tests/test_operator_docs_agree.py).
 Use the [Collect source setup](../collect/README.md#running-from-source) for
 workspace installation. The package registers the `gmail` plugin; it has no
 standalone Gmail CLI.
+
+The rule builder loads its script from an authenticated same-origin endpoint. Search, labeling, derivation, chip, save, edit, enable/disable and delete controls use delegated listeners rather than inline handlers, preserving Collect’s strict script CSP.

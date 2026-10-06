@@ -76,7 +76,8 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   Requests must also carry a loopback Host header. The browser receives the
   local control token in an HttpOnly, SameSite cookie; JavaScript cannot read
   it. Browser libraries are packaged with Collect rather than loaded from a
-  CDN, and the server sends a policy that blocks remote scripts.
+  CDN. The server's content policy allows local scripts and Alpine's expression
+  evaluator, but blocks remote and inline script execution.
 * **Auto-launches the macOS menubar app** on startup when one is
   installed, so the user always has a visible status indicator
   without remembering a second command.
@@ -461,3 +462,5 @@ The CLI accepts multiselect values as JSON arrays of unique, nonempty string IDs
 `fulcra-collect set-setting apple-reminders selected_lists '["example-list-id"]'`.
 Use `[]` to clear the selection; a required empty selection cannot be enabled.
 The dashboard discovers IDs and labels for you, so it is the easier setup path.
+
+OAuth completion uses a packaged same-origin script and inert escaped plugin data, so the strict browser CSP allows the wizard to advance after sign-in. Failed or expired callbacks do not signal completion.

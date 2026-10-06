@@ -272,3 +272,5 @@ dist/static/components/
 Permission requests and checks are tied to a specific visit to the setup step.
 Leaving and returning starts a fresh check; a late response from the previous
 visit cannot authorize the new one or unblock another step.
+
+OAuth callback completion runs from static/oauth-complete.js under the same strict script CSP as the wizard. Plugin identifiers are read from inert HTML data attributes.
