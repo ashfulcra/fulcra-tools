@@ -954,6 +954,17 @@ it (not on PyPI).
   budgets) or `_JSON_EXEMPT` with a stated reason — `_JSON_EXEMPT` is empty today, pinned paths must
   print SOMETHING, and the widened sweep immediately found a live leak (`headroom --json` printed
   prose on its no-accounts early return).
+- **Digest uncertainty travels with the payload.** `digest` text, stored body and
+  timeline note must carry the same read-degraded reason and last-known/unverified
+  row warning as JSON; an unreadable index never licenses "no open work". Its
+  additive source timestamp/age uses summaries `generated_at` or, on the validated
+  generation path, the attested coverage horizon, never the render clock as a
+  fallback. Preserve first-written window snapshots, but withhold their pending
+  unqualified historical timeline body while the current read is degraded; render
+  a current warned note instead, preserving same-ID retries and already-confirmed
+  emissions. A False store/emit-marker
+  write or mismatched readback cannot be reported as confirmed persistence;
+  UNKNOWN marker reads preserve existing history and withhold emission.
 - **A finished review does not close its request row unless something closes it.**
   The review store and task board need explicit closure propagation. The DECISION verbs (`review close`, `review conclude`) close their own rows at settle time —
   best-effort and loud, because the marker is durable truth and bookkeeping must not fail a verified
