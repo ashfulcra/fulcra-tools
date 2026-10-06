@@ -2,7 +2,7 @@
 
 Independent Node tools for durable coordination: validation, authorized causal
 replay, open-work digests, checkpoints/handoffs and a recoverable SQLite listener.
-Unofficial and unsupported; existing coord-engine and fleet schedules are unchanged.
+Unofficial and unsupported; existing coord-engine installations and their schedules are unchanged.
 Wire formats remain `gatekeeper-work/1` and `gatekeeper/1`.
 
 See [current release evidence and remaining gates](https://github.com/ashfulcra/fulcra-tools/blob/main/docs/coord/V5-RELEASE-STATUS.md)
