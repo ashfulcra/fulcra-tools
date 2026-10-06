@@ -2,7 +2,7 @@
 
 Independent Node tools for durable coordination: validation, authorized causal
 replay, open-work digests, checkpoints/handoffs and a recoverable SQLite listener.
-Unofficial and unsupported; existing coord-engine and fleet schedules are unchanged.
+Unofficial and unsupported; existing coord-engine installations and their schedules are unchanged.
 Wire formats remain `gatekeeper-work/1` and `gatekeeper/1`.
 
 See [current release evidence and remaining gates](https://github.com/ashfulcra/fulcra-tools/blob/main/docs/coord/V5-RELEASE-STATUS.md)
@@ -48,6 +48,9 @@ coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable
 ## Explicit enrollment
 
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+The guide's [survey-informed operating patterns](docs/harnesses.md#survey-informed-operating-patterns)
+separate reported, manual and scheduled evidence, with bounded recovery recipes
+and explicit unknowns; they are not installed configuration or fleet acceptance.
 The enrollment planner selects an interactive or native-listener path from dated
 local capability evidence, reuses exact native registrations, and preserves faster
 operator intervals. With explicit unattended opt-in and current read, publish,
