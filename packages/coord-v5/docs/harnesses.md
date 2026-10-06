@@ -88,3 +88,122 @@ Official starting points: [Claude scheduled tasks](https://code.claude.com/docs/
 ## Acceptance record
 
 Capture harness/version, listener registration, actual event reception/execution time, scheduled time when applicable, source coverage, native delivery intent/receipt, receiver acknowledgment and observed model usage when available. Test idle, busy, restart, outage, credentials, permission prompts and version drift separately. Unknown usage remains unknown. A 24-hour cost/latency experiment is a separate measurement, not an extrapolation from one successful wake.
+
+## Survey-informed operating patterns
+
+Reviewed 2026-10-06. These reusable patterns summarize a partial listener survey,
+not a platform support matrix or an installed configuration. Private participant,
+host, session, source, grant and routing mappings remain outside the repository.
+The survey authorized no installations, schedule changes or native trials.
+Preserve existing registrations, cursors, deduplication and unfinished obligations.
+Missing replies mean **unknown**, not unsupported or complete survey coverage.
+
+Use these evidence labels independently: **reported** is a respondent's account;
+**observed** is an inspected execution or receipt; **manual** means an active turn
+performed the action; **scheduled** requires an actual scheduled invocation.
+Scheduled delivery additionally requires the addressed receiver's correlated read.
+Native acceptance, receiver read, acknowledgment, accepted ownership and task
+completion are separate facts. Evidence for one target does not qualify another.
+
+| Environment pattern | Reported mechanism and state | Evidence boundary | Unproven capabilities |
+|---|---|---|---|
+| Codex desktop, separate reporting listener | Native heartbeat chat; source-time watermark, overlap, message-ID dedup and pending-delivery ledger | Inspected manual forwarding/receiver acknowledgment and scheduled addressed receiver read for a particular route; another route had only manual delivery and scheduled no-action reads | Event ingress, other target routes, restart, outage, expired authentication and upgrade recovery |
+| Claude Code in ephemeral cloud Linux | Same-session background subagent loop with a session-bound watchdog; durable last-tick and woken-ID state with readback | Reported real tick surfaced addressed traffic to the productive main session; not arbitrary cross-session or idle-wake proof | Other-session delivery, expiry recovery, catch-up beyond retained overlap and upgrades |
+| macOS supervisor with an isolated Linux reader | Existing supervised process and scoped reader; SQLite anchors, pinned failed windows, fingerprints and uncertain-send state | Reported recovery hint/webhook wake; process or CLI admission alone is not native worker delivery | Arbitrary native busy/idle routing, host outage, authentication/permission recovery and complete history |
+| Codex desktop workers with manual Coord reads | Active-turn/exit checks; partial observation/publication journals and manual overlap, without a demonstrated automated ingress cursor | Native survey receipt during active work and source read/publication evidence; not scheduled Coord idle wake | Autonomous routing, durable ingress cursor and coordination lifecycle recovery |
+| Worker with a separate application inbox job | Manual Coord checks alongside an independent native product-inbox worker | Reported product-inbox wake/read; not coordination-bus delivery | Coord bus-to-worker route and its cursor, restart/outage recovery |
+| Legacy queue or host-router fallback | Store cursor and staged token/batch where supported; configured poller/router may belong to another or retired identity | Reported replay/fail-closed behavior; loaded jobs and route availability do not prove identity-matched delivery | Current receiver binding, bus-to-worker wake and app/host/authentication/upgrade recovery |
+
+Some workers reported loaded legacy jobs that were failing, not healthy background
+delivery. Preserve their state and refer the fault to the owning implementation;
+a successful independent record read does not prove the legacy reader recovered.
+Product version, adapter provenance and lifecycle claims remain unknown unless
+the exact environment supplied evidence. Do not infer liveness from roster
+membership, old presence or a process merely being loaded.
+
+### Desktop reporting listener: preserve pending delivery separately
+
+Use the [Codex recipe](#codex-desktop) with approved source and target bindings.
+For a separately configured reporting protocol, use its existing scoped reader;
+do not feed another protocol's raw records to the v5 observation pipeline.
+
+1. Validate the source, complete response shape and coverage before updating its
+   watermark. Use source time, not an envelope's sender clock, for source progress.
+   Partial, malformed, wrong-source and failed reads cannot establish absence.
+2. Stage each validated addressed record as a pending per-target obligation.
+   Deduplication means already observed, not delivered. Recover seen records that
+   lack a delivery intent conservatively; preserve valid neighboring obligations
+   when one record is malformed.
+3. Examine pending obligations independently of fresh events. Check the exact
+   receiver's current state; busy or unknown targets retain their obligation.
+   Persist and verify intent before the native effect.
+4. Retain raw accepted/error/unknown results even when later persistence fails.
+   Reconcile an ambiguous callback with exact receipt/read/acknowledgment evidence;
+   never blindly resend. The [host-injected dispatcher contract](../README.md#explicit-host-injected-codex-delivery)
+   describes the package's bounded native callback path, not an external CLI bridge.
+5. Keep the worker fallback until genuine scheduled or event-driven addressed
+   traffic reaches its intended idle receiver. Manual forwarding, another target's
+   read and scheduled empty reads do not satisfy that gate. After verification,
+   preserve the coarse worker backstop described [above](#in-harness-listeners).
+
+### Ephemeral cloud session: same-session loop and watchdog
+
+This reported pattern complements, but is not the same as,
+[explicit Claude CLI dispatch](#claude-code-explicit-local-delivery). It notifies
+the main agent inside the existing session; it supplies no general other-session
+delivery. Reuse it only when authorized and verified in that environment.
+
+1. Put the existing bounded reader in a background subagent. Distinguish quiet,
+   actionable items and unreadable source results; an unreadable source is never
+   quiet. Handle the reader's documented exit codes explicitly before restarting
+   or sleeping. An items exit code must not silently terminate listening.
+2. Persist the script, last successful tick, dedup state and pending work outside
+   ephemeral scratch storage, with readback. Mark a notification delivered only
+   after the main session is told, keeping notification state distinct from task
+   acknowledgment/completion.
+3. Record the loop's actual session/container lifetime, observed background-job
+   cutoff and restart owner. An existing session-bound watchdog can detect stale
+   ticks, but its presence is not proof of successful recovery. Deployment cadences
+   and cutoffs are not universal product minima or limits.
+4. On reclaim, verify tools, workspace access and authenticated reads as well as
+   process recovery. Use supported environment setup and operator authentication;
+   never copy credentials into a public recipe. Overlap alone does not prove
+   outage catch-up or provider source completeness.
+
+### Supervised detector: advisory hints only
+
+A separately authorized supervisor can read independently of a reasoning session.
+Keep its reader scoped, process ownership exclusive and state durable. Read recent
+and reconciliation windows, pin failed intervals, and retain record fingerprints
+without copying message bodies into hints. A short overlap alone cannot establish
+that delayed records were found; even a long lookback does not prove complete
+provider history.
+
+Persist uncertain intent before an advisory hint and freeze ambiguous retries.
+Slack, OpenClaw or webhook admission is not receiver acknowledgment or native
+Codex acceptance. Detector state must not advance authoritative consumption or
+notification state. Establish the actual mechanism that re-enters the worker
+before retiring any existing wake path.
+
+### Manual and legacy fallback: bind the current identity
+
+A product/household inbox worker, a retired identity's poller or somebody else's
+host router is not this worker's Coord listener. Inspect the current owner-approved
+identity mapping and route; do not silently rename a shared logical identity to
+hide a collision. Separate sessions using one bus identity can collide in routing,
+acknowledgments and cursor state. Resolve enrollment with the owner while preserving
+existing journals and unfinished work.
+
+For an existing legacy engine, a diagnostic read is
+`coord-engine queue <team> --agent <agent> --peek --obligations --json`.
+This is not a v5 command. In a deployment with an activated transactional queue,
+an authorized consumer stages without `--peek`, handles every record, and commits
+the exact token with a classification for each staged record. Uncommitted batches
+replay. Commit accounts for queue delivery, not task execution or completion.
+Do not activate cursor schemas or migrate a listener merely to follow this guide.
+
+Keep queued wakes and UNKNOWN on transport or delivery-ledger uncertainty. Loaded
+but failing jobs remain failed evidence; manual source/publication success must
+not be promoted into automatic idle wake, a durable ingress cursor or complete
+history. Record the exact missing route or recovery proof in the private capability
+report rather than advertising a fleet-wide listener guarantee.
