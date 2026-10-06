@@ -124,7 +124,10 @@ untouched. New store and emit-marker
 writes require confirmed absence before writing, then success and exact readback
 before confirmation; unreadable markers preserve history and withhold emission.
 Persistence or confirmation failure returns
-rc 3. Read degradation itself keeps the existing digest exit contract and JSON
+rc 3, meaning persistence is unconfirmed, not that data was lost: readback may
+observe a stale superseded version; a later confirmed marker read can resolve
+that uncertainty without blindly retrying an ambiguous external effect.
+Read degradation itself keeps the existing digest exit contract and JSON
 marker. No schedule or timeline configuration is changed by this behavior.
 
 `roles status` now returns one `liveness_fact` that carries lease and presence
