@@ -26,7 +26,9 @@
 #      for distribution.)
 #   * A stored notarytool credential profile. Create once:
 #       xcrun notarytool store-credentials "$FULCRA_NOTARY_PROFILE" \
-#         --apple-id <apple-id> --team-id <TEAMID> --password <app-specific-pw>
+#         --apple-id <apple-id> --team-id <TEAMID>
+#     Paste the app-specific password at the secure prompt; do not put it in
+#     the command line or shell history.
 #
 # USAGE:
 #   FULCRA_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \

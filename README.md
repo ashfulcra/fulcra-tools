@@ -184,7 +184,7 @@ Use Collect when you want one of its connectors or a common place to schedule
 imports. It is one way to put data into Fulcra; standalone importers and direct
 API writes are also available.
 
-**[Download Collect 0.1.3 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.3-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Collect 0.1.4 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)

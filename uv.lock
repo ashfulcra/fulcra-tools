@@ -438,7 +438,7 @@ provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-collect"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "packages/collect" }
 dependencies = [
     { name = "click" },
@@ -682,7 +682,7 @@ provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-menubar"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "packages/menubar" }
 dependencies = [
     { name = "fulcra-collect" },
