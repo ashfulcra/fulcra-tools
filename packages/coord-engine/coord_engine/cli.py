@@ -12177,12 +12177,18 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
     now = _iso(_now())
     # Public-read failure contract (see _read_degraded_row): don't fold an UNKNOWN
     # index into a falsely-quiet health digest.
-    rows, ok, reason = _load_rows_status(transport, args.team)
+    doc_sink: list[Any] = []
+    rows, ok, reason = _load_rows_status(transport, args.team, doc_sink=doc_sink)
+    authority = _PUBLIC_READ_CONTEXT.get()
+    aggregate_doc = doc_sink[0] if doc_sink else None
+    source_at = (authority.coverage_horizon if authority is not None else
+                 aggregate_doc.get("generated_at") if isinstance(aggregate_doc, dict) else None)
     d = digest_mod.build(rows, _presence_shards(transport, args.team),
-                         now=now, human=args.human or _human())
+                         now=now, human=args.human or _human(), source_at=source_at,
+                         source_kind="coverage-horizon" if authority is not None else "summaries")
+    if not ok:
+        d = {**d, _READ_DEGRADED: _read_degraded_row(reason)}
     if args.json:
-        if not ok:
-            d = {**d, _READ_DEGRADED: _read_degraded_row(reason)}
         jsonutil.print_json(d)
     else:
         if not ok:
@@ -12208,12 +12214,23 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
         # The store marker dedups the BUS COPY (a lost race just re-writes an
         # equivalent copy as a new version — harmless). It is NOT the timeline
         # correctness guard: that lives in the deterministic record id below.
-        stored_body = transport.read(marker)
+        stored_body, marker_status = transport.read_classified(marker)
+        if (marker_status not in ("ok", "absent")
+                or (marker_status == "ok" and not isinstance(stored_body, str))
+                or (marker_status == "absent" and stored_body is not None)):
+            print("digest store marker UNKNOWN — history preserved, timeline withheld",
+                  file=sys.stderr)
+            return 3
+        already_stored = stored_body is not None
         if stored_body is not None:
             print(f"(digest for {day} {window} already stored — skipped)", file=sys.stderr)
         else:
             stored_body = digest_mod.render(d)
-            transport.write(marker, stored_body)
+            if (not transport.write(marker, stored_body)
+                    or transport.read(marker) != stored_body):
+                print("digest store FAILED or readback unverified — timeline withheld",
+                      file=sys.stderr)
+                return 3
             print(f"stored digest -> _coord/digests/{day}-{window}.md", file=sys.stderr)
         if emit_timeline:
             # Timeline emit state is SEPARATE from the store marker and written
@@ -12224,16 +12241,32 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
             # ingestion-layer upsert of the same record, so retries and races
             # can never duplicate the digest (codex P1).
             emitted_marker = f"team/{args.team}/_coord/digests/{day}-{window}.emitted"
-            if transport.read(emitted_marker) is not None:
+            emitted_body, emitted_status = transport.read_classified(emitted_marker)
+            if (emitted_status not in ("ok", "absent")
+                    or (emitted_status == "ok" and not isinstance(emitted_body, str))
+                    or (emitted_status == "absent" and emitted_body is not None)):
+                print("digest emit marker UNKNOWN — confirmation preserved, "
+                      "timeline withheld", file=sys.stderr)
+                return 3
+            if emitted_status == "ok":
                 pass  # this window's digest is confirmed on the timeline
             else:
                 rid = _digest_record_id(args.team, day, window)
+                # Preserve first-written history and same-ID retries. A current
+                # degraded read must qualify the emitted payload itself instead
+                # of reusing a possibly clean historical snapshot unqualified.
+                timeline_body = (digest_mod.render(d) if already_stored and not ok
+                                 else stored_body)
                 if _emit_digest_timeline(
                         name=f"Agent digest — {day} {window}",
-                        note=stored_body, window=window, agent=_host(),
+                        note=timeline_body, window=window, agent=_host(),
                         record_id=rid):
-                    transport.write(emitted_marker,
-                                    f"emitted {now} by {_host()} record {rid}\n")
+                    receipt = f"emitted {now} by {_host()} record {rid}\n"
+                    if (not transport.write(emitted_marker, receipt)
+                            or transport.read(emitted_marker) != receipt):
+                        print("digest timeline accepted, but emit-marker write/readback "
+                              "FAILED — confirmation unverified", file=sys.stderr)
+                        return 3
                     print(f"emitted digest timeline moment ({day} {window})",
                           file=sys.stderr)
                 else:

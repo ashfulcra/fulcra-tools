@@ -109,6 +109,27 @@ while public reads use canonical authorities. Generation serving is a separate
 activation; its presence in the code is not evidence that a team has enabled it.
 Epsilon is not a repair for an incomplete or unknown read.
 
+`digest` carries an unreadable-index/freshness warning in the same rendered body
+used by text output, `--store` and `--emit-timeline`, not only on stderr. Retained
+rows/counts are explicitly last-known/unverified; empty counts under UNKNOWN do
+not claim no open work. The existing digest-v1 JSON adds `source:{kind,at,age_hours}`:
+the summaries timestamp is its `generated_at`, while a validated generation uses
+the attested coverage horizon. Missing/invalid time stays unknown; the render
+clock is never substituted for source time. Source age does not prove complete
+history or healthy presence reads. Existing per-window stored bodies remain
+historical snapshots; a degraded current read withholds their pending timeline
+body and emits the current explicitly warned note instead. Same-ID retries remain
+available after transient emit failure, and confirmed emitted records are left
+untouched. New store and emit-marker
+writes require confirmed absence before writing, then success and exact readback
+before confirmation; unreadable markers preserve history and withhold emission.
+Persistence or confirmation failure returns
+rc 3, meaning persistence is unconfirmed, not that data was lost: readback may
+observe a stale superseded version; a later confirmed marker read can resolve
+that uncertainty without blindly retrying an ambiguous external effect.
+Read degradation itself keeps the existing digest exit contract and JSON
+marker. No schedule or timeline configuration is changed by this behavior.
+
 `roles status` now returns one `liveness_fact` that carries lease and presence
 observations plus both store-prefix provenance fields. Fresh holder presence and
 a lapsed lease can therefore never be rendered as confidently `VACANT`.
@@ -191,6 +212,12 @@ transport bounds.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 
 ## Environment / tuning
+
+Malformed CLI stdout or stderr is a transport failure, not usable text.
+The file transport converts decoding failures to `TransportError`; classified
+reads return `(None, "error")`, never an empty body or affirmative absence.
+It does not replace invalid bytes. The unreadable source still needs repair;
+this boundary prevents a raw decoding exception from crashing a fold.
 
 Common transport, identity, and fold settings. Command-specific settings are
 documented with their skills and CLI help. **Prefix rule:**
