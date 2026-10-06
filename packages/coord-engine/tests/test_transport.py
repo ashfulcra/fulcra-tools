@@ -9,6 +9,7 @@ soft return) ever escapes a transport method.
 """
 
 import subprocess
+import sys
 import time
 import urllib.error
 
@@ -139,6 +140,34 @@ def test_delete_idempotent_rejects_other_remote_error(monkeypatch):
 
 def test_updates_returns_none_on_missing_binary():
     assert _missing().updates("60 seconds") is None
+
+
+# --- malformed subprocess text: unreadable is never content or absence ---
+
+@pytest.fixture(params=[1, 2], ids=["stdout", "stderr"])
+def undecodable_transport(request, monkeypatch):
+    # Removing _run's decode-error normalization must break these tests. Run
+    # the actual bounded subprocess, not a fake that raises the expected error.
+    # stderr even resembles an affirmative absence: corrupt text cannot prove it.
+    monkeypatch.setenv("COORD_TRANSPORT_HTTP", "0")
+    script = (
+        "import os, sys; "
+        "os.write(2, b'Error: File not found in Fulcra: /x.md\\n'); "
+        f"os.write({request.param}, bytes([0x9b])); sys.exit(1)"
+    )
+    return tr.FulcraFileTransport(
+        command=[sys.executable, "-c", script], timeout=5.0,
+    )
+
+
+def test_read_classified_rejects_undecodable_subprocess_text(undecodable_transport):
+    assert undecodable_transport.read_classified("/x.md") == (None, "error")
+
+
+def test_list_dir_normalizes_undecodable_subprocess_text(undecodable_transport):
+    with pytest.raises(tr.TransportError) as error:
+        undecodable_transport.list_dir("/prefix")
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
 
 
 # --- briefing-level: a fold over a timing-out transport degrades, no traceback ---

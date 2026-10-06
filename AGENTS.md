@@ -921,6 +921,9 @@ it (not on PyPI).
   fan-out uses `budget.Deadline` for its deadline check (never a hand-rolled
   `time.monotonic() >= deadline`) and `budget.degraded_row` for its marker**, so the whole family
   keeps one `>=` boundary and one degraded shape.
+  Undecodable CLI stdout/stderr is normalized to `TransportError`, never replacement-decoded;
+  classified reads report `error`, not content or absence. A malformed source remains
+  unreadable and needs repair; this does not prove a clean fold.
 - **Ship-gate: a verb that mutates durable state does not ship on decision-function tests alone.**
   It ships with at least one test that invokes the ACTUATOR end to end, or with a recorded live dry
   run against a real team. `review residue` shipped its decision function under thirteen passing

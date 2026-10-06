@@ -210,6 +210,12 @@ transport bounds.
 
 ## Environment / tuning
 
+Malformed CLI stdout or stderr is a transport failure, not usable text.
+The file transport converts decoding failures to `TransportError`; classified
+reads return `(None, "error")`, never an empty body or affirmative absence.
+It does not replace invalid bytes. The unreadable source still needs repair;
+this boundary prevents a raw decoding exception from crashing a fold.
+
 Common transport, identity, and fold settings. Command-specific settings are
 documented with their skills and CLI help. **Prefix rule:**
 `COORD_*` is the engine-native, canonical prefix for all tuning knobs; `FULCRA_COORD_*`
