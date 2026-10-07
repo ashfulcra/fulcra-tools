@@ -357,5 +357,46 @@ describe('mod', () => {
       expect((await draft.findAll({ type: 'Button', text: /Oct 19/ })).length).toBe(1)
     }
   })
+
+  test('rename a contact; hide a collaboration until something new arrives', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows = [v1Row({ message_id: 'h1', topic: 'noise', body: 'daily report' }, '2026-10-07T11:00:00Z')]
+    engine(on, fake(rows), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown>; input: (t: unknown) => Promise<unknown> }
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+    await ui.press({ key: `ds-new-mesh:${PEER}` })
+    await ui.input({ key: 'drename', text: 'Kristina' })
+    expect((await ui.findAll({ type: 'Button', text: /^Kristina$/ })).length).toBeGreaterThan(0)
+    await ui.press({ key: `ds-open-mesh:${PEER}` })
+    await ui.press({ key: 'dhide' })
+    expect((await ui.findAll({ text: /1 hidden/ })).length).toBeGreaterThan(0)
+    rows.push(v1Row({ message_id: 'h2', topic: 'noise', body: 'new report' }, '2026-10-07T12:01:00Z'))
+    await clock.advance(120_000)
+    expect((await ui.findAll({ text: /hidden/ })).length).toBe(0)
+  })
+
+  test('quiet channels back off; Refresh still reads everything', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const f = fake([])
+    engine(on, f, sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const reads = () => f.calls.filter(c => c.argv[1] === 'get-records' && c.argv[2] === V1_IN).length
+    for (let i = 0; i < 6; i += 1) await clock.advance(120_000)
+    const before = reads()
+    await clock.advance(120_000)
+    await clock.advance(120_000)
+    expect(reads() - before).toBeLessThan(2)
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { press: (t: unknown) => Promise<unknown> }
+    const r0 = reads()
+    await ui.press({ key: 'drefresh' })
+    expect(reads()).toBe(r0 + 1)
+  })
 })
 

@@ -37,6 +37,8 @@ manifest.
     - A **Decision needed / Prepared for approval** card (Approve & send / Discard) and a **Returned revision** card (Use these changes).
     - **Continue in chat**, **Add to chat** (visible, removable context on your next prompt), Pause, Mark completed, a reply box, and the exchange.
   - **Terminal:** the same structure as text, with colored states.
+  - **Triage:** rename any contact, hide a collaboration until something new arrives, an "Older, still open" list for items untouched 3+ days, full-text search across messages, one-click "Hand to my agent" / "Mark completed" on cards, and long messages folded behind "Show more".
+- **Polls lightly.** A source with no new message for 5 reads drops to every 5th tick; Refresh / Check now reads everything.
   - Colors follow the light/dark theme.
 - **Responds per your policy.** The four AICQ modes, set in Settings or with
   `/aicq mode <mode>`:

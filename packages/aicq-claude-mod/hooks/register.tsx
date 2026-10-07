@@ -19,6 +19,9 @@ const PANE = 'aicq'
 const INBOX_CAP = 400
 const PEER_REFRESH_TICKS = 10
 const POOL = 6
+/** A source with no new message for QUIET_AFTER reads is read only every QUIET_EVERY ticks. */
+const QUIET_AFTER = 5
+const QUIET_EVERY = 5
 const SKILL_URL = 'https://github.com/fulcradynamics/agent-skills/tree/main/skills/connect-our-agents'
 
 const inbox = atom({ plugin: 'aicq', key: 'inbox' } as const, [])
@@ -35,6 +38,8 @@ const queryAtom = atom({ plugin: 'aicq', key: 'query' } as const, '')
 const overridesAtom = atom({ plugin: 'aicq', key: 'overrides' } as const, {})
 const invitesAtom = atom({ plugin: 'aicq', key: 'invites' } as const, [])
 const expandedAtom = atom({ plugin: 'aicq', key: 'expanded' } as const, [])
+const aliasesAtom = atom({ plugin: 'aicq', key: 'aliases' } as const, {})
+const hiddenAtom = atom({ plugin: 'aicq', key: 'hidden' } as const, {})
 
 const ACCENT = '#10a37f'
 const CARD_BORDER = 'gray'
@@ -63,6 +68,7 @@ const wsChannels = new Map<string, string>()
 let tick = 0
 let polling = false
 let wakeQueued = false
+const quietReads = new Map<string, number>()
 let theme = ''
 // The invite form's fields: typed into, read on Generate; no redraw needed per keystroke.
 const inviteDraft = { name: '', message: 'Let’s connect our agents so we can coordinate directly. We’ll share only the work we choose.' }
@@ -169,7 +175,7 @@ async function readSource($: $, src: Source): Promise<{ src: Source; failed: boo
   }
 }
 
-async function poll($: $): Promise<AicqMessage[]> {
+async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
   if (polling) return []
   polling = true
   tick += 1
@@ -181,7 +187,8 @@ async function poll($: $): Promise<AicqMessage[]> {
     const cursors = new Map<string, Cursor>()
     const srcs = sourcesFor(now, new Map())
     for (const src of srcs) cursors.set(src.key, ((await $.store.get(`cursor:${src.key}`)) as Cursor | undefined) ?? EMPTY_CURSOR)
-    const work = sourcesFor(now, cursors)
+    // Active sources every tick; long-quiet ones every QUIET_EVERY ticks (a manual Check now reads all).
+    const work = sourcesFor(now, cursors).filter(src => forceAll || (quietReads.get(src.key) ?? 0) < QUIET_AFTER || tick % QUIET_EVERY === 0)
 
     const results: Awaited<ReturnType<typeof readSource>>[] = []
     for (let i = 0; i < work.length; i += POOL) {
@@ -197,6 +204,7 @@ async function poll($: $): Promise<AicqMessage[]> {
       }
       const before = cursors.get(src.key) ?? EMPTY_CURSOR
       const { fresh, cursor } = advance(before, msgs)
+      quietReads.set(src.key, fresh.length ? 0 : (quietReads.get(src.key) ?? 0) + 1)
       await $.store.set(`cursor:${src.key}`, cursor)
       added.push(...fresh)
       if (before.at !== null) arrived.push(...fresh.filter(m => m.direction === 'in'))
@@ -587,6 +595,34 @@ async function toggleExpanded($: $, key: string) {
   await update($, expandedAtom, l => (l.includes(key) ? l.filter(k => k !== key) : [...l, key]))
 }
 
+async function renameContact($: $, key: string, name: string) {
+  const clean = name.trim().slice(0, 40)
+  await update($, aliasesAtom, a => {
+    const next = { ...a }
+    if (clean) next[key] = clean
+    else delete next[key]
+    return next
+  })
+  await $.store.set('aliases', (await read($, aliasesAtom)) as Record<string, string>)
+  $.ui.toast(clean ? `AICQ: renamed to ${clean}` : 'AICQ: name reset')
+}
+
+/** Hides a collaboration from the board until something newer than now arrives in it. */
+async function hideCollab($: $, c: Collaboration) {
+  await update($, hiddenAtom, h => ({ ...h, [c.key]: c.updatedAt }))
+  await $.store.set('hidden', (await read($, hiddenAtom)) as Record<string, string>)
+  await goHome($)
+}
+
+async function unhideCollab($: $, key: string) {
+  await update($, hiddenAtom, h => {
+    const next = { ...h }
+    delete next[key]
+    return next
+  })
+  await $.store.set('hidden', (await read($, hiddenAtom)) as Record<string, string>)
+}
+
 async function openInvite($: $) {
   await update($, view, (): PaneView => ({ kind: 'invite' }))
 }
@@ -705,6 +741,10 @@ export const register: Register = (on, options) => {
     }
     const savedOverrides = ((await $.store.get('overrides')) as Record<string, string> | undefined) ?? {}
     const savedInvites = ((await $.store.get('invites')) as never[] | undefined) ?? []
+    const savedAliases = ((await $.store.get('aliases')) as Record<string, string> | undefined) ?? {}
+    const savedHidden = ((await $.store.get('hidden')) as Record<string, string> | undefined) ?? {}
+    await update($, aliasesAtom, () => savedAliases)
+    await update($, hiddenAtom, () => savedHidden)
     await update($, overridesAtom, () => savedOverrides)
     await update($, invitesAtom, () => savedInvites)
     const stored = await $.store.get('mode')
@@ -918,7 +958,13 @@ export const register: Register = (on, options) => {
     const expanded = ((await read($, expandedAtom)) as string[] | undefined) ?? []
     const invites = ((await read($, invitesAtom)) as Invite[] | undefined) ?? []
     const nowMs = st.lastCheckAt ? Date.parse(st.lastCheckAt) : await $.clock.now()
-    const collabs = collaborations(all, { paused: pausedKeys, drafts: pendingDrafts.map(d => d.collabKey) })
+    const aliases = ((await read($, aliasesAtom)) as Record<string, string> | undefined) ?? {}
+    const hidden = ((await read($, hiddenAtom)) as Record<string, string> | undefined) ?? {}
+    const allCollabs = collaborations(all, { paused: pausedKeys, drafts: pendingDrafts.map(d => d.collabKey) })
+    // Hidden stays hidden until something newer than the hide arrives.
+    const isHidden = (c: Collaboration) => !!hidden[c.key] && c.updatedAt <= hidden[c.key]!
+    const collabs = allCollabs.filter(c => !isHidden(c))
+    const hiddenCount = allCollabs.length - collabs.length
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 100
     const wide = cols >= 96
 
@@ -930,6 +976,8 @@ export const register: Register = (on, options) => {
       return (userId && (!shared || shared === userId.slice(0, 8)) ? persons[userId] : undefined) ?? shared ?? fallback
     }
     const titleOf = (userId: string | null, fallback: string, workspace: string | null) => {
+      const alias = aliases[workspace ? `ws:${workspace}:${fallback}` : `mesh:${userId ?? fallback}`]
+      if (alias) return alias
       if (workspace) return fallback === 'all' ? `Everyone in ${workspace}` : fallback
       const agent = userId ? agentNames[userId] : undefined
       const person = personOf(userId, fallback)
@@ -1011,6 +1059,9 @@ export const register: Register = (on, options) => {
             <Box>
               <Button key={`${k}-open-${c.key}`} label="Open" onPress={() => openCollab($, c.key)} />
               {pendingDrafts.some(d => d.collabKey === c.key) && <Button key={`${k}-appr-${c.key}`} variant="primary" label="Review draft" onPress={() => openCollab($, c.key)} />}
+              {c.state === 'needs-reply' && <Button key={`${k}-hand-${c.key}`} label="Hand to my agent" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />}
+              {c.state === 'result-ready' && <Button key={`${k}-done-${c.key}`} label="Mark completed" onPress={() => markCompleted($, c)} />}
+              <Button key={`${k}-hide-${c.key}`} plain label="Hide" onPress={() => hideCollab($, c)} />
             </Box>
           </Box>
         )
@@ -1067,7 +1118,7 @@ export const register: Register = (on, options) => {
             <Text dimColor> {st.checking ? 'checking…' : `checked ${st.lastCheckAt ? new Date(st.lastCheckAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : 'never'}`}</Text>
           </Box>
           <Box>
-            <Button key="drefresh" label="Refresh" onPress={() => poll($).then(() => undefined, () => undefined)} />
+            <Button key="drefresh" label="Refresh" onPress={() => poll($, true).then(() => undefined, () => undefined)} />
             <Button key="dsettings" label={v.kind === 'settings' ? 'Done' : 'Settings'} onPress={() => (v.kind === 'settings' ? goHome($) : openSettings($))} />
             <Button key="dinvite" variant="primary" label="+ Invite" onPress={() => openInvite($)} />
           </Box>
@@ -1129,6 +1180,7 @@ export const register: Register = (on, options) => {
             <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
             <Svg key="dchead" alt={`${name}. ${p?.current ? STATE_LABEL[p.current.state] : 'No active collaboration'}`} source={detailHeaderSvg(640, { name, subtitle: p ? subtitleOf(p.contactUserId, p.workspace) : '', reply: p ? replyLine(p) : '', mine: p?.group === 'mine', pillLabel: p?.current ? STATE_LABEL[p.current.state] : 'No active work', pillTone: 'neutral', title: p?.current ? titleCase(p.current.topic) : 'No active collaboration', narrative: p?.current ? narrative(p.current, name) : 'Give your agent a direction when you have something to work on together.', footer: p?.lastWorkedAt ? `Last activity: ${when(p.lastWorkedAt)}` : 'Last activity: none yet' })} />
             {target && <Input key="dstart" placeholder={`Ask ${name} to…`} submitLabel="Send" onSubmit={value => startCollab($, target, value)} />}
+            {p && <Input key="drename" label="Name this contact" placeholder={name} submitLabel="Save" onSubmit={value => renameContact($, p.key, value)} />}
             {target && (
               <Box marginTop={1} marginBottom={1}>
                 <Button key="dshare" label="Share a file" onPress={() => $.prompt.submit({ text: `AICQ: I want to share a file with ${name}${target.toUser ? ` (user ${target.toUser})` : ''}${target.workspace ? ` in workspace ${target.workspace}` : ''}. Ask me which file and what I want from them, then use aicq_share.` }).then(() => undefined, () => undefined)} />
@@ -1148,7 +1200,10 @@ export const register: Register = (on, options) => {
         const others = collabs.filter(x => x.contactKey === c.contactKey && x.key !== c.key).slice(0, 4)
         dMain = (
           <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-            <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
+            <Box>
+              <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
+              <Button key="dcontact" plain label={`· About ${name}`} onPress={() => openContact($, c.contactKey)} />
+            </Box>
             <Svg key="dhead" alt={`${name}. ${STATE_LABEL[c.state]}. ${titleCase(c.topic)}. ${narrative(c, name)}`} source={detailHeaderSvg(640, { name, subtitle: subtitleOf(c.contactUserId, c.workspace), reply: summary ? replyLine(summary) : '', mine: !!c.workspace, pillLabel: STATE_LABEL[c.state], pillTone: toneOf(c.state), title: titleCase(c.topic), narrative: narrative(c, name), footer: footerOf(c) })} />
             {draft && <Svg key="ddraft" alt={`${draft.question ? 'Decision needed' : 'Waiting for your approval'}: ${draft.question ?? ''} ${draft.body}`} source={noteCardSvg(640, draft.question ? 'A decision is needed' : 'Waiting for your approval', draft.question ?? `Send this to ${name}?`, draft.options.length ? draft.options.map((o, i) => `${i === 0 ? 'Recommended: ' : ''}${o.label}`).join('  ·  ') : draft.body, 'amber')} />}
             {draft && <Text dimColor wrap="wrap">Only {draft.options.length ? 'the reply you choose' : 'this reply'} will be shared with {name}. Your private chat stays private.</Text>}
@@ -1183,6 +1238,7 @@ export const register: Register = (on, options) => {
               <Button key="dcontinue" variant="primary" label="Continue in chat" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />
               <Button key="dpause" label={isPaused ? 'Resume' : 'Pause'} onPress={() => togglePause($, c.key)} />
               <Button key="ddone" label="Mark completed" onPress={() => markCompleted($, c)} />
+              <Button key="dhide" label="Hide" onPress={() => hideCollab($, c)} />
             </Box>
             <Input key="ddirect" placeholder="Give your agent a direction for this collaboration…" submitLabel="Send to my agent" onSubmit={value => directCollab($, c, value).then(() => undefined, () => undefined)} />
             <Text dimColor>Your agent carries this direction into the collaboration.</Text>
@@ -1192,7 +1248,8 @@ export const register: Register = (on, options) => {
             {expanded.includes(c.key) && c.messages.slice(-12).map(m => (
               <Box key={`dm-${m.id}`} flexDirection="column" marginBottom={1} paddingX={1} borderStyle="round" borderColor={m.direction === 'out' ? ACCENT : CARD_BORDER} alignSelf={m.direction === 'out' ? 'flex-end' : 'flex-start'} width="85%">
                 <Text dimColor>{m.direction === 'out' ? 'Your agent' : name} · {when(m.at)}{m.kind !== 'message' ? ` · ${m.kind}` : ''}{m.state ? ` · ${STATE_LABEL[m.state]}` : ''}</Text>
-                <Markdown key={`dmd-${m.id}`} text={m.body.length > 1500 ? `${m.body.slice(0, 1500)}…` : m.body} />
+                <Markdown key={`dmd-${m.id}`} text={m.body.length > 600 && !expanded.includes(m.id) ? `${m.body.slice(0, 600)}…` : m.body.slice(0, 8000)} />
+                {m.body.length > 600 && <Button key={`dmore-${m.id}`} plain label={expanded.includes(m.id) ? 'Show less' : 'Show more'} onPress={() => toggleExpanded($, m.id)} />}
                 {m.artifacts.length > 0 && <Text dimColor>Shared: {m.artifacts.map(a => `${a.name}${a.version ? ` (v${a.version})` : ''}`).join(', ')}</Text>}
               </Box>
             ))}
@@ -1202,14 +1259,21 @@ export const register: Register = (on, options) => {
           </Box>
         )
       } else {
-        const underWay = collabs.filter(c => ACTIVE.includes(c.state) && nowMs - Date.parse(c.updatedAt) < 14 * 86_400_000).filter(c => !query || titleOf(c.contactUserId, c.contact, c.workspace).toLowerCase().includes(query))
+        const searchHit = (c: Collaboration) => !query || titleOf(c.contactUserId, c.contact, c.workspace).toLowerCase().includes(query) || c.topic.toLowerCase().includes(query) || c.messages.some(m => m.body.toLowerCase().includes(query))
+        const openAll = collabs.filter(c => ACTIVE.includes(c.state) && nowMs - Date.parse(c.updatedAt) < 30 * 86_400_000).filter(searchHit)
+        // Fresh work leads; open items untouched for 3+ days drop to a compact list.
+        const underWay = openAll.filter(c => query || nowMs - Date.parse(c.updatedAt) < 3 * 86_400_000 || c.state === 'decision-needed' || c.state === 'prepared-for-approval')
+        const older = openAll.filter(c => !underWay.includes(c))
         const outcomes = collabs.filter(c => (c.state === 'completed' || c.state === 'fyi') && nowMs - Date.parse(c.updatedAt) < 7 * 86_400_000).slice(0, 4)
         const quietOnes = people.filter(p => !p.current && p.lastWorkedAt).filter(matches).slice(0, 5)
         dMain = (
           <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Svg key="dhome-h" alt="Your agents at work" source={headingSvg(860, 'Working for you', 'Your agents at work', `${underWay.length === 0 ? 'Nothing under way.' : `${underWay.length} collaboration${underWay.length > 1 ? 's' : ''} under way.`} Your agents handle routine steps within your preferences (${MODE_LABEL[mode]}).`)} />
             <Box flexDirection="row" flexWrap="wrap">{underWay.slice(0, 12).map(c => dCard(c, 'duw'))}</Box>
-            {underWay.length > 12 && <Text dimColor>+ {underWay.length - 12} more · search agents to narrow</Text>}
+            {underWay.length > 12 && <Text dimColor>+ {underWay.length - 12} more · search to narrow</Text>}
+            {older.length > 0 && <Svg key="dolder-h" alt="Older, still open" source={sideLabelSvg(`Older, still open (${older.length})`)} />}
+            {older.slice(0, 10).map(c => <Button key={`dold-${c.key}`} plain label={`${titleOf(c.contactUserId, c.contact, c.workspace)} · ${titleCase(c.topic)} · ${STATE_LABEL[c.state]} · ${humanAge(nowMs - Date.parse(c.updatedAt))}`} onPress={() => openCollab($, c.key)} />)}
+            {hiddenCount > 0 && <Text dimColor>{hiddenCount} hidden · each returns when something new arrives</Text>}
             {outcomes.length > 0 && <Svg key="dout-h" alt="Recent outcomes" source={sectionSvg(860, 'Recent outcomes')} />}
             {outcomes.length > 0 && <Box flexDirection="row" flexWrap="wrap">{outcomes.map(c => dCard(c, 'doc'))}</Box>}
             {quietOnes.map(p => <Text key={`dq-${p.key}`} dimColor>{titleOf(p.contactUserId, p.contact, p.workspace)} · {quietLine(p, nowMs)}</Text>)}
@@ -1254,7 +1318,7 @@ export const register: Register = (on, options) => {
           <Text dimColor>  {st.checking ? 'checking…' : `checked ${st.lastCheckAt ? new Date(st.lastCheckAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : 'never'}`}</Text>
         </Box>
         <Box>
-          <Button key="refresh" plain label="↻" onPress={() => poll($).then(() => undefined, () => undefined)} />
+          <Button key="refresh" plain label="↻" onPress={() => poll($, true).then(() => undefined, () => undefined)} />
           <Text> </Text>
           <Button key="invite" label="+ Invite a friend" onPress={() => $.prompt.submit({ text: 'AICQ: I want to invite someone. Ask me who and for a one-line introduction, then use aicq_invite.' }).then(() => undefined, () => undefined)} />
           <Button key="settings" plain label={v.kind === 'settings' ? 'Done' : 'Settings'} onPress={() => (v.kind === 'settings' ? goHome($) : openSettings($))} />
@@ -1334,6 +1398,7 @@ export const register: Register = (on, options) => {
               <Button key="continue" variant="primary" label="Continue in chat" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />
               <Button key="pause" label={isPaused ? 'Resume' : 'Pause'} onPress={() => togglePause($, c.key)} />
               <Button key="done" label="Mark completed" onPress={() => markCompleted($, c)} />
+              <Button key="hide" label="Hide" onPress={() => hideCollab($, c)} />
             </Box>
             <Input key="direct" placeholder="Give your agent a direction for this collaboration…" submitLabel="Send to my agent" onSubmit={value => directCollab($, c, value).then(() => undefined, () => undefined)} />
             <Text dimColor>Your agent carries this direction into the collaboration.</Text>
@@ -1341,7 +1406,8 @@ export const register: Register = (on, options) => {
             {expanded.includes(c.key) && c.messages.slice(-12).map(m => (
               <Box key={`msg-${m.id}`} flexDirection="column" marginBottom={1} paddingX={1} borderStyle="round" borderColor={m.direction === 'out' ? ACCENT : CARD_BORDER} alignSelf={m.direction === 'out' ? 'flex-end' : 'flex-start'} width="85%">
                 <Text dimColor>{m.direction === 'out' ? 'Your agent' : name} · {when(m.at)}{m.kind !== 'message' ? ` · ${m.kind}` : ''}{m.state ? ` · ${STATE_LABEL[m.state]}` : ''}</Text>
-                <Text wrap="wrap">{m.body.length > 900 ? `${m.body.slice(0, 900)}…` : m.body}</Text>
+                <Text wrap="wrap">{m.body.length > 600 && !expanded.includes(m.id) ? `${m.body.slice(0, 600)}…` : m.body.slice(0, 8000)}</Text>
+                {m.body.length > 600 && <Button key={`more-${m.id}`} plain label={expanded.includes(m.id) ? 'Show less' : 'Show more'} onPress={() => toggleExpanded($, m.id)} />}
                 {m.artifacts.length > 0 && <Text dimColor>Shared: {m.artifacts.map(a => `${a.name}${a.version ? ` (v${a.version})` : ''}`).join(', ')}</Text>}
               </Box>
             ))}
@@ -1353,7 +1419,11 @@ export const register: Register = (on, options) => {
       }
     } else {
       // ---- main: your agents at work -------------------------------------------
-      const underWay = collabs.filter(c => ACTIVE.includes(c.state) && nowMs - Date.parse(c.updatedAt) < 14 * 86_400_000).filter(c => !query || titleOf(c.contactUserId, c.contact, c.workspace).toLowerCase().includes(query))
+      const searchHit = (c: Collaboration) => !query || titleOf(c.contactUserId, c.contact, c.workspace).toLowerCase().includes(query) || c.topic.toLowerCase().includes(query) || c.messages.some(m => m.body.toLowerCase().includes(query))
+        const openAll = collabs.filter(c => ACTIVE.includes(c.state) && nowMs - Date.parse(c.updatedAt) < 30 * 86_400_000).filter(searchHit)
+        // Fresh work leads; open items untouched for 3+ days drop to a compact list.
+        const underWay = openAll.filter(c => query || nowMs - Date.parse(c.updatedAt) < 3 * 86_400_000 || c.state === 'decision-needed' || c.state === 'prepared-for-approval')
+        const older = openAll.filter(c => !underWay.includes(c))
       const outcomes = collabs.filter(c => (c.state === 'completed' || c.state === 'fyi') && nowMs - Date.parse(c.updatedAt) < 7 * 86_400_000).slice(0, 4)
       const quiet = people.filter(p => !p.current && p.lastWorkedAt).filter(matches).slice(0, 6)
       const limit = Math.max(4, Math.floor(((e.viewport?.rows ?? 40) - 10) / 6) * (wide ? 2 : 1))
@@ -1367,7 +1437,10 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" flexWrap="wrap" marginTop={1}>
             {underWay.slice(0, limit).map(c => card(c, 'uw'))}
           </Box>
-          {underWay.length > limit && <Text dimColor>+ {underWay.length - limit} more · search agents to narrow</Text>}
+          {underWay.length > limit && <Text dimColor>+ {underWay.length - limit} more · search to narrow</Text>}
+          {older.length > 0 && <Text bold>Older, still open ({older.length})</Text>}
+          {older.slice(0, 10).map(c => <Button key={`old-${c.key}`} plain label={`${titleOf(c.contactUserId, c.contact, c.workspace)} · ${titleCase(c.topic)} · ${STATE_LABEL[c.state]} · ${humanAge(nowMs - Date.parse(c.updatedAt))}`} onPress={() => openCollab($, c.key)} />)}
+          {hiddenCount > 0 && <Text dimColor>{hiddenCount} hidden · each returns when something new arrives</Text>}
           {outcomes.length > 0 && <Text bold>Recent outcomes</Text>}
           {outcomes.length > 0 && <Box flexDirection="row" flexWrap="wrap" marginTop={1}>{outcomes.map(c => card(c, 'oc'))}</Box>}
           {quiet.map(p => (

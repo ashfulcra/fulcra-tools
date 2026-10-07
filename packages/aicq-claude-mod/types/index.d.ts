@@ -94,6 +94,8 @@ declare module 'claude-code' {
       overrides: Record<string, string>
       invites: Invite[]
       expanded: string[]
+      aliases: Record<string, string>
+      hidden: Record<string, string>
     }
   }
 }
