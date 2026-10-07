@@ -160,18 +160,31 @@ function sourcesFor(now: string, cursors: Map<string, Cursor>): Source[] {
   return out
 }
 
-async function readSource($: $, src: Source): Promise<{ src: Source; failed: boolean; msgs: AicqMessage[] }> {
+type SourceRead = {
+  src: Source
+  failed: boolean
+  msgs: AicqMessage[]
+  /** Truncated output or undecodable lines: the read may have missed messages. */
+  incomplete: boolean
+  /** Ids of records that decoded as JSON but are no message format we read. */
+  malformedIds: string[]
+}
+
+async function readSource($: $, src: Source): Promise<SourceRead> {
   try {
     const r = await fulcra($, src.argv)
-    if (r.exitCode !== 0) return { src, failed: true, msgs: [] }
+    if (r.exitCode !== 0) return { src, failed: true, msgs: [], incomplete: true, malformedIds: [] }
+    const { rows, bad } = parseJsonl(r.stdout)
     const msgs: AicqMessage[] = []
-    for (const row of parseJsonl(r.stdout).rows) {
+    const malformedIds: string[] = []
+    for (const row of rows) {
       const p = parseRow(row, src.ctx)
       if ('message' in p) msgs.push(p.message)
+      else if (p.skip === 'malformed') malformedIds.push(String(row.id ?? row.recorded_at ?? JSON.stringify(row).slice(0, 80)))
     }
-    return { src, failed: false, msgs }
+    return { src, failed: false, msgs, incomplete: r.isStdoutTruncated || bad > 0, malformedIds }
   } catch {
-    return { src, failed: true, msgs: [] }
+    return { src, failed: true, msgs: [], incomplete: true, malformedIds: [] }
   }
 }
 
@@ -190,21 +203,29 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
     // Active sources every tick; long-quiet ones every QUIET_EVERY ticks (a manual Check now reads all).
     const work = sourcesFor(now, cursors).filter(src => forceAll || (quietReads.get(src.key) ?? 0) < QUIET_AFTER || tick % QUIET_EVERY === 0)
 
-    const results: Awaited<ReturnType<typeof readSource>>[] = []
+    const results: SourceRead[] = []
     for (let i = 0; i < work.length; i += POOL) {
       results.push(...(await Promise.all(work.slice(i, i + POOL).map(src => readSource($, src)))))
     }
 
     const arrived: AicqMessage[] = []
     const added: AicqMessage[] = []
-    for (const { src, failed, msgs } of results) {
+    for (const { src, failed, msgs, incomplete, malformedIds } of results) {
       if (failed) {
         degraded.push(src.label)
+        quietReads.set(src.key, 0)
         continue
       }
       const before = cursors.get(src.key) ?? EMPTY_CURSOR
-      const { fresh, cursor } = advance(before, msgs)
-      quietReads.set(src.key, fresh.length ? 0 : (quietReads.get(src.key) ?? 0) + 1)
+      const { fresh, cursor: advanced } = advance(before, msgs)
+      // Unreadable records are reported once each (by record id), then remembered, never silently dropped.
+      const newBad = malformedIds.filter(id => !before.seen.includes(`bad:${id}`))
+      if (newBad.length) degraded.push(`${src.label}: ${newBad.length} unreadable`)
+      const seen = [...advanced.seen, ...newBad.map(id => `bad:${id}`)].slice(-800)
+      // An incomplete read keeps the watermark where it was so the next read covers the gap again.
+      const cursor = incomplete ? { at: before.at, seen } : { at: advanced.at, seen }
+      if (incomplete) degraded.push(`${src.label} (incomplete read)`)
+      quietReads.set(src.key, fresh.length || incomplete || newBad.length ? 0 : (quietReads.get(src.key) ?? 0) + 1)
       await $.store.set(`cursor:${src.key}`, cursor)
       added.push(...fresh)
       if (before.at !== null) arrived.push(...fresh.filter(m => m.direction === 'in'))
@@ -253,10 +274,22 @@ async function onArrival($: $, arrived: AicqMessage[]) {
     eligible.push(m)
   }
   if (!eligible.length) return
-  const ref = `${contactKeyOf(eligible[0]!)}#${threadTopic(eligible[0]!.topic)}`
-  const mode = modeOf(overrides[ref] ?? globalMode)
+  // Each collaboration keeps its own policy: one prompt per effective mode, strictest first, never mixed.
+  const keyOf = (m: AicqMessage) => `${contactKeyOf(m)}#${threadTopic(m.topic)}`
+  const groups = new Map<ResponseMode, AicqMessage[]>()
+  for (const m of eligible) {
+    const mode = modeOf(overrides[keyOf(m)] ?? globalMode)
+    groups.set(mode, [...(groups.get(mode) ?? []), m])
+  }
+  const order: ResponseMode[] = ['draft', 'respond-check', 'respond-results']
   wakeQueued = true
-  void $.prompt.submit({ text: wakePrompt(mode, eligible, ref) })
+  void (async () => {
+    for (const mode of order) {
+      const batch = groups.get(mode)
+      if (!batch?.length) continue
+      await $.prompt.submit({ text: wakePrompt(mode, batch, keyOf(batch[0]!)) })
+    }
+  })()
     .then(() => undefined, () => { $.ui.toast('AICQ: could not start a turn; see /aicq') })
     .finally(() => { wakeQueued = false })
 }
@@ -300,7 +333,7 @@ async function send($: $, input: SendInput): Promise<{ ok: boolean; text: string
   const since = new Date(Date.parse(sentAt) - 5 * 60_000).toISOString()
   const until = new Date(Date.parse(sentAt) + 5 * 60_000).toISOString()
   const back = await fulcra($, ['get-records', channel, since, until])
-  const ok = back.exitCode === 0 && readbackHas(back.stdout, id)
+  const ok = back.exitCode === 0 && !back.isStdoutTruncated && readbackHas(back.stdout, id, input.topic)
   const message: AicqMessage = {
     id, source: input.workspace ? 'workspace' : 'mesh', direction: 'out', channel, contact,
     contactUserId: input.toUser, workspace: input.workspace, to: input.to, kind: input.kind, topic: input.topic,
@@ -831,12 +864,18 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__aicq__aicq_send' }, async ($, e) => {
     const input = sendInputFrom(toolArgs(e))
-    if (((await read($, paused)) as string[]).includes(collabKeyFor(input))) {
-      return { deny: 'aicq: this collaboration is paused by the owner; nothing sent. Ask them to resume it in /aicq.' }
-    }
     if (!input.workspace && !input.toUser) {
       const hit = peers.find(p => p.name.toLowerCase() === input.to.toLowerCase())
       if (hit) input.toUser = hit.userId
+    }
+    const key = collabKeyFor(input)
+    if (((await read($, paused)) as string[]).includes(key)) {
+      return { deny: 'aicq: this collaboration is paused by the owner; nothing sent. Ask them to resume it in /aicq.' }
+    }
+    // Prepare-for-approval is enforced here, not only in the prompt: the owner approves in /aicq.
+    const overrides = ((await read($, overridesAtom)) as Record<string, string> | undefined) ?? {}
+    if (modeOf(overrides[key] ?? (await currentMode($))) === 'draft') {
+      return { deny: 'aicq: this collaboration is set to "Prepare for my approval"; nothing sent. Save the reply with aicq_draft so the owner can approve it in /aicq.' }
     }
     const res = await send($, input)
     return res.ok || res.message ? { result: res.text } : { deny: res.text }

@@ -331,7 +331,23 @@ export function encode(o: Outgoing): string {
   return JSON.stringify({ note: JSON.stringify(env) })
 }
 
-/** True when a get-records readback holds the message id. */
-export function readbackHas(stdout: string, id: string): boolean {
-  return parseJsonl(stdout).rows.some(r => JSON.stringify(r).includes(id))
+/**
+ * True only when a decoded record carries exactly this message id (and, when
+ * given, this topic). A record that merely mentions the id in its body or
+ * in_reply_to never verifies it.
+ */
+export function readbackHas(stdout: string, id: string, topic?: string): boolean {
+  for (const row of parseJsonl(stdout).rows) {
+    const note = typeof row.note === 'string' ? parseObject(row.note) : null
+    const coord = note && note.coord && typeof note.coord === 'object' ? (note.coord as Json) : null
+    const v1 = str(row.protocol) === V1_PROTOCOL ? row
+      : row.data && typeof row.data === 'object' && str((row.data as Json).protocol) === V1_PROTOCOL ? (row.data as Json)
+        : null
+    const candidates: [string, string][] = []
+    if (v1) candidates.push([str(v1.message_id), str(v1.topic)])
+    if (coord) candidates.push([str(coord.message_id), str(coord.topic)])
+    if (note && str(note.mid)) candidates.push([str(note.mid), str(note.slug).replace(/-ack$/, '')])
+    if (candidates.some(([mid, t]) => mid === id && (topic === undefined || t === topic))) return true
+  }
+  return false
 }

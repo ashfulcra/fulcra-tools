@@ -103,6 +103,11 @@ describe('wire: peers, outboxes, out', () => {
     const ws = JSON.parse((JSON.parse(encode({ ...base, wire: 'workspace', workspace: 'team' })) as { note: string }).note) as { coord: Record<string, unknown> }
     expect(ws.coord.protocol).toBe('fulcra.workspaces/1')
     expect(readbackHas(JSON.stringify(v1), 'id1')).toBe(true)
+    // Exact identity: another message that mentions id1 (body or in_reply_to) never verifies it.
+    const other = JSON.stringify({ protocol: 'connect-our-agents/1', message_id: 'id2', sender: 'x', recipients: ['y'], kind: 'reply', body: 'about id1', in_reply_to: 'id1', topic: 't' })
+    expect(readbackHas(other, 'id1')).toBe(false)
+    expect(readbackHas(JSON.stringify(v1), 'id1', 'other-topic')).toBe(false)
+    expect(readbackHas(JSON.stringify({ note: JSON.stringify({ v: 1, mid: 'id9', body: 'id1' }) }), 'id1')).toBe(false)
   })
 
   test('cursor, window, index, jsonl', () => {
@@ -174,7 +179,7 @@ describe('policy', () => {
 
 type Run = { argv: readonly string[]; init?: { stdin?: string } }
 
-function fake(inboxRows: Record<string, unknown>[], opts: { failRecords?: boolean } = {}) {
+function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecords?: boolean; truncated?: boolean } = {}) {
   const calls: Run[] = []
   const recorded = new Map<string, string[]>()
   const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
@@ -192,7 +197,7 @@ function fake(inboxRows: Record<string, unknown>[], opts: { failRecords?: boolea
     if (cmd === 'get-records') {
       if (opts.failRecords) return { value: { exitCode: 1, stdout: '', stderr: 'boom', isStdoutTruncated: false, isStderrTruncated: false } }
       const ch = String(r.argv[2])
-      if (ch === V1_IN) return ok(inboxRows.map(x => JSON.stringify(x)).join('\n'))
+      if (ch === V1_IN) return { value: { exitCode: 0, stdout: inboxRows.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n'), stderr: '', isStdoutTruncated: !!opts.truncated, isStderrTruncated: false } }
       return ok((recorded.get(ch) ?? []).map(x => JSON.stringify({ start_time: '2026-10-07T12:00:00Z', ...JSON.parse(x) as object })).join('\n'))
     }
     return { value: { exitCode: 2, stdout: '', stderr: `unknown ${String(sub)}`, isStdoutTruncated: false, isStderrTruncated: false } }
@@ -398,5 +403,83 @@ describe('mod', () => {
     await ui.press({ key: 'drefresh' })
     expect(reads()).toBe(r0 + 1)
   })
+
+  test('mixed-policy arrivals: a draft-only collaboration is never answered autonomously, in either order', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows: Record<string, unknown>[] = [
+      v1Row({ message_id: 'a0', topic: 'auto-thread', body: 'auto start' }, '2026-10-07T11:00:00Z'),
+      v1Row({ message_id: 'c0', topic: 'careful-thread', body: 'careful start' }, '2026-10-07T11:00:00Z'),
+    ]
+    const sink = sinkOf()
+    const f = fake(rows)
+    engine(on, f, sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.command.run({ command: 'aicq', args: 'mode respond-results' } as never)
+    type UI = { press: (t: unknown) => Promise<unknown>; select: (t: unknown) => Promise<unknown>; findAll: (q: unknown) => Promise<unknown[]> }
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+    await ui.press({ key: `ds-new-mesh:${PEER}` })
+    await ui.press({ key: `dch-mesh:${PEER}#careful-thread` })
+    await ui.select({ key: 'dauto', value: 'draft' })
+    for (const [first, second, at] of [['auto-thread', 'careful-thread', '2026-10-07T12:01:00Z'], ['careful-thread', 'auto-thread', '2026-10-07T12:03:00Z']] as const) {
+      sink.prompts.length = 0
+      rows.push(v1Row({ message_id: `${first}-${at}`, topic: first, body: `${first} body` }, at))
+      rows.push(v1Row({ message_id: `${second}-${at}`, topic: second, body: `${second} body` }, at))
+      await clock.advance(120_000)
+      const careful = sink.prompts.filter(p => p.includes('careful-thread body'))
+      const auto = sink.prompts.filter(p => p.includes('auto-thread body'))
+      expect(careful.length).toBe(1)
+      expect(careful[0]!.includes('Do NOT send')).toBe(true)
+      expect(careful[0]!.includes('auto-thread body')).toBe(false)
+      expect(auto.length).toBe(1)
+    }
+    // And the send hook enforces it, whatever a prompt says.
+    const r = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_send', to: 'Peer Agent', topic: 'careful-thread', body: 'sneaky' } as never))
+    expect(r.includes('Prepare for my approval')).toBe(true)
+    expect(f.recorded.size).toBe(0)
+  })
+
+  test('malformed-only and mixed reads are reported, not silently empty; truncated reads keep the watermark', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows: (Record<string, unknown> | string)[] = [{ id: 'bad-1', start_time: '2026-10-07T11:00:00Z', note: '{"not":"a message"}' }]
+    const sink = sinkOf()
+    engine(on, fake(rows), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    expect(sink.statuses.some(t => t.includes('1 unreadable'))).toBe(true)
+    // Mixed: the valid message lands; the old unreadable record is not reported again.
+    sink.statuses.length = 0
+    rows.push(v1Row({ message_id: 'ok-1', body: 'fine' }, '2026-10-07T12:01:00Z'))
+    await clock.advance(120_000)
+    expect(sink.statuses[sink.statuses.length - 1]!.includes('unreadable')).toBe(false)
+    const res = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox', topic: 'review' } as never))
+    expect(res.includes('fine')).toBe(true)
+  })
+
+  test('a truncated read is degraded and does not advance the watermark', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const opts = { truncated: false }
+    const rows: (Record<string, unknown> | string)[] = [v1Row({ message_id: 't0', body: 'complete' }, '2026-10-07T11:00:00Z')]
+    const f = fake(rows, opts)
+    const sink = sinkOf()
+    engine(on, f, sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000) // complete read: watermark 11:00
+    opts.truncated = true
+    rows.push(v1Row({ message_id: 't1', body: 'partial' }, '2026-10-07T12:00:30Z'), 'not json at all')
+    await clock.advance(120_000) // truncated read sees t1 but must not move the watermark to 12:00
+    expect(sink.statuses[sink.statuses.length - 1]!.includes('incomplete read')).toBe(true)
+    opts.truncated = false
+    await clock.advance(120_000)
+    const starts = f.calls.filter(c => c.argv[1] === 'get-records' && c.argv[2] === V1_IN).map(c => String(c.argv[3]))
+    expect(starts[starts.length - 1]).toBe('2026-10-07T10:50:00.000Z')
+  })
+
 })
 
