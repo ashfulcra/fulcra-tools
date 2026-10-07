@@ -252,9 +252,25 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     missing = sorted(c.key for c in plugin.required_credentials
                      if getattr(c, "required", True) and not ctx.credentials.get(c.key))
     if missing:
+        # Distinguish "not set" from "set, but macOS will not let us read it".
+        # Reporting a blocked item as unset sends the user off to re-enter a
+        # credential that is already there, and hides the real cause (the
+        # keychain ACL no longer matches this build of the app).
+        blocked = sorted(
+            k for k in missing
+            if credentials.is_blocked(plugin.id, k))
+        if blocked:
+            detail = (
+                f"keychain authorization needed for: {', '.join(blocked)}. "
+                "The credential IS stored, but macOS will not let this build "
+                "of the app read it — click 'Always Allow' on the keychain "
+                "prompt (NOT 'Allow'). Reads are suppressed meanwhile so the "
+                "daemon does not stack more dialogs.")
+        else:
+            detail = (f"missing required credential(s): {', '.join(missing)} — "
+                      f"set with: fulcra-collect set-credential {plugin.id} <key>")
         emit({"type": "result", "outcome": "error",
-              "error": (f"missing required credential(s): {', '.join(missing)} — "
-                        f"set with: fulcra-collect set-credential {plugin.id} <key>"),
+              "error": detail,
               "watermark": getattr(ctx.state, "watermark", None),
               "definition_id": getattr(ctx.state, "definition_id", None),
               "definition_validated_at": getattr(
