@@ -1311,10 +1311,12 @@ export const register: Register = (on, options) => {
               <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginTop={1}>
                 <Text dimColor bold>{draft.question ? 'DECISION NEEDED' : 'PREPARED FOR APPROVAL'}</Text>
                 {draft.question && <Text bold wrap="wrap">{draft.question}</Text>}
-                <Text wrap="wrap">{draft.body}</Text>
-                <Text dimColor>Approving sends this to {name} and nothing else.</Text>
+                {draft.options.length === 0 && <Text wrap="wrap">{draft.body}</Text>}
+                <Text dimColor>Only {draft.options.length ? 'the reply you choose' : 'this reply'} will be shared with {name}. Your private chat stays private.</Text>
                 <Box marginTop={1}>
-                  <Button key="approve" variant="primary" label="Approve & send" onPress={() => approveDraft($, draft.id)} />
+                  {draft.options.length > 0
+                    ? draft.options.map((o, i) => <Button key={`opt-${i}`} variant={i === 0 ? 'primary' : undefined} label={o.label} onPress={() => approveDraft($, draft.id, i)} />)
+                    : <Button key="approve" variant="primary" label="Approve and proceed" onPress={() => approveDraft($, draft.id)} />}
                   <Button key="discard" label="Discard" onPress={() => discardDraft($, draft.id)} />
                 </Box>
               </Box>
@@ -1325,21 +1327,25 @@ export const register: Register = (on, options) => {
                 <Text wrap="wrap">{c.outcome}</Text>
               </Box>
             )}
-            <Box marginTop={1}>
+            <Text dimColor bold>SHARED WORK & DIRECTION</Text>
+            <Select key="auto" label="Autonomy" value={overrides[c.key] ?? 'inherit'} options={[{ value: 'inherit', label: `Your default (${MODE_LABEL[mode]})` }, ...MODES.map(m => ({ value: m, label: MODE_LABEL[m] }))]} onSelect={value => setCollabMode($, c.key, value)} />
+            <Box>
+              <Button key="attach" label="Add to this chat" onPress={() => attach($, c)} />
               <Button key="continue" variant="primary" label="Continue in chat" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />
-              <Button key="attach" label="Add to chat" onPress={() => attach($, c)} />
               <Button key="pause" label={isPaused ? 'Resume' : 'Pause'} onPress={() => togglePause($, c.key)} />
               <Button key="done" label="Mark completed" onPress={() => markCompleted($, c)} />
             </Box>
-            <Input key="reply" placeholder={`Message ${name}…`} submitLabel="Send" onSubmit={value => replyFromPane($, c, value)} />
-            <Text dimColor bold>EXCHANGE</Text>
-            {c.messages.slice(-12).map(m => (
+            <Input key="direct" placeholder="Give your agent a direction for this collaboration…" submitLabel="Send to my agent" onSubmit={value => directCollab($, c, value).then(() => undefined, () => undefined)} />
+            <Text dimColor>Your agent carries this direction into the collaboration.</Text>
+            <Button key="conv" plain label={`${expanded.includes(c.key) ? '▾' : '▸'} Agent conversation · ${c.messages.length} update${c.messages.length === 1 ? '' : 's'}`} onPress={() => toggleExpanded($, c.key)} />
+            {expanded.includes(c.key) && c.messages.slice(-12).map(m => (
               <Box key={`msg-${m.id}`} flexDirection="column" marginBottom={1} paddingX={1} borderStyle="round" borderColor={m.direction === 'out' ? ACCENT : CARD_BORDER} alignSelf={m.direction === 'out' ? 'flex-end' : 'flex-start'} width="85%">
-                <Text dimColor>{m.direction === 'out' ? 'You' : name} · {when(m.at)}{m.kind !== 'message' ? ` · ${m.kind}` : ''}{m.state ? ` · ${STATE_LABEL[m.state]}` : ''}</Text>
+                <Text dimColor>{m.direction === 'out' ? 'Your agent' : name} · {when(m.at)}{m.kind !== 'message' ? ` · ${m.kind}` : ''}{m.state ? ` · ${STATE_LABEL[m.state]}` : ''}</Text>
                 <Text wrap="wrap">{m.body.length > 900 ? `${m.body.slice(0, 900)}…` : m.body}</Text>
-                {m.artifacts.length > 0 && <Text dimColor>Files: {m.artifacts.map(a => `${a.name}${a.version ? ` (v${a.version})` : ''}`).join(', ')}</Text>}
+                {m.artifacts.length > 0 && <Text dimColor>Shared: {m.artifacts.map(a => `${a.name}${a.version ? ` (v${a.version})` : ''}`).join(', ')}</Text>}
               </Box>
             ))}
+            {expanded.includes(c.key) && <Input key="reply" placeholder={`Message ${name} directly…`} submitLabel="Send" onSubmit={value => replyFromPane($, c, value)} />}
             {others.length > 0 && <Text dimColor bold>OTHER WORK WITH {name.toUpperCase()}</Text>}
             {others.map(o => <Button key={`other-${o.key}`} plain label={`${titleCase(o.topic)} · ${STATE_LABEL[o.state]}`} onPress={() => openCollab($, o.key)} />)}
           </Box>
