@@ -819,10 +819,12 @@ export const register: Register = (on, options) => {
         const selected = p.key === selectedKey || (v.kind === 'contact' && v.key === p.key)
         const open = () => (target ? openCollab($, target.key) : openContact($, p.key))
         return (
-          <Box key={`ds-${p.key}`} alignItems="flex-start" paddingX={1} paddingY={0} marginBottom={1} borderStyle="round" borderColor={selected ? '#6d5fe0' : 'transparent'} backgroundColor={selected ? SELECTED_BG : undefined} hover={{ backgroundColor: SELECTED_BG, borderColor: '#4a4a54' }}>
-            <Svg key={`ds-av-${p.key}`} alt="" source={avatarSvg(name, p.group === 'mine', 30)} />
-            <Box flexDirection="column" flexGrow={1} marginLeft={1}>
-              <Button key={`ds-open-${p.key}`} plain label={name} onPress={open} />
+          <Box key={`ds-${p.key}`} alignItems="flex-start" width="100%" overflow="hidden" paddingX={1} marginBottom={1} {...(selected ? { borderStyle: 'round', borderColor: '#6d5fe0', backgroundColor: SELECTED_BG } : {})} hover={{ backgroundColor: SELECTED_BG }}>
+            <Box flexShrink={0} width={4}>
+              <Svg key={`ds-av-${p.key}`} alt={name.slice(0, 1)} width={30} height={30} source={avatarSvg(name, p.group === 'mine', 30)} />
+            </Box>
+            <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden" marginLeft={1}>
+              <Button key={`ds-open-${p.key}`} plain label={name.length > 26 ? `${name.slice(0, 25)}…` : name} onPress={open} />
               <Text dimColor wrap="truncate-end">{p.current ? `${STATE_LABEL[p.current.state]} · ${titleCase(p.current.topic)}` : quietLine(p, nowMs)}</Text>
               <Text dimColor wrap="truncate-end">{replyLine(p)}</Text>
               <Box display="none" hover={{ display: 'flex' }}>
@@ -837,7 +839,7 @@ export const register: Register = (on, options) => {
       const dFriendsAll = people.filter(p => p.group === 'friends').filter(matches)
       const dFriends = query ? dFriendsAll : dFriendsAll.filter(p => p.lastWorkedAt || p.contact !== (p.contactUserId ?? '').slice(0, 8))
       const dSidebar = (
-        <Box key="dside" flexDirection="column" width="28%" marginRight={2}>
+        <Box key="dside" flexDirection="column" width={wide ? '28%' : '100%'} minWidth={0} overflow="hidden" marginRight={wide ? 2 : 0}>
           <Input key="dsearch" placeholder="Search agents" value={query} onInput={value => update($, queryAtom, () => value).then(() => undefined)} onSubmit={value => update($, queryAtom, () => value).then(() => undefined)} />
           <Svg key="dl-mine" alt="My agents" source={sideLabelSvg('My agents')} />
           {dMine.length === 0 ? <Text dimColor>Add workspaces in Settings</Text> : dMine.map(dSide)}
@@ -862,7 +864,7 @@ export const register: Register = (on, options) => {
       let dMain
       if (v.kind === 'settings') {
         dMain = (
-          <Box key="dmain" flexDirection="column" flexGrow={1}>
+          <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Svg key="dset-h" alt="AICQ settings" source={headingSvg(640, 'AICQ settings', 'How your agent responds', 'Choose when this Claude Code session checks and what it does when another agent writes.')} />
             <Select key="dmode" label="When a message arrives" value={mode} options={MODES.map(m => ({ value: m, label: MODE_LABEL[m] }))} onSelect={value => setMode($, value)} />
             <Text dimColor wrap="wrap">Checks every {Math.round(cfg.everyMs / 1000)}s while this session is open: your mesh contacts{cfg.workspaceNames.length ? ` and workspace ${cfg.workspaceNames.join(', ')}` : ''}. Paused collaborations never respond on their own; each collaboration gets at most 4 automatic turns an hour.</Text>
@@ -874,7 +876,7 @@ export const register: Register = (on, options) => {
         const history = collabs.filter(x => x.contactKey === v.key).slice(0, 8)
         const target = p ? { to: p.workspace ? p.contact : (p.contactUserId ? (learnAgentNames(all)[p.contactUserId] ?? p.contact) : p.contact), toUser: p.contactUserId, workspace: p.workspace } : null
         dMain = (
-          <Box key="dmain" flexDirection="column" flexGrow={1}>
+          <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
             <Svg key="dchead" alt={`${name}. ${p?.current ? STATE_LABEL[p.current.state] : 'No active collaboration'}`} source={detailHeaderSvg(640, { name, subtitle: p ? subtitleOf(p.contactUserId, p.workspace) : '', reply: p ? replyLine(p) : '', mine: p?.group === 'mine', pillLabel: p?.current ? STATE_LABEL[p.current.state] : 'No active work', pillTone: 'neutral', title: p?.current ? titleCase(p.current.topic) : 'No active collaboration', narrative: p?.current ? narrative(p.current, name) : 'Give your agent a direction when you have something to work on together.', footer: p?.lastWorkedAt ? `Last activity: ${when(p.lastWorkedAt)}` : 'Last activity: none yet' })} />
             {target && <Input key="dstart" placeholder={`Ask ${name} to…`} submitLabel="Send" onSubmit={value => startCollab($, target, value)} />}
@@ -896,7 +898,7 @@ export const register: Register = (on, options) => {
         const summary = people.find(p => p.key === c.contactKey)
         const others = collabs.filter(x => x.contactKey === c.contactKey && x.key !== c.key).slice(0, 4)
         dMain = (
-          <Box key="dmain" flexDirection="column" flexGrow={1}>
+          <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
             <Svg key="dhead" alt={`${name}. ${STATE_LABEL[c.state]}. ${titleCase(c.topic)}. ${narrative(c, name)}`} source={detailHeaderSvg(640, { name, subtitle: subtitleOf(c.contactUserId, c.workspace), reply: summary ? replyLine(summary) : '', mine: !!c.workspace, pillLabel: STATE_LABEL[c.state], pillTone: toneOf(c.state), title: titleCase(c.topic), narrative: narrative(c, name), footer: footerOf(c) })} />
             {draft && <Svg key="ddraft" alt={`${draft.question ? 'Decision needed' : 'Prepared for approval'}: ${draft.question ?? ''} ${draft.body}`} source={noteCardSvg(640, draft.question ? 'Decision needed' : 'Prepared for approval', draft.question ?? `Reply to ${name}`, `${draft.body}  —  Approving sends this to ${name} and nothing else.`, 'amber')} />}
@@ -944,7 +946,7 @@ export const register: Register = (on, options) => {
         const outcomes = collabs.filter(c => (c.state === 'completed' || c.state === 'fyi') && nowMs - Date.parse(c.updatedAt) < 7 * 86_400_000).slice(0, 4)
         const quietOnes = people.filter(p => !p.current && p.lastWorkedAt).filter(matches).slice(0, 5)
         dMain = (
-          <Box key="dmain" flexDirection="column" flexGrow={1}>
+          <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Svg key="dhome-h" alt="Your agents at work" source={headingSvg(860, 'Working for you', 'Your agents at work', `${underWay.length === 0 ? 'Nothing under way.' : `${underWay.length} collaboration${underWay.length > 1 ? 's' : ''} under way.`} Your agents handle routine steps within your preferences (${MODE_LABEL[mode]}).`)} />
             <Box flexDirection="row" flexWrap="wrap">{underWay.slice(0, 12).map(c => dCard(c, 'duw'))}</Box>
             {underWay.length > 12 && <Text dimColor>+ {underWay.length - 12} more · search agents to narrow</Text>}
