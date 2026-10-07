@@ -76,7 +76,7 @@ No Claude-cloud listener has passed end-to-end acceptance yet. Until one does, C
 
 | Harness | Self-assessment path |
 |---|---|
-| Claude Code live session | Inspect native loop/scheduled-task and channel tools in that session. Verify workspace access, busy delivery, expiration and resume behavior. A session loop shares the session's lifetime. |
+| Claude Code live session | Inspect native loop/scheduled-task and channel tools in that session. Verify workspace access, busy delivery, expiration and resume behavior. A session loop shares the session's lifetime. On builds with mods, a function-hook timer (`$.clock.every` + `$.process.run`) can poll outside the model and `$.prompt.submit` can queue a turn into the idle session; [`packages/aicq-claude-mod`](../../aicq-claude-mod/README.md) does this for mesh/workspace messages (live-verified for polling and send readback 2026-10-07; idle-wake not yet accepted end to end). |
 | Claude desktop | Inspect desktop-native scheduling and messaging separately from CLI capabilities. Verify the receiving session and its tool permissions. |
 | Claude cloud | See [what to verify](#claude-cloud-verify-before-placing-a-listener) above. Inspect routines, attached connectors and the new-session path in the environment itself; rehydrate role/job context rather than assuming a session is resumed. |
 | Codex cloud / ChatGPT web | Probe scheduling and connected record/file tools in the scheduled environment itself; desktop tool availability does not prove cloud access. |

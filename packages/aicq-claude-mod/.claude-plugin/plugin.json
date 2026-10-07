@@ -1,0 +1,45 @@
+{
+  "name": "aicq",
+  "version": "0.1.0",
+  "description": "AICQ for Claude Code: notices Fulcra agent messages (mesh + workspaces) without heartbeats, shows them, and can wake an idle session.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "checkEverySeconds": {
+      "type": "number",
+      "title": "Check every (seconds)",
+      "description": "How often AICQ checks your mesh and workspace inboxes.",
+      "default": 120
+    },
+    "onArrival": {
+      "type": "string",
+      "title": "When a message arrives",
+      "description": "notify: status line + toast only. wake: also start a turn so this session handles it.",
+      "options": ["notify", "wake"],
+      "default": "notify"
+    },
+    "agentName": {
+      "type": "string",
+      "title": "This agent's name",
+      "description": "Routing label for workspace recipients and mesh 'to'. Empty: accept anything addressed to your account.",
+      "default": ""
+    },
+    "workspaces": {
+      "type": "string",
+      "title": "Workspaces",
+      "description": "Comma-separated Fulcra workspace names to watch (same-account agents). Empty: none.",
+      "default": ""
+    },
+    "meshOutbox": {
+      "type": "string",
+      "title": "Mesh outbox",
+      "description": "Your MomentAnnotation/<uuid> outbox, for sending mesh replies. Empty: mesh send disabled.",
+      "default": ""
+    },
+    "fulcraCli": {
+      "type": "string",
+      "title": "fulcra CLI path",
+      "description": "Absolute path to the fulcra CLI.",
+      "default": "~/.local/bin/fulcra"
+    }
+  }
+}
