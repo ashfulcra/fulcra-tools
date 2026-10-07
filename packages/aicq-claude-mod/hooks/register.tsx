@@ -374,6 +374,15 @@ async function approveDraft($: $, id: string, option = -1) {
   const d = list.find(x => x.id === id)
   if (!d) return
   const body = option >= 0 && d.options[option] ? d.options[option]!.body : d.body
+  if (d.sharePath) {
+    // The owner approved this exact file, recipient and message.
+    const text = await shareFile($, { path: d.sharePath, to: d.to, to_user: d.toUser ?? '', workspace: d.workspace ?? '', topic: d.topic, body, in_reply_to: d.inReplyTo ?? '' })
+    const ok = /Sent and read back/.test(text)
+    if (ok) await update($, drafts, l => l.filter(x => x.id !== id))
+    $.ui.toast(ok ? `AICQ: shared with ${d.to}` : `AICQ: ${text.slice(0, 120)}`)
+    await setStatus($, st => st)
+    return
+  }
   const res = await send($, {
     to: d.to, toUser: d.toUser, workspace: d.workspace, topic: d.topic, body,
     kind: d.inReplyTo ? 'reply' : 'message', inReplyTo: d.inReplyTo, state: d.state, purpose: null, artifacts: [],
@@ -753,6 +762,12 @@ function inlineCard($: $, els: CardElements, d: InlineCard) {
   )
 }
 
+/** The owner's policy for one collaboration: paused, or the effective response mode. */
+async function policyFor($: $, key: string): Promise<{ paused: boolean; mode: ResponseMode }> {
+  const overrides = ((await read($, overridesAtom)) as Record<string, string> | undefined) ?? {}
+  return { paused: ((await read($, paused)) as string[]).includes(key), mode: modeOf(overrides[key] ?? (await currentMode($))) }
+}
+
 function toolArgs(e: unknown): Record<string, unknown> {
   return e as Record<string, unknown>
 }
@@ -903,7 +918,30 @@ export const register: Register = (on, options) => {
     return { result: `Draft ${d.id} saved for the owner's approval in /aicq. Nothing was sent.` }
   })
 
-  on('tool.call', { tool: 'mcp__aicq__aicq_share' }, async ($, e) => ({ result: await shareFile($, toolArgs(e)) }))
+  on('tool.call', { tool: 'mcp__aicq__aicq_share' }, async ($, e) => {
+    const a = { ...toolArgs(e) }
+    const input = sendInputFrom(a)
+    if (!input.workspace && !input.toUser) {
+      const hit = peers.find(p => p.name.toLowerCase() === input.to.toLowerCase())
+      if (hit) a.to_user = input.toUser = hit.userId
+    }
+    const key = collabKeyFor(input)
+    const policy = await policyFor($, key)
+    // Policy is resolved before any upload, grant or send.
+    if (policy.paused) return { deny: 'aicq: this collaboration is paused by the owner; nothing uploaded, shared or sent.' }
+    if (policy.mode === 'draft') {
+      const d: Draft = {
+        id: crypto.randomUUID(), collabKey: key, to: input.to, toUser: input.toUser, workspace: input.workspace,
+        topic: input.topic, body: input.body, inReplyTo: input.inReplyTo, createdAt: await nowIso($),
+        question: `Share ${s(a.path).split('/').pop() ?? 'this file'} with ${input.to}?`, state: input.state, options: [], sharePath: s(a.path).trim(),
+      }
+      await update($, drafts, l => [...l.filter(x => x.collabKey !== d.collabKey), d])
+      await setStatus($, st => st)
+      $.ui.toast(`AICQ: file share to ${input.to} waits for your approval · /aicq`)
+      return { result: `This collaboration is set to "Prepare for my approval". The share is saved as draft ${d.id}; nothing was uploaded, shared or sent.` }
+    }
+    return { result: await shareFile($, a) }
+  })
   on('tool.call', { tool: 'mcp__aicq__aicq_invite' }, async ($, e) => ({ result: await invite($, toolArgs(e)) }))
   on('tool.call', { tool: 'mcp__aicq__aicq_connect' }, async ($, e) => ({ result: await connect($, toolArgs(e)) }))
 

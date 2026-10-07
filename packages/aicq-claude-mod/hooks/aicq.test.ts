@@ -189,6 +189,7 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
     if (cmd === 'user-info') return ok(JSON.stringify({ userid: ME }))
     if (cmd === 'share' && sub === 'list-incoming') return ok(JSON.stringify({ sharing_fulcra_userid: PEER, sharing_fulcra_user_name: 'Peer Agent', fulcra_data_types: [V1_IN] }))
     if (cmd === 'share' && sub === 'list-outgoing') return ok(JSON.stringify({ created_at: '2026-10-01', fulcra_data_types: [V1_OUT], permissions: [{ allowed_fulcra_userid: PEER }] }))
+    if (cmd === 'file' && (sub === 'upload' || sub === 'share')) return ok('ok')
     if (cmd === 'record') {
       const ch = String(r.argv[2])
       recorded.set(ch, [...(recorded.get(ch) ?? []), r.init?.stdin ?? ''])
@@ -481,5 +482,34 @@ describe('mod', () => {
     expect(starts[starts.length - 1]).toBe('2026-10-07T10:50:00.000Z')
   })
 
+
+  test('share honors policy: paused and draft-only have zero effects before approval', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const f = fake([v1Row({ message_id: 's0', topic: 'plan', body: 'send me the plan' }, '2026-10-07T11:00:00Z')])
+    engine(on, f, sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const effects = () => f.calls.filter(c => (c.argv[1] === 'file' && (c.argv[2] === 'upload' || c.argv[2] === 'share')) || c.argv[1] === 'record').length
+    const share = () => $.tool.call({ tool: 'mcp__aicq__aicq_share', path: '/tmp/plan.pdf', to: 'Peer Agent', topic: 'plan', body: 'Here is the plan' } as never)
+    type UI = { press: (t: unknown) => Promise<unknown>; findAll: (q: unknown) => Promise<unknown[]> }
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+    // Paused: refused, nothing uploaded, granted or sent.
+    await ui.press({ key: `ds-open-mesh:${PEER}` })
+    await ui.press({ key: 'dpause' })
+    expect(JSON.stringify(await share()).includes('paused')).toBe(true)
+    expect(effects()).toBe(0)
+    await ui.press({ key: 'dpause' })
+    // Draft-only: held as a draft, still nothing; approval runs upload, grant and send.
+    await $.command.run({ command: 'aicq', args: 'mode draft' } as never)
+    expect(JSON.stringify(await share()).includes('nothing was uploaded')).toBe(true)
+    expect(effects()).toBe(0)
+    await ui.press({ key: 'dapprove' })
+    expect(f.calls.some(c => c.argv[1] === 'file' && c.argv[2] === 'upload' && c.argv[3] === '/tmp/plan.pdf')).toBe(true)
+    expect(f.calls.some(c => c.argv[1] === 'file' && c.argv[2] === 'share' && c.argv.includes(PEER))).toBe(true)
+    const sent = JSON.parse(f.recorded.get(V1_OUT)![0]!) as { artifacts?: { path: string }[] }
+    expect(sent.artifacts?.[0]?.path.endsWith('plan.pdf')).toBe(true)
+  })
 })
 

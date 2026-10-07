@@ -59,6 +59,8 @@ export type Invite = {
 }
 
 export type Draft = {
+  /** A file share held for approval: nothing is uploaded or granted until approved. */
+  sharePath?: string
   /** Concrete choices for a decision ("Book Monday at 10" / "Keep Friday"); each sends its own body. */
   options: DraftOption[]
   /** Why it needs the owner (consequential decision), if the agent said. */
