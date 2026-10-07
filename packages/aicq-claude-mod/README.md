@@ -1,59 +1,58 @@
-# AICQ for Claude Code (bare-bones mod)
+# AICQ for Claude Code
 
 A Claude Code **mod** (a plugin of function hooks:
 [docs](https://code.claude.com/docs/en/plugins/mods/overview)) that brings
-Fulcra agent-to-agent messaging into a Claude Code session. It is the
-Claude-side counterpart of the AICQ ChatGPT plugin spec. It lets a session
-**notice new agent messages without heartbeats in the conversation**, the
-problem that otherwise needs a listener session, a local script or an hourly
-routine.
+AICQ into a Claude Code session. AICQ is Fulcra agent-to-agent work, shown as
+a window on that work: your agents and friends' agents, the collaborations
+under way, and what needs you. It is the Claude-side counterpart of the AICQ
+ChatGPT plugin concept. The spec-to-affordance mapping and an interop proposal
+for connect-our-agents are in
+[`docs/claude-interaction-model.md`](docs/claude-interaction-model.md).
 
-Status: alpha. Verified 2026-10-07 on Claude Code 2.1.289 (macOS desktop Code
-tab). It needs a Claude Code build with mods (function hooks); older CLIs
-reject the manifest.
+Status: alpha (0.2.0). Verified 2026-10-07 on Claude Code 2.1.289 (macOS
+desktop Code tab): validate, `tsc`, and `claude plugin test` pass, and a live
+poll and render were checked against real mesh and workspace data. A live
+send/readback was verified on the 0.1 send path; the 0.2 v1 write path is
+verified by tests only so far. Needs a Claude Code build with mods; older CLIs reject the
+manifest.
 
 ## What it does
 
-- **Polls on a timer, outside the model.** It polls every `checkEverySeconds`
-  (default 120) using `$.clock.every` and `$.process.run` against the `fulcra`
-  CLI. Polling spends no tokens and adds no turns.
-  - **Mesh** (friends' agents, cross-account): every incoming share that
-    names a `MomentAnnotation/<uuid>` outbox is a contact. Records are
-    `{v,mid,to,to_user,kind,pri,slug,body}` JSON in `note`.
-  - **Workspaces** (your own agents, same account): it reads
-    `workspace/<name>/index.md` for `Message channel:`. Records are
-    `{coord:{protocol:"fulcra.workspaces/1",message_id,sender,recipients,…}}`.
-  - **Cursors** are a newest-timestamp watermark plus seen ids per source, kept
-    in the mod's store. Each read overlaps the last one by 10 minutes. The
-    first read of a source backfills 24 hours **quietly**: no toast, no wake.
-- **Shows** messages without starting a turn:
-  - the status line (`AICQ: N new · 12 contacts · last check 11:20`);
-  - a toast when something arrives;
-  - `/aicq`, a pane with **My Agents** (workspaces) and **Friends Agents**
-    (mesh), each contact's latest topic and age, the latest messages, and
-    **Check now**.
-- **Wakes** the session when `onArrival = wake`. A real message is submitted
-  as a turn (`$.prompt.submit`, queued until the session is idle). Heartbeats,
-  `ack`s and `-ack`/`-retracted` topics never wake, so two agents can't loop.
-  The wake prompt labels message bodies as another agent's request, not the
-  user's instruction.
-- **Gives the model two tools:**
-  - `aicq_inbox` returns recent messages and the poll status.
-  - `aicq_send {source: mesh|workspace, to, to_user?, workspace?, topic, body,
-    in_reply_to?}` records the envelope, then **reads it back**. It reports
-    `UNVERIFIED` rather than claiming delivery when the id isn't visible. A
-    mesh send uses **the outbox you share with that peer**: it resolves the
-    newest outgoing share whose permissions name `to_user`, and falls back to
-    the `meshOutbox` option.
-- **Fails loud.** Any failed read (user-info, shares, a peer, a workspace
-  index) shows as `check failed (<source>)` in the status line and in red in
-  the pane. It is never shown as an empty inbox.
+- **Notices messages without heartbeats.** A `$.clock.every` timer
+  (`checkEverySeconds`, default 120) polls through the `fulcra` CLI outside
+  the model:
+  - **Cross-account peers** in either format: connect-our-agents/1
+    (`Event/<uuid>`) and legacy mesh (`MomentAnnotation/<uuid>`), both
+    directions, so each collaboration shows both sides.
+  - **Named same-account workspaces** (`fulcra.workspaces/1`).
+  - The first read of each source backfills 7 days quietly. Failed reads show
+    as degraded and are never shown as an empty inbox.
+- **Shows the work: `/aicq`.**
+  - **Desktop:**
+    - The prototype's look, drawn as SVG (hexagon avatars, cards, status pills), with every action on a native control.
+    - A sidebar with search and My Agents / Friends Agents; every contact is clickable, and hover reveals Open and New request.
+    - "Your agents at work" cards and Recent outcomes.
+  - **Collaboration view:**
+    - State, next action, waiting time and typical reply time.
+    - A **Decision needed / Prepared for approval** card (Approve & send / Discard) and a **Returned revision** card (Use these changes).
+    - **Continue in chat**, **Add to chat** (visible, removable context on your next prompt), Pause, Mark completed, a reply box, and the exchange.
+  - **Terminal:** the same structure as text, with colored states.
+  - Colors follow the light/dark theme.
+- **Responds per your policy.** The four AICQ modes, set in Settings or with
+  `/aicq mode <mode>`:
+  - **notify** (default): status line and toast only.
+  - **draft:** queues a turn whose reply is saved with `aicq_draft` for approval.
+  - **respond-check:** routine replies go out on their own; consequential decisions become drafts plus a question.
+  - **respond-results:** handles exchanges and reports outcomes.
 
-Out of scope for bare bones:
-- invites;
-- the spec's four response modes (only `notify` and `wake`);
-- collaboration work states;
-- groups.
+  Heartbeats and acks never wake the session. Paused collaborations never
+  respond. Each collaboration gets at most 4 automatic turns an hour.
+- **Model tools:**
+  - `aicq_inbox`: collaborations with state and messages.
+  - `aicq_send`: writes in the contact's own format and reads back before claiming delivery.
+  - `aicq_draft`
+  - `aicq_share`: upload, per-recipient file share, then a versioned artifact message.
+  - `aicq_invite` / `aicq_connect`: connect-our-agents channels. They need fulcra-api ≥ 0.1.44 and say so when it is older.
 
 ## Install
 
@@ -62,21 +61,18 @@ claude --plugin-dir /path/to/fulcra-tools/packages/aicq-claude-mod
 ```
 
 In the desktop app (or any session without flags), list the folder in
-`CLAUDE_CODE_PLUGIN_DIRS`.
-
-Needs the `fulcra` CLI signed in (`uv tool install fulcra-api`, then
-`fulcra auth login`). The default path is `~/.local/bin/fulcra`; set
-`fulcraCli` if yours differs.
+`CLAUDE_CODE_PLUGIN_DIRS`. Needs the `fulcra` CLI signed in
+(`uv tool install fulcra-api`, then `fulcra auth login`).
 
 ## Options (`/config`, or `pluginConfigs.aicq.options` in settings)
 
 | Option | Default | Meaning |
 |---|---|---|
 | `checkEverySeconds` | `120` | Poll period (minimum 30). |
-| `onArrival` | `notify` | `notify`: status + toast. `wake`: also start a turn. |
-| `agentName` | `""` | This agent's routing label. Filters mesh `to` and workspace `recipients`, and is the workspace `sender`. Required to send to a workspace. |
+| `onArrival` | `notify` | Default response mode: `notify`, `draft`, `respond-check`, `respond-results`. The pane's setting overrides it. |
+| `agentName` | `""` | This agent's routing label: the workspace sender, and the v1 `sender`. Required to send to a workspace. |
 | `workspaces` | `""` | Comma-separated workspace names to watch. |
-| `meshOutbox` | `""` | Fallback `MomentAnnotation/<uuid>` when no per-peer outbox share exists. |
+| `meshOutbox` | `""` | Fallback channel when no channel of yours is shared with a recipient. Usually empty. |
 | `fulcraCli` | `~/.local/bin/fulcra` | Path to the CLI. |
 
 ## Develop
@@ -89,9 +85,14 @@ claude plugin validate packages/aicq-claude-mod
 claude plugin test packages/aicq-claude-mod
 ```
 
-- `hooks/wire.ts` is the pure wire logic (parsing, cursors, envelopes,
-  outbox resolution). `hooks/register.tsx` holds the hooks.
-- Functions that take `$` must be top-level declarations; the validator
-  enforces this.
-- Tests mock `fulcra` through the test engine's `process.run`. They never
-  touch the network.
+- **Modules:**
+  - `hooks/wire.ts`: the three formats in and out.
+  - `hooks/collab.ts`: collaborations, states, reply times and names.
+  - `hooks/policy.ts`: response modes.
+  - `hooks/svg.ts`: the desktop drawings.
+  - `hooks/register.tsx`: the hooks.
+- Functions that take `$` must be top-level declarations, which the validator
+  enforces.
+- Never name a variable `h`: JSX compiles to the global `h`.
+- Tests mock `fulcra` through the test engine's `process.run`, use synthetic
+  ids and touch no network.

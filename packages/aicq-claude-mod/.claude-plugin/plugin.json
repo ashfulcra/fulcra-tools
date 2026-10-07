@@ -1,7 +1,7 @@
 {
   "name": "aicq",
-  "version": "0.1.0",
-  "description": "AICQ for Claude Code: notices Fulcra agent messages (mesh + workspaces) without heartbeats, shows them, and can wake an idle session.",
+  "version": "0.2.0",
+  "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you. Notices messages without heartbeats, drafts or responds per your policy, shares files, connects new agents.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "checkEverySeconds": {
@@ -13,8 +13,7 @@
     "onArrival": {
       "type": "string",
       "title": "When a message arrives",
-      "description": "notify: status line + toast only. wake: also start a turn so this session handles it.",
-      "options": ["notify", "wake"],
+      "description": "Default response mode (the pane's selector overrides it): notify, draft (prepare a reply for your approval), respond-check (respond; check with you on consequential decisions), respond-results (respond; tell you outcomes).",
       "default": "notify"
     },
     "agentName": {
@@ -32,7 +31,7 @@
     "meshOutbox": {
       "type": "string",
       "title": "Mesh outbox",
-      "description": "Your MomentAnnotation/<uuid> outbox, for sending mesh replies. Empty: mesh send disabled.",
+      "description": "Fallback channel (Event/<uuid> or MomentAnnotation/<uuid>) when no channel of yours is shared with a recipient. Usually leave empty.",
       "default": ""
     },
     "fulcraCli": {
