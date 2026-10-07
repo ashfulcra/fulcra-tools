@@ -140,7 +140,8 @@ describe('collaborations', () => {
   test('explicit work updates, completion, pause and drafts', () => {
     const msgs = [msg({ id: '1', direction: 'out', at: '2026-10-07T10:00:00Z' }), msg({ id: '2', at: '2026-10-07T10:05:00Z', state: 'working', kind: 'reply' })]
     expect(collaborations(msgs, none)[0]!.state).toBe('working')
-    expect(collaborations([...msgs, msg({ id: '3', at: '2026-10-07T11:00:00Z', kind: 'reply', body: 'Done: v7 delivered' })], none)[0]!.state).toBe('completed')
+    expect(collaborations([...msgs, msg({ id: '3', at: '2026-10-07T11:00:00Z', kind: 'reply', body: 'Done: v7 delivered' })], none)[0]!.state).toBe('result-ready')
+    expect(collaborations([...msgs, msg({ id: '4', at: '2026-10-07T11:30:00Z', kind: 'reply', state: 'completed', body: 'Booked.' })], none)[0]!.state).toBe('completed')
     const key = collaborations(msgs, none)[0]!.key
     expect(collaborations(msgs, { paused: [key], drafts: [] })[0]!.state).toBe('paused')
     expect(collaborations(msgs, { paused: [], drafts: [key] })[0]!.state).toBe('prepared-for-approval')
@@ -292,7 +293,8 @@ describe('mod', () => {
         expect((await ui.findAll({ type: 'Button', text: /Review draft/ })).length).toBe(1)
         // The sidebar is interactive: pressing a contact opens its collaboration with the draft to approve.
         await ui.press({ key: `ds-open-mesh:${PEER}` })
-        expect((await ui.findAll({ type: 'Button', text: /Approve & send/ })).length).toBe(1)
+        expect((await ui.findAll({ type: 'Button', text: /Approve and proceed/ })).length).toBe(1)
+        expect((await ui.findAll({ type: 'Button', text: /Agent conversation · 1 update/ })).length).toBe(1)
         await ui.press({ key: 'dback' })
         await ui.press({ key: `ds-new-mesh:${PEER}` })
         expect((await ui.findAll({ type: 'Input', key: 'dstart' })).length).toBe(1)
@@ -300,4 +302,60 @@ describe('mod', () => {
       }
     }
   })
+
+  test('decision options: each choice sends its own reply, nothing before the press', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const f = fake([v1Row({ message_id: 'q2', kind: 'message', topic: 'review-time', body: 'Friday is out. Monday 10?' }, '2026-10-07T11:00:00Z')])
+    engine(on, f, sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.tool.call({ tool: 'mcp__aicq__aicq_draft', to: 'Peer Agent', topic: 'review-time', body: 'fallback', in_reply_to: 'q2', question: 'Move the review to Monday at 10?',
+      options: [{ label: 'Book Monday at 10', body: 'Monday 10 works. Please book it.' }, { label: 'Keep Friday', body: 'Please keep Friday.' }] } as never)
+    expect(f.recorded.size).toBe(0)
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown> }
+    await ui.press({ key: `ds-open-mesh:${PEER}` })
+    expect((await ui.findAll({ type: 'Button', text: /Book Monday at 10/ })).length).toBe(1)
+    await ui.press({ key: 'dopt-1' })
+    const sent = JSON.parse(f.recorded.get(V1_OUT)![0]!) as Record<string, unknown>
+    expect([sent.body, sent.in_reply_to]).toEqual(['Please keep Friday.', 'q2'])
+  })
+
+  test('per-collaboration autonomy: an override to "Just notify me" stops the wake', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows = [v1Row({ message_id: 'o1', topic: 'quiet-thread', body: 'first' }, '2026-10-07T11:00:00Z')]
+    const sink = sinkOf()
+    engine(on, fake(rows), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.command.run({ command: 'aicq', args: 'mode respond-results' } as never)
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { press: (t: unknown) => Promise<unknown>; select: (t: unknown) => Promise<unknown> }
+    await ui.press({ key: `ds-open-mesh:${PEER}` })
+    await (ui as unknown as { select: (t: unknown) => Promise<unknown> }).select({ key: 'dauto', value: 'notify' })
+    rows.push(v1Row({ message_id: 'o2', topic: 'quiet-thread', body: 'second' }, '2026-10-07T12:01:00Z'))
+    await clock.advance(120_000)
+    expect(sink.prompts.length).toBe(0)
+    expect(sink.toasts.filter(t => t.includes('new from')).length).toBe(1)
+  })
+
+  test('inline chat cards: send receipt and decision render on both surfaces', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    engine(on, fake([v1Row({ message_id: 'q3', topic: 'plan', body: 'Which date?' }, '2026-10-07T11:00:00Z')]), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.tool.call({ tool: 'mcp__aicq__aicq_draft', to: 'Peer Agent', topic: 'plan', body: 'x', question: 'Pick a date?', options: [{ label: 'Oct 19', body: 'Oct 19 please' }] } as never)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const send = await $.ui.mount({ plugin: 'aicq', surface, component: 'ToolUse', props: { tool_use_id: 't1', tool: 'mcp__aicq__aicq_send', input: { to: 'Peer Agent', topic: 'plan', body: 'Here is v3' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'Sent and read back: id 1 to Peer Agent' } } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+      expect((await send.findAll({ text: /Sent to Peer Agent/ })).length > 0).toBe(true)
+      expect((await send.findAll({ type: 'Button', text: /View collaboration/ })).length).toBe(1)
+      const draft = await $.ui.mount({ plugin: 'aicq', surface, component: 'ToolUse', props: { tool_use_id: 't2', tool: 'mcp__aicq__aicq_draft', input: { to: 'Peer Agent', topic: 'plan', body: 'x', question: 'Pick a date?' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'saved' } } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+      expect((await draft.findAll({ type: 'Button', text: /Oct 19/ })).length).toBe(1)
+    }
+  })
 })
+

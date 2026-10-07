@@ -3,6 +3,7 @@ export type WorkState =
   | 'working'
   | 'decision-needed'
   | 'prepared-for-approval'
+  | 'result-ready'
   | 'completed'
   | 'paused'
   | 'unable'
@@ -46,7 +47,20 @@ export type AicqStatus = {
   contacts: number
 }
 
+export type DraftOption = { label: string; body: string }
+
+export type Invite = {
+  channel: string
+  name: string
+  message: string
+  text: string
+  createdAt: string
+  revoked: boolean
+}
+
 export type Draft = {
+  /** Concrete choices for a decision ("Book Monday at 10" / "Keep Friday"); each sends its own body. */
+  options: DraftOption[]
   /** Why it needs the owner (consequential decision), if the agent said. */
   question: string | null
   state: WorkState | null
@@ -63,7 +77,7 @@ export type Draft = {
 
 export type AttachedContext = { collabKey: string; title: string; text: string }
 
-export type PaneView = { kind: 'home' } | { kind: 'settings' } | { kind: 'collab'; key: string } | { kind: 'contact'; key: string }
+export type PaneView = { kind: 'home' } | { kind: 'settings' } | { kind: 'invite' } | { kind: 'collab'; key: string } | { kind: 'contact'; key: string }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -77,6 +91,9 @@ declare module 'claude-code' {
       mode: string
       showQuiet: boolean
       query: string
+      overrides: Record<string, string>
+      invites: Invite[]
+      expanded: string[]
     }
   }
 }

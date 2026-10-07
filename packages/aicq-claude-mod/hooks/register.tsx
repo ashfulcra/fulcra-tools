@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { AicqMessage, AicqStatus, AttachedContext, Draft, PaneView, WorkState } from '../types'
+import type { AicqMessage, AicqStatus, AttachedContext, Draft, Invite, PaneView, WorkState } from '../types'
 import {
   ACTIVE, STATE_LABEL, collaborations, gist, contactKeyOf, contacts, contextBlock, humanAge, learnAgentNames, learnPersonNames, quietLine, replyLine, threadTopic,
 } from './collab'
 import type { Collaboration, ContactSummary } from './collab'
-import { MODES, MODE_LABEL, modeOf, wakePrompt, wakes, withinBudget } from './policy'
+import { MODES, MODE_HELP, MODE_LABEL, modeOf, wakePrompt, wakes, withinBudget } from './policy'
 import type { ResponseMode } from './policy'
 import {
   EMPTY_CURSOR, advance, encode, isWakeWorthy, outboxFor, parseJsonl, parsePeers, parseRow,
@@ -32,6 +32,9 @@ const attached = atom({ plugin: 'aicq', key: 'attached' } as const, null)
 const modeAtom = atom({ plugin: 'aicq', key: 'mode' } as const, 'notify')
 const showQuietAtom = atom({ plugin: 'aicq', key: 'showQuiet' } as const, false)
 const queryAtom = atom({ plugin: 'aicq', key: 'query' } as const, '')
+const overridesAtom = atom({ plugin: 'aicq', key: 'overrides' } as const, {})
+const invitesAtom = atom({ plugin: 'aicq', key: 'invites' } as const, [])
+const expandedAtom = atom({ plugin: 'aicq', key: 'expanded' } as const, [])
 
 const ACCENT = '#10a37f'
 const CARD_BORDER = 'gray'
@@ -42,7 +45,7 @@ const AVATAR_FRIEND = '#4b4b7a'
 const NEEDS_YOU: readonly WorkState[] = ['decision-needed', 'prepared-for-approval', 'needs-reply']
 const STATE_COLOR: Record<WorkState, string> = {
   'decision-needed': 'yellow', 'prepared-for-approval': 'yellow', 'needs-reply': 'magenta', 'waiting': 'blue',
-  'working': 'cyan', 'completed': 'green', 'paused': 'gray', 'unable': 'red', 'fyi': 'gray',
+  'working': 'cyan', 'result-ready': 'green', 'completed': 'green', 'paused': 'gray', 'unable': 'red', 'fyi': 'gray',
 }
 
 type $ = EngineInterface
@@ -61,6 +64,8 @@ let tick = 0
 let polling = false
 let wakeQueued = false
 let theme = ''
+// The invite form's fields: typed into, read on Generate; no redraw needed per keystroke.
+const inviteDraft = { name: '', message: 'Let’s connect our agents so we can coordinate directly. We’ll share only the work we choose.' }
 
 const s = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d)
 
@@ -224,25 +229,26 @@ async function onArrival($: $, arrived: AicqMessage[]) {
   if (!worthy.length) return
   const first = worthy[0]!
   $.ui.toast(`AICQ: ${worthy.length} new from ${first.contact}${worthy.length > 1 ? ' and others' : ''} · /aicq`)
-  const mode = await currentMode($)
-  if (!wakes(mode) || wakeQueued) return
+  const globalMode = await currentMode($)
+  const overrides = (await read($, overridesAtom)) as Record<string, string>
+  if (wakeQueued) return
   const pausedKeys = (await read($, paused)) as string[]
   const nowMs = await $.clock.now()
   const eligible: AicqMessage[] = []
   for (const m of worthy) {
     const key = `${contactKeyOf(m)}#${threadTopic(m.topic)}`
     if (pausedKeys.includes(key)) continue
+    if (!wakes(modeOf(overrides[key] ?? globalMode))) continue
     const hist = ((await $.store.get(`wakes:${key}`)) as number[] | undefined) ?? []
     if (!withinBudget(hist, nowMs)) continue
     await $.store.set(`wakes:${key}`, [...hist.filter(t => nowMs - t < 3_600_000), nowMs])
     eligible.push(m)
   }
-  if (!eligible.length) {
-    $.ui.toast('AICQ: new messages held (paused or turn budget reached) · /aicq')
-    return
-  }
+  if (!eligible.length) return
+  const ref = `${contactKeyOf(eligible[0]!)}#${threadTopic(eligible[0]!.topic)}`
+  const mode = modeOf(overrides[ref] ?? globalMode)
   wakeQueued = true
-  void $.prompt.submit({ text: wakePrompt(mode, eligible) })
+  void $.prompt.submit({ text: wakePrompt(mode, eligible, ref) })
     .then(() => undefined, () => { $.ui.toast('AICQ: could not start a turn; see /aicq') })
     .finally(() => { wakeQueued = false })
 }
@@ -322,12 +328,13 @@ function collabKeyFor(input: SendInput): string {
   return `${contactKeyOf(probe)}#${threadTopic(input.topic)}`
 }
 
-async function approveDraft($: $, id: string) {
+async function approveDraft($: $, id: string, option = -1) {
   const list = (await read($, drafts)) as Draft[]
   const d = list.find(x => x.id === id)
   if (!d) return
+  const body = option >= 0 && d.options[option] ? d.options[option]!.body : d.body
   const res = await send($, {
-    to: d.to, toUser: d.toUser, workspace: d.workspace, topic: d.topic, body: d.body,
+    to: d.to, toUser: d.toUser, workspace: d.workspace, topic: d.topic, body,
     kind: d.inReplyTo ? 'reply' : 'message', inReplyTo: d.inReplyTo, state: d.state, purpose: null, artifacts: [],
   })
   if (res.ok) await update($, drafts, l => l.filter(x => x.id !== id))
@@ -409,7 +416,12 @@ async function detach($: $) {
   await update($, attached, () => null)
 }
 
+let lastContinue = { key: '', at: 0 }
+
 async function continueCollab($: $, c: Collaboration) {
+  const nowMs = await $.clock.now()
+  if (lastContinue.key === c.key && nowMs - lastContinue.at < 30_000) return
+  lastContinue = { key: c.key, at: nowMs }
   await $.prompt.submit({
     text: `Continue the AICQ collaboration "${c.topic}" with ${c.contact}. Current state: ${STATE_LABEL[c.state]}; next action: ${c.nextAction}. Retrieve what you need with aicq_inbox (topic "${c.topic}") and act within my existing permissions; reply with aicq_send.\n\n${contextBlock(c)}`,
   })
@@ -552,6 +564,126 @@ async function migrate($: $) {
   await $.store.set('schema', SCHEMA)
 }
 
+async function setCollabMode($: $, key: string, value: string) {
+  await update($, overridesAtom, o => {
+    const next = { ...o }
+    if (value === 'inherit') delete next[key]
+    else next[key] = modeOf(value)
+    return next
+  })
+  await $.store.set('overrides', (await read($, overridesAtom)) as Record<string, string>)
+}
+
+/** Direction goes to the owner's own agent, which carries it into the collaboration. */
+async function directCollab($: $, c: Collaboration, text: string) {
+  const direction = text.trim()
+  if (!direction) return
+  await $.prompt.submit({
+    text: `AICQ direction for the collaboration "${c.topic}" with ${c.contact}: ${direction}\n\nCarry this into the collaboration: retrieve what you need with aicq_inbox (topic "${c.topic}"), then act with aicq_send within my existing permissions. Share only what this direction covers; my private chat stays private.\n\n${contextBlock(c)}\n[aicq:${c.key}]`,
+  })
+}
+
+async function toggleExpanded($: $, key: string) {
+  await update($, expandedAtom, l => (l.includes(key) ? l.filter(k => k !== key) : [...l, key]))
+}
+
+async function openInvite($: $) {
+  await update($, view, (): PaneView => ({ kind: 'invite' }))
+}
+
+function invitationText(name: string, message: string, channel: string): string {
+  return [
+    `${name}, ${cfg.agentName || 'my agent'} would like to connect your agents.`,
+    '',
+    message,
+    '',
+    'Connecting lets our agents exchange the messages and files we choose to share. Your private chat history stays private.',
+    '',
+    'To accept, in the app you use (ChatGPT, Claude or Claude Code, Hermes, Grok, Codex):',
+    `1. Install AICQ (connect-our-agents): ${SKILL_URL}`,
+    '2. Sign in with your Fulcra account.',
+    '3. Set up AICQ: choose what your agent can share and how much it handles on its own.',
+    `4. Accept the connection from Fulcra user ${me || '(my user id)'}: share your channel with me and reply with your Fulcra user id.`,
+    '',
+    `(My channel for you: ${channel})`,
+  ].join('\n')
+}
+
+async function createInvite($: $, name: string, message: string): Promise<string> {
+  if (!name.trim() || !message.trim()) return 'Add who it is for and a message.'
+  if (!me) await refreshTopology($, [])
+  const ch = await createChannel($, name.trim())
+  if (!ch.channel) return ch.text
+  const inv = { channel: ch.channel, name: name.trim(), message: message.trim(), text: invitationText(name.trim(), message.trim(), ch.channel), createdAt: await nowIso($), revoked: false }
+  await update($, invitesAtom, l => [inv, ...l])
+  await $.store.set('invites', (await read($, invitesAtom)) as unknown[])
+  return ''
+}
+
+async function copyInvite($: $, channel: string, surface: string) {
+  const inv = ((await read($, invitesAtom)) as { channel: string; text: string }[]).find(i => i.channel === channel)
+  if (!inv) return
+  const r = await $.ui.copy({ text: inv.text, surface: surface as never })
+  $.ui.toast(r.isCopied ? 'AICQ: invitation copied' : 'AICQ: could not copy; select the text instead')
+}
+
+async function revokeInvite($: $, channel: string) {
+  const r = await fulcra($, ['data-type', 'archive', channel])
+  if (r.exitCode !== 0) {
+    $.ui.toast(`AICQ: could not revoke (exit ${r.exitCode}); the invitation still works`)
+    return
+  }
+  await update($, invitesAtom, l => l.map(i => (i.channel === channel ? { ...i, revoked: true } : i)))
+  await $.store.set('invites', (await read($, invitesAtom)) as unknown[])
+  $.ui.toast('AICQ: invitation revoked; its link can no longer connect')
+}
+
+type InlineCard = {
+  key: string; headline: string; state: WorkState | null; body: string; collab: Collaboration | null
+  draft?: Draft | null; footnote: string
+}
+
+/** One AICQ card in the transcript: brand line, state pill, a sentence, and the prototype's two actions. */
+type CardElements = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'>
+
+function inlineCard($: $, els: CardElements, d: InlineCard) {
+  const { Box, Text, Button } = els
+  const B = Box
+  const c = d.collab
+  const pillColor = d.state ? STATE_COLOR[d.state] : 'gray'
+  return (
+    <B key={d.key} flexDirection="column" borderStyle="round" borderColor="#3a3a44" paddingX={1} marginY={0}>
+      <B justifyContent="space-between">
+        <Text bold color={ACCENT}>◆ AICQ <Text color="white" bold>{d.headline}</Text></Text>
+        {d.state && <Text color={pillColor}>{d.state === 'waiting' ? 'Working for you' : STATE_LABEL[d.state]}</Text>}
+      </B>
+      {d.body && <Text wrap="wrap">{d.body}</Text>}
+      {d.draft && d.draft.options.length > 0 && (
+        <B>
+          {d.draft.options.map((o, i) => <Button key={`${d.key}-opt-${i}`} variant={i === 0 ? 'primary' : undefined} label={o.label} onPress={() => approveDraft($, d.draft!.id, i)} />)}
+        </B>
+      )}
+      {d.draft && d.draft.options.length === 0 && (
+        <B>
+          <Button key={`${d.key}-approve`} variant="primary" label="Approve and proceed" onPress={() => approveDraft($, d.draft!.id)} />
+          <Button key={`${d.key}-discard`} label="Discard" onPress={() => discardDraft($, d.draft!.id)} />
+        </B>
+      )}
+      <B justifyContent="space-between">
+        {c
+          ? (
+            <B>
+              <Button key={`${d.key}-view`} label="View collaboration" onPress={() => openCollab($, c.key).then(() => $.ui.open({ id: PANE, title: 'AICQ', columns: 120 })).then(() => undefined)} />
+              <Button key={`${d.key}-ctx`} label="Add context" onPress={() => attach($, c)} />
+            </B>
+          )
+          : <Text> </Text>}
+        {d.footnote && <Text dimColor>{d.footnote}</Text>}
+      </B>
+    </B>
+  )
+}
+
 function toolArgs(e: unknown): Record<string, unknown> {
   return e as Record<string, unknown>
 }
@@ -571,6 +703,10 @@ export const register: Register = (on, options) => {
     } catch {
       theme = ''
     }
+    const savedOverrides = ((await $.store.get('overrides')) as Record<string, string> | undefined) ?? {}
+    const savedInvites = ((await $.store.get('invites')) as never[] | undefined) ?? []
+    await update($, overridesAtom, () => savedOverrides)
+    await update($, invitesAtom, () => savedInvites)
     const stored = await $.store.get('mode')
     await update($, modeAtom, () => modeOf(stored ?? cfg.defaultMode))
     await $.command.register({ name: 'aicq', description: 'AICQ: your agents and friends’ agents, their work, and what needs you. Also: /aicq share <contact> <file> · /aicq invite <name> · /aicq mode <mode>' })
@@ -587,7 +723,8 @@ export const register: Register = (on, options) => {
       ['aicq_draft', 'AICQ: prepare a reply for the owner to approve in /aicq instead of sending it. Use in draft mode, and for consequential decisions (say why in question).',
         { type: 'object', required: ['to', 'topic', 'body'], properties: {
           to: { type: 'string' }, to_user: { type: 'string' }, workspace: { type: 'string' }, topic: { type: 'string' }, body: { type: 'string' },
-          in_reply_to: { type: 'string' }, state: { type: 'string' }, question: { type: 'string', description: 'The decision needed, why it needs the owner, your recommendation, what approval permits' } } }],
+          in_reply_to: { type: 'string' }, state: { type: 'string' }, question: { type: 'string', description: 'The decision needed, phrased as a question to the owner' },
+          options: { type: 'array', description: 'Concrete choices, recommended first; each sends its own reply', items: { type: 'object', required: ['label', 'body'], properties: { label: { type: 'string', description: 'Button text, e.g. "Book Monday at 10"' }, body: { type: 'string', description: 'The exact reply this choice sends' } } } } } }],
       ['aicq_share', 'AICQ: share a local file with another agent: uploads it to Fulcra Files, grants the recipient access (cross-account), and sends a message referencing the versioned artifact.',
         { type: 'object', required: ['path', 'to', 'topic', 'body'], properties: {
           path: { type: 'string', description: 'Local file path' }, to: { type: 'string' }, to_user: { type: 'string' }, workspace: { type: 'string' },
@@ -676,6 +813,10 @@ export const register: Register = (on, options) => {
       id: crypto.randomUUID(), collabKey: collabKeyFor(input), to: input.to, toUser: input.toUser, workspace: input.workspace,
       topic: input.topic, body: input.body, inReplyTo: input.inReplyTo, createdAt: await nowIso($),
       question: s(a.question).trim() || null, state: input.state,
+      options: (Array.isArray(a.options) ? a.options : []).flatMap(o => {
+        const r = o as Record<string, unknown>
+        return s(r.label).trim() && s(r.body).trim() ? [{ label: s(r.label).trim().slice(0, 40), body: s(r.body) }] : []
+      }).slice(0, 4),
     }
     await update($, drafts, l => [...l.filter(x => x.collabKey !== d.collabKey), d])
     await setStatus($, st => st)
@@ -687,17 +828,75 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__aicq__aicq_invite' }, async ($, e) => ({ result: await invite($, toolArgs(e)) }))
   on('tool.call', { tool: 'mcp__aicq__aicq_connect' }, async ($, e) => ({ result: await connect($, toolArgs(e)) }))
 
+  // ---- inline cards in the conversation (the prototype's receipts) --------------
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const origin = e.props.origin as { kind: string; name?: string }
+    if (origin.kind !== 'plugin' || origin.name !== 'aicq' || e.surface === 'mobile') return next(e)
+    const text = e.props.text
+    const ref = /\[aicq:([^\]]+)\]\s*$/.exec(text)?.[1]
+    const all = (await read($, inbox)) as AicqMessage[]
+    const pendingDrafts = (await read($, drafts)) as Draft[]
+    const c = ref ? collaborations(all, { paused: (await read($, paused)) as string[], drafts: pendingDrafts.map(d => d.collabKey) }).find(x => x.key === ref) : undefined
+    const headline = /^AICQ: (\d+) new agent message/.test(text)
+      ? `New from ${c?.contact ?? 'an agent'}${c ? ` · ${titleCase(c.topic)}` : ''}`
+      : /^AICQ direction/.test(text) ? `Your direction${c ? ` for ${titleCase(c.topic)}` : ''}`
+        : /^Continue the AICQ/.test(text) ? `Continuing${c ? ` ${titleCase(c.topic)} with ${c.contact}` : ''}`
+          : text.split('\n')[0]!.replace(/^AICQ:?\s*/, '').slice(0, 90)
+    const body = c ? narrative(c, c.contact) : ''
+    return inlineCard($, $.ui.resolve(e), { key: `um-${e.requestId}`, headline, state: c?.state ?? null, body, collab: c ?? null, footnote: 'AICQ started this turn for you' })
+  })
+
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const tool = String(e.props.tool)
+    if (!tool.startsWith('mcp__aicq__') || e.surface === 'mobile') return next(e)
+    const a = (e.props.input ?? {}) as Record<string, unknown>
+    const out = typeof e.props.output === 'string' ? e.props.output : e.props.output === undefined ? '' : JSON.stringify(e.props.output)
+    const running = e.props.isRunning
+    const all = (await read($, inbox)) as AicqMessage[]
+    const pendingDrafts = (await read($, drafts)) as Draft[]
+    const collabs = collaborations(all, { paused: (await read($, paused)) as string[], drafts: pendingDrafts.map(d => d.collabKey) })
+    const input = sendInputFrom(a)
+    if (!input.workspace && !input.toUser) input.toUser = peers.find(p => p.name.toLowerCase() === input.to.toLowerCase())?.userId ?? null
+    const c = collabs.find(x => x.key === collabKeyFor(input)) ?? collabs.find(x => x.topic === threadTopic(input.topic))
+    const k = `tu-${e.props.tool_use_id}`
+    const name = tool.replace('mcp__aicq__aicq_', '')
+    if (name === 'send' || name === 'share') {
+      const ok = /^Sent and read back/.test(out) || /\nArtifact:/.test(out) && /Sent and read back/.test(out)
+      const state: WorkState | null = running ? null : ok ? (input.state ?? 'waiting') : null
+      const verb = name === 'share' ? `Shared ${s(a.path).split('/').pop() ?? 'a file'} with` : 'Sent to'
+      return inlineCard($, $.ui.resolve(e), {
+        key: k, headline: `${verb} ${input.to}${input.topic ? ` · ${titleCase(input.topic)}` : ''}`, state,
+        body: running ? 'Sending and reading back…' : ok ? (input.body.length > 160 ? `${input.body.slice(0, 157)}…` : input.body) : out.slice(0, 200),
+        collab: c ?? null, footnote: running ? '' : ok ? 'Delivered and read back' : e.props.isErrored ? 'Not sent' : 'Not verified: do not assume delivery',
+      })
+    }
+    if (name === 'draft') {
+      const d = pendingDrafts.find(x => x.collabKey === collabKeyFor(input))
+      return inlineCard($, $.ui.resolve(e), {
+        key: k, headline: `${s(a.question) ? 'Decision needed' : 'Prepared for your approval'} · ${input.to}`, state: d ? (d.question ? 'decision-needed' : 'prepared-for-approval') : null,
+        body: s(a.question) || input.body, collab: c ?? null, draft: d ?? null, footnote: d ? 'Nothing has been sent' : 'Handled',
+      })
+    }
+    if (name === 'invite' || name === 'connect') {
+      return inlineCard($, $.ui.resolve(e), { key: k, headline: name === 'invite' ? `Invitation for ${s(a.name)}` : `Connecting with ${s(a.name) || s(a.peer_user_id).slice(0, 8)}`, state: null, body: out.split('\n').slice(0, 3).join(' '), collab: null, footnote: running ? 'Working…' : '' })
+    }
+    return inlineCard($, $.ui.resolve(e), { key: k, headline: name === 'inbox' ? 'Checked your collaborations' : `AICQ ${name}`, state: null, body: '', collab: null, footnote: running ? 'Working…' : '' })
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const ctx = (await read($, attached)) as AttachedContext | null
     const pending = (await read($, drafts)) as Draft[]
-    if (e.props.hasSurvey || (!ctx && pending.length === 0)) return next(e)
+    const all = (await read($, inbox)) as AicqMessage[]
+    const needs = collaborations(all, { paused: (await read($, paused)) as string[], drafts: pending.map(d => d.collabKey) })
+      .filter(c => c.state === 'decision-needed' || c.state === 'prepared-for-approval' || c.state === 'result-ready').length
+    if (e.props.hasSurvey || (!ctx && needs === 0)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box>
-        {ctx && <Text>AICQ context: {ctx.title} </Text>}
+        {ctx && <Text>◆ AICQ context attached: {ctx.title} </Text>}
         {ctx && <Button key="aicq-detach" label="Remove" onPress={() => detach($)} />}
-        {pending.length > 0 && <Text> AICQ: {pending.length} to approve </Text>}
-        {pending.length > 0 && <Button key="aicq-open" label="Open" onPress={() => $.ui.open({ id: PANE, title: 'AICQ' }).then(() => undefined)} />}
+        {needs > 0 && <Text> ◆ AICQ: {needs} need{needs === 1 ? 's' : ''} you </Text>}
+        {needs > 0 && <Button key="aicq-open" label="Pick up" onPress={() => $.ui.open({ id: PANE, title: 'AICQ', columns: 120 }).then(() => undefined)} />}
       </Box>
     )
   })
@@ -715,6 +914,9 @@ export const register: Register = (on, options) => {
     const pausedKeys = (await read($, paused)) as string[]
     const mode = modeOf(await read($, modeAtom))
     const query = (((await read($, queryAtom)) as string | undefined) ?? '').toLowerCase()
+    const overrides = ((await read($, overridesAtom)) as Record<string, string> | undefined) ?? {}
+    const expanded = ((await read($, expandedAtom)) as string[] | undefined) ?? []
+    const invites = ((await read($, invitesAtom)) as Invite[] | undefined) ?? []
     const nowMs = st.lastCheckAt ? Date.parse(st.lastCheckAt) : await $.clock.now()
     const collabs = collaborations(all, { paused: pausedKeys, drafts: pendingDrafts.map(d => d.collabKey) })
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 100
@@ -846,6 +1048,16 @@ export const register: Register = (on, options) => {
           <Svg key="dl-friends" alt="Friends agents" source={sideLabelSvg('Friends agents')} />
           {dFriends.length === 0 ? <Text dimColor>No connected agents yet</Text> : dFriends.map(dSide)}
           {dFriendsAll.length > dFriends.length && <Text dimColor>+ {dFriendsAll.length - dFriends.length} more (search)</Text>}
+          {invites.filter(i => !i.revoked).map(i => (
+            <Box key={`dsi-${i.channel}`} alignItems="center" paddingX={1}>
+              <Svg key={`dsi-av-${i.channel}`} alt="" width={30} height={30} source={avatarSvg(i.name, false, 30)} />
+              <Box flexDirection="column" marginLeft={1}>
+                <Button key={`dsi-open-${i.channel}`} plain label={`${i.name}’s agent`} onPress={() => openInvite($)} />
+                <Text dimColor>Invitation · Not accepted</Text>
+              </Box>
+            </Box>
+          ))}
+          <Button key="dsi-new" plain label="+ Invite a friend" onPress={() => openInvite($)} />
         </Box>
       )
       const dTop = (
@@ -857,7 +1069,7 @@ export const register: Register = (on, options) => {
           <Box>
             <Button key="drefresh" label="Refresh" onPress={() => poll($).then(() => undefined, () => undefined)} />
             <Button key="dsettings" label={v.kind === 'settings' ? 'Done' : 'Settings'} onPress={() => (v.kind === 'settings' ? goHome($) : openSettings($))} />
-            <Button key="dinvite" variant="primary" label="+ Invite" onPress={() => $.prompt.submit({ text: 'AICQ: I want to invite someone. Ask me who and for a one-line introduction, then use aicq_invite.' }).then(() => undefined, () => undefined)} />
+            <Button key="dinvite" variant="primary" label="+ Invite" onPress={() => openInvite($)} />
           </Box>
         </Box>
       )
@@ -865,9 +1077,46 @@ export const register: Register = (on, options) => {
       if (v.kind === 'settings') {
         dMain = (
           <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-            <Svg key="dset-h" alt="AICQ settings" source={headingSvg(640, 'AICQ settings', 'How your agent responds', 'Choose when this Claude Code session checks and what it does when another agent writes.')} />
-            <Select key="dmode" label="When a message arrives" value={mode} options={MODES.map(m => ({ value: m, label: MODE_LABEL[m] }))} onSelect={value => setMode($, value)} />
-            <Text dimColor wrap="wrap">Checks every {Math.round(cfg.everyMs / 1000)}s while this session is open: your mesh contacts{cfg.workspaceNames.length ? ` and workspace ${cfg.workspaceNames.join(', ')}` : ''}. Paused collaborations never respond on their own; each collaboration gets at most 4 automatic turns an hour.</Text>
+            <Svg key="dset-h" alt="AICQ settings" source={headingSvg(640, 'AICQ settings', 'How much should your agents handle?', `Account: ${me ? `Fulcra ${me.slice(0, 8)}` : 'signed-in Fulcra user'} · Agent: ${cfg.agentName || 'this Claude Code session'}`)} />
+            {MODES.map(m => (
+              <Box key={`dset-${m}`} flexDirection="column" paddingX={1} marginBottom={1} {...(m === mode ? { borderStyle: 'round', borderColor: ACCENT } : {})}>
+                <Button key={`dset-b-${m}`} plain label={`${m === mode ? '◉' : '○'}  ${MODE_LABEL[m]}`} onPress={() => setMode($, m)} />
+                {m === mode && <Text dimColor wrap="wrap">{MODE_HELP[m]}</Text>}
+              </Box>
+            ))}
+            <Text bold>Sharing stays under your control</Text>
+            <Text dimColor wrap="wrap">Your agents share the messages and files you authorize. This setting doesn’t grant access to more tools or expose your private chats. Each collaboration can override it.</Text>
+            <Text dimColor wrap="wrap">Checks every {Math.round(cfg.everyMs / 1000)}s while this session is open: your connected agents{cfg.workspaceNames.length ? ` and workspace ${cfg.workspaceNames.join(', ')}` : ''}. Paused collaborations never respond on their own; each collaboration gets at most 4 automatic turns an hour.</Text>
+            <Box marginTop={1}><Button key="dset-done" variant="primary" label="Done" onPress={() => goHome($)} /></Box>
+          </Box>
+        )
+      } else if (v.kind === 'invite') {
+        dMain = (
+          <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
+            <Svg key="dinv-h" alt="Invite someone's agent" source={headingSvg(640, 'Invite', 'Invite someone’s agent', 'Invite a friend to connect their agent with yours.')} />
+            <Input key="dinv-name" label="Who is this for?" placeholder="Name" value={inviteDraft.name} onInput={value => { inviteDraft.name = value }} onSubmit={value => { inviteDraft.name = value }} />
+            <Input key="dinv-msg" label="Message" value={inviteDraft.message} onInput={value => { inviteDraft.message = value }} onSubmit={value => { inviteDraft.message = value }} />
+            <Text dimColor wrap="wrap">Your friend will see this message before accepting. No files or chat history are shared.</Text>
+            <Box marginTop={1} marginBottom={1}>
+              <Button key="dinv-gen" variant="primary" label="Generate invitation" onPress={() => createInvite($, inviteDraft.name, inviteDraft.message).then(err => { if (err) $.ui.toast(`AICQ: ${err}`); else inviteDraft.name = '' })} />
+            </Box>
+            {invites.map(inv => (
+              <Box key={`dinv-${inv.channel}`} flexDirection="column" borderStyle="round" borderColor={inv.revoked ? CARD_BORDER : ACCENT} paddingX={1} marginBottom={1}>
+                <Box justifyContent="space-between">
+                  <Text bold>{inv.name}’s agent</Text>
+                  <Text color={inv.revoked ? 'gray' : 'yellow'}>{inv.revoked ? 'Revoked' : 'Not accepted'}</Text>
+                </Box>
+                {!inv.revoked && <Text dimColor>Send this to {inv.name}:</Text>}
+                {!inv.revoked && <Text wrap="wrap">{inv.text}</Text>}
+                {!inv.revoked && (
+                  <Box>
+                    <Button key={`dinv-copy-${inv.channel}`} variant="primary" label="Copy invitation" onPress={ev => copyInvite($, inv.channel, ev.surface)} />
+                    <Button key={`dinv-revoke-${inv.channel}`} label="Revoke invitation" onPress={() => revokeInvite($, inv.channel)} />
+                  </Box>
+                )}
+              </Box>
+            ))}
           </Box>
         )
       } else if (v.kind === 'contact') {
@@ -901,10 +1150,13 @@ export const register: Register = (on, options) => {
           <Box key="dmain" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Button key="dback" plain label="‹ Your agents at work" onPress={() => goHome($)} />
             <Svg key="dhead" alt={`${name}. ${STATE_LABEL[c.state]}. ${titleCase(c.topic)}. ${narrative(c, name)}`} source={detailHeaderSvg(640, { name, subtitle: subtitleOf(c.contactUserId, c.workspace), reply: summary ? replyLine(summary) : '', mine: !!c.workspace, pillLabel: STATE_LABEL[c.state], pillTone: toneOf(c.state), title: titleCase(c.topic), narrative: narrative(c, name), footer: footerOf(c) })} />
-            {draft && <Svg key="ddraft" alt={`${draft.question ? 'Decision needed' : 'Prepared for approval'}: ${draft.question ?? ''} ${draft.body}`} source={noteCardSvg(640, draft.question ? 'Decision needed' : 'Prepared for approval', draft.question ?? `Reply to ${name}`, `${draft.body}  —  Approving sends this to ${name} and nothing else.`, 'amber')} />}
+            {draft && <Svg key="ddraft" alt={`${draft.question ? 'Decision needed' : 'Waiting for your approval'}: ${draft.question ?? ''} ${draft.body}`} source={noteCardSvg(640, draft.question ? 'A decision is needed' : 'Waiting for your approval', draft.question ?? `Send this to ${name}?`, draft.options.length ? draft.options.map((o, i) => `${i === 0 ? 'Recommended: ' : ''}${o.label}`).join('  ·  ') : draft.body, 'amber')} />}
+            {draft && <Text dimColor wrap="wrap">Only {draft.options.length ? 'the reply you choose' : 'this reply'} will be shared with {name}. Your private chat stays private.</Text>}
             {draft && (
               <Box marginBottom={1}>
-                <Button key="dapprove" variant="primary" label="Approve & send" onPress={() => approveDraft($, draft.id)} />
+                {draft.options.length > 0
+                  ? draft.options.map((o, i) => <Button key={`dopt-${i}`} variant={i === 0 ? 'primary' : undefined} label={o.label} onPress={() => approveDraft($, draft.id, i)} />)
+                  : <Button key="dapprove" variant="primary" label="Approve and proceed" onPress={() => approveDraft($, draft.id)} />}
                 <Button key="ddiscard" label="Discard" onPress={() => discardDraft($, draft.id)} />
               </Box>
             )}
@@ -922,21 +1174,29 @@ export const register: Register = (on, options) => {
               )
             })()}
             {!draft && c.outcome && <Svg key="doutcome" alt={`Outcome: ${c.outcome}`} source={noteCardSvg(640, c.state === 'completed' ? 'Outcome' : `Latest from ${name}`, '', c.outcome, 'neutral')} />}
-            <Box marginTop={1} marginBottom={1}>
+            <Svg key="dsw" alt="Shared work and direction" source={sideLabelSvg('Shared work & direction')} />
+            <Box alignItems="center">
+              <Select key="dauto" label="Autonomy" value={overrides[c.key] ?? 'inherit'} options={[{ value: 'inherit', label: `Your default (${MODE_LABEL[mode]})` }, ...MODES.map(m => ({ value: m, label: MODE_LABEL[m] }))]} onSelect={value => setCollabMode($, c.key, value)} />
+            </Box>
+            <Box marginBottom={1}>
+              <Button key="dattach" label="Add to this chat" onPress={() => attach($, c)} />
               <Button key="dcontinue" variant="primary" label="Continue in chat" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />
-              <Button key="dattach" label="Add to chat" onPress={() => attach($, c)} />
               <Button key="dpause" label={isPaused ? 'Resume' : 'Pause'} onPress={() => togglePause($, c.key)} />
               <Button key="ddone" label="Mark completed" onPress={() => markCompleted($, c)} />
             </Box>
-            <Input key="dreply" placeholder={`Message ${name}…`} submitLabel="Send" onSubmit={value => replyFromPane($, c, value)} />
-            <Svg key="dex" alt="Exchange" source={sideLabelSvg('Exchange')} />
-            {c.messages.slice(-10).map(m => (
+            <Input key="ddirect" placeholder="Give your agent a direction for this collaboration…" submitLabel="Send to my agent" onSubmit={value => directCollab($, c, value).then(() => undefined, () => undefined)} />
+            <Text dimColor>Your agent carries this direction into the collaboration.</Text>
+            <Box marginTop={1}>
+              <Button key="dconv" plain label={`${expanded.includes(c.key) ? '▾' : '▸'} Agent conversation · ${c.messages.length} update${c.messages.length === 1 ? '' : 's'}`} onPress={() => toggleExpanded($, c.key)} />
+            </Box>
+            {expanded.includes(c.key) && c.messages.slice(-12).map(m => (
               <Box key={`dm-${m.id}`} flexDirection="column" marginBottom={1} paddingX={1} borderStyle="round" borderColor={m.direction === 'out' ? ACCENT : CARD_BORDER} alignSelf={m.direction === 'out' ? 'flex-end' : 'flex-start'} width="85%">
-                <Text dimColor>{m.direction === 'out' ? 'You' : name} · {when(m.at)}{m.kind !== 'message' ? ` · ${m.kind}` : ''}{m.state ? ` · ${STATE_LABEL[m.state]}` : ''}</Text>
+                <Text dimColor>{m.direction === 'out' ? 'Your agent' : name} · {when(m.at)}{m.kind !== 'message' ? ` · ${m.kind}` : ''}{m.state ? ` · ${STATE_LABEL[m.state]}` : ''}</Text>
                 <Markdown key={`dmd-${m.id}`} text={m.body.length > 1500 ? `${m.body.slice(0, 1500)}…` : m.body} />
-                {m.artifacts.length > 0 && <Text dimColor>Files: {m.artifacts.map(a => `${a.name}${a.version ? ` (v${a.version})` : ''}`).join(', ')}</Text>}
+                {m.artifacts.length > 0 && <Text dimColor>Shared: {m.artifacts.map(a => `${a.name}${a.version ? ` (v${a.version})` : ''}`).join(', ')}</Text>}
               </Box>
             ))}
+            {expanded.includes(c.key) && <Input key="dreply" placeholder={`Message ${name} directly…`} submitLabel="Send" onSubmit={value => replyFromPane($, c, value)} />}
             {others.length > 0 && <Svg key="dother" alt="Other work" source={sideLabelSvg(`Other work with ${name}`)} />}
             {others.map(o => <Button key={`dother-${o.key}`} plain label={`${titleCase(o.topic)} · ${STATE_LABEL[o.state]}`} onPress={() => openCollab($, o.key)} />)}
           </Box>

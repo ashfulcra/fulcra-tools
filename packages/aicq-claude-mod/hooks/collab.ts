@@ -33,13 +33,14 @@ export type ContactSummary = {
   replySamples: number
 }
 
-export const ACTIVE: readonly WorkState[] = ['decision-needed', 'prepared-for-approval', 'waiting', 'working', 'needs-reply', 'paused']
+export const ACTIVE: readonly WorkState[] = ['decision-needed', 'prepared-for-approval', 'needs-reply', 'result-ready', 'working', 'waiting', 'paused']
 
 export const STATE_LABEL: Record<WorkState, string> = {
   'waiting': 'Waiting for agent',
   'working': 'Working',
   'decision-needed': 'Decision needed',
   'prepared-for-approval': 'Prepared for approval',
+  'result-ready': 'Result ready',
   'completed': 'Completed',
   'paused': 'Paused',
   'unable': 'Unable to complete',
@@ -80,10 +81,12 @@ function deriveState(msgs: readonly AicqMessage[], key: string, marks: LocalMark
     return { state: explicit.state, waitingSince: explicit.state === 'waiting' ? explicit.at : null }
   }
   // Only my requests leave the ball in their court; my replies and reports do not.
-  if (last.direction === 'out') return last.kind === 'message' ? { state: 'waiting', waitingSince: last.at } : { state: 'fyi', waitingSince: null }
+  // A broadcast to everyone is an FYI: nobody in particular owes a reply.
+  if (last.direction === 'out') return last.kind === 'message' && last.to !== 'all' && last.to !== '*' ? { state: 'waiting', waitingSince: last.at } : { state: 'fyi', waitingSince: null }
   if (last.kind === 'question' || last.kind === 'decision') return { state: 'decision-needed', waitingSince: null }
   if (last.kind === 'directive' || last.kind === 'request' || last.kind === 'message') return { state: 'needs-reply', waitingSince: null }
-  return { state: 'completed', waitingSince: null }
+  // Their reply is a result for you to look at; Completed is an explicit outcome.
+  return { state: 'result-ready', waitingSince: null }
 }
 
 function nextActionFor(state: WorkState, contact: string): string {
@@ -93,6 +96,7 @@ function nextActionFor(state: WorkState, contact: string): string {
     case 'decision-needed': return 'Your direction is needed'
     case 'prepared-for-approval': return 'Approve or discard the prepared reply'
     case 'needs-reply': return 'Your agent should respond'
+    case 'result-ready': return 'Look at the result'
     case 'paused': return 'Paused by you'
     case 'unable': return 'Stopped; see the reason'
     default: return 'Nothing pending'
@@ -114,7 +118,7 @@ export function collaborations(all: readonly AicqMessage[], marks: LocalMarks): 
     const last = msgs[msgs.length - 1]!
     const { state, waitingSince } = deriveState(msgs, key, marks)
     const firstSub = msgs.find(isSubstantive) ?? first
-    const outcomeMsg = state === 'completed' ? [...msgs].reverse().find(m => m.direction === 'in' && isSubstantive(m)) : undefined
+    const outcomeMsg = state === 'completed' || state === 'result-ready' ? [...msgs].reverse().find(m => m.direction === 'in' && isSubstantive(m)) : undefined
     out.push({
       key,
       contactKey: contactKeyOf(first),

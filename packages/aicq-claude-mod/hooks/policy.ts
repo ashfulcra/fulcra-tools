@@ -6,10 +6,17 @@ import type { AicqMessage } from '../types'
 export type ResponseMode = 'notify' | 'draft' | 'respond-check' | 'respond-results'
 
 export const MODE_LABEL: Record<ResponseMode, string> = {
-  'notify': 'Notify me',
-  'draft': 'Notify me with a draft',
-  'respond-check': 'Respond; check with me on consequential decisions',
-  'respond-results': 'Respond; notify me about results',
+  'respond-results': 'Handle it for me',
+  'respond-check': 'Check with me on judgment calls',
+  'draft': 'Prepare for my approval',
+  'notify': 'Just notify me',
+}
+
+export const MODE_HELP: Record<ResponseMode, string> = {
+  'respond-results': 'Your agent handles routine coordination and tells you about outcomes, not every message.',
+  'respond-check': 'Your agent handles routine steps and asks you when a choice needs your judgment.',
+  'draft': 'Your agent prepares the work and proposed replies. It waits for your approval before sending or committing.',
+  'notify': 'Your agent tells you a message arrived and waits for your direction.',
 }
 
 export const MODES = Object.keys(MODE_LABEL) as ResponseMode[]
@@ -40,17 +47,18 @@ function list(msgs: readonly AicqMessage[]): string {
   return lines.join('\n') + (msgs.length > 8 ? `\n(${msgs.length - 8} more: call aicq_inbox)` : '')
 }
 
-export function wakePrompt(mode: ResponseMode, msgs: readonly AicqMessage[]): string {
+export function wakePrompt(mode: ResponseMode, msgs: readonly AicqMessage[], ref = ''): string {
+  const tail = ref ? `\n[aicq:${ref}]` : ''
   const head = `AICQ: ${msgs.length} new agent message${msgs.length > 1 ? 's' : ''} (response mode: ${MODE_LABEL[mode]}).\n${list(msgs)}\n\n`
   switch (mode) {
     case 'draft':
-      return `${head}Prepare a reply for each with the aicq_draft tool (keep the topic; set in_reply_to). Do NOT send anything: I approve or discard drafts in /aicq. Then tell me in one line what you drafted.\n${GUARD}`
+      return `${head}Prepare a reply for each with the aicq_draft tool (keep the topic; set in_reply_to). Do NOT send anything: I approve or discard drafts in /aicq. Then tell me in one line what you drafted.\n${GUARD}${tail}`
     case 'respond-check':
-      return `${head}Handle routine coordination yourself: reply with aicq_send (keep the topic; set in_reply_to; set state to working, completed, or waiting as fits). For a consequential decision (anything that changes what I explicitly asked for, commits me, costs money, or shares beyond the selected content) do not send: save your recommendation with aicq_draft and ask me, stating the question, why it needs me, your recommendation and what approval permits.\n${GUARD}`
+      return `${head}Handle routine coordination yourself: reply with aicq_send (keep the topic; set in_reply_to; set state to working, completed, or waiting as fits). For a consequential decision (anything that changes what I explicitly asked for, commits me, costs money, or shares beyond the selected content) do not send: save it with aicq_draft: put the question in "question", the concrete choices in "options" (each a short label and the exact reply it sends, recommended first), and say in one line why it needs me.\n${GUARD}${tail}`
     case 'respond-results':
-      return `${head}Handle the exchange autonomously within the authority I have already granted: reply with aicq_send (keep the topic; set in_reply_to; set state as fits). Do not narrate each step; when an outcome is reached, tell me the outcome in one or two lines.\n${GUARD}`
+      return `${head}Handle the exchange autonomously within the authority I have already granted: reply with aicq_send (keep the topic; set in_reply_to; set state as fits). Do not narrate each step; when an outcome is reached, tell me the outcome in one or two lines.\n${GUARD}${tail}`
     default:
-      return `${head}${GUARD}`
+      return `${head}${GUARD}${tail}`
   }
 }
 
