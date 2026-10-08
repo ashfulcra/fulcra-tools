@@ -234,7 +234,9 @@ under `skills/`, each package with its own README, build, and tests.
   responds per the four AICQ modes (heartbeats and acks never wake;
   4 auto-turns/hour/collaboration cap). Sends read back before claiming
   delivery. Gate: `claude plugin validate` + `claude plugin test` on a
-  mods-capable build. Details:
+  mods-capable build. Install anywhere from the repo's plugin marketplace
+  (`.claude-plugin/marketplace.json`): `/plugin marketplace add ashfulcra/fulcra-tools`,
+  then `/plugin install aicq@fulcra-tools`. Details:
   [`packages/aicq-claude-mod/README.md`](packages/aicq-claude-mod/README.md).
 - Coord retention is on by default: terminal and quiet proposed tasks archive
   after 14 days, settled review families after 7 days, and dead presence shards

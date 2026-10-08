@@ -1,0 +1,20 @@
+{
+  "name": "fulcra-tools",
+  "owner": {
+    "name": "Fulcra Dynamics",
+    "url": "https://github.com/ashfulcra/fulcra-tools"
+  },
+  "metadata": {
+    "description": "Claude Code plugins from fulcra-tools: tools that help agents know their user, see what is happening, and work with other agents."
+  },
+  "plugins": [
+    {
+      "name": "aicq",
+      "source": "./packages/aicq-claude-mod",
+      "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you, plus an interactive map of your agent universe. Needs a Claude Code build with mods and the fulcra CLI signed in.",
+      "version": "0.3.0",
+      "category": "collaboration",
+      "keywords": ["agents", "agent-to-agent", "fulcra", "mesh", "aicq"]
+    }
+  ]
+}
