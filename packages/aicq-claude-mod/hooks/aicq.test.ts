@@ -212,6 +212,8 @@ describe('policy', () => {
 type Run = { argv: readonly string[]; init?: { stdin?: string } }
 
 const COORD_FAULTS = { boardThrows: false }
+/** Scripted outcomes for post-write readback reads, consumed in order ('ok' once exhausted). */
+const READBACK: { plan: ('lag' | 'trunc' | 'fail' | 'ok')[] } = { plan: [] }
 const ROSTER = { text: '' }
 const COORD = {
   agents: [
@@ -254,6 +256,12 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
     if (cmd === 'get-records') {
       if (opts.failRecords) return { value: { exitCode: 1, stdout: '', stderr: 'boom', isStdoutTruncated: false, isStderrTruncated: false } }
       const ch = String(r.argv[2])
+      if (ch === V1_OUT && READBACK.plan.length) {
+        const step = READBACK.plan.shift()!
+        if (step === 'lag') return ok('')
+        if (step === 'fail') return { value: { exitCode: 1, stdout: '', stderr: 'boom', isStdoutTruncated: false, isStderrTruncated: false } }
+        if (step === 'trunc') return { value: { exitCode: 0, stdout: (recorded.get(ch) ?? []).map(x => JSON.stringify({ start_time: '2026-10-07T12:00:00Z', ...JSON.parse(x) as object })).join('\n'), stderr: '', isStdoutTruncated: true, isStderrTruncated: false } }
+      }
       if (ch === V1_IN) return { value: { exitCode: 0, stdout: inboxRows.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n'), stderr: '', isStdoutTruncated: !!opts.truncated, isStderrTruncated: false } }
       return ok((recorded.get(ch) ?? []).map(x => JSON.stringify({ start_time: '2026-10-07T12:00:00Z', ...JSON.parse(x) as object })).join('\n'))
     }
@@ -741,5 +749,31 @@ describe('mod', () => {
       ROSTER.text = ''
     }
   })
+
+  for (const [first, second, verified] of [['lag', 'ok', true], ['trunc', 'ok', true], ['fail', 'ok', true], ['lag', 'lag', false]] as const) {
+    test(`readback: first read ${first}, second ${second} -> ${verified ? 'verified' : 'UNVERIFIED'}; one write, two reads`, async ($, on) => {
+      const clock = mock.clock(on, { now: T0 })
+      mock.store(on)
+      mock.env(on, { HOME: '/home/t' })
+      const f = fake([])
+      engine(on, f, sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(2000)
+      READBACK.plan = [first, second]
+      try {
+        const before = f.calls.length
+        const pending = $.tool.call({ tool: 'mcp__aicq__aicq_send', to: 'Peer Agent', topic: 'lagging', body: 'hello' } as never)
+        await clock.advance(5000)
+        const res = JSON.stringify(await pending)
+        const after = f.calls.slice(before)
+        expect(after.filter(c => c.argv[1] === 'record').length).toBe(1)
+        expect(after.filter(c => c.argv[1] === 'get-records' && c.argv[2] === V1_OUT).length).toBe(2)
+        expect(res.includes('Sent and read back')).toBe(verified)
+        if (!verified) expect(res.includes('UNVERIFIED') && res.includes('a resend duplicates')).toBe(true)
+      } finally {
+        READBACK.plan = []
+      }
+    })
+  }
 })
 
