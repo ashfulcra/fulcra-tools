@@ -1,3 +1,42 @@
+// Universe types mirror hooks/universe.ts (the contract must be self-contained).
+export type Liveness = 'live' | 'idle' | 'stale' | 'lapsed' | 'unknown'
+
+export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string }
+
+export type UniverseNode = {
+  key: string
+  kind: 'agent' | 'peer'
+  label: string
+  machine: string
+  platform: string
+  liveness: Liveness
+  lastSeen: string | null
+  summary: string
+  annotation: string
+  open: Record<string, number>
+  blocked: BlockedItem[]
+  /** Blocked items waiting on the owner (user:<owner>). */
+  blockedOnOwner: number
+  meshes: string[]
+  /** Fulcra user id for a cross-account peer. */
+  userId: string | null
+}
+
+export type Mesh = { key: string; label: string; kind: 'workspace' | 'v5' | 'cross-account'; members: string[] }
+
+export type Machine = { name: string; reconciledAt: string | null; stale: boolean | null }
+
+export type Universe = {
+  builtAt: string
+  machines: Machine[]
+  nodes: UniverseNode[]
+  meshes: Mesh[]
+  /** Sources that could not be read: shown, never silently empty. */
+  degraded: string[]
+}
+
+export type Placement = Record<string, { machine?: string; platform?: string }>
+
 export type WorkState =
   | 'waiting'
   | 'working'
@@ -81,7 +120,7 @@ export type Draft = {
 
 export type AttachedContext = { collabKey: string; title: string; text: string }
 
-export type PaneView = { kind: 'home' } | { kind: 'settings' } | { kind: 'invite' } | { kind: 'collab'; key: string } | { kind: 'contact'; key: string }
+export type PaneView = { kind: 'home' } | { kind: 'settings' } | { kind: 'invite' } | { kind: 'map' } | { kind: 'node'; key: string } | { kind: 'collab'; key: string } | { kind: 'contact'; key: string }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -102,6 +141,9 @@ declare module 'claude-code' {
       hidden: Record<string, string>
       adopted: string[]
       owned: Record<string, string>
+      universe: Universe | null
+      universeLoading: boolean
+      placement: Placement
     }
   }
 }
