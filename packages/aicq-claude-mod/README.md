@@ -50,6 +50,7 @@ manifest.
   Heartbeats and acks never wake the session. Paused collaborations never
   respond. Each collaboration gets at most 4 automatic turns an hour.
 - **Owns only its threads.** A thread belongs to this agent when it sent a message in it, was addressed by its agent name, or the owner pressed **Take over**. Threads another of the owner's agents started (for example a reply to a message this agent never sent) show "Another of your agents is handling this" and notify without starting a turn here; unclaimed new threads notify only. Owned threads are stored durably with their last activity (no count cap; an entry expires only after 180 days with no activity); threads the owner took over never expire; a store write failure is reported, never silent.
+- **Universe map** (`/aicq map`, or **Universe map** in the pane): an interactive, status-colored map of the owner's agent universe — machine/env → platform/runtime → identity/session — with the meshes between them (workspaces, V5 workspaces, the cross-account mesh) and red blocked-on-you links. Built from `coord-engine agents|board|health` (team `coordTeam`), the V5 actor configs on this machine, workspace member lists and mesh peers; it refreshes every 10 minutes and on Refresh, and any unreadable source is named, never shown as empty. Placement is inferred from identity names (`platform:machine:name`), V5 instance ids and workspace notes; correct any node's machine or platform from its detail (stored). Clicking a node shows liveness, annotation, open work and each blocked item with its next action, and offers: message it on the coord bus (delivery confirmed by the bus), help me unblock this, open its AICQ thread or contact, ask my agent about it.
 - **Model tools:**
   - `aicq_inbox`: collaborations with state and messages.
   - `aicq_send`: writes in the contact's own format and reads back before claiming delivery.
@@ -77,6 +78,9 @@ In the desktop app (or any session without flags), list the folder in
 | `workspaces` | `""` | Comma-separated workspace names to watch. |
 | `meshOutbox` | `""` | Fallback channel when no channel of yours is shared with a recipient. Usually empty. |
 | `fulcraCli` | `~/.local/bin/fulcra` | Path to the CLI. |
+| `coordTeam` | `fulcra` | coord-engine team the universe map reads and messages. |
+| `coordEngine` | `~/.local/bin/coord-engine` | Path to coord-engine. |
+| `owner` | `ash` | Your principal on the bus (`user:<owner>` marks blocked-on-you). |
 
 ## Develop
 

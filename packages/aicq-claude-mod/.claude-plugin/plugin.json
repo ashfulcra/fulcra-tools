@@ -39,6 +39,24 @@
       "title": "fulcra CLI path",
       "description": "Absolute path to the fulcra CLI.",
       "default": "~/.local/bin/fulcra"
+    },
+    "coordTeam": {
+      "type": "string",
+      "title": "Coord team",
+      "description": "coord-engine team the universe map reads (agents, board, health) and messages go to.",
+      "default": "fulcra"
+    },
+    "coordEngine": {
+      "type": "string",
+      "title": "coord-engine path",
+      "description": "Absolute path to the coord-engine CLI.",
+      "default": "~/.local/bin/coord-engine"
+    },
+    "owner": {
+      "type": "string",
+      "title": "Owner principal",
+      "description": "Your principal on the coord bus (blocked-on-you links use user:<owner>).",
+      "default": "ash"
     }
   }
 }

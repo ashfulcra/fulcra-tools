@@ -217,3 +217,137 @@ export function avatarSvg(label: string, mine: boolean, size = 30): string {
   const r = size / 2 - 1
   return svg(size, size, hexAvatar(size / 2, size / 2, r, label, mine))
 }
+
+// ---- the agent universe map ---------------------------------------------------
+
+export type MapNode = { key: string; label: string; liveness: string; blocked: number; blockedOnOwner: number; peer: boolean }
+export type MapColumn = { machine: string; subtitle: string; platforms: { platform: string; nodes: MapNode[] }[] }
+export type MapMesh = { key: string; label: string; kind: string; members: string[] }
+
+const LIVE_COLOR: Record<string, string> = { live: '#2fbf71', idle: '#e8b04b', stale: '#8c8c96', lapsed: '#e07b39', unknown: '#5c5c66' }
+const MESH_COLOR: Record<string, string> = { workspace: '#6d8cff', v5: '#b07cff', 'cross-account': '#2fb3bf' }
+
+/** The whole universe as one drawing; returns the markup and its size. */
+const CHUNK = 14
+
+/** Long columns split into continuation columns so the drawing stays readable. */
+function chunked(cols: readonly MapColumn[]): MapColumn[] {
+  const out: MapColumn[] = []
+  for (const col of cols) {
+    let cur: MapColumn = { ...col, platforms: [] }
+    let count = 0
+    for (const pf of col.platforms) {
+      for (let i = 0; i < pf.nodes.length; i += 1) {
+        if (count === CHUNK) {
+          out.push(cur)
+          cur = { machine: `${col.machine} (cont.)`, subtitle: col.subtitle, platforms: [] }
+          count = 0
+        }
+        const last = cur.platforms[cur.platforms.length - 1]
+        if (last && last.platform === pf.platform) last.nodes.push(pf.nodes[i]!)
+        else cur.platforms.push({ platform: pf.platform, nodes: [pf.nodes[i]!] })
+        count += 1
+      }
+    }
+    if (cur.platforms.length || !out.length) out.push(cur)
+  }
+  return out
+}
+
+export function universeSvg(colsIn: readonly MapColumn[], meshes: readonly MapMesh[], owner: string, selected: string | null, maxWidth = 1200): { source: string; width: number; height: number } {
+  const cols = chunked(colsIn)
+  const colW = 236
+  const gap = 18
+  const top = 150
+  const perRow = Math.max(3, Math.floor((maxWidth - gap) / (colW + gap)))
+  const width = Math.max(720, Math.min(cols.length, perRow) * (colW + gap) + gap)
+  const pos = new Map<string, { x: number; y: number }>()
+  let parts = ''
+  let maxY = top
+  let rowTop = top
+  let rowBottom = top
+  cols.forEach((col, ci) => {
+    if (ci > 0 && ci % perRow === 0) {
+      rowTop = rowBottom + gap
+    }
+    const x0 = gap + (ci % perRow) * (colW + gap)
+    let y = rowTop
+    const headH = 40
+    const bodyStart = y + headH
+    let inner = ''
+    let yy = bodyStart + 6
+    for (const pf of col.platforms) {
+      inner += `<text x="${x0 + 14}" y="${yy + 12}" font-family="${FONT}" font-size="10.5" letter-spacing="1.1" font-weight="600" fill="${C.dim}">${esc(pf.platform.toUpperCase())}</text>`
+      yy += 20
+      for (const n of pf.nodes) {
+        const cy = yy + 11
+        const cx = x0 + 22
+        pos.set(n.key, { x: cx, y: cy })
+        const sel = n.key === selected
+        if (sel) inner += `<rect x="${x0 + 6}" y="${yy - 2}" width="${colW - 12}" height="26" rx="8" fill="${C.selected}" stroke="${C.selectedBorder}"/>`
+        inner += n.peer
+          ? `<path d="${hexPathPublic(cx, cy, 7)}" fill="${LIVE_COLOR[n.liveness] ?? LIVE_COLOR.unknown}"/>`
+          : `<circle cx="${cx}" cy="${cy}" r="6.5" fill="${LIVE_COLOR[n.liveness] ?? LIVE_COLOR.unknown}"/>`
+        const label = n.label.length > 24 ? n.label.slice(0, 23) + '…' : n.label
+        inner += `<text x="${cx + 14}" y="${cy + 4.5}" font-family="${FONT}" font-size="12.5" fill="${C.text}">${esc(label)}</text>`
+        if (n.blocked > 0) {
+          const bx = x0 + colW - 30
+          inner += `<rect x="${bx}" y="${cy - 9}" width="22" height="18" rx="9" fill="${n.blockedOnOwner ? '#c0392b' : '#7a4a14'}"/><text x="${bx + 11}" y="${cy + 4}" text-anchor="middle" font-family="${FONT}" font-size="10.5" font-weight="700" fill="#fff">${n.blocked}</text>`
+        }
+        yy += 26
+      }
+      yy += 6
+    }
+    const h = Math.max(yy - y + 6, headH + 30)
+    parts += `<rect x="${x0}" y="${y}" width="${colW}" height="${h}" rx="14" fill="${C.card}" stroke="${C.cardBorder}"/>`
+      + `<text x="${x0 + 14}" y="${y + 22}" font-family="${FONT}" font-size="14" font-weight="650" fill="${C.text}">${esc(col.machine)}</text>`
+      + `<text x="${x0 + 14}" y="${y + 36}" font-family="${FONT}" font-size="10.5" fill="${C.dim}">${esc(col.subtitle)}</text>`
+      + `<line x1="${x0}" y1="${bodyStart}" x2="${x0 + colW}" y2="${bodyStart}" stroke="${C.cardBorder}"/>` + inner
+    maxY = Math.max(maxY, y + h)
+    rowBottom = Math.max(rowBottom, y + h)
+  })
+
+  // Owner and mesh hubs across the top.
+  const ownerX = width / 2
+  const ownerY = 30
+  let hubs = ''
+  let edges = ''
+  const hubW = 150
+  const hubGap = 14
+  const hubsW = meshes.length * (hubW + hubGap) - hubGap
+  meshes.forEach((m, i) => {
+    const hx = width / 2 - hubsW / 2 + i * (hubW + hubGap)
+    const hy = 84
+    const color = MESH_COLOR[m.kind] ?? C.dim
+    hubs += `<rect x="${hx}" y="${hy}" width="${hubW}" height="26" rx="13" fill="${C.card}" stroke="${color}"/>`
+      + `<text x="${hx + hubW / 2}" y="${hy + 17}" text-anchor="middle" font-family="${FONT}" font-size="11" fill="${color}">${esc(m.label.length > 22 ? m.label.slice(0, 21) + '…' : m.label)} · ${m.members.length}</text>`
+    edges += `<line x1="${ownerX}" y1="${ownerY + 14}" x2="${hx + hubW / 2}" y2="${hy}" stroke="${color}" stroke-opacity="0.5"/>`
+    for (const k of m.members) {
+      const p = pos.get(k)
+      if (!p) continue
+      const sx = hx + hubW / 2
+      const sy = hy + 26
+      edges += `<path d="M${sx},${sy} C${sx},${(sy + p.y) / 2} ${p.x - 30},${p.y - 40} ${p.x - 8},${p.y}" fill="none" stroke="${color}" stroke-opacity="0.35" stroke-width="1.2"${m.kind === 'cross-account' ? ' stroke-dasharray="4 3"' : ''}/>`
+    }
+  })
+  // Blocked-on-owner links run to the owner.
+  for (const col of cols) for (const pf of col.platforms) for (const n of pf.nodes) {
+    if (!n.blockedOnOwner) continue
+    const p = pos.get(n.key)
+    if (!p) continue
+    edges += `<path d="M${p.x},${p.y - 7} C${p.x},${(ownerY + p.y) / 2} ${ownerX},${ownerY + 60} ${ownerX},${ownerY + 14}" fill="none" stroke="#c0392b" stroke-opacity="0.55" stroke-width="1.4"/>`
+  }
+  const ownerNode = `<circle cx="${ownerX}" cy="${ownerY}" r="15" fill="${C.selected}" stroke="${C.selectedBorder}" stroke-width="1.5"/>`
+    + `<text x="${ownerX}" y="${ownerY + 5}" text-anchor="middle" font-family="${FONT}" font-size="13" font-weight="700" fill="${C.text}">${esc((owner[0] ?? 'Y').toUpperCase())}</text>`
+    + `<text x="${ownerX + 22}" y="${ownerY + 5}" font-family="${FONT}" font-size="12.5" font-weight="600" fill="${C.text}">${esc(owner)}</text>`
+  const legendY = maxY + 26
+  const legend = Object.entries(LIVE_COLOR).map(([k, c], i) => `<circle cx="${gap + 8 + i * 84}" cy="${legendY}" r="5" fill="${c}"/><text x="${gap + 18 + i * 84}" y="${legendY + 4}" font-family="${FONT}" font-size="11" fill="${C.dim}">${k}</text>`).join('')
+    + `<rect x="${gap + 430}" y="${legendY - 9}" width="20" height="18" rx="9" fill="#c0392b"/><text x="${gap + 456}" y="${legendY + 4}" font-family="${FONT}" font-size="11" fill="${C.dim}">blocked on you</text>`
+    + `<rect x="${gap + 560}" y="${legendY - 9}" width="20" height="18" rx="9" fill="#7a4a14"/><text x="${gap + 586}" y="${legendY + 4}" font-family="${FONT}" font-size="11" fill="${C.dim}">blocked</text>`
+  const height = legendY + 18
+  return { source: svg(width, height, edges + hubs + parts + ownerNode + legend), width, height }
+}
+
+export function hexPathPublic(cx: number, cy: number, r: number): string {
+  return hexPath(cx, cy, r)
+}
