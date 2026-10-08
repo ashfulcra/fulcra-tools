@@ -579,5 +579,28 @@ describe('mod', () => {
       expect(sink.prompts.length).toBe(1)
     })
   }
+
+  test('ownership has no count cap: an old owned thread still wakes after 2000 newer owned threads', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows: Record<string, unknown>[] = [v1Row({ message_id: 'old-0', topic: 'old-owned', recipients: ['aicq'], body: 'addressed to aicq' }, '2026-10-07T10:00:00Z')]
+    const sink = sinkOf()
+    const f = fake(rows)
+    engine(on, f, sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000) // backfill: old-owned is this agent's (addressed by name)
+    for (let i = 0; i < 1999; i += 1) rows.push(v1Row({ message_id: `t${i}`, topic: `topic-${i}`, recipients: ['aicq'], body: `hi ${i}` }, new Date(T0 + 30_000 + i * 10).toISOString()))
+    await clock.advance(120_000) // notify mode: 1999 newer owned threads, no turns
+    expect(sink.prompts.length).toBe(0)
+    await $.command.run({ command: 'aicq', args: 'mode respond-results' } as never)
+    await $.tool.call({ tool: 'mcp__aicq__aicq_send', to: 'Peer Agent', topic: 'new-owned', body: 'one more' } as never)
+    // The next read holds only a new old-owned update, not addressed by name and with no reply reference.
+    rows.length = 0
+    rows.push(v1Row({ message_id: 'old-1', topic: 'old-owned', recipients: ['someone'], body: 'update' }, new Date(T0 + 200_000).toISOString()))
+    await clock.advance(120_000)
+    expect(sink.prompts.length).toBe(1)
+    expect(sink.prompts[0]!.includes('update')).toBe(true)
+  })
 })
 

@@ -101,6 +101,7 @@ declare module 'claude-code' {
       aliases: Record<string, string>
       hidden: Record<string, string>
       adopted: string[]
+      owned: Record<string, string>
     }
   }
 }
