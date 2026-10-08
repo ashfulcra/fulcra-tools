@@ -558,5 +558,26 @@ describe('mod', () => {
     await clock.advance(120_000)
     expect(sink.prompts.length).toBe(1)
   })
+
+  for (const n of [399, 401]) {
+    test(`ownership survives inbox eviction (${n} later messages)`, async ($, on) => {
+      const clock = mock.clock(on, { now: T0 })
+      mock.store(on)
+      mock.env(on, { HOME: '/home/t' })
+      const rows: Record<string, unknown>[] = []
+      const sink = sinkOf()
+      const f = fake(rows)
+      engine(on, f, sink)
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(2000)
+      await $.command.run({ command: 'aicq', args: 'mode respond-results' } as never)
+      await $.tool.call({ tool: 'mcp__aicq__aicq_send', to: 'Peer Agent', topic: 'long-owned-thread', body: 'Start' } as never)
+      for (let i = 0; i < n; i += 1) {
+        rows.push(v1Row({ message_id: `l${i}`, topic: 'long-owned-thread', recipients: ['someone'], body: `update ${i}` }, new Date(T0 + 60_000 + i * 1000).toISOString()))
+      }
+      await clock.advance(120_000)
+      expect(sink.prompts.length).toBe(1)
+    })
+  }
 })
 

@@ -237,6 +237,9 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
     }
 
     if (added.length) {
+      const ownership = await ownershipFor($)
+      const derived = collaborations([...((await read($, inbox)) as AicqMessage[]), ...added], { paused: [], drafts: [], ownership })
+      await rememberOwned($, derived.filter(c => c.owner === 'me').map(c => c.key))
       await update($, inbox, list => {
         const byId = new Map(list.map(m => [m.id, m]))
         for (const m of added) byId.set(m.id, m)
@@ -355,6 +358,7 @@ async function send($: $, input: SendInput): Promise<{ ok: boolean; text: string
     await update($, inbox, list => [message, ...list.filter(m => m.id !== id)].slice(0, INBOX_CAP))
     sentIds = [...sentIds.filter(x => x !== id), id].slice(-2000)
     await $.store.set('sentIds', sentIds)
+    await rememberOwned($, [`${contactKeyOf(message)}#${threadTopic(input.topic)}`])
   }
   return {
     ok,
@@ -787,6 +791,15 @@ async function ownershipFor($: $) {
   return { mineIds: sentIds, agentName: cfg.agentName, adopted: ((await read($, adoptedAtom)) as string[] | undefined) ?? [] }
 }
 
+/** Records threads as this agent's for good: ownership must not depend on messages still in the inbox. */
+async function rememberOwned($: $, keys: readonly string[]) {
+  const have = ((await read($, adoptedAtom)) as string[] | undefined) ?? []
+  const add = keys.filter(k => !have.includes(k))
+  if (!add.length) return
+  await update($, adoptedAtom, l => [...l, ...add].slice(-2000))
+  await $.store.set('adopted', (await read($, adoptedAtom)) as string[])
+}
+
 async function adopt($: $, key: string) {
   await update($, adoptedAtom, l => (l.includes(key) ? l : [...l, key]))
   await $.store.set('adopted', (await read($, adoptedAtom)) as string[])
@@ -823,6 +836,7 @@ export const register: Register = (on, options) => {
     sentIds = ((await $.store.get('sentIds')) as string[] | undefined) ?? []
     const savedAdopted = ((await $.store.get('adopted')) as string[] | undefined) ?? []
     await update($, adoptedAtom, () => savedAdopted)
+    await rememberOwned($, collaborations((await read($, inbox)) as AicqMessage[], { paused: [], drafts: [], ownership: await ownershipFor($) }).filter(c => c.owner === 'me').map(c => c.key))
     const savedAliases = ((await $.store.get('aliases')) as Record<string, string> | undefined) ?? {}
     const savedHidden = ((await $.store.get('hidden')) as Record<string, string> | undefined) ?? {}
     await update($, aliasesAtom, () => savedAliases)
