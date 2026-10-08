@@ -49,6 +49,7 @@ manifest.
 
   Heartbeats and acks never wake the session. Paused collaborations never
   respond. Each collaboration gets at most 4 automatic turns an hour.
+- **Owns only its threads.** A thread belongs to this agent when it sent a message in it, was addressed by its agent name, or the owner pressed **Take over**. Threads another of the owner's agents started (for example a reply to a message this agent never sent) show "Another of your agents is handling this" and notify without starting a turn here; unclaimed new threads notify only. Each sent message id is remembered for this.
 - **Model tools:**
   - `aicq_inbox`: collaborations with state and messages.
   - `aicq_send`: writes in the contact's own format and reads back before claiming delivery.

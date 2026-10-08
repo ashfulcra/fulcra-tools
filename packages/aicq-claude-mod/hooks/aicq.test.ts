@@ -224,7 +224,7 @@ function engine(on: any, f: ReturnType<typeof fake>, sink: Sink) {
 const T0 = Date.parse('2026-10-07T12:00:00Z')
 
 describe('mod', () => {
-  test('backfill is quiet; arrivals notify; respond mode starts one guarded turn', async ($, on) => {
+  test('backfill is quiet; arrivals notify; respond mode starts one guarded turn', { options: { agentName: 'aicq' } }, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     mock.env(on, { HOME: '/home/t' })
@@ -405,7 +405,7 @@ describe('mod', () => {
     expect(reads()).toBe(r0 + 1)
   })
 
-  test('mixed-policy arrivals: a draft-only collaboration is never answered autonomously, in either order', async ($, on) => {
+  test('mixed-policy arrivals: a draft-only collaboration is never answered autonomously, in either order', { options: { agentName: 'aicq' } }, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     mock.env(on, { HOME: '/home/t' })
@@ -510,6 +510,53 @@ describe('mod', () => {
     expect(f.calls.some(c => c.argv[1] === 'file' && c.argv[2] === 'share' && c.argv.includes(PEER))).toBe(true)
     const sent = JSON.parse(f.recorded.get(V1_OUT)![0]!) as { artifacts?: { path: string }[] }
     expect(sent.artifacts?.[0]?.path.endsWith('plan.pdf')).toBe(true)
+  })
+
+  test('ownership: threads another agent started never wake this session until taken over', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows: Record<string, unknown>[] = [v1Row({ message_id: 'x0', topic: 'other-thread', recipients: ['gatekeeper'], body: 'earlier' }, '2026-10-07T11:00:00Z')]
+    const sink = sinkOf()
+    const f = fake(rows)
+    engine(on, f, sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.command.run({ command: 'aicq', args: 'mode respond-results' } as never)
+    // A reply to a message this agent never sent: another agent's thread.
+    rows.push(v1Row({ message_id: 'x1', topic: 'other-thread', recipients: ['gatekeeper'], body: 'In reply to 11111111-2222-3333-4444-555555555555: Wednesday works.' }, '2026-10-07T12:01:00Z'))
+    await clock.advance(120_000)
+    expect(sink.prompts.length).toBe(0)
+    expect(sink.toasts.some(t => t.includes('handled by another of your agents'))).toBe(true)
+    const inbox = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox', topic: 'other-thread' } as never))
+    expect(inbox.includes('another of the owner')).toBe(true)
+    // The owner hands it over; the next message in it wakes this agent.
+    type UI = { press: (t: unknown) => Promise<unknown> }
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+    await ui.press({ key: `ds-new-mesh:${PEER}` })
+    await ui.press({ key: `dch-mesh:${PEER}#other-thread` })
+    await ui.press({ key: 'dtake' })
+    rows.push(v1Row({ message_id: 'x2', topic: 'other-thread', recipients: ['gatekeeper'], body: 'One more detail' }, '2026-10-07T12:03:00Z'))
+    await clock.advance(120_000)
+    expect(sink.prompts.length).toBe(1)
+  })
+
+  test('ownership: a thread this agent started keeps waking it', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const rows: Record<string, unknown>[] = []
+    const sink = sinkOf()
+    const f = fake(rows)
+    engine(on, f, sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.command.run({ command: 'aicq', args: 'mode respond-results' } as never)
+    await $.tool.call({ tool: 'mcp__aicq__aicq_send', to: 'Peer Agent', topic: 'mine-thread', body: 'Can you review?' } as never)
+    const sentId = (JSON.parse(f.recorded.get(V1_OUT)![0]!) as { message_id: string }).message_id
+    rows.push(v1Row({ message_id: 'm1', topic: 'mine-thread', recipients: ['someone'], kind: 'reply', in_reply_to: sentId, body: 'Reviewed.' }, '2026-10-07T12:01:00Z'))
+    await clock.advance(120_000)
+    expect(sink.prompts.length).toBe(1)
   })
 })
 

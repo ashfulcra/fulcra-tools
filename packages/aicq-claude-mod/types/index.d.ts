@@ -23,6 +23,8 @@ export type AicqMessage = {
   source: 'mesh' | 'workspace'
   /** in: from the contact; out: sent by this owner (any of their agents). */
   direction: 'in' | 'out'
+  /** The sending agent's name where the format carries one (v1, workspace); null for legacy mesh. */
+  sender?: string | null
   channel: string
   contact: string
   contactUserId: string | null
@@ -98,6 +100,7 @@ declare module 'claude-code' {
       expanded: string[]
       aliases: Record<string, string>
       hidden: Record<string, string>
+      adopted: string[]
     }
   }
 }
