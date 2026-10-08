@@ -520,8 +520,14 @@ async function send($: $, input: SendInput): Promise<{ ok: boolean; text: string
   if (rec.exitCode !== 0) return { ok: false, text: `NOT SENT: fulcra record exited ${rec.exitCode}. Nothing was delivered.` }
   const since = new Date(Date.parse(sentAt) - 5 * 60_000).toISOString()
   const until = new Date(Date.parse(sentAt) + 5 * 60_000).toISOString()
-  const back = await fulcra($, ['get-records', channel, since, until])
-  const ok = back.exitCode === 0 && !back.isStdoutTruncated && readbackHas(back.stdout, id, input.topic)
+  // The store can lag a few seconds behind a write: one delayed re-check before calling it unverified.
+  let back = await fulcra($, ['get-records', channel, since, until])
+  let ok = back.exitCode === 0 && !back.isStdoutTruncated && readbackHas(back.stdout, id, input.topic)
+  if (!ok) {
+    await $.clock.sleep(4000)
+    back = await fulcra($, ['get-records', channel, since, until])
+    ok = back.exitCode === 0 && !back.isStdoutTruncated && readbackHas(back.stdout, id, input.topic)
+  }
   const message: AicqMessage = {
     id, source: input.workspace ? 'workspace' : 'mesh', direction: 'out', channel, contact,
     contactUserId: input.toUser, workspace: input.workspace, to: input.to, kind: input.kind, topic: input.topic,
