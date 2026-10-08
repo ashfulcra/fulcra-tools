@@ -258,7 +258,7 @@ export function parseRow(row: Json, ctx: RowContext): Parsed {
       id, source: ctx.source, direction, channel: ctx.channel, contact,
       contactUserId: ctx.contactUserId, workspace: ctx.workspace,
       to: recipients.join(','), kind: normKind(kind, topic), topic, body, at: sentAt,
-      inReplyTo, state, purpose, artifacts,
+      inReplyTo, state, purpose, artifacts, sender: v1 || coord ? sender || null : null,
     },
   }
 }

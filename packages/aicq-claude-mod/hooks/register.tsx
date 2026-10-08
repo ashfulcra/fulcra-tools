@@ -40,6 +40,10 @@ const invitesAtom = atom({ plugin: 'aicq', key: 'invites' } as const, [])
 const expandedAtom = atom({ plugin: 'aicq', key: 'expanded' } as const, [])
 const aliasesAtom = atom({ plugin: 'aicq', key: 'aliases' } as const, {})
 const hiddenAtom = atom({ plugin: 'aicq', key: 'hidden' } as const, {})
+const adoptedAtom = atom({ plugin: 'aicq', key: 'adopted' } as const, [])
+// Threads this agent owns by its own activity: key -> last activity. No count cap; expiry only after OWNED_TTL_MS idle.
+const ownedAtom = atom({ plugin: 'aicq', key: 'owned' } as const, {})
+const OWNED_TTL_MS = 180 * 86_400_000
 
 const ACCENT = '#10a37f'
 const CARD_BORDER = 'gray'
@@ -69,6 +73,8 @@ let tick = 0
 let polling = false
 let wakeQueued = false
 const quietReads = new Map<string, number>()
+// Ids this agent sent (persisted): what makes a thread this agent's own.
+let sentIds: string[] = []
 let theme = ''
 // The invite form's fields: typed into, read on Generate; no redraw needed per keystroke.
 const inviteDraft = { name: '', message: 'Let’s connect our agents so we can coordinate directly. We’ll share only the work we choose.' }
@@ -223,7 +229,9 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
       if (newBad.length) degraded.push(`${src.label}: ${newBad.length} unreadable`)
       const seen = [...advanced.seen, ...newBad.map(id => `bad:${id}`)].slice(-800)
       // An incomplete read keeps the watermark where it was so the next read covers the gap again.
-      const cursor = incomplete ? { at: before.at, seen } : { at: advanced.at, seen }
+      // A complete first read marks the source as read even when it held nothing, so its first real
+      // message later is an arrival, not quiet backfill.
+      const cursor = incomplete ? { at: before.at, seen } : { at: advanced.at ?? (before.at === null ? now : null), seen }
       if (incomplete) degraded.push(`${src.label} (incomplete read)`)
       quietReads.set(src.key, fresh.length || incomplete || newBad.length ? 0 : (quietReads.get(src.key) ?? 0) + 1)
       await $.store.set(`cursor:${src.key}`, cursor)
@@ -232,6 +240,9 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
     }
 
     if (added.length) {
+      const ownership = await ownershipFor($)
+      const derived = collaborations([...((await read($, inbox)) as AicqMessage[]), ...added], { paused: [], drafts: [], ownership })
+      await rememberOwned($, derived.filter(c => c.owner === 'me').map(c => ({ key: c.key, at: c.updatedAt })))
       await update($, inbox, list => {
         const byId = new Map(list.map(m => [m.id, m]))
         for (const m of added) byId.set(m.id, m)
@@ -257,7 +268,12 @@ async function onArrival($: $, arrived: AicqMessage[]) {
   const worthy = arrived.filter(isWakeWorthy)
   if (!worthy.length) return
   const first = worthy[0]!
-  $.ui.toast(`AICQ: ${worthy.length} new from ${first.contact}${worthy.length > 1 ? ' and others' : ''} · /aicq`)
+  // Only threads this agent owns start a turn here; others notify and wait (another agent, or the owner, handles them).
+  const all = (await read($, inbox)) as AicqMessage[]
+  const ownerByKey = new Map(collaborations(all, { paused: [], drafts: [], ownership: await ownershipFor($) }).map(c => [c.key, c.owner]))
+  const keyOfMsg = (m: AicqMessage) => `${contactKeyOf(m)}#${threadTopic(m.topic)}`
+  const notMine = worthy.filter(m => ownerByKey.get(keyOfMsg(m)) !== 'me')
+  $.ui.toast(`AICQ: ${worthy.length} new from ${first.contact}${worthy.length > 1 ? ' and others' : ''}${notMine.length === worthy.length ? (ownerByKey.get(keyOfMsg(first)) === 'other' ? ' · handled by another of your agents' : ' · unassigned: Take over in /aicq') : ''} · /aicq`)
   const globalMode = await currentMode($)
   const overrides = (await read($, overridesAtom)) as Record<string, string>
   if (wakeQueued) return
@@ -267,6 +283,7 @@ async function onArrival($: $, arrived: AicqMessage[]) {
   for (const m of worthy) {
     const key = `${contactKeyOf(m)}#${threadTopic(m.topic)}`
     if (pausedKeys.includes(key)) continue
+    if (ownerByKey.get(key) !== 'me') continue
     if (!wakes(modeOf(overrides[key] ?? globalMode))) continue
     const hist = ((await $.store.get(`wakes:${key}`)) as number[] | undefined) ?? []
     if (!withinBudget(hist, nowMs)) continue
@@ -340,7 +357,12 @@ async function send($: $, input: SendInput): Promise<{ ok: boolean; text: string
     body: input.body, at: sentAt, inReplyTo: input.inReplyTo, state: input.state, purpose: input.purpose,
     artifacts: input.artifacts.map(a => ({ uri: a.path, name: a.path.split('/').pop() ?? a.path, version: a.version, sha256: null })),
   }
-  if (ok) await update($, inbox, list => [message, ...list.filter(m => m.id !== id)].slice(0, INBOX_CAP))
+  if (ok) {
+    await update($, inbox, list => [message, ...list.filter(m => m.id !== id)].slice(0, INBOX_CAP))
+    sentIds = [...sentIds.filter(x => x !== id), id].slice(-2000)
+    await $.store.set('sentIds', sentIds)
+    await rememberOwned($, [{ key: `${contactKeyOf(message)}#${threadTopic(input.topic)}`, at: sentAt }])
+  }
   return {
     ok,
     message,
@@ -430,6 +452,11 @@ function titleCase(topic: string): string {
 
 /** One sentence of what is happening, in the spec's voice. */
 function narrative(c: Collaboration, name: string): string {
+  const lead = c.owner === 'other' ? 'Another of your agents is handling this. ' : c.owner === 'unassigned' && c.state === 'needs-reply' ? 'No agent has picked this up yet. ' : ''
+  return lead + baseNarrative(c, name)
+}
+
+function baseNarrative(c: Collaboration, name: string): string {
   const latestIn = [...c.messages].reverse().find(m => m.direction === 'in')
   switch (c.state) {
     case 'waiting': return `Waiting for a reply from ${name}. The request is preserved.`
@@ -762,6 +789,42 @@ function inlineCard($: $, els: CardElements, d: InlineCard) {
   )
 }
 
+/** Ownership marks for collaborations(): this agent's sent ids, its name, threads handed to it. */
+async function ownershipFor($: $) {
+  const explicit = ((await read($, adoptedAtom)) as string[] | undefined) ?? []
+  const owned = Object.keys(((await read($, ownedAtom)) as Record<string, string> | undefined) ?? {})
+  return { mineIds: sentIds, agentName: cfg.agentName, adopted: [...explicit, ...owned] }
+}
+
+/**
+ * Records threads as this agent's, with their latest activity: ownership must not depend on messages
+ * still in the inbox. No count cap (an active thread is never displaced); an entry expires only after
+ * OWNED_TTL_MS with no activity at all. Threads the owner took over live in `adopted` and never expire.
+ */
+async function rememberOwned($: $, entries: readonly { key: string; at: string }[]) {
+  const nowMs = await $.clock.now()
+  const before = ((await read($, ownedAtom)) as Record<string, string> | undefined) ?? {}
+  const next: Record<string, string> = {}
+  for (const [k, at] of Object.entries(before)) if (nowMs - Date.parse(at) < OWNED_TTL_MS) next[k] = at
+  for (const { key, at } of entries) if (!next[key] || next[key]! < at) next[key] = at
+  const changed = Object.keys(next).length !== Object.keys(before).length || Object.entries(next).some(([k, v]) => before[k] !== v)
+  if (!changed) return
+  await update($, ownedAtom, () => next)
+  try {
+    await $.store.set('owned', next)
+  } catch {
+    // Never silent: ownership still holds for this session, but it would not survive a reload.
+    $.ui.toast('AICQ: could not save thread ownership (store full); it holds until reload')
+    await setStatus($, st => ({ ...st, degraded: [...st.degraded.filter(d => d !== 'ownership store'), 'ownership store'] }))
+  }
+}
+
+async function adopt($: $, key: string) {
+  await update($, adoptedAtom, l => (l.includes(key) ? l : [...l, key]))
+  await $.store.set('adopted', (await read($, adoptedAtom)) as string[])
+  $.ui.toast('AICQ: this agent now handles that collaboration')
+}
+
 /** The owner's policy for one collaboration: paused, or the effective response mode. */
 async function policyFor($: $, key: string): Promise<{ paused: boolean; mode: ResponseMode }> {
   const overrides = ((await read($, overridesAtom)) as Record<string, string> | undefined) ?? {}
@@ -789,6 +852,12 @@ export const register: Register = (on, options) => {
     }
     const savedOverrides = ((await $.store.get('overrides')) as Record<string, string> | undefined) ?? {}
     const savedInvites = ((await $.store.get('invites')) as never[] | undefined) ?? []
+    sentIds = ((await $.store.get('sentIds')) as string[] | undefined) ?? []
+    const savedAdopted = ((await $.store.get('adopted')) as string[] | undefined) ?? []
+    await update($, adoptedAtom, () => savedAdopted)
+    const savedOwned = ((await $.store.get('owned')) as Record<string, string> | undefined) ?? {}
+    await update($, ownedAtom, () => savedOwned)
+    await rememberOwned($, collaborations((await read($, inbox)) as AicqMessage[], { paused: [], drafts: [], ownership: await ownershipFor($) }).filter(c => c.owner === 'me').map(c => ({ key: c.key, at: c.updatedAt })))
     const savedAliases = ((await $.store.get('aliases')) as Record<string, string> | undefined) ?? {}
     const savedHidden = ((await $.store.get('hidden')) as Record<string, string> | undefined) ?? {}
     await update($, aliasesAtom, () => savedAliases)
@@ -865,13 +934,13 @@ export const register: Register = (on, options) => {
     const contact = s(a.contact).toLowerCase()
     const topic = s(a.topic).toLowerCase()
     const all = (await read($, inbox)) as AicqMessage[]
-    const marks = { paused: (await read($, paused)) as string[], drafts: ((await read($, drafts)) as Draft[]).map(d => d.collabKey) }
+    const marks = { paused: (await read($, paused)) as string[], drafts: ((await read($, drafts)) as Draft[]).map(d => d.collabKey), ownership: await ownershipFor($) }
     const list = collaborations(all, marks).filter(c =>
       (!contact || c.contact.toLowerCase().includes(contact) || (c.contactUserId ?? '').startsWith(contact)) && (!topic || c.topic.toLowerCase().includes(topic)))
     const st = await read($, status)
     const out = list.slice(0, limit).map(c => ({
       topic: c.topic, contact: c.contact, contact_user_id: c.contactUserId, workspace: c.workspace,
-      state: c.state, next_action: c.nextAction, purpose: c.purpose, outcome: c.outcome, updated_at: c.updatedAt,
+      state: c.state, handled_by: c.owner === 'me' ? 'this agent' : c.owner === 'other' ? 'another of the owner\u2019s agents' : 'unassigned', next_action: c.nextAction, purpose: c.purpose, outcome: c.outcome, updated_at: c.updatedAt,
       messages: c.messages.slice(-6).map(m => ({ id: m.id, at: m.at, from: m.direction === 'out' ? 'me' : m.contact, kind: m.kind, body: m.body.slice(0, 1200), artifacts: m.artifacts })),
     }))
     return { result: JSON.stringify({ status: st, mode: await currentMode($), collaborations: out }, null, 2) }
@@ -953,7 +1022,7 @@ export const register: Register = (on, options) => {
     const ref = /\[aicq:([^\]]+)\]\s*$/.exec(text)?.[1]
     const all = (await read($, inbox)) as AicqMessage[]
     const pendingDrafts = (await read($, drafts)) as Draft[]
-    const c = ref ? collaborations(all, { paused: (await read($, paused)) as string[], drafts: pendingDrafts.map(d => d.collabKey) }).find(x => x.key === ref) : undefined
+    const c = ref ? collaborations(all, { paused: (await read($, paused)) as string[], drafts: pendingDrafts.map(d => d.collabKey), ownership: await ownershipFor($) }).find(x => x.key === ref) : undefined
     const headline = /^AICQ: (\d+) new agent message/.test(text)
       ? `New from ${c?.contact ?? 'an agent'}${c ? ` · ${titleCase(c.topic)}` : ''}`
       : /^AICQ direction/.test(text) ? `Your direction${c ? ` for ${titleCase(c.topic)}` : ''}`
@@ -971,7 +1040,7 @@ export const register: Register = (on, options) => {
     const running = e.props.isRunning
     const all = (await read($, inbox)) as AicqMessage[]
     const pendingDrafts = (await read($, drafts)) as Draft[]
-    const collabs = collaborations(all, { paused: (await read($, paused)) as string[], drafts: pendingDrafts.map(d => d.collabKey) })
+    const collabs = collaborations(all, { paused: (await read($, paused)) as string[], drafts: pendingDrafts.map(d => d.collabKey), ownership: await ownershipFor($) })
     const input = sendInputFrom(a)
     if (!input.workspace && !input.toUser) input.toUser = peers.find(p => p.name.toLowerCase() === input.to.toLowerCase())?.userId ?? null
     const c = collabs.find(x => x.key === collabKeyFor(input)) ?? collabs.find(x => x.topic === threadTopic(input.topic))
@@ -1004,8 +1073,8 @@ export const register: Register = (on, options) => {
     const ctx = (await read($, attached)) as AttachedContext | null
     const pending = (await read($, drafts)) as Draft[]
     const all = (await read($, inbox)) as AicqMessage[]
-    const needs = collaborations(all, { paused: (await read($, paused)) as string[], drafts: pending.map(d => d.collabKey) })
-      .filter(c => c.state === 'decision-needed' || c.state === 'prepared-for-approval' || c.state === 'result-ready').length
+    const needs = collaborations(all, { paused: (await read($, paused)) as string[], drafts: pending.map(d => d.collabKey), ownership: await ownershipFor($) })
+      .filter(c => c.owner !== 'other' && (c.state === 'decision-needed' || c.state === 'prepared-for-approval' || c.state === 'result-ready')).length
     if (e.props.hasSurvey || (!ctx && needs === 0)) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
@@ -1037,7 +1106,7 @@ export const register: Register = (on, options) => {
     const nowMs = st.lastCheckAt ? Date.parse(st.lastCheckAt) : await $.clock.now()
     const aliases = ((await read($, aliasesAtom)) as Record<string, string> | undefined) ?? {}
     const hidden = ((await read($, hiddenAtom)) as Record<string, string> | undefined) ?? {}
-    const allCollabs = collaborations(all, { paused: pausedKeys, drafts: pendingDrafts.map(d => d.collabKey) })
+    const allCollabs = collaborations(all, { paused: pausedKeys, drafts: pendingDrafts.map(d => d.collabKey), ownership: await ownershipFor($) })
     // Hidden stays hidden until something newer than the hide arrives.
     const isHidden = (c: Collaboration) => !!hidden[c.key] && c.updatedAt <= hidden[c.key]!
     const collabs = allCollabs.filter(c => !isHidden(c))
@@ -1136,7 +1205,8 @@ export const register: Register = (on, options) => {
             <Box>
               <Button key={`${k}-open-${c.key}`} label="Open" onPress={() => openCollab($, c.key)} />
               {pendingDrafts.some(d => d.collabKey === c.key) && <Button key={`${k}-appr-${c.key}`} variant="primary" label="Review draft" onPress={() => openCollab($, c.key)} />}
-              {c.state === 'needs-reply' && <Button key={`${k}-hand-${c.key}`} label="Hand to my agent" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />}
+              {c.owner !== 'me' && <Button key={`${k}-take-${c.key}`} label="Take over" onPress={() => adopt($, c.key)} />}
+              {c.owner === 'me' && c.state === 'needs-reply' && <Button key={`${k}-hand-${c.key}`} label="Hand to my agent" onPress={() => continueCollab($, c).then(() => undefined, () => undefined)} />}
               {c.state === 'result-ready' && <Button key={`${k}-done-${c.key}`} label="Mark completed" onPress={() => markCompleted($, c)} />}
               <Button key={`${k}-hide-${c.key}`} plain label="Hide" onPress={() => hideCollab($, c)} />
             </Box>
@@ -1316,6 +1386,7 @@ export const register: Register = (on, options) => {
               <Button key="dpause" label={isPaused ? 'Resume' : 'Pause'} onPress={() => togglePause($, c.key)} />
               <Button key="ddone" label="Mark completed" onPress={() => markCompleted($, c)} />
               <Button key="dhide" label="Hide" onPress={() => hideCollab($, c)} />
+              {c.owner !== 'me' && <Button key="dtake" label="Take over" onPress={() => adopt($, c.key)} />}
             </Box>
             <Input key="ddirect" placeholder="Give your agent a direction for this collaboration…" submitLabel="Send to my agent" onSubmit={value => directCollab($, c, value).then(() => undefined, () => undefined)} />
             <Text dimColor>Your agent carries this direction into the collaboration.</Text>
@@ -1476,6 +1547,7 @@ export const register: Register = (on, options) => {
               <Button key="pause" label={isPaused ? 'Resume' : 'Pause'} onPress={() => togglePause($, c.key)} />
               <Button key="done" label="Mark completed" onPress={() => markCompleted($, c)} />
               <Button key="hide" label="Hide" onPress={() => hideCollab($, c)} />
+              {c.owner !== 'me' && <Button key="take" label="Take over" onPress={() => adopt($, c.key)} />}
             </Box>
             <Input key="direct" placeholder="Give your agent a direction for this collaboration…" submitLabel="Send to my agent" onSubmit={value => directCollab($, c, value).then(() => undefined, () => undefined)} />
             <Text dimColor>Your agent carries this direction into the collaboration.</Text>

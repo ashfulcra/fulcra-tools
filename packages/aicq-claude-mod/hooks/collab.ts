@@ -4,8 +4,12 @@
 
 import type { AicqMessage, WorkState } from '../types'
 
+/** Who handles a thread: this agent, another of the owner's agents, or nobody yet. */
+export type ThreadOwner = 'me' | 'other' | 'unassigned'
+
 export type Collaboration = {
   key: string
+  owner: ThreadOwner
   contactKey: string
   contact: string
   contactUserId: string | null
@@ -64,6 +68,8 @@ export function contactKeyOf(m: AicqMessage): string {
 }
 
 export type LocalMarks = {
+  /** Outbound ids this agent sent, plus its agent name, plus threads the owner handed to it. */
+  ownership?: { mineIds: readonly string[]; agentName: string; adopted: readonly string[] }
   /** Collaboration keys the owner paused (auto-responses stop). */
   paused: readonly string[]
   /** Collaboration keys with a draft waiting for approval. */
@@ -103,6 +109,26 @@ function nextActionFor(state: WorkState, contact: string): string {
   }
 }
 
+const REF = /^In reply to ([0-9a-f-]{8,})/i
+
+/** A message's reference to an earlier one: in_reply_to, or a legacy "In reply to <id>" lead. */
+export function referenceOf(m: AicqMessage): string | null {
+  return m.inReplyTo ?? REF.exec(m.body)?.[1] ?? null
+}
+
+function ownerOf(msgs: readonly AicqMessage[], key: string, marks: LocalMarks): ThreadOwner {
+  const o = marks.ownership
+  if (!o) return 'me'
+  if (o.adopted.includes(key)) return 'me'
+  const mine = new Set(o.mineIds)
+  const isMine = (m: AicqMessage) => m.direction === 'out' && (mine.has(m.id) || (!!o.agentName && m.sender === o.agentName))
+  if (msgs.some(isMine)) return 'me'
+  if (msgs.some(m => m.direction === 'in' && (!!o.agentName && m.to.split(',').includes(o.agentName) || (referenceOf(m) !== null && mine.has(referenceOf(m)!))))) return 'me'
+  // Someone on the owner's side is already in this thread, or it answers a message this agent never sent.
+  if (msgs.some(m => m.direction === 'out') || msgs.some(m => m.direction === 'in' && referenceOf(m) !== null)) return 'other'
+  return 'unassigned'
+}
+
 export function collaborations(all: readonly AicqMessage[], marks: LocalMarks): Collaboration[] {
   const groups = new Map<string, AicqMessage[]>()
   for (const m of all) {
@@ -121,6 +147,7 @@ export function collaborations(all: readonly AicqMessage[], marks: LocalMarks): 
     const outcomeMsg = state === 'completed' || state === 'result-ready' ? [...msgs].reverse().find(m => m.direction === 'in' && isSubstantive(m)) : undefined
     out.push({
       key,
+      owner: ownerOf(msgs, key, marks),
       contactKey: contactKeyOf(first),
       contact: msgs.find(m => m.direction === 'in')?.contact ?? first.contact,
       contactUserId: first.contactUserId,
