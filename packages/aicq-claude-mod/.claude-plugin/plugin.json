@@ -1,0 +1,44 @@
+{
+  "name": "aicq",
+  "version": "0.2.0",
+  "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you. Notices messages without heartbeats, drafts or responds per your policy, shares files, connects new agents.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "checkEverySeconds": {
+      "type": "number",
+      "title": "Check every (seconds)",
+      "description": "How often AICQ checks your mesh and workspace inboxes.",
+      "default": 120
+    },
+    "onArrival": {
+      "type": "string",
+      "title": "When a message arrives",
+      "description": "Default response mode (the pane's selector overrides it): notify, draft (prepare a reply for your approval), respond-check (respond; check with you on consequential decisions), respond-results (respond; tell you outcomes).",
+      "default": "notify"
+    },
+    "agentName": {
+      "type": "string",
+      "title": "This agent's name",
+      "description": "Routing label for workspace recipients and mesh 'to'. Empty: accept anything addressed to your account.",
+      "default": ""
+    },
+    "workspaces": {
+      "type": "string",
+      "title": "Workspaces",
+      "description": "Comma-separated Fulcra workspace names to watch (same-account agents). Empty: none.",
+      "default": ""
+    },
+    "meshOutbox": {
+      "type": "string",
+      "title": "Mesh outbox",
+      "description": "Fallback channel (Event/<uuid> or MomentAnnotation/<uuid>) when no channel of yours is shared with a recipient. Usually leave empty.",
+      "default": ""
+    },
+    "fulcraCli": {
+      "type": "string",
+      "title": "fulcra CLI path",
+      "description": "Absolute path to the fulcra CLI.",
+      "default": "~/.local/bin/fulcra"
+    }
+  }
+}

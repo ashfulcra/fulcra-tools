@@ -226,6 +226,16 @@ under `skills/`, each package with its own README, build, and tests.
   versioned policy, a pure diff plan, a Linear adapter). Workflow order, lane
   policy, and adapter contracts:
   [`packages/coord-tracker-bridge/README.md`](packages/coord-tracker-bridge/README.md).
+- **`packages/aicq-claude-mod`** — alpha Claude Code **mod** (function-hook
+  plugin, not a Python package; excluded from the uv workspace): AICQ in a
+  Claude Code session. It polls connect-our-agents/1, legacy mesh and
+  `fulcra.workspaces/1` on a timer through the `fulcra` CLI, groups messages
+  into collaborations with work states, draws `/aicq` (SVG on desktop), and
+  responds per the four AICQ modes (heartbeats and acks never wake;
+  4 auto-turns/hour/collaboration cap). Sends read back before claiming
+  delivery. Gate: `claude plugin validate` + `claude plugin test` on a
+  mods-capable build. Details:
+  [`packages/aicq-claude-mod/README.md`](packages/aicq-claude-mod/README.md).
 - Coord retention is on by default: terminal and quiet proposed tasks archive
   after 14 days, settled review families after 7 days, and dead presence shards
   are pruned after 7 days. `COORD_RETENTION_DAYS=0` or
