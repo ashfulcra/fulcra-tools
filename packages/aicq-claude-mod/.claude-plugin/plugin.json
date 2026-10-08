@@ -1,6 +1,6 @@
 {
   "name": "aicq",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you. Notices messages without heartbeats, drafts or responds per your policy, shares files, connects new agents.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -58,5 +58,9 @@
       "description": "Your principal on the coord bus (blocked-on-you links use user:<owner>).",
       "default": "ash"
     }
-  }
+  },
+  "author": {
+    "name": "Fulcra Dynamics"
+  },
+  "homepage": "https://github.com/ashfulcra/fulcra-tools/tree/main/packages/aicq-claude-mod"
 }

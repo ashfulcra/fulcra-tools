@@ -60,13 +60,29 @@ manifest.
 
 ## Install
 
-```bash
-claude --plugin-dir /path/to/fulcra-tools/packages/aicq-claude-mod
+From the fulcra-tools plugin marketplace, on any machine with a mods-capable Claude Code (2.1.289+), in Claude Code:
+
+```
+/plugin marketplace add ashfulcra/fulcra-tools
+/plugin install aicq@fulcra-tools
+/plugin configure aicq@fulcra-tools
 ```
 
-In the desktop app (or any session without flags), list the folder in
-`CLAUDE_CODE_PLUGIN_DIRS`. Needs the `fulcra` CLI signed in
-(`uv tool install fulcra-api`, then `fulcra auth login`).
+or from a shell:
+
+```bash
+claude plugin marketplace add ashfulcra/fulcra-tools
+```
+
+```bash
+claude plugin install aicq@fulcra-tools
+```
+
+Then set at least `agentName`, unique per machine or session (it decides which threads this agent owns), and `workspaces`. Start a new session, then run `/aicq` and `/aicq map`. `/plugin marketplace update fulcra-tools` picks up new versions.
+
+Needs the `fulcra` CLI signed in to your Fulcra account (`uv tool install fulcra-api`, then `fulcra auth login`). The universe map also reads `coord-engine` (see [`docs/coord/GET-ON-THE-BUS.md`](../../docs/coord/GET-ON-THE-BUS.md)); without it the map names the coord sources it could not read.
+
+For development, load the folder directly instead: `claude --plugin-dir /path/to/fulcra-tools/packages/aicq-claude-mod` (or list it in `CLAUDE_CODE_PLUGIN_DIRS`).
 
 ## Options (`/config`, or `pluginConfigs.aicq.options` in settings)
 
