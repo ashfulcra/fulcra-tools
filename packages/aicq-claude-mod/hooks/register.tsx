@@ -117,28 +117,74 @@ function parseJsonOut(text: string): unknown {
   }
 }
 
-/** V5 actor bindings in this machine's coord-v5 folders: identity, instance (machine) and workspace. */
-async function v5Actors($: $): Promise<{ logicalAgentId: string; instanceId: string; workspaceId: string }[]> {
+/**
+ * V5 actor bindings in this machine's coord-v5 folders: identity, instance (machine) and workspace.
+ * An absent root or a folder without config.json is simply not an actor; a root or config that exists
+ * but cannot be listed, read or parsed is named in `degraded`, never treated as an empty inventory.
+ * Only config.json is read (never policy, tokens or other files).
+ */
+async function v5Actors($: $, degraded: string[]): Promise<{ logicalAgentId: string; instanceId: string; workspaceId: string }[]> {
   const h = await homeDir($)
   const out: { logicalAgentId: string; instanceId: string; workspaceId: string }[] = []
   for (const root of [`${h}/.local/share/coord-v5`, `${h}/.local/share/fulcra-coord-v5-alpha3`]) {
-    let entries: { name: string; isDirectory?: boolean }[] = []
+    const short = root.replace(h, '~')
+    let entries: { name: string }[]
     try {
-      entries = (await $.fs.list(root)) as unknown as { name: string; isDirectory?: boolean }[]
+      if (!(await $.fs.exists(root))) continue
+      entries = (await $.fs.list(root)) as unknown as { name: string }[]
     } catch {
+      degraded.push(`V5 actors (${short} unreadable)`)
       continue
     }
     for (const ent of entries) {
+      const path = `${root}/${ent.name}/config.json`
       try {
-        const cfgText = await $.fs.read(`${root}/${ent.name}/config.json`)
-        const c = JSON.parse(String(cfgText)) as { workspaceId?: string; actorBinding?: { logical_agent_id?: string; instance_id?: string } }
-        if (c.actorBinding?.logical_agent_id) out.push({ logicalAgentId: c.actorBinding.logical_agent_id, instanceId: c.actorBinding.instance_id ?? '', workspaceId: c.workspaceId ?? '' })
+        if (!(await $.fs.exists(path))) continue
       } catch {
-        // not an actor folder
+        degraded.push(`V5 config ${short}/${ent.name} (unreadable)`)
+        continue
+      }
+      try {
+        const c = JSON.parse(String(await $.fs.read(path))) as { workspaceId?: string; actorBinding?: { logical_agent_id?: string; instance_id?: string } }
+        if (c.actorBinding?.logical_agent_id) out.push({ logicalAgentId: c.actorBinding.logical_agent_id, instanceId: c.actorBinding.instance_id ?? '', workspaceId: c.workspaceId ?? '' })
+        else degraded.push(`V5 config ${short}/${ent.name} (no actor binding)`)
+      } catch {
+        degraded.push(`V5 config ${short}/${ent.name} (unreadable or malformed)`)
       }
     }
   }
   return out
+}
+
+/** One coord read: a thrown failure (timeout, spawn) becomes a named degraded result like a nonzero exit. */
+async function coordJson($: $, args: string[], label: string, degraded: string[]): Promise<unknown> {
+  try {
+    const r = await coord($, args)
+    const data = r.exitCode === 0 && !r.isStdoutTruncated ? parseJsonOut(r.stdout) : null
+    if (data === null) degraded.push(`${label}${r.isStdoutTruncated ? ' (truncated)' : r.exitCode !== 0 ? ` (exit ${r.exitCode})` : ' (unparseable)'}`)
+    return data
+  } catch {
+    degraded.push(`${label} (failed or timed out)`)
+    return null
+  }
+}
+
+/** A fresh roster read for the map; on failure the last good text is kept and the source is named as stale. */
+async function readRoster($: $, name: string, degraded: string[]): Promise<string | null> {
+  try {
+    const r = await fulcra($, ['file', 'download', `workspace/${name}/index.md`, '-'])
+    if (r.exitCode === 0 && !r.isStdoutTruncated) {
+      wsIndexText.set(name, r.stdout)
+      const ch = parseWorkspaceChannel(r.stdout)
+      if (ch) wsChannels.set(name, ch)
+      return r.stdout
+    }
+  } catch {
+    // reported below
+  }
+  const last = wsIndexText.get(name) ?? null
+  degraded.push(last ? `workspace ${name} roster (refresh failed; showing the last read)` : `workspace ${name} roster`)
+  return last
 }
 
 /** Reads the whole universe; each unreadable source is named in `degraded`, never shown as empty. */
@@ -148,17 +194,22 @@ async function refreshUniverse($: $) {
   await update($, universeLoadingAtom, () => true)
   try {
     const degraded: string[] = []
-    const [ag, bd, hl] = await Promise.all([
-      coord($, ['agents', cfg.coordTeam, '--json']), coord($, ['board', cfg.coordTeam, '--json']), coord($, ['health', cfg.coordTeam, '--json']),
+    const [agentsRaw, boardRaw, healthRaw] = await Promise.all([
+      coordJson($, ['agents', cfg.coordTeam, '--json'], 'coord agents', degraded),
+      coordJson($, ['board', cfg.coordTeam, '--json'], 'coord board', degraded),
+      coordJson($, ['health', cfg.coordTeam, '--json'], 'coord health', degraded),
     ])
-    const agents = ag.exitCode === 0 ? parseJsonOut(ag.stdout) : null
-    const board = bd.exitCode === 0 ? parseJsonOut(bd.stdout) : null
-    const health = hl.exitCode === 0 ? parseJsonOut(hl.stdout) : null
-    if (!Array.isArray(agents)) degraded.push('coord agents')
-    if (!board || typeof board !== 'object') degraded.push('coord board')
-    if (!health || typeof health !== 'object') degraded.push('coord health')
-    for (const w of cfg.workspaceNames) if (!wsIndexText.has(w)) await resolveWorkspace($, w)
-    for (const w of cfg.workspaceNames) if (!wsIndexText.has(w)) degraded.push(`workspace ${w}`)
+    const agents = Array.isArray(agentsRaw) ? agentsRaw : null
+    const board = boardRaw && typeof boardRaw === 'object' && !Array.isArray(boardRaw) ? boardRaw : null
+    const health = healthRaw && typeof healthRaw === 'object' && !Array.isArray(healthRaw) ? healthRaw : null
+    if (agentsRaw !== null && !agents) degraded.push('coord agents (unexpected shape)')
+    if (boardRaw !== null && !board) degraded.push('coord board (unexpected shape)')
+    if (healthRaw !== null && !health) degraded.push('coord health (unexpected shape)')
+    const rosters: Record<string, string> = {}
+    for (const w of cfg.workspaceNames) {
+      const text = await readRoster($, w, degraded)
+      if (text !== null) rosters[w] = text
+    }
     if (!me) await refreshTopology($, degraded)
     const all = (await read($, inbox)) as AicqMessage[]
     const agentNames = learnAgentNames(all)
@@ -167,8 +218,8 @@ async function refreshUniverse($: $) {
       agents: Array.isArray(agents) ? (agents as Record<string, unknown>[]) : null,
       board: board && typeof board === 'object' ? (board as Record<string, unknown>) : null,
       health: health && typeof health === 'object' ? (health as Record<string, unknown>) : null,
-      v5: await v5Actors($),
-      workspaces: Object.fromEntries(cfg.workspaceNames.filter(w => wsIndexText.has(w)).map(w => [w, wsIndexText.get(w)!])),
+      v5: await v5Actors($, degraded),
+      workspaces: rosters,
       peers: peers.map(p => ({ userId: p.userId, label: agentNames[p.userId] ? `${p.name === p.userId.slice(0, 8) ? '' : `${p.name.split(' ')[0]}’s `}${agentNames[p.userId]}` : p.name })),
       owner: cfg.owner,
       thisAgent: { name: cfg.agentName || 'claude-code-aicq-mod', machine: thisMachine, platform: 'Claude Code' },

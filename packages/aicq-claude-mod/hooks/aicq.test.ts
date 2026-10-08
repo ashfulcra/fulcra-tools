@@ -211,6 +211,8 @@ describe('policy', () => {
 
 type Run = { argv: readonly string[]; init?: { stdin?: string } }
 
+const COORD_FAULTS = { boardThrows: false }
+const ROSTER = { text: '' }
 const COORD = {
   agents: [
     { agent: 'claude-code:DeskBookPro:fulcra-tools-coord', liveness: 'live', state: 'live', summary: '', annotation: '', open: { active: 1 } },
@@ -232,7 +234,10 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
     const [, cmd, sub] = r.argv
     if (String(r.argv[0]).endsWith('coord-engine')) {
       if (cmd === 'agents') return ok(JSON.stringify(COORD.agents))
-      if (cmd === 'board') return ok(JSON.stringify(COORD.board))
+      if (cmd === 'board') {
+        if (COORD_FAULTS.boardThrows) throw new Error('timed out')
+        return ok(JSON.stringify(COORD.board))
+      }
       if (cmd === 'health') return ok(JSON.stringify(COORD.health))
       if (cmd === 'tell') return ok(`directive ${String(r.argv[4]).slice(0, 20)}-abcd1234 -> ${String(r.argv[3])}`)
     }
@@ -240,6 +245,7 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
     if (cmd === 'share' && sub === 'list-incoming') return ok(JSON.stringify({ sharing_fulcra_userid: PEER, sharing_fulcra_user_name: 'Peer Agent', fulcra_data_types: [V1_IN] }))
     if (cmd === 'share' && sub === 'list-outgoing') return ok(JSON.stringify({ created_at: '2026-10-01', fulcra_data_types: [V1_OUT], permissions: [{ allowed_fulcra_userid: PEER }] }))
     if (cmd === 'file' && (sub === 'upload' || sub === 'share')) return ok('ok')
+    if (cmd === 'file' && sub === 'download' && String(r.argv[3]) === 'workspace/team/index.md') return ok(ROSTER.text)
     if (cmd === 'record') {
       const ch = String(r.argv[2])
       recorded.set(ch, [...(recorded.get(ch) ?? []), r.init?.stdin ?? ''])
@@ -677,6 +683,63 @@ describe('mod', () => {
     const tells = f.calls.filter(c => String(c.argv[0]).endsWith('coord-engine') && c.argv[1] === 'tell')
     expect(tells.length).toBe(2)
     expect(tells[0]!.argv.slice(2, 4)).toEqual(['fulcra', 'coord-boss'])
+  })
+
+  test('universe: a thrown source read is named; readable sources still render', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    COORD_FAULTS.boardThrows = true
+    try {
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(2000)
+      await $.command.run({ command: 'aicq', args: 'map' } as never)
+      await clock.advance(10)
+      const ui = await $.ui.mount({ plugin: 'aicq', surface: 'terminal', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+      expect((await ui.findAll({ text: /coord board \(failed or timed out\)/ })).length).toBeGreaterThan(0)
+      expect((await ui.findAll({ type: 'Button', text: /coord-boss/ })).length).toBeGreaterThan(0)
+    } finally {
+      COORD_FAULTS.boardThrows = false
+    }
+  })
+
+  test('universe: an unreadable V5 root is named, never an empty inventory', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    on('fs.exists', () => ({ value: true }))
+    on('fs.list', () => ({ deny: 'EACCES: permission denied' }))
+    engine(on, fake([]), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.command.run({ command: 'aicq', args: 'map' } as never)
+    await clock.advance(10)
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'terminal', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+    expect((await ui.findAll({ text: /V5 actors \(~\/\.local\/share\/coord-v5 unreadable\)/ })).length).toBeGreaterThan(0)
+  })
+
+  test('universe: Refresh re-reads the workspace roster', { options: { workspaces: 'team' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    ROSTER.text = `Message channel: ${WS_CH}\n## Members\n- first-agent — joined\n`
+    try {
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(2000)
+      await $.command.run({ command: 'aicq', args: 'map' } as never)
+      await clock.advance(10)
+      type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown> }
+      const ui = await $.ui.mount({ plugin: 'aicq', surface: 'terminal', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+      expect((await ui.findAll({ type: 'Button', text: /first-agent/ })).length).toBe(1)
+      ROSTER.text = `Message channel: ${WS_CH}\n## Members\n- second-agent — joined\n`
+      await ui.press({ key: 'urefresh' })
+      expect((await ui.findAll({ type: 'Button', text: /second-agent/ })).length).toBe(1)
+      expect((await ui.findAll({ type: 'Button', text: /first-agent/ })).length).toBe(0)
+    } finally {
+      ROSTER.text = ''
+    }
   })
 })
 
