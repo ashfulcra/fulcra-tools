@@ -27,6 +27,7 @@ npx --no-install coord-v5 --help
 
 ```text
 coord-v5 transport read --config ABS --db ABS --start ZONED --end ZONED
+coord-v5 transport read-updates --config ABS --db ABS --start ZONED --end ZONED --updates-start ZONED --mode shadow|gated
 coord-v5 transport publish --config ABS --db ABS --event ABS
 coord-v5 transport inspect|replay --config ABS --db ABS
 coord-v5 work view --config ABS --db ABS --policy ABS
@@ -44,6 +45,65 @@ coord-v5 observation --config ABS --policy ABS --db ABS
 coord-v5 listener configure|prepare|settle|ack|inspect --db ABS --scope JSON --holder ID
 coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable ABS [--timeout-ms N]
 ```
+
+## Parallel updates/cursor route (opt-in)
+
+`read-updates` adds an authenticated `/data/v1/updates` summary before the existing
+validated record reader. Start with `--mode shadow` and an isolated private journal:
+it still reads records and reports whether a quiet hint would have skipped that
+read. `--mode gated` may skip quiet record fetches after a successful bootstrap;
+the ordinary `read` route is unchanged. No listener or schedule is automatically
+switched. The API export `readWorkUpdates` defaults to shadow; the CLI requires
+an explicit mode. Bearer handling/private config rules are unchanged.
+
+Two clocks remain separate: `--updates-start` is the initial ingestion-summary
+boundary, while `--start`/`--end` are the operator-chosen RECORD replay window.
+Never substitute the update watermark for the record window: recently ingested
+events may have old event timestamps. A bounded record window cannot recover
+older history outside it. The update watermark is retained separately in the
+scope-bound transport journal, with two-minute overlap and compare-and-swap.
+It advances only after a valid summary and clean direct read, or a quiet gated
+check backed by a recent direct read. Failures/gaps retain the previous watermark.
+Old package versions preserve this additive meta entry but do not use the route.
+
+Long summary intervals are caught up in contiguous windows of at most seven days,
+with at most eight windows per invocation. Every segment must validate before the
+whole watermark can advance; a failed segment retains the entire previous cursor.
+`SUMMARY_CATCHUP_LIMIT` falls back to the direct reader without issuing summaries
+or resetting history. For older intervals, keep the same journal and use successive
+historical `--end` boundaries in 49-day steps from its previous cursor (at most
+56 days including the two-minute overlap). For each invocation, explicitly select
+`--start` less than seven days before that intermediate end, retain the original
+`--updates-start`, and advance to the next boundary only after successful summary
+validation and a clean direct read. Never reset/delete the journal to bypass the
+cap. Each successful invocation advances only its validated ingestion interval;
+the matching bounded record replay window does not recover intervening record
+history outside that selected window or constitute complete-history evidence.
+
+First use, a changed exact/aggregate annotation hint, malformed/unavailable hints,
+changed replay start, unresolved publication intents and an hourly audit force a
+direct read. A detected quiet-hint miss disables gating in that journal. Quiet
+checks do not write empty/fresh record observations or clear retained work.
+
+Independent durable health metadata retains failed direct-read retry obligations
+and hint-miss disablement even when a concurrent cursor commit wins. A quiet hint
+cannot advance past a known failed read. Only a clean direct recovery with an
+unchanged health revision clears its retry obligation; later concurrent failures
+remain pending. Hint-miss disablement is monotonic, including stale shadow reads.
+
+Always build the authorized observation and process pending delivery obligations
+after either result. `unchanged_hint` means only "no change indicated", not
+complete history, no work, fresh ownership verification or successful delivery.
+Catalog/annotation ownership preflight remains mandatory on direct reads; quiet
+checks verify the authenticated principal and rely on the previous bounded
+source verification until the next audit. No new permissions are inferred.
+
+This is an experimental optimization, not a provider completeness contract.
+Summary absence can miss provider omissions; periodic replay only detects what
+the chosen record window includes. Shadow comparison must precede any live
+gated rollout. Changed sources use extra requests; quiet gated sources can avoid
+record bodies and repeated source metadata reads. There is no sustained latency
+guarantee, shared multi-source summary cache or opaque provider cursor here.
 
 ## Explicit enrollment
 
@@ -88,7 +148,7 @@ actorBinding}`. Base URL remains `https://api.fulcradynamics.com/`; channel is
 configuration. Supply your existing owned source and explicit actor binding.
 Synthetic examples use principal `00000000-0000-4000-8000-000000000900` and stream
 `00000000-0000-4000-8000-000000000901`; these are not usable credentials.
-Every live read/publish preflights authenticated principal, catalog channel and
+Every direct record read/publish preflights authenticated principal, catalog channel and
 owned annotation metadata. This package does not create sources or grant authority.
 SQLite scope cannot be rebound to another source.
 

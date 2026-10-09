@@ -65,7 +65,7 @@ const mockSource = `
   const values = JSON.parse(process.env.MOCK_VALUES || '{}');
   globalThis.fetch = async (url, init = {}) => {
     const address = String(url);
-    const key = address.includes('/info') ? 'info' : address.includes('/catalog') ? 'catalog' : address.includes('/annotation?') ? 'annotation' : init.method === 'POST' ? 'post' : 'records';
+    const key = address.includes('/info') ? 'info' : address.includes('/updates?') ? 'updates' : address.includes('/catalog') ? 'catalog' : address.includes('/annotation?') ? 'annotation' : init.method === 'POST' ? 'post' : 'records';
     appendFileSync(process.env.MOCK_LOG, JSON.stringify({ key, method: init.method, url: address, body: init.body ?? null }) + '\\n');
     const value = Object.hasOwn(values, key) ? values[key] : key === 'info' ? { userid: '${principalId}' } : key === 'catalog' ? [{ id: '${config.channel}', api_version: 'v1alpha1', recordable: true, queryable: true, record_spec: { type: 'event' }, fulcra_userid: '${principalId}' }] : key === 'annotation' ? [${JSON.stringify(metadata)}] : key === 'post' ? { upload_id: 'pending-1' } : [];
     const status = values[key + 'Status'] ?? (key === 'post' ? 201 : 200);
@@ -113,6 +113,20 @@ afterEach(() => {
 });
 
 describe('opt-in synthetic work transport CLI in fresh processes', () => {
+  it('runs the parallel route in separate CLI processes and skips only an audited quiet source', () => {
+    const p = fixturePaths();
+    const args = ['read-updates', '--config', p.configPath, '--db', p.dbPath,
+      '--start', '2026-09-26T00:00:00Z', '--end', '2026-09-27T00:00:00Z',
+      '--updates-start', '2026-09-26T00:00:00Z', '--mode', 'gated'];
+    const values = { updates: { data_types: {}, file_changes: [] }, records: [row(1)] };
+    const first = run(p, args, 'fixture', values);
+    expect(first.status).toBe(0); expect(first.output.status).toBe('stored');
+    const secondArgs = args.map(v => v === '2026-09-27T00:00:00Z' ? '2026-09-27T00:05:00Z' : v);
+    const second = run(p, secondArgs, 'fixture', values);
+    expect(second.status).toBe(0); expect(second.output.status).toBe('unchanged_hint');
+    expect(calls(p).filter(c => c.key === 'records')).toHaveLength(1);
+    expect(second.output.pending_work_requires_processing).toBe(true);
+  });
   it('exits nonzero for unavailable reads while retaining cached work', () => {
     const p = fixturePaths();
     const readArgs = [

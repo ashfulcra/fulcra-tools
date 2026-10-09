@@ -232,6 +232,31 @@ export async function verifyOwnedWorkStream(input) {
   return preflight(input);
 }
 
+/** Authenticated ingestion-summary hint only: never record provenance or completeness.
+ * @param {any} input */
+export async function readOwnedDataUpdates(input) {
+  try {
+    const config = validateWorkTransportConfig(input?.config);
+    if (!tokenValid(input?.token) || typeof input?.fetch !== 'function' ||
+        !validTime(input.start) || !validTime(input.end) ||
+        Date.parse(input.start) >= Date.parse(input.end) ||
+        Date.parse(input.end) - Date.parse(input.start) > MAX_WINDOW)
+      return { status: 'unavailable', code: 'INVALID_WINDOW' };
+    const info = await readJson(input.fetch, input.token, paths(config).info);
+    if (!plain(info) || info.userid !== config.principalId)
+      return { status: 'unavailable', code: 'PRINCIPAL_MISMATCH' };
+    const query = new URLSearchParams({ start_time: new Date(input.start).toISOString(), end_time: new Date(input.end).toISOString() });
+    const summary = await readJson(input.fetch, input.token, new URL(`/data/v1/updates?${query}`, config.baseUrl).href);
+    if (!plain(summary) || !plain(summary.data_types) || !Array.isArray(summary.file_changes) ||
+        summary.file_changes.length > MAX_ROWS || Object.keys(summary.data_types).length > MAX_ROWS ||
+        Object.entries(summary.data_types).some(([key, count]) => !key || key.length > 512 || !Number.isSafeInteger(count) || count < 0))
+      return { status: 'unavailable', code: 'MALFORMED_UPDATES' };
+    return { status: 'available', changed: (summary.data_types[config.channel] ?? 0) > 0 || (summary.data_types.MomentAnnotation ?? 0) > 0 };
+  } catch (error) {
+    return { status: 'unavailable', code: safeCode(error) };
+  }
+}
+
 /** @param {any} input */
 export async function readWorkWindow(input) {
   let config;
