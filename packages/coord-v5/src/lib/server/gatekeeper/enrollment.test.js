@@ -235,6 +235,12 @@ describe("managed local instruction block", () => {
     "At work start, resume obligations. Record actionable commitments before substantial work.\n" +
     "Publish progress, blockers and results through typed coordination events. Before yielding,\n" +
     "make the next action and recovery context durable. Report failed reads; never call them empty.\n" +
+    "When automatic checking is requested, reconcile one shared environment/harness listener and its registration.\n" +
+    "For Codex desktop, bind the exact source/job-to-session route; preserve existing listener journals and pending delivery.\n" +
+    "Verify actual event or scheduled invocation, idle worker delivery and independent receiver acknowledgment separately.\n" +
+    "Keep unverified automatic setup as a linked owned task with the exact prerequisite; never silently substitute a worker heartbeat.\n" +
+    "Retire or relax a temporary worker fallback only after verified replacement and within the operator's approved scope.\n" +
+    "These instructions install nothing and grant no permissions or schedule authority.\n" +
     "Use the installed Coord v5 onboarding guide for enrollment and harness-specific listening.\n" +
     "<!-- coord-v5:end -->\n";
   const modes = ["worker", "listener", "executor"];

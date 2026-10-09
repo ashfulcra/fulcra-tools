@@ -14,6 +14,15 @@ work independently of Collect. Collect is an optional host for local/source
 connectors, not a prerequisite for using Fulcra. The root README indexes every
 package and bundled skill; retain the human introduction and verify release claims.
 
+**Coord v5 Codex automatic enrollment:** reconcile one shared listener per
+environment/harness and its exact source/job-to-worker route. Follow the
+[shared listener acceptance checklist](packages/coord-v5/docs/onboarding.md#shared-codex-listener-acceptance).
+Interactive membership does not finish automatic setup. Keep a linked owned
+acceptance task or exact blocker until actual invocation, idle worker delivery
+and independent receiver evidence are verified; never silently substitute a
+per-worker heartbeat. Preserve monitoring and temporary fallback obligations
+until a verified replacement exists. This instruction grants no setup authority.
+
 Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.

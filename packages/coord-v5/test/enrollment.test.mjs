@@ -55,6 +55,19 @@ test("enrollment CLI selects interactive and never echoes unknown secret fields"
   assert.equal(invalid.status, 1);
   assert.equal(invalid.stdout.includes(input.secret), false);
 });
+// Exercises the actual default CLI surface that onboarding agents consume.
+test("default worker instructions require shared listener enrollment without granting setup authority", () => {
+  const result = run("instructions", { content: "", workspace_id: "example", remove: false });
+  assert.equal(result.status, 0, result.stdout);
+  const { content } = JSON.parse(result.stdout);
+  assert.match(content, /automatic checking.*one shared environment\/harness listener/i);
+  assert.match(content, /exact source\/job-to-session route/i);
+  assert.match(content, /idle worker delivery.*receiver acknowledgment/i);
+  assert.match(content, /unverified.*linked owned task.*exact prerequisite/i);
+  assert.match(content, /never silently substitute.*worker heartbeat/i);
+  assert.match(content, /grant no.*schedule authority/i);
+});
+
 // Catches optional-key rejection, wrong forwarding, envelope drift and accidental file writes.
 test("instruction CLI converts every mode and removes without touching actual local instructions", () => {
   const directory = mkdtempSync(join(tmpdir(), "coord-v5-instructions-"));
