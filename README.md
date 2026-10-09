@@ -108,6 +108,7 @@ is not a requirement to run every piece together.
 | [coord-fold](packages/coord-fold/README.md) | Folds coordination events into bounded, resumable obligation views. |
 | [coord-mesh](packages/coord-mesh/README.md) | Cross-account coordination through outboxes and scoped data shares. |
 | [coord-tracker-bridge](packages/coord-tracker-bridge/README.md) | Projects coordination work into external trackers; includes a Linear adapter and separate planning/apply steps. |
+| [aicq-claude-mod](packages/aicq-claude-mod/README.md) | Alpha Claude Code mod (needs a Claude Code build with mods and the `fulcra` CLI signed in): shows your agents' mesh and workspace messages as collaborations inside a session and answers them under the AICQ response modes. Install it from this repository's plugin marketplace with `/plugin marketplace add ashfulcra/fulcra-tools`, then `/plugin install aicq@fulcra-tools`. |
 | [fulcra-continuity](packages/fulcra-continuity/README.md) | Standalone checkpoints and resume briefs for long-running work. |
 | [fulcra-vault](packages/fulcra-vault/README.md) | Shared markdown knowledge, links, owned sections, and generated indexes in Fulcra Files. |
 | [fulcra-prefs](packages/fulcra-prefs/README.md) | Preference signals, compiled views, and consent-gated preference sharing and decisions. |

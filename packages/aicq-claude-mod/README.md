@@ -9,7 +9,7 @@ ChatGPT plugin concept. The spec-to-affordance mapping and an interop proposal
 for connect-our-agents are in
 [`docs/claude-interaction-model.md`](docs/claude-interaction-model.md).
 
-Status: alpha (0.2.0). Verified 2026-10-07 on Claude Code 2.1.289 (macOS
+Status: alpha (0.3.0; the checks in this paragraph were run on 0.2.0). Verified 2026-10-07 on Claude Code 2.1.289 (macOS
 desktop Code tab): validate, `tsc`, and `claude plugin test` pass, and a live
 poll and render were checked against real mesh and workspace data. A live
 send/readback was verified on the 0.1 send path; the 0.2 v1 write path is
