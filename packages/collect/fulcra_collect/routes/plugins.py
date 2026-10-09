@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +105,46 @@ _UPLOAD_MAX_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 # Chunk size for streaming uploads to disk. Big enough to keep syscall
 # overhead low, small enough that the per-request memory footprint stays flat.
 _UPLOAD_CHUNK_BYTES = 64 * 1024
+
+_FOLDER_PICKER_SCRIPT = (
+    'POSIX path of (choose folder with prompt "Choose a folder for Fulcra Collect")'
+)
+
+
+class FolderSelectionCancelled(RuntimeError):
+    """The user closed the native folder chooser without selecting a folder."""
+
+
+def _choose_macos_folder() -> Path:
+    """Open a fixed macOS folder chooser and return a validated directory.
+
+    The AppleScript is constant: plugin ids, setting keys and user content never
+    enter the script. The selected absolute path is returned only to the local
+    route so it can be stored in Collect's private configuration.
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _FOLDER_PICKER_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("macOS folder picker is unavailable") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or "").casefold()
+        if "canceled" in detail or "cancelled" in detail or "-128" in detail:
+            raise FolderSelectionCancelled("folder selection canceled")
+        raise RuntimeError("macOS folder picker did not complete")
+    raw = (result.stdout or "").strip()
+    if not raw:
+        raise FolderSelectionCancelled("folder selection canceled")
+    selected = Path(raw).expanduser().resolve(strict=False)
+    if selected == Path("/"):
+        raise ValueError("select a folder below the filesystem root")
+    if not selected.is_dir():
+        raise ValueError("selected item is not an existing directory")
+    return selected
 
 
 def register(app: FastAPI, ctx: RouteContext) -> None:
@@ -213,6 +254,39 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         _config.save(cfg)
         daemon.handle_request({"cmd": "reload"})
         return {"ok": True}
+
+    @app.post(
+        "/api/plugin/{plugin_id}/choose-folder",
+        dependencies=[Depends(require_token)],
+    )
+    def choose_folder(plugin_id: str, key: str):
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None:
+            raise HTTPException(404, f"unknown plugin {plugin_id!r}")
+        declared = {setting.key: setting for setting in plugin.required_settings}
+        setting = declared.get(key)
+        if setting is None:
+            raise HTTPException(400, f"unknown setting key {key!r}")
+        if setting.kind != "path":
+            raise HTTPException(
+                400,
+                f"setting {key!r} has kind {setting.kind!r}; folder selection "
+                "is only allowed for 'path' settings",
+            )
+        try:
+            selected = _choose_macos_folder()
+        except FolderSelectionCancelled:
+            raise HTTPException(409, "Folder selection canceled.") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except RuntimeError:
+            raise HTTPException(503, "Could not open the macOS folder picker.") from None
+
+        cfg = _config.load()
+        cfg.update_plugin_settings(plugin_id, {key: str(selected)})
+        _config.save(cfg)
+        daemon.handle_request({"cmd": "reload"})
+        return {"ok": True, "name": selected.name}
 
     # ------------------------------------------------------------------
     # File upload — backs the wizard's file_upload step. The user picks a

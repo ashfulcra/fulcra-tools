@@ -27,7 +27,7 @@ SQLite database at `~/.config/fulcra-collect/state.db`.
 
 The [menubar app](../menubar/README.md) and [web UI](../web-ui/README.md)
 control this daemon. Packages such as [media-helpers](../media-helpers/README.md)
-and [Day One](../dayone/README.md) expose plugin entry points for it; some also
+and [local-sources](../local-sources/README.md) expose plugin entry points for it; some also
 have standalone CLIs. A connector can adopt the plugin contract to reuse
 scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
 
@@ -44,6 +44,11 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   terminate the daemon loop or stop unrelated plugins. Service workers also
   run in their own process groups, so disabling Collect or shutting it down
   terminates helper commands started by the service.
+* **Lets setup choose a local folder without copying its path into the browser.**
+  A plugin can declare a `folder_picker` step for a `path` setting. The explicit
+  **Choose folder** action opens a fixed macOS chooser; the daemon validates and
+  stores the path in private local configuration, while the UI receives only the
+  display name. Choosing a folder does not enable the plugin or upload data.
 * **Runs them in worker subprocesses.** Each scheduled or manual run
   spawns a fresh `fulcra-collect _worker <id>` process, isolating ordinary
   importer crashes from the daemon. The worker streams structured
@@ -200,7 +205,7 @@ fulcra_collect/
         status.py           /api/status, /api/version, /api/reload
         plugins.py          /api/plugin/{id}/{run,enable,disable,credentials,settings,
                             contract,setting_options/{key},health_check,check_permission,
-                            request_permission,upload}
+                            request_permission,upload,choose-folder}
         definitions.py      /api/definitions, /api/plugin/{id}/definition (bind/clear)
         fulcra_auth.py      /api/fulcra/auth/{status,token,cli_status,cli_login}
         oauth.py            /api/oauth/{plugin_id}/{start,callback}
