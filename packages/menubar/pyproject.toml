@@ -79,6 +79,7 @@ requires = [
     "fulcra-attention",
     "fulcra-csv-importer",
     "fulcra-gmail",
+    "fulcra-local-sources",
     "fulcra-purpleair",
     "tomlkit>=0.12",
     # macOS GUI stack.

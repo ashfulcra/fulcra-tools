@@ -254,6 +254,7 @@ class SetupStep:
       input              — collect values for the keys in settings_keys
       oauth              — OAuth flow; the UI drives the redirect/callback cycle
       file_upload        — ask the user to choose a file (path Setting)
+      folder_picker      — ask macOS to choose a local folder (path Setting)
       permission_request — prompt the user to grant an OS permission
       test_connection    — invoke Plugin.health_check and show the result
       definition_picker  — let the user choose (or confirm) a Fulcra annotation
@@ -261,7 +262,7 @@ class SetupStep:
       done               — final confirmation / success screen
     """
     kind: Literal[
-        "intro", "external_action", "input", "oauth", "file_upload",
+        "intro", "external_action", "input", "oauth", "file_upload", "folder_picker",
         "permission_request",
         "test_connection", "definition_picker", "done",
     ]

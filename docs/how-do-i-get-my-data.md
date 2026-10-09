@@ -31,6 +31,30 @@ A few plugin IDs (`generic-rss`, `generic-csv`) are generic adapters
 that can stand in for sources we don't have a dedicated plugin for —
 worth a look when nothing else matches.
 
+## Local folders and Obsidian
+
+The source tree includes a `local-folders` plugin. Choose one folder through
+Collect's macOS folder picker, review the eligible-file preview, name the
+collection, and enable it. Collect checks every six hours and copies only new
+or changed supported files to `vault/imports/local-folders/<collection>/`.
+It preserves relative layout, which covers ordinary document folders and
+Obsidian Markdown plus common attachments. It does not follow links or upload
+hidden, generated, likely credential, unsupported, or oversized files. Source
+deletions do not delete Fulcra copies. This plugin is planned for the next Mac
+installer and is not in the 0.1.3 download.
+[Setup and limits](../packages/local-sources/README.md).
+
+## Meeting transcripts
+
+The source tree includes a `meeting-transcripts` plugin for meeting tools that
+can export into a folder on your Mac. Choose that folder once; Collect checks it
+every fifteen minutes for Markdown, text, VTT, SRT, and supported JSON exports.
+Subtitle timing is removed and each transcript becomes Markdown under
+`vault/meetings/imported/<collection>/`. The plugin never changes the export and
+needs no meeting-provider sign-in. This plugin is planned for the next Mac
+installer and is not in the 0.1.3 download.
+[Supported formats and limits](../packages/local-sources/README.md).
+
 ## Apple Reminders
 
 The `apple-reminders` plugin is in Collect 0.1.3. It reads selected lists through EventKit and synchronizes
@@ -306,9 +330,9 @@ shows up in Fulcra, with no machine-id suffix.
 
 ---
 
-**Last verified:** 2026-08-12 against the
+**Last verified:** 2026-10-08 against the
 `fulcra_collect.plugins` entry points in
-`packages/{attention,dayone,gmail,media-helpers,purpleair}/pyproject.toml` and the
+`packages/{apple-notes,apple-reminders,attention,dayone,gmail,local-sources,media-helpers,purpleair,todoist}/pyproject.toml` and the
 plugin definitions in `collect_plugin.py` / `collect_plugins.py`. If
 you add or remove a plugin, update this page.
 

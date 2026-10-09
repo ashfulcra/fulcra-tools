@@ -27,7 +27,8 @@ in place. If macOS refuses to unload the cached job, the app reports the failure
 and does not claim the old process was upgraded.
 
 The beta is signed, notarized, and built for Apple silicon. It includes its
-Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. Chrome
+Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. The 0.1.4 source bundle also includes the
+[local folder and transcript plugins](../local-sources/README.md); they are not in the published 0.1.3 installer. Chrome
 Attention is an optional extension in the disk image with separate setup.
 [Release details and plugin status](../../docs/collect.md#plugin-status).
 

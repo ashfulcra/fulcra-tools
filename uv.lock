@@ -19,6 +19,7 @@ members = [
     "fulcra-dayone",
     "fulcra-gmail",
     "fulcra-labs",
+    "fulcra-local-sources",
     "fulcra-media-helpers",
     "fulcra-menubar",
     "fulcra-netflix-skill",
@@ -637,6 +638,30 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
 provides-extras = ["fulcra-cli", "dev"]
+
+[[package]]
+name = "fulcra-local-sources"
+version = "0.1.0"
+source = { editable = "packages/local-sources" }
+dependencies = [
+    { name = "fulcra-collect" },
+    { name = "fulcra-common" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fulcra-collect", editable = "packages/collect" },
+    { name = "fulcra-common", editable = "packages/fulcra-common" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "fulcra-media-helpers"
