@@ -624,6 +624,16 @@ class RunContext:
             event["observed_at"] = observed_at
         self._emit(event)
 
+    def collect_token(self) -> str | None:
+        """Use only Collect's sign-in; never refresh through another account.
+
+        Selected-source uploads fail closed if this token is missing or expired.
+        Reconnect in Collect until refresh can verify the same principal.
+        """
+        from . import credentials
+        token = credentials.get_user_secret("bearer-token")
+        return token if token and not _jwt_expired(token) else None
+
     def fulcra_token(self) -> str | None:
         """Return the Fulcra access token.
 

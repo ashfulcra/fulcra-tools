@@ -78,7 +78,13 @@ configuration saves and automatic token refresh must never clear it.
 ## Public repository privacy
 
 **Selected local-source uploads:** use Collect's captured Fulcra token, never
-the CLI's independently stored account. Partition content-hash state by the
+the CLI's independently stored account. Use `RunContext.collect_token()` for
+selected-source uploads; its missing/expired token requires reconnecting in Collect.
+The legacy `fulcra_token()` helper still supports independent CLI/env fallback
+and is unsuitable for account-bound sources. Capture and compare the stored
+token as well as the epoch before uploading. Do not re-canonicalize a selected
+folder path on subsequent scans: substituted ancestor/root links must fail closed.
+Partition content-hash state by the
 authenticated destination account. Before each source read and upload, validate
 the captured plugin epoch, source/collection selection, preview mode, enabled
 state and account-transition gate. Hold the shared configuration/account lease

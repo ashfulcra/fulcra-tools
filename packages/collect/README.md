@@ -475,3 +475,8 @@ Use `[]` to clear the selection; a required empty selection cannot be enabled.
 The dashboard discovers IDs and labels for you, so it is the easier setup path.
 
 OAuth completion uses a packaged same-origin script and inert escaped plugin data, so the strict browser CSP allows the wizard to advance after sign-in. Failed or expired callbacks do not signal completion.
+
+Selected local-source uploads require Collect's own current sign-in. If it is
+missing or expired, reconnect to Fulcra in Collect; these sources do not fall
+back to the CLI's account or refresh through it. Replacing a selected folder or
+its parent with a symbolic link stops the scan; choose the folder again.

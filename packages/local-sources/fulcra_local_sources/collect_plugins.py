@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import re
+import hmac
 from datetime import timedelta
 from pathlib import Path
 from functools import partial
 from copy import deepcopy
 
 from fulcra_collect.plugin import HealthResult, Plugin, RunContext, Setting, SetupStep
-from fulcra_collect import config as collect_config
+from fulcra_collect import config as collect_config, credentials as collect_credentials
 from fulcra_collect.config_leases import task_mutation_scope
 
 from .scan import ScanResult, scan_tree
@@ -74,10 +75,12 @@ def meeting_transcripts_health(ctx: RunContext) -> HealthResult:
     return _health(ctx, extensions=TRANSCRIPT_EXTENSIONS, noun="transcripts")
 
 
-def _still_allowed(plugin_id, settings, epoch):
+def _still_allowed(plugin_id, settings, epoch, token=None):
     current = collect_config.load()
     now = current.plugin_settings.get(plugin_id, {})
-    if (current.account_transition or plugin_id not in current.enabled
+    current_token = collect_credentials.get_user_secret("bearer-token") if token else None
+    if ((token is not None and (not current_token or not hmac.compare_digest(token, current_token)))
+            or current.account_transition or plugin_id not in current.enabled
             or current.plugin_epochs.get(plugin_id, "") != epoch
             or any(now.get(key, False if key == "dry_run" else None)
                    != settings.get(key, False if key == "dry_run" else None)
@@ -97,7 +100,10 @@ def _run(
     preview = ctx.config.get("dry_run", False)
     if type(preview) is not bool:
         raise ValueError("Preview only must be on or off")
-    allowed = partial(_still_allowed, ctx.plugin_id, deepcopy(ctx.config), ctx.config_epoch)
+    token = None if preview else ctx.collect_token()
+    if not preview and not token:
+        raise ValueError("Reconnect to Fulcra in Collect before uploading.")
+    allowed = partial(_still_allowed, ctx.plugin_id, deepcopy(ctx.config), ctx.config_epoch, token)
     allowed()
     collection = collection_slug(ctx.config.get("collection_name"))
     scan = scan_tree(_source(ctx), allowed_extensions=extensions, still_allowed=allowed)
@@ -109,7 +115,7 @@ def _run(
     )
     owns_writer = writer is None and not preview
     if owns_writer:
-        writer = VaultWriter(ctx.fulcra_token())
+        writer = VaultWriter(token)
     try:
         with task_mutation_scope():
             allowed()

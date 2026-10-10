@@ -103,3 +103,8 @@ The package registers `local-folders` and `meeting-transcripts` in the
 `fulcra_collect.plugins` entry-point group. The macOS bundle gets the package
 from `packages/menubar/pyproject.toml`; `bundle_manifest.py` derives its wheel
 and import checks from that list.
+
+Selected local-source uploads require Collect's own current sign-in. If it is
+missing or expired, reconnect to Fulcra in Collect; these sources do not fall
+back to the CLI's account or refresh through it. Replacing a selected folder or
+its parent with a symbolic link stops the scan; choose the folder again.

@@ -89,3 +89,22 @@ def test_scan_stops_at_traversal_budget_even_when_files_are_unsupported(tmp_path
         (tmp_path / name).write_bytes(b"synthetic")
     with pytest.raises(ValueError, match="traversal entry limit"):
         scan_tree(tmp_path, allowed_extensions={".md"}, limits=ScanLimits(max_entries=1))
+
+
+@pytest.mark.parametrize("swap_ancestor", [False, True])
+def test_selected_path_must_not_be_canonicalized_to_a_new_target(tmp_path, swap_ancestor):
+    parent = tmp_path / "selected-parent"
+    root = parent / "selected"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / "selected").mkdir(parents=True)
+    (outside / "selected" / "private.md").write_text("synthetic outside content")
+    if swap_ancestor:
+        root.rmdir()
+        parent.rmdir()
+        parent.symlink_to(outside, target_is_directory=True)
+    else:
+        root.rmdir()
+        root.symlink_to(outside / "selected", target_is_directory=True)
+    with pytest.raises(ValueError, match="source unavailable"):
+        scan_tree(root, allowed_extensions={".md"})

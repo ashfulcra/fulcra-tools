@@ -5,12 +5,13 @@ from unittest.mock import Mock
 import pytest
 
 from fulcra_local_sources import collect_plugins
-from fulcra_collect import config as collect_config
+from fulcra_collect import config as collect_config, credentials as collect_credentials
 
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path / "private-config"))
+    monkeypatch.setattr(collect_credentials, "get_user_secret", lambda key: "synthetic-token")
 
 
 class Context:
@@ -26,7 +27,7 @@ class Context:
         collect_config.save(saved)
         self.config_epoch = saved.plugin_epochs[plugin_id]
 
-    def fulcra_token(self):
+    def collect_token(self):
         return "synthetic-token"
 
     def kv_get(self, key, default=None):
@@ -177,3 +178,18 @@ def test_preview_requires_an_actual_boolean(tmp_path):
                                     "collection_name": "chosen", "dry_run": "false"})
     with pytest.raises(ValueError, match="Preview only"):
         collect_plugins.run_local_folders(ctx, writer=Writer())
+
+
+def test_unannounced_token_replacement_stops_upload(tmp_path, monkeypatch):
+    (tmp_path / "brief.md").write_text("synthetic")
+    ctx = Context("local-folders", {"source_path": str(tmp_path), "collection_name": "Test"})
+    writer = Writer()
+    scan = collect_plugins.scan_tree
+    def changed(*args, **kwargs):
+        result = scan(*args, **kwargs)
+        monkeypatch.setattr(collect_credentials, "get_user_secret", lambda key: "different-account")
+        return result
+    monkeypatch.setattr(collect_plugins, "scan_tree", changed)
+    with pytest.raises(RuntimeError, match="configuration changed"):
+        collect_plugins.run_local_folders(ctx, writer=writer)
+    assert not writer.uploads

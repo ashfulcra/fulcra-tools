@@ -57,7 +57,7 @@ def _likely_secret(path: Path) -> bool:
                              r"(?:$|[-_.])", stem)))
 
 
-def scan_tree(
+def _scan_tree(
     source: Path,
     *,
     allowed_extensions: set[str],
@@ -70,7 +70,7 @@ def scan_tree(
     on each file object for the local reader and is excluded from its repr.
     """
     limits = limits or ScanLimits()
-    root = Path(source).expanduser().resolve(strict=False)
+    root = Path(os.path.abspath(Path(source).expanduser()))
     if root == Path("/"):
         raise ValueError("select a folder below the filesystem root")
     if not root.is_dir():
@@ -147,3 +147,10 @@ def scan_tree(
         skipped_by_reason=dict(sorted(skipped.items())),
         total_bytes=total_bytes,
     )
+
+
+def scan_tree(source: Path, **kwargs) -> ScanResult:
+    try:
+        return _scan_tree(source, **kwargs)
+    except OSError:
+        raise ValueError("source unavailable or source changed; select the folder again") from None
