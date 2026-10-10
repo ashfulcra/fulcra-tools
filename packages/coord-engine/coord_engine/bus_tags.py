@@ -86,6 +86,12 @@ SCHEMA = "coord.bus-tags.v2"
 DIMENSIONS = ("agent", "platform", "harness", "model")
 REQUIRED_DIMENSION = "agent"
 
+#: Longest tag name the platform accepts. Measured 2026-10-10: a longer name
+#: is refused by ``POST /user/v1alpha1/tag`` with 422 ``string_too_long``
+#: (``max_length`` 30), so ``agent:<identity>`` fails for any identity over 24
+#: characters. Provisioning checks this before creating anything.
+TAG_NAME_MAX = 30
+
 _UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")

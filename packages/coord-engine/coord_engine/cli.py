@@ -13270,6 +13270,20 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
                   "(record tags are uuids, never names); nothing was created",
                   file=sys.stderr)
             return 2
+    # The same rule for a name the platform will refuse: a long identity used
+    # to fail only at create time, after the shorter names had been minted.
+    too_long = [(dim, bus_tags.tag_name(dim, declared))
+                for dim, declared, explicit in wanted
+                if not explicit and declared and
+                len(bus_tags.tag_name(dim, declared)) > bus_tags.TAG_NAME_MAX]
+    if too_long:
+        for dim, name in too_long:
+            print(f"tag-provision: the tag name {name!r} is {len(name)} "
+                  f"characters; the platform accepts at most "
+                  f"{bus_tags.TAG_NAME_MAX}. Create a tag with a shorter name "
+                  f"and pass its uuid as --tag-id-{dim}", file=sys.stderr)
+        print("tag-provision: nothing was created", file=sys.stderr)
+        return 2
 
     ensure = getattr(transport, "tag_ensure", None)
     resolved: dict[str, str] = {}
@@ -13290,6 +13304,20 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
 
     if resolved:
         entry.update(resolved)
+        # Every reader refuses the WHOLE registry when one entry lacks the
+        # required dimension, so writing such an entry would untag every
+        # agent's events, not just this one's. Report what was created
+        # instead, so a retry can record it without minting duplicates.
+        if bus_tags._parse_entry(entry) is None:
+            hint = " ".join(f"--tag-id-{d} {t}" for d, t in resolved.items())
+            print(f"tag-provision: {agent} has no {bus_tags.REQUIRED_DIMENSION} "
+                  f"tag, and an entry without one would make every reader "
+                  f"reject {path}; the registry was NOT written. Created so "
+                  f"far: {hint}. Record them with the "
+                  f"{bus_tags.REQUIRED_DIMENSION} tag in one run: "
+                  f"--tag-id-{bus_tags.REQUIRED_DIMENSION} <uuid> {hint}",
+                  file=sys.stderr)
+            return 2
         agents[agent] = entry
         if not transport.write(
                 path, bus_tags.render_registry(registry["base"], agents)):
