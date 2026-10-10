@@ -6,8 +6,8 @@ import {
   ACTIVE, STATE_LABEL, collaborations, gist, contactKeyOf, contacts, contextBlock, humanAge, learnAgentNames, learnPersonNames, quietLine, replyLine, threadTopic,
 } from './collab'
 import type { Collaboration, ContactSummary } from './collab'
-import { buildUniverse, grouped } from './universe'
-import type { Placement, Universe, UniverseNode } from './universe'
+import { buildUniverse, grouped, parseClaudeSession, parseCodexIndex } from './universe'
+import type { Placement, SessionPins, SessionRef, Universe, UniverseNode } from './universe'
 import { MODES, MODE_HELP, MODE_LABEL, modeOf, wakePrompt, wakes, withinBudget } from './policy'
 import type { ResponseMode } from './policy'
 import {
@@ -46,6 +46,9 @@ const hiddenAtom = atom({ plugin: 'aicq', key: 'hidden' } as const, {})
 const universeAtom = atom({ plugin: 'aicq', key: 'universe' } as const, null)
 const universeLoadingAtom = atom({ plugin: 'aicq', key: 'universeLoading' } as const, false)
 const placementAtom = atom({ plugin: 'aicq', key: 'placement' } as const, {})
+// The owner's pinned session per universe node (persisted), and the local sessions the picker offers.
+const sessionPinsAtom = atom({ plugin: 'aicq', key: 'sessionPins' } as const, {})
+const localSessionsAtom = atom({ plugin: 'aicq', key: 'localSessions' } as const, [])
 const adoptedAtom = atom({ plugin: 'aicq', key: 'adopted' } as const, [])
 // Threads this agent owns by its own activity: key -> last activity. No count cap; expiry only after OWNED_TTL_MS idle.
 const ownedAtom = atom({ plugin: 'aicq', key: 'owned' } as const, {})
@@ -130,37 +133,98 @@ function parseJsonOut(text: string): unknown {
  * but cannot be listed, read or parsed is named in `degraded`, never treated as an empty inventory.
  * Only config.json is read (never policy, tokens or other files).
  */
-async function v5Actors($: $, degraded: string[]): Promise<{ logicalAgentId: string; instanceId: string; workspaceId: string }[]> {
+type V5Actor = { logicalAgentId: string; instanceId: string; workspaceId: string; sessionId: string }
+
+/**
+ * V5 actor bindings on this machine. Two layouts exist: a shared root holding one folder per actor
+ * (`~/.local/share/coord-v5/<actor>/config.json`, and the alpha3 root), and one root per actor
+ * (`~/.local/share/coord-v5-<actor>/state/config.json`), which is what the enrolled actors use.
+ */
+async function v5Actors($: $, degraded: string[]): Promise<V5Actor[]> {
   const h = await homeDir($)
-  const out: { logicalAgentId: string; instanceId: string; workspaceId: string }[] = []
-  for (const root of [`${h}/.local/share/coord-v5`, `${h}/.local/share/fulcra-coord-v5-alpha3`]) {
+  const share = `${h}/.local/share`
+  const candidates: string[] = []
+  for (const root of [`${share}/coord-v5`, `${share}/fulcra-coord-v5-alpha3`]) {
     const short = root.replace(h, '~')
-    let entries: { name: string }[]
     try {
       if (!(await $.fs.exists(root))) continue
-      entries = (await $.fs.list(root)) as unknown as { name: string }[]
+      for (const ent of (await $.fs.list(root)) as unknown as { name: string }[]) candidates.push(`${root}/${ent.name}/config.json`)
     } catch {
       degraded.push(`V5 actors (${short} unreadable)`)
+    }
+  }
+  try {
+    for (const ent of (await $.fs.list(share)) as unknown as { name: string; kind: string }[]) {
+      if (ent.kind === 'dir' && /^coord-v5-./.test(ent.name)) candidates.push(`${share}/${ent.name}/state/config.json`)
+    }
+  } catch {
+    degraded.push('V5 actors (~/.local/share unreadable)')
+  }
+  const out: V5Actor[] = []
+  for (const path of candidates) {
+    const short = path.replace(h, '~')
+    try {
+      if (!(await $.fs.exists(path))) continue
+    } catch {
+      degraded.push(`V5 config ${short} (unreadable)`)
       continue
     }
-    for (const ent of entries) {
-      const path = `${root}/${ent.name}/config.json`
-      try {
-        if (!(await $.fs.exists(path))) continue
-      } catch {
-        degraded.push(`V5 config ${short}/${ent.name} (unreadable)`)
-        continue
-      }
-      try {
-        const c = JSON.parse(String(await $.fs.read(path))) as { workspaceId?: string; actorBinding?: { logical_agent_id?: string; instance_id?: string } }
-        if (c.actorBinding?.logical_agent_id) out.push({ logicalAgentId: c.actorBinding.logical_agent_id, instanceId: c.actorBinding.instance_id ?? '', workspaceId: c.workspaceId ?? '' })
-        else degraded.push(`V5 config ${short}/${ent.name} (no actor binding)`)
-      } catch {
-        degraded.push(`V5 config ${short}/${ent.name} (unreadable or malformed)`)
-      }
+    try {
+      const c = JSON.parse(String(await $.fs.read(path))) as { workspaceId?: string; actorBinding?: { logical_agent_id?: string; instance_id?: string; session_id?: string } }
+      const b = c.actorBinding
+      if (b?.logical_agent_id) out.push({ logicalAgentId: b.logical_agent_id, instanceId: b.instance_id ?? '', workspaceId: c.workspaceId ?? '', sessionId: b.session_id ?? '' })
+      else degraded.push(`V5 config ${short} (no actor binding)`)
+    } catch {
+      degraded.push(`V5 config ${short} (unreadable or malformed)`)
     }
   }
   return out
+}
+
+/**
+ * The sessions the desktop apps record on this machine: Claude desktop's per-session files and Codex's
+ * thread index. An app that is not installed contributes nothing; an install it cannot read is degraded.
+ */
+async function localSessions($: $, degraded: string[]): Promise<SessionRef[]> {
+  const h = await homeDir($)
+  const out: SessionRef[] = []
+  // The main desktop app, then each extra instance (`~/.claude-instances/<name>`), which keeps its own records.
+  const roots: { dir: string; instance: string }[] = [{ dir: `${h}/Library/Application Support/Claude/claude-code-sessions`, instance: '' }]
+  try {
+    if (await $.fs.exists(`${h}/.claude-instances`)) {
+      for (const ent of (await $.fs.list(`${h}/.claude-instances`)) as unknown as { name: string; kind: string }[]) {
+        if (ent.kind === 'dir') roots.push({ dir: `${h}/.claude-instances/${ent.name}/claude-code-sessions`, instance: ent.name })
+      }
+    }
+  } catch {
+    degraded.push('Claude desktop instances (unreadable)')
+  }
+  for (const { dir: root, instance } of roots) {
+    try {
+      if (!(await $.fs.exists(root))) continue
+      for (const account of (await $.fs.list(root)) as unknown as { name: string; kind: string }[]) {
+        if (account.kind !== 'dir') continue
+        for (const org of (await $.fs.list(`${root}/${account.name}`)) as unknown as { name: string; kind: string }[]) {
+          if (org.kind !== 'dir') continue
+          const dir = `${root}/${account.name}/${org.name}`
+          for (const f of (await $.fs.list(dir)) as unknown as { name: string; kind: string }[]) {
+            if (f.kind !== 'file' || !/^[a-z]+_.*\.json$/.test(f.name)) continue
+            const ref = parseClaudeSession(String(await $.fs.read(`${dir}/${f.name}`)), instance)
+            if (ref) out.push(ref)
+          }
+        }
+      }
+    } catch {
+      degraded.push(`Claude desktop sessions${instance ? ` (${instance} instance)` : ''} (unreadable)`)
+    }
+  }
+  const codexIndex = `${h}/.codex/session_index.jsonl`
+  try {
+    if (await $.fs.exists(codexIndex)) out.push(...parseCodexIndex(String(await $.fs.read(codexIndex))))
+  } catch {
+    degraded.push('Codex threads (unreadable)')
+  }
+  return out.sort((a, b) => ((a.at ?? '') < (b.at ?? '') ? 1 : -1))
 }
 
 /** One coord read: a thrown failure (timeout, spawn) becomes a named degraded result like a nonzero exit. */
@@ -218,6 +282,8 @@ async function refreshUniverse($: $) {
       if (text !== null) rosters[w] = text
     }
     if (!me) await refreshTopology($, degraded)
+    const sessions = await localSessions($, degraded)
+    await update($, localSessionsAtom, () => sessions)
     const all = (await read($, inbox)) as AicqMessage[]
     const agentNames = learnAgentNames(all)
     const universe = buildUniverse({
@@ -231,6 +297,8 @@ async function refreshUniverse($: $) {
       owner: cfg.owner,
       thisAgent: { name: cfg.agentName || 'claude-code-aicq-mod', machine: thisMachine, platform: 'Claude Code' },
       placement: ((await read($, placementAtom)) as Placement | undefined) ?? {},
+      sessions,
+      sessionPins: ((await read($, sessionPinsAtom)) as SessionPins | undefined) ?? {},
       degraded,
     })
     await update($, universeAtom, () => universe)
@@ -253,6 +321,41 @@ async function setPlacement($: $, key: string, field: 'machine' | 'platform', va
   await update($, placementAtom, pl => ({ ...pl, [key]: { ...(pl[key] ?? {}), [field]: value } }))
   await $.store.set('placement', (await read($, placementAtom)) as Placement)
   await update($, universeAtom, u => (u ? { ...u, nodes: u.nodes.map(n => (n.key === key ? { ...n, [field]: value } : n)) } : u))
+}
+
+// Only the two routes deeplink() builds, so nothing else ever reaches `open`.
+const SESSION_LINK = /^(claude:\/\/claude\.ai\/epitaxy\/[a-z]+_[0-9A-Za-z-]{8,}|codex:\/\/threads\/[0-9a-f-]{36})$/
+
+/**
+ * Opens a desktop session through macOS `open`. A Link cannot do it: the desktop pane is a remote
+ * surface, which keeps only https links clickable. The sessions offered are this machine's own, so
+ * opening them on the host is opening them where they live.
+ */
+async function openSession($: $, href: string) {
+  if (!SESSION_LINK.test(href)) {
+    $.ui.toast('AICQ: not a session link this pane opens.')
+    return
+  }
+  try {
+    const r = await $.process.run(['/usr/bin/open', href], { timeoutMs: 10_000 })
+    if (r.exitCode !== 0) $.ui.toast(`AICQ: could not open the session (${(r.stderr || `exit ${r.exitCode}`).trim().slice(0, 120)}).`)
+  } catch {
+    $.ui.toast('AICQ: could not open the session.')
+  }
+}
+
+/** Pins (or, with `none`, suppresses) the session a node opens; stored, then the map is rebuilt from it. */
+async function setSessionPin($: $, key: string, value: string) {
+  const [app, ...rest] = value.split(':')
+  const id = rest.join(':')
+  await update($, sessionPinsAtom, pins => {
+    const next = { ...pins }
+    if (value === 'auto') delete next[key]
+    else next[key] = value === 'none' ? 'none' : { app: app === 'codex' ? 'codex' : 'claude', id }
+    return next
+  })
+  await $.store.set('sessionPins', (await read($, sessionPinsAtom)) as SessionPins)
+  await refreshUniverse($)
 }
 
 /** A directive to an agent on the coord bus; the bus confirms delivery or says it could not. */
@@ -1042,7 +1145,7 @@ const LIVE_GLYPH: Record<string, string> = { live: '●', idle: '◐', stale: '�
 const LIVE_TONE: Record<string, string> = { live: 'green', idle: 'yellow', stale: 'gray', lapsed: '#e07b39', unknown: 'gray' }
 
 /** The agent universe: machine/env → platform/runtime → identity/session, meshes, status and blocked state. */
-async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean) {
+async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean, surface: string) {
   const { Box, Text, Button, Input, Select, Svg } = els
   const u = (await read($, universeAtom)) as Universe | null
   const loading = ((await read($, universeLoadingAtom)) as boolean | undefined) ?? false
@@ -1111,6 +1214,20 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
     const agentId = n.key.replace(/^agent:|^peer:/, '')
     const machines = [...new Set([...u.machines.map(m => m.name), 'Cloud', 'Unplaced', n.machine])]
     const platforms = [...new Set(['Claude Code', 'Codex', 'OpenClaw', 'Hermes', 'ChatGPT', 'Grok', 'Coord service', 'Unknown runtime', n.platform])]
+    const pins = ((await read($, sessionPinsAtom)) as SessionPins | undefined) ?? {}
+    const pin = pins[n.key]
+    const local = (((await read($, localSessionsAtom)) as SessionRef[] | undefined) ?? []).filter(x => !x.archived).slice(0, 40)
+    const appName = (app: 'claude' | 'codex') => (app === 'claude' ? 'Claude' : 'Codex')
+    const sessionOptions = [
+      { value: 'auto', label: 'From its V5 binding' },
+      { value: 'none', label: 'No session link' },
+      ...local.map(x => ({ value: `${x.app}:${x.id}`, label: `${appName(x.app)}${x.instance ? ` (${x.instance})` : ''} · ${(x.title || x.id).slice(0, 48)}` })),
+    ]
+    // A pin to a session no longer listed (archived, or older than the 40 shown) stays selectable.
+    if (pin && pin !== 'none' && !sessionOptions.some(o => o.value === `${pin.app}:${pin.id}`)) {
+      sessionOptions.push({ value: `${pin.app}:${pin.id}`, label: `${appName(pin.app)} · ${pin.id.slice(0, 20)} (pinned)` })
+    }
+    const sessionValue = pin === 'none' ? 'none' : pin ? `${pin.app}:${pin.id}` : 'auto'
     detail = (
       <Box key="udetail" flexDirection="column" borderStyle="round" borderColor={n.blockedOnOwner ? 'red' : ACCENT} paddingX={1} marginBottom={1}>
         <Box justifyContent="space-between">
@@ -1122,6 +1239,14 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
         {n.summary && <Text wrap="wrap">{n.summary}</Text>}
         {Object.keys(n.open).length > 0 && <Text dimColor>Open work: {Object.entries(n.open).map(([k, c]) => `${c} ${k}`).join(' · ')}</Text>}
         {n.meshes.length > 0 && <Text dimColor>Meshes: {n.meshes.map(k => u.meshes.find(m => m.key === k)?.label ?? k).join(' · ')}</Text>}
+        {n.session && (
+          <Box key="usession">
+            {surface === 'mobile'
+              ? <Text dimColor>{n.session.href}</Text>
+              : <Button key="usessionopen" label={`Open session in ${appName(n.session.app)}`} onPress={() => openSession($, n.session!.href)} />}
+            <Text dimColor>  {n.session.title ? `${n.session.title} · ` : ''}{n.session.via}</Text>
+          </Box>
+        )}
         {n.blocked.length > 0 && <Text bold color={n.blockedOnOwner ? 'red' : 'yellow'}>Blocked ({n.blocked.length}{n.blockedOnOwner ? `, ${n.blockedOnOwner} on you` : ''})</Text>}
         {n.blocked.slice(0, 6).map(b => (
           <Box key={`ub-${b.id}`} flexDirection="column" marginBottom={1}>
@@ -1139,6 +1264,7 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
         <Box>
           <Select key="umachine" label="Machine / env" value={n.machine} options={machines.map(m => ({ value: m, label: m }))} onSelect={value => setPlacement($, n.key, 'machine', value)} />
           <Select key="uplatform" label="Platform / runtime" value={n.platform} options={platforms.map(p => ({ value: p, label: p }))} onSelect={value => setPlacement($, n.key, 'platform', value)} />
+          {n.kind === 'agent' && <Select key="usessionpick" label="Session" value={sessionValue} options={sessionOptions} onSelect={value => setSessionPin($, n.key, value)} />}
         </Box>
       </Box>
     )
@@ -1184,6 +1310,8 @@ export const register: Register = (on, options) => {
     }
     const savedPlacement = ((await $.store.get('placement')) as Placement | undefined) ?? {}
     await update($, placementAtom, () => savedPlacement)
+    const savedPins = ((await $.store.get('sessionPins')) as SessionPins | undefined) ?? {}
+    await update($, sessionPinsAtom, () => savedPins)
     try {
       const hn = await $.process.run(['/bin/hostname', '-s'], { timeoutMs: 5000 })
       thisMachine = hn.stdout.trim()
@@ -1442,7 +1570,7 @@ export const register: Register = (on, options) => {
     const v0 = (await read($, view)) as PaneView
     if (v0.kind === 'map' || v0.kind === 'node') {
       const els = $.ui.resolve(e)
-      return renderUniverse($, { ...els, Svg: e.surface === 'desktop' ? (els as Elements['desktop']).Svg : undefined }, v0, (e.props.bodyColumns ?? e.viewport?.columns ?? 100) >= 96)
+      return renderUniverse($, { ...els, Svg: e.surface === 'desktop' ? (els as Elements['desktop']).Svg : undefined }, v0, (e.props.bodyColumns ?? e.viewport?.columns ?? 100) >= 96, e.surface)
     }
     const all = (await read($, inbox)) as AicqMessage[]
     const st = (await read($, status)) as AicqStatus

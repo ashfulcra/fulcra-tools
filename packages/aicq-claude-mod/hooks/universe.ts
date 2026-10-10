@@ -2,7 +2,8 @@
 // identity/session, plus the meshes between them (workspaces, the V5 bus,
 // cross-account mesh peers) and blocked-on-owner links. Pure: inputs are
 // what the hooks module read (coord-engine JSON, V5 configs, workspace
-// index, mesh peers); placement overrides come from the owner.
+// index, mesh peers, the desktop apps' session records); placement and
+// session pins come from the owner.
 
 export type Liveness = 'live' | 'idle' | 'stale' | 'lapsed' | 'unknown'
 
@@ -25,7 +26,30 @@ export type UniverseNode = {
   meshes: string[]
   /** Fulcra user id for a cross-account peer. */
   userId: string | null
+  /** The desktop session this identity runs in, when it is known exactly (never guessed). */
+  session: NodeSession | null
 }
+
+/** A local Claude desktop Code session or Codex desktop thread, as the app itself records it. */
+export type SessionRef = {
+  app: 'claude' | 'codex'
+  /** What the app's deep link opens: the desktop id (`local_…`) for Claude, the thread id for Codex. */
+  id: string
+  /** Another id the same session is known by: Claude Code's own CLI session id. */
+  cliId: string | null
+  title: string
+  cwd: string
+  /** Last activity, ISO, when the app records it. */
+  at: string | null
+  archived: boolean
+  /** The desktop instance that records it: '' for the main app, else its `~/.claude-instances/<name>`. */
+  instance: string
+}
+
+/** An owner's explicit choice of session for a node: `{ app, id }`, or `none` to suppress a binding's link. */
+export type SessionPins = Record<string, { app: 'claude' | 'codex'; id: string } | 'none'>
+
+export type NodeSession = { app: 'claude' | 'codex'; href: string; title: string; via: 'pinned' | 'v5 binding' }
 
 export type Mesh = { key: string; label: string; kind: 'workspace' | 'v5' | 'cross-account'; members: string[] }
 
@@ -125,6 +149,69 @@ export function workspaceMembers(indexMd: string): { name: string; text: string 
   return out
 }
 
+// Deep links into the desktop apps. Both apps register their scheme with macOS (Claude.app: `claude`,
+// Codex.app: `codex`); these are the routes each app itself uses to open one session or thread.
+export function deeplink(s: Pick<SessionRef, 'app' | 'id'>): string {
+  return s.app === 'claude' ? `claude://claude.ai/epitaxy/${encodeURIComponent(s.id)}` : `codex://threads/${encodeURIComponent(s.id)}`
+}
+
+/**
+ * Desktop session ids are `<kind>_<id>`: `local_<uuid>` for a session on this machine, other kinds for
+ * sessions the local app shows but that run elsewhere. The app links every kind the same way.
+ */
+const DESKTOP_SESSION_ID = /^[a-z]+_[0-9A-Za-z-]{8,}$/
+
+/** One Claude desktop session file (`claude-code-sessions/<account>/<org>/<id>.json`); null when it is not one. */
+export function parseClaudeSession(text: string, instance = ''): SessionRef | null {
+  let d: Json
+  try {
+    d = JSON.parse(text) as Json
+  } catch {
+    return null
+  }
+  const id = str(d.sessionId)
+  if (!DESKTOP_SESSION_ID.test(id)) return null
+  const at = typeof d.lastActivityAt === 'number' ? new Date(d.lastActivityAt).toISOString() : null
+  return { app: 'claude', id, cliId: str(d.cliSessionId) || null, title: str(d.title), cwd: str(d.cwd), at, archived: d.isArchived === true, instance }
+}
+
+/** Codex's `session_index.jsonl`: one row per rename, so the newest row per thread id wins. */
+export function parseCodexIndex(text: string): SessionRef[] {
+  const byId = new Map<string, SessionRef>()
+  for (const line of text.split('\n')) {
+    let d: Json
+    try {
+      d = JSON.parse(line) as Json
+    } catch {
+      continue
+    }
+    const id = str(d.id)
+    if (!/^[0-9a-f-]{36}$/.test(id)) continue
+    const at = str(d.updated_at) || null
+    const prev = byId.get(id)
+    if (prev && prev.at && at && prev.at > at) continue
+    byId.set(id, { app: 'codex', id, cliId: null, title: str(d.thread_name), cwd: '', at, archived: false, instance: '' })
+  }
+  return [...byId.values()]
+}
+
+/**
+ * The session a node opens: the owner's pin first, else an exact match of its V5 binding's session id
+ * against what the apps record. No name or folder matching, so a link never opens the wrong session.
+ */
+export function sessionFor(key: string, boundSessionId: string, pins: SessionPins, sessions: readonly SessionRef[]): NodeSession | null {
+  const pin = pins[key]
+  if (pin === 'none') return null
+  if (pin) {
+    const hit = sessions.find(s => s.app === pin.app && s.id === pin.id)
+    return { app: pin.app, href: deeplink(pin), title: hit?.title ?? '', via: 'pinned' }
+  }
+  const id = boundSessionId.replace(/^local_/, '')
+  if (!id) return null
+  const hit = sessions.find(s => s.cliId === id || s.id === id || s.id === `local_${id}`)
+  return hit ? { app: hit.app, href: deeplink(hit), title: hit.title, via: 'v5 binding' } : null
+}
+
 const LIVENESS: readonly Liveness[] = ['live', 'idle', 'stale', 'lapsed', 'unknown']
 
 /** A readable label: drop the platform prefix and a machine segment, keep namespaces ("arc/main-comms"). */
@@ -146,7 +233,10 @@ export type UniverseInputs = {
   /** `coord-engine health <team> --json`. */
   health: Json | null
   /** V5 actor bindings found on this machine. */
-  v5: { logicalAgentId: string; instanceId: string; workspaceId: string }[]
+  v5: { logicalAgentId: string; instanceId: string; workspaceId: string; sessionId: string }[]
+  /** Local Claude desktop sessions and Codex threads, as the apps record them. */
+  sessions: SessionRef[]
+  sessionPins: SessionPins
   /** Workspaces: name → index.md text. */
   workspaces: Record<string, string>
   /** Cross-account mesh peers. */
@@ -216,6 +306,7 @@ export function buildUniverse(i: UniverseInputs): Universe {
       open: (row?.open && typeof row.open === 'object' ? row.open : {}) as Record<string, number>,
       blocked, blockedOnOwner: blocked.filter(b => b.blockedOn === `user:${i.owner}`).length,
       meshes: [], userId: null,
+      session: sessionFor(key, v5?.sessionId ?? '', i.sessionPins, i.sessions),
     })
   }
   for (const row of i.agents ?? []) add(str(row.agent), row)
@@ -231,7 +322,7 @@ export function buildUniverse(i: UniverseInputs): Universe {
     nodes.set(key, {
       key, kind: 'peer', label: p.label, machine: over.machine || 'Friends’ accounts', platform: over.platform || platformOf(p.label),
       liveness: 'unknown', lastSeen: null, summary: '', annotation: '', open: {}, blocked: [], blockedOnOwner: 0,
-      meshes: [], userId: p.userId,
+      meshes: [], userId: p.userId, session: null,
     })
   }
   if (peerMesh.members.length) meshes.push(peerMesh)
