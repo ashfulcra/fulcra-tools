@@ -558,6 +558,13 @@ it (not on PyPI).
     over two weeks by a notifier that woke a human, a headless invoke that
     could not authenticate, and a peek that never consumed — none ran the
     agent, while every layer reported success.
+- **`bus-v3 tag-provision` never writes a registry entry without `agent`.**
+  One such entry makes every reader reject `_coord/bus-v3/tags.json`, which
+  untags the whole fleet's events. The verb exits 2 instead, leaves the
+  registry unchanged, and prints the uuids it created for a `--tag-id-*`
+  retry. Tag names are capped at 30 characters by the platform, so an
+  identity over 24 characters needs a shorter, hand-created agent tag passed
+  as `--tag-id-agent`; the verb checks names before creating anything.
 - **Durable tooling stash.** An agent's operational bundle survives ephemeral
   machines via `coord-engine stash push/pull/list`: push refreshes a
   `manifest.json` (per-file sha256 + exec bit) and runs a **fail-closed
