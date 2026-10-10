@@ -284,7 +284,7 @@ const COORD = {
   health: { hosts: [{ host: 'coord-reconcile:DeskBookPro', last_reconcile: '2026-10-07T11:50:00Z', stale: false }, { host: 'coord-reconcile:SingularityServer', last_reconcile: '2026-10-07T11:55:00Z', stale: false }] },
 }
 
-function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecords?: boolean; truncated?: boolean } = {}) {
+function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecords?: boolean; truncated?: boolean; honorWindow?: boolean } = {}) {
   const calls: Run[] = []
   const recorded = new Map<string, string[]>()
   const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
@@ -320,7 +320,9 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
         if (step === 'fail') return { value: { exitCode: 1, stdout: '', stderr: 'boom', isStdoutTruncated: false, isStderrTruncated: false } }
         if (step === 'trunc') return { value: { exitCode: 0, stdout: (recorded.get(ch) ?? []).map(x => JSON.stringify({ start_time: '2026-10-07T12:00:00Z', ...JSON.parse(x) as object })).join('\n'), stderr: '', isStdoutTruncated: true, isStderrTruncated: false } }
       }
-      if (ch === V1_IN) return { value: { exitCode: 0, stdout: inboxRows.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n'), stderr: '', isStdoutTruncated: !!opts.truncated, isStderrTruncated: false } }
+      // honorWindow: return only rows inside the requested [start, end] window, as the real store does.
+      const inWindow = (x: Record<string, unknown> | string) => !opts.honorWindow || typeof x === 'string' || (Date.parse(String(x.start_time)) >= Date.parse(String(r.argv[3])) && Date.parse(String(x.start_time)) <= Date.parse(String(r.argv[4])))
+      if (ch === V1_IN) return { value: { exitCode: 0, stdout: inboxRows.filter(inWindow).map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n'), stderr: '', isStdoutTruncated: !!opts.truncated, isStderrTruncated: false } }
       return ok((recorded.get(ch) ?? []).map(x => JSON.stringify({ start_time: '2026-10-07T12:00:00Z', ...JSON.parse(x) as object })).join('\n'))
     }
     return { value: { exitCode: 2, stdout: '', stderr: `unknown ${String(sub)}`, isStdoutTruncated: false, isStderrTruncated: false } }
@@ -499,6 +501,29 @@ describe('mod', () => {
     await $.tool.call({ tool: 'mcp__aicq__aicq_draft', to: 'Peer Agent', topic: 'stale-topic', body: 'my reply', in_reply_to: 'stale-1' } as never)
     const res = JSON.parse(String((await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never) as { result?: string }).result)) as { collaborations: { topic: string }[] }
     expect(res.collaborations.map(c => c.topic).sort()).toEqual(['fresh-topic', 'stale-topic'])
+  })
+
+  test('ignore after: raising the limit reads the newly covered history now, quietly', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([
+      v1Row({ message_id: 'recent', topic: 'recent', body: 'recent ask' }, iso(T0 - 3_600_000)),
+      v1Row({ message_id: 'ten-days', topic: 'ten-days', body: 'older ask' }, iso(T0 - 10 * DAY)),
+    ], { honorWindow: true }), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const topics = async () => (JSON.parse(String((await $.tool.call({ tool: 'mcp__aicq__aicq_inbox', include_stale: true } as never) as { result?: string }).result)) as { collaborations: { topic: string }[] }).collaborations.map(c => c.topic).sort()
+    // The default 5-day limit reads 7 days back, so the 10-day-old thread was never fetched.
+    expect(await topics()).toEqual(['recent'])
+    const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { press: (t: unknown) => Promise<unknown>; select: (t: unknown) => Promise<unknown> }
+    await ui.press({ key: 'dsettings' })
+    await ui.select({ key: 'dstale', value: '14' })
+    await clock.advance(100)
+    expect(await topics()).toEqual(['recent', 'ten-days'])
+    // Backfilled history is display only: the arrival ledger was untouched, so nothing notified or woke.
+    expect({ toasts: sink.toasts.filter(t => !/ignoring/.test(t)).length, prompts: sink.prompts.length }).toEqual({ toasts: 0, prompts: 0 })
   })
 
   test('ignore after: after a long gap, only messages inside the limit notify', { options: { agentName: 'aicq' } }, async ($, on) => {

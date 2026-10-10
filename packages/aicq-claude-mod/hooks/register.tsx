@@ -99,6 +99,9 @@ const quietReads = new Map<string, number>()
 // - the durable `cursor:<key>` in $.store is the shared arrival ledger: a message notifies or wakes only
 //   while no session (this one, an earlier one, or a sibling) has recorded it yet.
 const viewCursors = new Map<string, Cursor>()
+// How far back this session's view cursors have read. When the ignore-after limit grows past it, the view
+// is read again from the new lookback (the shared ledger is untouched, so nothing re-notifies).
+let viewCoveredMs = 0
 // Ids this agent sent (persisted): what makes a thread this agent's own.
 let sentIds: string[] = []
 let theme = ''
@@ -507,6 +510,14 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
     await refreshTopology($, degraded)
     const now = await nowIso($)
     const ignoreDays = ((await read($, ignoreDaysAtom)) as number | undefined) ?? cfg.ignoreAfterDays
+    // A session's first read backfills 7 days, or the ignore-after limit when that reaches further back.
+    const lookbackMs = Math.max(BACKFILL_MS, ignoreDays * 86_400_000)
+    if (lookbackMs > viewCoveredMs) {
+      // A wider limit than this session has read: start every view cursor over at the new lookback. A source
+      // whose read fails keeps no view cursor, so it is retried at the full lookback and named as degraded.
+      if (viewCoveredMs > 0) viewCursors.clear()
+      viewCoveredMs = lookbackMs
+    }
     const cursors = new Map<string, Cursor>()
     const windows = new Map<string, Cursor>()
     const srcs = sourcesFor(now, new Map())
@@ -518,8 +529,6 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
       windows.set(src.key, { at: viewAt === null || ledger.at === null ? null : viewAt < ledger.at ? viewAt : ledger.at, seen: [] })
     }
     // Active sources every tick; long-quiet ones every QUIET_EVERY ticks (a manual Check now reads all).
-    // A session's first read backfills 7 days, or the ignore-after limit when that reaches further back.
-    const lookbackMs = Math.max(BACKFILL_MS, ignoreDays * 86_400_000)
     const work = sourcesFor(now, windows, lookbackMs).filter(src => forceAll || (quietReads.get(src.key) ?? 0) < QUIET_AFTER || tick % QUIET_EVERY === 0)
 
     const results: SourceRead[] = []
@@ -874,6 +883,8 @@ async function setIgnoreDays($: $, value: string) {
   const days = ignoreDaysOf(value, cfg.ignoreAfterDays)
   await update($, ignoreDaysAtom, () => days)
   await $.store.set('ignoreAfterDays', days)
+  // A longer limit can reach history this session has not read yet; read it now rather than at the next tick.
+  void poll($, true).catch(() => undefined)
   $.ui.toast(days ? `AICQ: ignoring collaborations with no activity for over ${days} day${days > 1 ? 's' : ''}` : 'AICQ: not ignoring anything for age')
 }
 
