@@ -17,6 +17,14 @@ each require separate authorization. Generated prose is not runtime enforcement 
 
 ## Codex desktop
 
+For enrolled workers that unload between turns, the host-injected dispatcher
+can opt into `allowColdWake:true` after verifying the existing native sender
+loads the exact `notLoaded` thread. This uses the same durable claim and
+uncertain-send reconciliation; it does not create another listener or schedule.
+Keep the option disabled until actual unloaded preflight, tool admission and
+receiver evidence are saved. Busy/error/unknown sessions remain held. See the
+[dispatcher contract](../README.md#explicit-host-injected-codex-delivery).
+
 Use locally verified native thread messaging from an active listener turn. Assess event ingress separately; use native thread heartbeats/scheduled tasks as a verified fallback or backstop, not a mandatory event-path component. Do not configure an external command as though it could call an app-only tool. Local scheduled runs require the app and machine to be available; verify permissions in the actual scheduled turn. See [Codex scheduled tasks](https://learn.chatgpt.com/docs/automations).
 
 Verify the exact native cross-session route locally, including human authorization and target restrictions. An observed Codex ancestor-target restriction is evidence about that route, not a universal prohibition on messaging peer sessions. Keep route identifiers and target mappings private; availability in an active turn does not prove an idle receiver will wake.

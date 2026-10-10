@@ -242,7 +242,8 @@ the existing prepared descriptor shape is unchanged. Caller prompt text is refus
 the bounded notification prompt is reconstructed from journaled identity/items/IDs.
 
 `options` must explicitly supply trusted host callbacks `readThread(target)`
-and `sendMessage({threadId,hostId,prompt})`, with optional `now()` and `timeoutMs`
+and `sendMessage({threadId,hostId,prompt})`, with optional `now()`, `allowColdWake`
+and `timeoutMs`
 (default 60000, integer 1..60000). Each native call has its own observation timeout,
 so read plus send may take up to twice that bound; this cannot cancel an invoked
 callback. No tool lookup, credentials, subprocess, schedule, automatic send or new
@@ -251,7 +252,16 @@ callback injection is not proof of authentication or authorization.
 
 Preflight requires raw native schema-version-1 thread evidence with exact
 `thread.id`, resolved `thread.hostId` and `thread.status.type:"idle"`. A present
-`thread.kind` must be `codex`. Direct objects, one MCP JSON text block, or
+`thread.kind` must be `codex`. The optional boolean `allowColdWake` defaults to
+false. With explicit `true`, an exact native `notLoaded` status returns
+`THREAD_UNLOADED` and may proceed through the same claim/send/receipt path.
+This status is not relabeled idle. The host must verify that its existing native
+sender can load that exact enrolled thread, and enforce human authorization,
+before enabling cold delivery. No resume API or second listener is created.
+Active, busy, system-error, missing and unknown statuses remain blocked even
+with opt-in. Synthetic success cannot establish cold-load support: capture the
+actual unloaded preflight, native admission and receiver evidence separately.
+Direct objects, one MCP JSON text block, or
 `structuredContent` are supported; malformed/error/contradictory wrappers fail
 closed. Busy/unknown/unavailable reads cause no send and retain the prepared
 obligation for later reconsideration. This snapshot is not global race-free busy

@@ -3,6 +3,7 @@ export function validateCodexExecutor(options) {
   const timeoutMs = options?.timeoutMs ?? 60000;
   if (typeof options?.readThread !== 'function' || typeof options?.sendMessage !== 'function' ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000 ||
+      (options.allowColdWake !== undefined && typeof options.allowColdWake !== 'boolean') ||
       (options.now !== undefined && typeof options.now !== 'function'))
     throw new TypeError('Invalid Codex executor');
 }
@@ -50,6 +51,8 @@ export async function preflightCodex(target, options) {
   if (result?.schemaVersion !== 1 || !result.thread ||
       (Object.hasOwn(result.thread, 'kind') && result.thread.kind !== 'codex') || result.thread.id !== target.threadId ||
       result.thread.hostId !== target.hostId) return { code: 'INVALID_THREAD_RESULT' };
+  if (result.thread.status?.type === 'notLoaded' && options.allowColdWake === true)
+    return { code: 'THREAD_UNLOADED' };
   if (result.thread.status?.type !== 'idle') return { code: 'THREAD_NOT_IDLE' };
   return { code: 'THREAD_IDLE' };
 }
