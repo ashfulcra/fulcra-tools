@@ -1,7 +1,7 @@
 // Universe types mirror hooks/universe.ts (the contract must be self-contained).
 export type Liveness = 'live' | 'idle' | 'stale' | 'lapsed' | 'unknown'
 
-export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string }
+export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string; since: string }
 
 export type UniverseNode = {
   key: string
@@ -33,11 +33,12 @@ export type SessionRef = {
   at: string | null
   archived: boolean
   instance: string
+  web: string | null
 }
 
 export type SessionPins = Record<string, { app: 'claude' | 'codex'; id: string } | 'none'>
 
-export type NodeSession = { app: 'claude' | 'codex'; href: string; title: string; via: 'pinned' | 'v5 binding' }
+export type NodeSession = { app: 'claude' | 'codex' | 'chatgpt' | 'other'; href: string; web: string | null; title: string; via: 'pinned' | 'v5 binding' | 'self-reported' }
 
 export type Mesh = { key: string; label: string; kind: 'workspace' | 'v5' | 'cross-account'; members: string[] }
 

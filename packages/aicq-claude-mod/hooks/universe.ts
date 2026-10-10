@@ -7,7 +7,7 @@
 
 export type Liveness = 'live' | 'idle' | 'stale' | 'lapsed' | 'unknown'
 
-export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string }
+export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string; since: string }
 
 export type UniverseNode = {
   key: string
@@ -44,12 +44,21 @@ export type SessionRef = {
   archived: boolean
   /** The desktop instance that records it: '' for the main app, else its `~/.claude-instances/<name>`. */
   instance: string
+  /** The same session on the web, when the app records one (a Claude session's Remote Control page). */
+  web: string | null
 }
 
 /** An owner's explicit choice of session for a node: `{ app, id }`, or `none` to suppress a binding's link. */
 export type SessionPins = Record<string, { app: 'claude' | 'codex'; id: string } | 'none'>
 
-export type NodeSession = { app: 'claude' | 'codex'; href: string; title: string; via: 'pinned' | 'v5 binding' }
+/**
+ * How to open the session a node runs in. `href` is the app link ('' when only a web link is known);
+ * `web` opens the same session in a browser, which is the one every surface can click.
+ */
+export type NodeSession = { app: 'claude' | 'codex' | 'chatgpt' | 'other'; href: string; web: string | null; title: string; via: 'pinned' | 'v5 binding' | 'self-reported' }
+
+/** An agent's own report of its links (`team/<team>/agent-links/<identity>.json`, schema agent-links/1). */
+export type AgentLinks = { identity: string; aliases: string[]; platform: string; machine: string; updatedAt: string; app: string | null; web: string | null }
 
 export type Mesh = { key: string; label: string; kind: 'workspace' | 'v5' | 'cross-account'; members: string[] }
 
@@ -175,7 +184,10 @@ export function parseClaudeSession(text: string, instance = ''): SessionRef | nu
   const id = str(d.sessionId)
   if (!DESKTOP_SESSION_ID.test(id)) return null
   const at = typeof d.lastActivityAt === 'number' ? new Date(d.lastActivityAt).toISOString() : null
-  return { app: 'claude', id, cliId: str(d.cliSessionId) || null, title: str(d.title), cwd: str(d.cwd), at, archived: d.isArchived === true, instance }
+  // The newest Remote Control id is the session's web page; it opens only while Remote Control is on.
+  const bridges = Array.isArray(d.bridgeSessionIds) ? d.bridgeSessionIds.filter((b): b is string => typeof b === 'string' && /^session_[A-Za-z0-9]{8,}$/.test(b)) : []
+  const web = bridges.length ? `https://claude.ai/code/${bridges[bridges.length - 1]}` : null
+  return { app: 'claude', id, cliId: str(d.cliSessionId) || null, title: str(d.title), cwd: str(d.cwd), at, archived: d.isArchived === true, instance, web }
 }
 
 /**
@@ -207,26 +219,67 @@ export function parseCodexIndex(text: string): { sessions: SessionRef[]; bad: nu
     const at = str(d.updated_at) || null
     const prev = byId.get(id)
     if (prev && prev.at && at && prev.at > at) continue
-    byId.set(id, { app: 'codex', id, cliId: null, title: str(d.thread_name), cwd: '', at, archived: false, instance: '' })
+    byId.set(id, { app: 'codex', id, cliId: null, title: str(d.thread_name), cwd: '', at, archived: false, instance: '', web: null })
   }
   return { sessions: [...byId.values()], bad }
 }
 
+// The only link shapes AICQ ever opens or draws as clickable. Links come from agents' own reports, so
+// anything else (a lookalike host, another scheme) must never become a one-click link.
+const ALLOWED_LINKS: readonly RegExp[] = [
+  /^claude:\/\/claude\.ai\/[A-Za-z0-9_\-./]+$/,
+  /^https:\/\/claude\.ai\/[A-Za-z0-9_\-./]+$/,
+  /^codex:\/\/threads\/[0-9a-f-]{36}(\?hostId=remote-control(%3A|:)[A-Za-z0-9_-]+)?$/,
+  /^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]+$/,
+]
+
+export function isAllowedLink(url: string): boolean {
+  return url.length <= 2048 && !url.includes('..') && ALLOWED_LINKS.some(re => re.test(url))
+}
+
+/** One `agent-links/1` file; null when it is not one. Links outside the allowlist are dropped, not kept. */
+export function parseAgentLinks(text: string): AgentLinks | null {
+  let d: Json
+  try {
+    d = JSON.parse(text) as Json
+  } catch {
+    return null
+  }
+  if (d.schema !== 'agent-links/1' || !str(d.identity)) return null
+  const links = Array.isArray(d.links) ? (d.links as Json[]) : []
+  const pick = (kind: string) => links.map(l => (str(l.kind) === kind ? str(l.url) : '')).find(u => u && isAllowedLink(u)) ?? null
+  const aliases = Array.isArray(d.aliases) ? d.aliases.map(str).filter(Boolean) : []
+  return { identity: str(d.identity), aliases, platform: str(d.platform), machine: str(d.machine), updatedAt: str(d.updated_at), app: pick('app'), web: pick('web') }
+}
+
+function appOf(url: string, platform: string): NodeSession['app'] {
+  if (url.startsWith('codex:')) return 'codex'
+  if (url.startsWith('claude:') || url.startsWith('https://claude.ai/')) return 'claude'
+  if (url.startsWith('https://chatgpt.com/')) return 'chatgpt'
+  return /codex/i.test(platform) ? 'codex' : /chatgpt/i.test(platform) ? 'chatgpt' : /claude/i.test(platform) ? 'claude' : 'other'
+}
+
 /**
- * The session a node opens: the owner's pin first, else an exact match of its V5 binding's session id
- * against what the apps record. No name or folder matching, so a link never opens the wrong session.
+ * The session a node opens, in precedence order: the owner's pin; then an exact match of its V5 binding's
+ * session id against what this machine's apps record (current, and vouched for by the app); then the
+ * agent's own report. No name or folder matching, so a link never opens the wrong session.
  */
-export function sessionFor(key: string, boundSessionId: string, pins: SessionPins, sessions: readonly SessionRef[]): NodeSession | null {
+export function sessionFor(key: string, boundSessionId: string, pins: SessionPins, sessions: readonly SessionRef[], reported: readonly AgentLinks[] = []): NodeSession | null {
   const pin = pins[key]
   if (pin === 'none') return null
+  const name = key.replace(/^agent:/, '')
+  const own = reported.find(l => l.identity === name || l.aliases.includes(name))
   if (pin) {
     const hit = sessions.find(s => s.app === pin.app && s.id === pin.id)
-    return { app: pin.app, href: deeplink(pin), title: hit?.title ?? '', via: 'pinned' }
+    return { app: pin.app, href: deeplink(pin), web: hit?.web ?? null, title: hit?.title ?? '', via: 'pinned' }
   }
   const id = boundSessionId.replace(/^local_/, '')
-  if (!id) return null
-  const hit = sessions.find(s => s.cliId === id || s.id === id || s.id === `local_${id}`)
-  return hit ? { app: hit.app, href: deeplink(hit), title: hit.title, via: 'v5 binding' } : null
+  const hit = id ? sessions.find(s => s.cliId === id || s.id === id || s.id === `local_${id}`) : undefined
+  if (hit) return { app: hit.app, href: deeplink(hit), web: hit.web ?? own?.web ?? null, title: hit.title, via: 'v5 binding' }
+  if (own && (own.app || own.web)) {
+    return { app: appOf(own.app ?? own.web ?? '', own.platform), href: own.app ?? '', web: own.web, title: '', via: 'self-reported' }
+  }
+  return null
 }
 
 const LIVENESS: readonly Liveness[] = ['live', 'idle', 'stale', 'lapsed', 'unknown']
@@ -254,6 +307,8 @@ export type UniverseInputs = {
   /** Local Claude desktop sessions and Codex threads, as the apps record them. */
   sessions: SessionRef[]
   sessionPins: SessionPins
+  /** Agents' own link reports (`agent-links/1`). */
+  agentLinks?: AgentLinks[]
   /** Workspaces: name → index.md text. */
   workspaces: Record<string, string>
   /** Cross-account mesh peers. */
@@ -287,6 +342,7 @@ export function buildUniverse(i: UniverseInputs): Universe {
     const item: BlockedItem = {
       id: str(r.id), title: str(r.title).replace(/-[0-9a-f]{8}$/, '').replace(/-/g, ' ').slice(0, 140),
       blockedOn: str(r.blocked_on), nextAction: str(r.next_action).slice(0, 300), priority: str(r.priority),
+      since: str(r.timestamp) || str(r.mtime),
     }
     for (const who of new Set([str(r.owner), str(r.assignee)].filter(Boolean))) {
       blockedBy.set(who, [...(blockedBy.get(who) ?? []), item])
@@ -323,7 +379,7 @@ export function buildUniverse(i: UniverseInputs): Universe {
       open: (row?.open && typeof row.open === 'object' ? row.open : {}) as Record<string, number>,
       blocked, blockedOnOwner: blocked.filter(b => b.blockedOn === `user:${i.owner}`).length,
       meshes: [], userId: null,
-      session: sessionFor(key, v5?.sessionId ?? '', i.sessionPins, i.sessions),
+      session: sessionFor(key, v5?.sessionId ?? '', i.sessionPins, i.sessions, i.agentLinks ?? []),
     })
   }
   for (const row of i.agents ?? []) add(str(row.agent), row)
