@@ -1757,9 +1757,28 @@ export const register: Register = (on, options) => {
     // ---- waiting on you: friends' agents and your own, in one ranked list --------
     const waitingEls = $.ui.resolve(e) as unknown as SessionElements
     const universeNow = ((await read($, universeAtom)) as Universe | null) ?? null
-    const waiting: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace))
+    const waitingAll: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace))
+    // Threads past the ignore-after limit are already out of `collabs`; a blocked task whose doc has not been
+    // touched past the limit is ignored the same way (shown on request, found by search).
+    const staleTaskKeys = new Set(waitingAll.filter(it => it.kind === 'task' && it.since && isStaleAt(it.since, nowMs, ignoreDays)).map(it => it.key))
+    const waiting = showStale || query ? waitingAll : waitingAll.filter(it => !staleTaskKeys.has(it.key))
     const waitingSection = (prefix: string) => {
-      if (waiting.length === 0) return <Text key={`${prefix}-none`} dimColor>Nothing is waiting on you{universeNow ? '' : ' in your AICQ threads (the coord bus has not been read yet)'}.</Text>
+      const ignoredLine = staleTaskKeys.size > 0 && !query
+        ? (
+          <Box key={`${prefix}-stale`}>
+            <Text dimColor>{showStale ? `Showing ${staleTaskKeys.size} blocked item${staleTaskKeys.size > 1 ? 's' : ''} untouched for over ${ignoreDays} days · ` : `${staleTaskKeys.size} blocked item${staleTaskKeys.size > 1 ? 's' : ''} untouched for over ${ignoreDays} days ignored · `}</Text>
+            <Button key={`${prefix}-stale-t`} plain label={showStale ? 'Ignore them again' : 'Show them'} onPress={() => update($, showStaleAtom, x => !x).then(() => undefined)} />
+          </Box>
+        )
+        : null
+      if (waiting.length === 0) {
+        return (
+          <Box key={`${prefix}-list`} flexDirection="column" marginBottom={1}>
+            <Text dimColor>Nothing is waiting on you{universeNow ? '' : ' in your AICQ threads (the coord bus has not been read yet)'}.</Text>
+            {ignoredLine}
+          </Box>
+        )
+      }
       return (
         <Box key={`${prefix}-list`} flexDirection="column" marginBottom={1}>
           {waiting.slice(0, 8).map(it => {
@@ -1782,6 +1801,7 @@ export const register: Register = (on, options) => {
             )
           })}
           {waiting.length > 8 && <Text dimColor>+ {waiting.length - 8} more waiting · the map shows every blocked item</Text>}
+          {ignoredLine}
         </Box>
       )
     }

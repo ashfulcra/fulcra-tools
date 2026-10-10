@@ -282,6 +282,19 @@ export function sessionFor(key: string, boundSessionId: string, pins: SessionPin
   return null
 }
 
+const REPORTED_PLATFORM: Record<string, string> = { 'claude-code': 'Claude Code', claude: 'Claude', codex: 'Codex', chatgpt: 'ChatGPT' }
+
+/**
+ * Where an agent says it runs, from its own links report: its declaration beats a guess from its name.
+ * Empty fields mean "not said", so the guess stands for that part.
+ */
+export function reportedPlacement(l: AgentLinks | undefined, machines: readonly string[]): { machine: string; platform: string } {
+  if (!l) return { machine: '', platform: '' }
+  const m = l.machine.trim()
+  const machine = !m ? '' : /^cloud$/i.test(m) ? 'Cloud' : (machines.find(x => x.toLowerCase() === m.toLowerCase()) ?? m)
+  return { machine, platform: REPORTED_PLATFORM[l.platform.trim().toLowerCase()] ?? '' }
+}
+
 const LIVENESS: readonly Liveness[] = ['live', 'idle', 'stale', 'lapsed', 'unknown']
 
 /** A readable label: drop the platform prefix and a machine segment, keep namespaces ("arc/main-comms"). */
@@ -369,11 +382,13 @@ export function buildUniverse(i: UniverseInputs): Universe {
       ? { machine: i.thisAgent.machine, platform: i.thisAgent.platform }
       : placeIdentity(name, names, { machine: v5?.instanceId, text: `${memberText.get(name) ?? ''} ${str(row?.summary)} ${v5?.instanceId ?? ''}` })
     const over = i.placement[key] ?? {}
+    // Owner's correction, then the agent's own report, then the guess from its name.
+    const said = reportedPlacement((i.agentLinks ?? []).find(l => l.identity === name || l.aliases.includes(name)), names)
     const live = str(row?.liveness)
     const blocked = blockedBy.get(name) ?? []
     nodes.set(key, {
       key, kind: 'agent', label: labelOf(name, names),
-      machine: over.machine || placed.machine, platform: over.platform || placed.platform,
+      machine: over.machine || said.machine || placed.machine, platform: over.platform || said.platform || placed.platform,
       liveness: (LIVENESS.includes(live as Liveness) ? live : str(row?.state) === 'lapsed' ? 'lapsed' : 'unknown') as Liveness,
       lastSeen: null, summary: str(row?.summary), annotation: str(row?.annotation),
       open: (row?.open && typeof row.open === 'object' ? row.open : {}) as Record<string, number>,
