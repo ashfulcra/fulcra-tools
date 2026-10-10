@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { AicqMessage } from '../types'
-import { collaborations, contextBlock, replyStats } from './collab'
+import { collaborations, contextBlock, isStale, isStaleAt, replyStats } from './collab'
 import { modeOf, wakePrompt, withinBudget } from './policy'
 import { buildUniverse, deeplink, grouped, labelOf, parseClaudeSession, parseCodexIndex, placeIdentity, sessionFor, workspaceMembers } from './universe'
 import {
@@ -241,6 +241,20 @@ describe('universe', () => {
   })
 })
 
+describe('ignore after', () => {
+  test('stale past the limit; off at 0; a pending draft is exempt', () => {
+    const now = Date.parse('2026-10-10T12:00:00Z')
+    const c = { key: 'k', updatedAt: '2026-10-05T11:00:00Z' }
+    expect(isStale(c, now, 5)).toBe(true)
+    expect(isStale({ ...c, updatedAt: '2026-10-05T13:00:00Z' }, now, 5)).toBe(false)
+    expect(isStale(c, now, 0)).toBe(false)
+    expect(isStale(c, now, 5, new Set(['k']))).toBe(false)
+    expect(isStaleAt('2026-10-01T00:00:00Z', now, 5)).toBe(true)
+    expect(isStaleAt('2026-10-09T00:00:00Z', now, 5)).toBe(false)
+    expect(isStaleAt('not a date', now, 5)).toBe(false)
+  })
+})
+
 describe('policy', () => {
   test('modes, budget and guarded prompts', () => {
     expect(modeOf('wake')).toBe('respond-check')
@@ -424,6 +438,82 @@ describe('mod', () => {
     await $.session.start({ cwd: '/tmp' } as never)
     await clock.advance(2000)
     expect(sink.toasts.length).toBe(1)
+  })
+
+  const DAY = 86_400_000
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const staleRows = () => [
+    v1Row({ message_id: 'fresh-1', topic: 'fresh-topic', body: 'recent ask' }, iso(T0 - 3_600_000)),
+    v1Row({ message_id: 'stale-1', topic: 'stale-topic', body: 'old ask' }, iso(T0 - 6 * DAY)),
+  ]
+
+  test('ignore after: stale collaborations leave aicq_inbox and the pane, and come back on request', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    engine(on, fake(staleRows()), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const inbox = async (args: Record<string, unknown> = {}) => JSON.parse(String((await $.tool.call({ tool: 'mcp__aicq__aicq_inbox', ...args } as never) as { result?: string }).result)) as { status: Record<string, unknown>; collaborations: { topic: string }[] }
+    const def = await inbox()
+    expect(def.collaborations.map(c => c.topic)).toEqual(['fresh-topic'])
+    expect([def.status.ignore_after_days, def.status.ignored_as_stale]).toEqual([5, 1])
+    expect((await inbox({ include_stale: true })).collaborations.map(c => c.topic).sort()).toEqual(['fresh-topic', 'stale-topic'])
+    type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown>; select: (t: unknown) => Promise<unknown> }
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+      const line = surface === 'terminal' ? 'stale-line' : 'dstale-line'
+      expect((await ui.findAll({ text: /1 with no activity for over 5 days ignored/ })).length).toBeGreaterThan(0)
+      expect((await ui.findAll({ text: /Stale topic/ })).length).toBe(0)
+      await ui.press({ key: `${line}-t` })
+      expect((await ui.findAll({ text: /Stale topic/ })).length).toBeGreaterThan(0)
+      await ui.press({ key: `${line}-t` })
+      expect((await ui.findAll({ text: /Stale topic/ })).length).toBe(0)
+      if (surface === 'desktop') {
+        // Settings: "Never ignore" brings it back everywhere.
+        await ui.press({ key: 'dsettings' })
+        await ui.select({ key: 'dstale', value: '0' })
+        expect((await inbox()).collaborations.length).toBe(2)
+      }
+    }
+  })
+
+  test('ignore after: 0 in config turns it off; a pending draft is never ignored', { options: { agentName: 'aicq', ignoreAfterDays: 0 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    engine(on, fake(staleRows()), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const topics = async () => (JSON.parse(String((await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never) as { result?: string }).result)) as { collaborations: { topic: string }[] }).collaborations.map(c => c.topic).sort()
+    expect(await topics()).toEqual(['fresh-topic', 'stale-topic'])
+  })
+
+  test('ignore after: a pending draft keeps a stale collaboration in view', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    engine(on, fake(staleRows()), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.tool.call({ tool: 'mcp__aicq__aicq_draft', to: 'Peer Agent', topic: 'stale-topic', body: 'my reply', in_reply_to: 'stale-1' } as never)
+    const res = JSON.parse(String((await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never) as { result?: string }).result)) as { collaborations: { topic: string }[] }
+    expect(res.collaborations.map(c => c.topic).sort()).toEqual(['fresh-topic', 'stale-topic'])
+  })
+
+  test('ignore after: after a long gap, only messages inside the limit notify', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { schema: 2, [`cursor:in:${PEER}:${V1_IN}`]: { at: iso(T0 - 10 * DAY), seen: [] } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([
+      v1Row({ message_id: 'old-while-away', topic: 'old-while-away', body: 'eight days old' }, iso(T0 - 8 * DAY)),
+      v1Row({ message_id: 'new-while-away', topic: 'new-while-away', body: 'one day old' }, iso(T0 - DAY)),
+    ]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    expect(sink.toasts.length).toBe(1)
+    expect(sink.toasts.some(t => /eight days old|Old while away/i.test(t))).toBe(false)
   })
 
   test('a failed read is degraded, never an empty all-clear', async ($, on) => {
