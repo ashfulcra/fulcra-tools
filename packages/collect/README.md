@@ -489,3 +489,7 @@ Markdown, with preview on by default. It needs a read-only internal Notion
 connection; setup currently requires a workspace owner. Linked pages,
 databases and attachments are marked as omitted. It is not in the 0.1.3
 installer. See [setup and limits](../notion/README.md).
+
+Notion setup probes check the live page selection and credentials before each
+request, including while the plugin is disabled. A selection change cancels the
+probe; malformed page content is never saved as an empty successful copy.

@@ -26,16 +26,18 @@ def _block(item, depth):
     elif kind == 'divider':
         body = '---'
     elif kind == 'code':
-        raw = plain_text(data.get('rich_text', []))
+        raw = plain_text(data.get('rich_text'))
         fence = '`' * max(3, max((len(v) for v in re.findall(r'`+', raw)), default=0) + 1)
         body = fence + '\n' + raw + '\n' + fence
     elif kind in {'paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item',
                   'numbered_list_item', 'to_do', 'toggle', 'quote', 'callout'}:
-        content = _escape(plain_text(data.get('rich_text', [])))
+        content = _escape(plain_text(data.get('rich_text')))
         prefix = {'heading_1': '# ', 'heading_2': '## ', 'heading_3': '### ',
                   'bulleted_list_item': '- ', 'numbered_list_item': '1. ', 'quote': '> ',
                   'callout': '> ', 'toggle': '- '}.get(kind, '')
         if kind == 'to_do':
+            if type(data.get('checked')) is not bool:
+                raise NotionError('Invalid Notion checkbox state.')
             prefix = '- [x] ' if data.get('checked') is True else '- [ ] '
         body = prefix + content
     else:

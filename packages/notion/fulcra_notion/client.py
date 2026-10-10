@@ -186,6 +186,8 @@ class NotionClient:
                     item['_children'] = self._children(identifier, depth + 1, seen)
                 output.append(item)
             if not data['has_more']:
+                if data.get('next_cursor') is not None:
+                    raise NotionError('Invalid terminal Notion pagination cursor.')
                 break
             cursor = data.get('next_cursor')
             if not isinstance(cursor, str) or not cursor or cursor in cursors:

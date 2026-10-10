@@ -67,8 +67,13 @@ Requests are spaced at least 0.35 seconds apart. A rate-limit response stops
 the run rather than retrying immediately. Earlier successfully uploaded pages
 keep their progress; the failing page's hash is never saved.
 
+Setup checks also stop if the page selection, connection or account transition
+changes during the check, even before the plugin is enabled.
+
 A missing, deleted, inaccessible, malformed or oversized page fails the run;
-it is not silently treated as an empty page. Notion and transport errors omit
+it is not silently treated as an empty page. Missing text/checkbox fields and
+inconsistent pagination fail rather than replacing a good copy with incomplete
+content. Notion and transport errors omit
 provider response text, tokens and private paths. Unsupported content gets a
 marker rather than a claim that the copy is complete.
 

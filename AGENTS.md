@@ -112,7 +112,11 @@ account, and captured settings/epoch/credentials checked before reads and
 under the shared configuration/account lease before uploads. Use the strict
 Collect token and bounded fresh credential checks. Its source-tree registration
 is not a claim that the released installer includes it; live provider and
-signed-installer verification remain separate release prerequisites.
+signed-installer verification remain separate release prerequisites. Setup
+health probes must capture the current persisted epoch and guard each read too;
+allow probes before enablement but abort changed selection/credentials. Reject
+missing known block fields and inconsistent pagination instead of saving a
+partial page as an empty success.
 
 All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow

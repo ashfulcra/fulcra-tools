@@ -183,3 +183,11 @@ def test_invalid_credentials_are_rejected_without_echoing_them():
         with pytest.raises(NotionError) as error:
             NotionClient(token)
         assert 'private-token' not in str(error.value)
+
+
+def test_terminal_pagination_requires_a_null_cursor():
+    def handler(request):
+        return httpx.Response(200, json=page() if request.url.path.startswith('/v1/pages/')
+                              else listing([], False, 'inconsistent-cursor'))
+    with client(handler) as api, pytest.raises(NotionError, match='pagination'):
+        api.snapshot(PAGE)

@@ -28,10 +28,10 @@ def _same(left, right):
     return isinstance(right, str) and hmac.compare_digest(left.encode(), right.encode())
 
 
-def _consent(settings, epoch, notion_token, fulcra_token=None, *, fresh=False):
+def _consent(settings, epoch, notion_token, fulcra_token=None, *, fresh=False, require_enabled=True):
     current = config.load()
     saved = current.plugin_settings.get(PLUGIN_ID, {})
-    if (current.account_transition or PLUGIN_ID not in current.enabled
+    if (current.account_transition or (require_enabled and PLUGIN_ID not in current.enabled)
             or current.plugin_epochs.get(PLUGIN_ID, '') != epoch
             or saved.get('page_links') != settings.get('page_links')
             or saved.get('dry_run', True) != settings.get('dry_run', True)
@@ -98,10 +98,17 @@ def run(ctx, *, client=None, writer=None):
 def health(ctx):
     try:
         selected = normalize_page_ids(ctx.config.get('page_links'))
-        with NotionClient(_token(ctx)) as client:
+        current = config.load()
+        allowed = partial(_consent, deepcopy(ctx.config),
+                          current.plugin_epochs.get(PLUGIN_ID, ''), _token(ctx),
+                          require_enabled=False)
+        allowed()
+        with NotionClient(_token(ctx), still_allowed=allowed) as client:
             preview = []
             for page_id in selected:
+                allowed()
                 snapshot = client.snapshot(page_id)
+                allowed()
                 render_snapshot(snapshot)
                 if len(preview) < 20:
                     preview.append({'title': snapshot.title,
@@ -110,6 +117,8 @@ def health(ctx):
     except (NotionError, ValueError):
         return HealthResult(False, 'Could not read every selected page. Check the page links '
                                   'and share each page with the Notion connection.')
+    except RuntimeError:
+        return HealthResult(False, 'The page selection or connection changed; run the check again.')
 
 
 PLUGIN = Plugin(

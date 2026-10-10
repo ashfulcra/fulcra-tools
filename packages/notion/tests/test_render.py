@@ -42,3 +42,15 @@ def test_attachment_fields_and_provider_metadata_are_not_exported():
 def test_render_limit_never_returns_a_truncated_document():
     with pytest.raises(NotionError, match='rendered'):
         render_snapshot(PageSnapshot(PAGE, 'Synthetic', ()), max_bytes=5)
+
+
+@pytest.mark.parametrize('item', [block('paragraph'), block('code'),
+    block('to_do', rich_text=[]), block('to_do', rich_text=[], checked='false')])
+def test_malformed_known_content_is_never_rendered_as_empty(item):
+    with pytest.raises(NotionError):
+        render_snapshot(PageSnapshot(PAGE, 'Synthetic', (item,)))
+
+
+def test_empty_text_and_an_explicit_false_checkbox_are_valid():
+    assert '- [ ]' in render_snapshot(PageSnapshot(PAGE, 'Synthetic', (
+        block('paragraph', rich_text=[]), block('to_do', rich_text=[], checked=False))))

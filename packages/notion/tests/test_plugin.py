@@ -137,3 +137,52 @@ def test_bad_preview_and_empty_selection_fail_before_reads():
         with pytest.raises((ValueError, RuntimeError)):
             collect_plugin.run(ctx, client=reader, writer=Writer())
         assert not reader.reads
+
+
+@pytest.mark.parametrize('change', ['selection', 'credential', 'epoch'])
+def test_health_probe_stops_after_live_configuration_changes(change, monkeypatch):
+    ctx = Context(preview=True)
+    ctx.config_epoch = ''  # Current setup route does not provide a worker epoch.
+    class Probe:
+        def __init__(self, guard):
+            self.guard = guard
+        def snapshot(self, page_id):
+            saved = config.load()
+            if change == 'selection':
+                saved.update_plugin_settings(ctx.plugin_id, {'page_links': ''})
+                config.save(saved)
+            elif change == 'credential':
+                monkeypatch.setattr(credentials, 'get_secret', lambda *a: 'replacement-token')
+            else:
+                config.invalidate_plugin_work(ctx.plugin_id)
+            self.guard()
+            return PageSnapshot(page_id, 'Synthetic page', ())
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    monkeypatch.setattr(collect_plugin, 'NotionClient',
+                        lambda token, **kwargs: Probe(kwargs.get('still_allowed', lambda: None)))
+    result = collect_plugin.health(ctx)
+    assert result.ok is False and not result.preview
+
+
+def test_health_probe_is_allowed_before_enablement(monkeypatch):
+    ctx = Context(preview=True)
+    saved = config.load()
+    saved.disable(ctx.plugin_id)
+    config.save(saved)
+    ctx.config_epoch = ''
+    class Probe:
+        def __init__(self, guard):
+            self.guard = guard
+        def snapshot(self, page_id):
+            self.guard()
+            return PageSnapshot(page_id, 'Synthetic page', ())
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    monkeypatch.setattr(collect_plugin, 'NotionClient',
+                        lambda token, **kwargs: Probe(kwargs.get('still_allowed', lambda: None)))
+    assert collect_plugin.health(ctx).ok is True
