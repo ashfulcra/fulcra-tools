@@ -316,6 +316,72 @@ describe('mod', () => {
     expect(res.includes('needs-reply') && res.includes('please review')).toBe(true)
   })
 
+  // The durable cursors are shared by every session on the machine and outlive each one; the inbox is
+  // per session. A new session (or a sibling that polled first) must still show what is already seen.
+  test('a new session shows messages an earlier or sibling session already saw, without re-notifying', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { schema: 2, [`cursor:in:${PEER}:${V1_IN}`]: { at: '2026-10-07T11:00:00Z', seen: ['seen-before'] } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([v1Row({ message_id: 'seen-before', body: 'already handled elsewhere', topic: 'review' }, '2026-10-07T11:00:00Z')]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const res = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never))
+    expect(res.includes('already handled elsewhere')).toBe(true)
+    expect(sink.toasts.length).toBe(0)
+    expect(sink.prompts.length).toBe(0)
+  })
+
+  test('a message that arrived while no session ran is still an arrival in the next one', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { schema: 2, [`cursor:in:${PEER}:${V1_IN}`]: { at: '2026-10-07T10:00:00Z', seen: ['older'] } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([
+      v1Row({ message_id: 'older', body: 'older one', topic: 'review' }, '2026-10-07T10:00:00Z'),
+      v1Row({ message_id: 'while-away', body: 'sent while you were away', topic: 'review' }, '2026-10-07T11:30:00Z'),
+    ]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    expect(sink.toasts.length).toBe(1)
+    const res = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never))
+    expect(res.includes('older one') && res.includes('sent while you were away')).toBe(true)
+  })
+
+  // The ledger's seen set is bounded (800 ids), so a handled id can age out. The session's 7-day display
+  // backfill must not hand such an old message back to the ledger as an arrival (codex-reviewer, PR #803).
+  test('display backfill never replays an evicted, already-handled message as an arrival', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const recent = Array.from({ length: 800 }, (_, i) => `recent-${i}`)
+    mock.store(on, { schema: 2, mode: 'respond-check', [`cursor:in:${PEER}:${V1_IN}`]: { at: '2026-10-07T11:00:00Z', seen: recent } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([
+      v1Row({ message_id: 'evicted-old', body: 'old request, handled long ago', topic: 'review' }, '2026-10-06T12:00:00Z'),
+      v1Row({ message_id: 'recent-799', body: 'latest handled', topic: 'review' }, '2026-10-07T11:00:00Z'),
+    ]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const res = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never))
+    expect(res.includes('old request, handled long ago')).toBe(true)
+    expect({ toasts: sink.toasts.length, prompts: sink.prompts.length }).toEqual({ toasts: 0, prompts: 0 })
+  })
+
+  test('a delayed message inside the ledger overlap is still an arrival', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { schema: 2, [`cursor:in:${PEER}:${V1_IN}`]: { at: '2026-10-07T11:00:00Z', seen: ['handled'] } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([
+      v1Row({ message_id: 'handled', body: 'handled', topic: 'review' }, '2026-10-07T11:00:00Z'),
+      // Stamped 5 minutes before the watermark but landed after it: inside the 10-minute overlap.
+      v1Row({ message_id: 'delayed', body: 'arrived late', topic: 'review' }, '2026-10-07T10:55:00Z'),
+    ]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    expect(sink.toasts.length).toBe(1)
+  })
+
   test('a failed read is degraded, never an empty all-clear', async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
@@ -439,8 +505,8 @@ describe('mod', () => {
     type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown>; input: (t: unknown) => Promise<unknown> }
     const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
     await ui.press({ key: `ds-new-mesh:${PEER}` })
-    await ui.input({ key: 'drename', text: 'Kristina' })
-    expect((await ui.findAll({ type: 'Button', text: /^Kristina$/ })).length).toBeGreaterThan(0)
+    await ui.input({ key: 'drename', text: 'Renamed Contact' })
+    expect((await ui.findAll({ type: 'Button', text: /^Renamed Contact$/ })).length).toBeGreaterThan(0)
     await ui.press({ key: `ds-open-mesh:${PEER}` })
     await ui.press({ key: 'dhide' })
     expect((await ui.findAll({ text: /1 hidden/ })).length).toBeGreaterThan(0)
