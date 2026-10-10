@@ -211,7 +211,11 @@ describe('universe', () => {
       JSON.stringify({ id: CODEX_THREAD, thread_name: 'Codex Coder', updated_at: '2026-10-05T00:00:00Z' }),
       '{torn',
     ].join('\n'))
-    expect(x.map(t => [t.id, t.title])).toEqual([[CODEX_THREAD, 'Codex Coder']])
+    expect(x.sessions.map(t => [t.id, t.title])).toEqual([[CODEX_THREAD, 'Codex Coder']])
+    // A torn line is counted, not silently dropped; blank lines are not records.
+    expect(x.bad).toBe(1)
+    expect(parseCodexIndex('\n\n').bad).toBe(0)
+    expect(parseCodexIndex('{"id":"not-a-thread"}\n{torn').bad).toBe(2)
     expect(deeplink({ app: 'claude', id: CLAUDE_LOCAL })).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
     expect(deeplink({ app: 'codex', id: CODEX_THREAD })).toBe(`codex://threads/${CODEX_THREAD}`)
   })
@@ -901,6 +905,42 @@ describe('mod', () => {
     }
     expect(opened().length).toBe(4)
   })
+
+  for (const [label, claudeFiles, codexIndex, expectWarn] of [
+    ['malformed-only Codex index', {}, '{torn', [/Codex threads: 1 unreadable index line/]],
+    ['mixed Codex index keeps the good thread', {}, `${JSON.stringify({ id: CODEX_THREAD, thread_name: 'ok' })}\n{torn`, [/Codex threads: 1 unreadable index line/]],
+    ['malformed Claude session file', { 'local_00000000-0000-4000-8000-0000000000f9.json': '{torn' }, '', [/Claude desktop sessions: 1 unreadable record/]],
+  ] as const) {
+    test(`universe: a ${label} is named as degraded, never an empty inventory`, async ($, on) => {
+      const clock = mock.clock(on, { now: T0 })
+      mock.store(on)
+      mock.env(on, { HOME: '/home/t' })
+      const S = '/home/t/Library/Application Support/Claude/claude-code-sessions/acct/org'
+      const files: Record<string, string> = {}
+      for (const [n, body] of Object.entries(claudeFiles)) files[`${S}/${n}`] = body as string
+      if (codexIndex) files['/home/t/.codex/session_index.jsonl'] = codexIndex
+      const isDir = (p: string) => Object.keys(files).some(f => f.startsWith(`${p}/`))
+      on('fs.exists', (_$: unknown, e: { path: string }) => ({ value: e.path in files || isDir(e.path) }))
+      on('fs.read', (_$: unknown, e: { path: string }) => (e.path in files ? { value: files[e.path]! } : { deny: 'ENOENT' }))
+      on('fs.list', (_$: unknown, e: { path: string }) => {
+        if (!isDir(e.path)) return { deny: 'ENOENT' }
+        const names = new Map<string, 'file' | 'dir'>()
+        for (const f of Object.keys(files)) {
+          if (!f.startsWith(`${e.path}/`)) continue
+          const [head, ...rest] = f.slice(e.path.length + 1).split('/')
+          names.set(head!, rest.length ? 'dir' : 'file')
+        }
+        return { value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
+      })
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(2000)
+      await $.command.run({ command: 'aicq', args: 'map' } as never)
+      await clock.advance(10)
+      const ui = await $.ui.mount({ plugin: 'aicq', surface: 'terminal', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+      for (const re of expectWarn) expect((await ui.findAll({ text: re })).length).toBeGreaterThan(0)
+    })
+  }
 
   for (const [first, second, verified] of [['lag', 'ok', true], ['trunc', 'ok', true], ['fail', 'ok', true], ['lag', 'lag', false]] as const) {
     test(`readback: first read ${first}, second ${second} -> ${verified ? 'verified' : 'UNVERIFIED'}; one write, two reads`, async ($, on) => {

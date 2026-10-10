@@ -175,24 +175,34 @@ export function parseClaudeSession(text: string, instance = ''): SessionRef | nu
   return { app: 'claude', id, cliId: str(d.cliSessionId) || null, title: str(d.title), cwd: str(d.cwd), at, archived: d.isArchived === true, instance }
 }
 
-/** Codex's `session_index.jsonl`: one row per rename, so the newest row per thread id wins. */
-export function parseCodexIndex(text: string): SessionRef[] {
+/**
+ * Codex's `session_index.jsonl`: one row per rename, so the newest row per thread id wins. `bad` counts
+ * nonblank lines that are not a thread row (torn, partly written or foreign), so a reader can say the
+ * inventory is partial instead of presenting what survived as complete.
+ */
+export function parseCodexIndex(text: string): { sessions: SessionRef[]; bad: number } {
   const byId = new Map<string, SessionRef>()
+  let bad = 0
   for (const line of text.split('\n')) {
+    if (!line.trim()) continue
     let d: Json
     try {
       d = JSON.parse(line) as Json
     } catch {
+      bad += 1
       continue
     }
     const id = str(d.id)
-    if (!/^[0-9a-f-]{36}$/.test(id)) continue
+    if (!/^[0-9a-f-]{36}$/.test(id)) {
+      bad += 1
+      continue
+    }
     const at = str(d.updated_at) || null
     const prev = byId.get(id)
     if (prev && prev.at && at && prev.at > at) continue
     byId.set(id, { app: 'codex', id, cliId: null, title: str(d.thread_name), cwd: '', at, archived: false, instance: '' })
   }
-  return [...byId.values()]
+  return { sessions: [...byId.values()], bad }
 }
 
 /**

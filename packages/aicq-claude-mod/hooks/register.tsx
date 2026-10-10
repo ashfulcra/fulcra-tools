@@ -188,6 +188,8 @@ async function v5Actors($: $, degraded: string[]): Promise<V5Actor[]> {
 async function localSessions($: $, degraded: string[]): Promise<SessionRef[]> {
   const h = await homeDir($)
   const out: SessionRef[] = []
+  // Records that exist but do not decode: counted and named, so a partial inventory never reads as complete.
+  let badClaude = 0
   // The main desktop app, then each extra instance (`~/.claude-instances/<name>`), which keeps its own records.
   const roots: { dir: string; instance: string }[] = [{ dir: `${h}/Library/Application Support/Claude/claude-code-sessions`, instance: '' }]
   try {
@@ -209,8 +211,10 @@ async function localSessions($: $, degraded: string[]): Promise<SessionRef[]> {
           const dir = `${root}/${account.name}/${org.name}`
           for (const f of (await $.fs.list(dir)) as unknown as { name: string; kind: string }[]) {
             if (f.kind !== 'file' || !/^[a-z]+_.*\.json$/.test(f.name)) continue
-            const ref = parseClaudeSession(String(await $.fs.read(`${dir}/${f.name}`)), instance)
+            const text = String(await $.fs.read(`${dir}/${f.name}`))
+            const ref = parseClaudeSession(text, instance)
             if (ref) out.push(ref)
+            else if (text.trim()) badClaude += 1
           }
         }
       }
@@ -220,10 +224,15 @@ async function localSessions($: $, degraded: string[]): Promise<SessionRef[]> {
   }
   const codexIndex = `${h}/.codex/session_index.jsonl`
   try {
-    if (await $.fs.exists(codexIndex)) out.push(...parseCodexIndex(String(await $.fs.read(codexIndex))))
+    if (await $.fs.exists(codexIndex)) {
+      const { sessions, bad } = parseCodexIndex(String(await $.fs.read(codexIndex)))
+      out.push(...sessions)
+      if (bad) degraded.push(`Codex threads: ${bad} unreadable index line${bad > 1 ? 's' : ''} (links for those threads are missing)`)
+    }
   } catch {
     degraded.push('Codex threads (unreadable)')
   }
+  if (badClaude) degraded.push(`Claude desktop sessions: ${badClaude} unreadable record${badClaude > 1 ? 's' : ''} (links for those sessions are missing)`)
   return out.sort((a, b) => ((a.at ?? '') < (b.at ?? '') ? 1 : -1))
 }
 
