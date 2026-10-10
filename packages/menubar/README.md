@@ -28,7 +28,10 @@ and does not claim the old process was upgraded.
 
 The beta is signed, notarized, and built for Apple silicon. It includes its
 Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. The 0.1.4 source bundle also includes the
-[local folder and transcript plugins](../local-sources/README.md); they are not in the published 0.1.3 installer. Chrome
+[local folder and transcript plugins](../local-sources/README.md) and
+[selected Notion pages](../notion/README.md); these are not in the published
+0.1.3 installer. Notion currently uses an internal connection token and page
+links, with preview on by default. Chrome
 Attention is an optional extension in the disk image with separate setup.
 [Release details and plugin status](../../docs/collect.md#plugin-status).
 

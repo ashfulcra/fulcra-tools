@@ -26,6 +26,8 @@ technical rationale; private team records belong in the team's own storage.
   troubleshooting, and the limits of experimental writeback.
 - [Local folders and transcripts](../packages/local-sources/README.md) — selected
   folders, supported formats, privacy boundaries, and sync limits.
+- [Notion pages](../packages/notion/README.md) — selected pages, connection setup,
+  previews and content that is omitted.
 - [`coord-DESIGN.md`](coord-DESIGN.md) — the design of the coord
   agent-coordination layer: why deterministic folds, what the engine owns.
 - [`coord/GET-ON-THE-BUS.md`](coord/GET-ON-THE-BUS.md) — the from-zero

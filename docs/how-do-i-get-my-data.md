@@ -58,6 +58,19 @@ needs no meeting-provider sign-in. This plugin is planned for the next Mac
 installer and is not in the 0.1.3 download.
 [Supported formats and limits](../packages/local-sources/README.md).
 
+## Notion pages
+
+The source tree includes `notion-pages`. A workspace owner creates an internal
+Notion connection with Read content access, grants it access to chosen pages,
+and gives you its token. Paste the token and a page link on each line into
+Collect, check the selected pages, and run a preview before turning uploads on.
+Collect checks every six hours and copies selected page content as Markdown
+under `vault/imports/notion/`. It leaves Notion unchanged and does not search
+the workspace. Linked pages, databases, synced blocks and attachments are marked
+as omitted; select a child page separately to copy it. This plugin is not in
+the 0.1.3 installer, and live verification remains pending.
+[Setup and limits](../packages/notion/README.md).
+
 ## Apple Reminders
 
 The `apple-reminders` plugin is in Collect 0.1.3. It reads selected lists through EventKit and synchronizes
@@ -335,7 +348,7 @@ shows up in Fulcra, with no machine-id suffix.
 
 **Last verified:** 2026-10-08 against the
 `fulcra_collect.plugins` entry points in
-`packages/{apple-notes,apple-reminders,attention,dayone,gmail,local-sources,media-helpers,purpleair,todoist}/pyproject.toml` and the
+`packages/{apple-notes,apple-reminders,attention,dayone,gmail,local-sources,media-helpers,notion,purpleair,todoist}/pyproject.toml` and the
 plugin definitions in `collect_plugin.py` / `collect_plugins.py`. If
 you add or remove a plugin, update this page.
 

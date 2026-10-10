@@ -73,8 +73,8 @@ installed; it still needs its own setup. An entry may be a scheduled importer,
 an export reader you run manually, a webhook receiver, or instructions for a
 separate browser extension.
 
-The 0.1.4 source tree has **25 plugin entries**: the same set plus Local folders
-and Obsidian, and Meeting transcript exports. They will become installer claims
+The 0.1.4 source tree has **26 plugin entries**: the same set plus Local folders
+and Obsidian, Meeting transcript exports, and selected Notion pages. They will become installer claims
 only after a new signed, notarized, Gatekeeper-accepted build is published.
 
 | Source | What is available |
@@ -86,6 +86,7 @@ only after a new signed, notarized, Gatekeeper-accepted build is published.
 | [Media](../packages/media-helpers/README.md) | 16 entries: Last.fm, Deezer, Trakt, Netflix CSV, Spotify extended history, YouTube takeout, Apple TV takeout, Apple Music takeout, generic RSS, Letterboxd, Goodreads, Apple Podcasts, Podcasts Time Machine recovery, local Apple TV, generic media CSV, and Plex/Jellyfin webhooks. |
 | [Gmail](../packages/gmail/README.md) | Read-only polling with local filters, selected messages in Fulcra Files, and optional agent-bus relay. Requires Google OAuth setup. |
 | [Local folders and meeting transcripts](../packages/local-sources/README.md) | Two source-tree plugins with a native folder picker, preview, bounded additive sync, and no provider sign-in. Planned for the next installer; not in the 0.1.3 download. |
+| [Notion pages](../packages/notion/README.md) | Selected page content copied as Markdown. Preview on by default; internal connection setup requires a workspace owner. Source only, with live verification pending. |
 | [PurpleAir](how-do-i-get-my-data.md#air-quality-purpleair) | Readings from the cloud API or sensors on your local network. |
 | [Fulcra Attention](../packages/attention/README.md) | A setup entry for the separate Chrome extension. The extension sends browsing activity directly to Fulcra and signs in separately. Its install folder is included in the disk image. |
 
@@ -154,6 +155,7 @@ is one producer of this context, and is not needed by the agents reading it.
 | [`packages/dayone`](../packages/dayone) | Day One journal entries (live SQLite read or one-shot export-zip upload). |
 | [`packages/gmail`](../packages/gmail/README.md) | Filtered Gmail messages copied into Fulcra Files, with optional bus relay. |
 | [`packages/local-sources`](../packages/local-sources/README.md) | Selected document folders and transcript export folders copied into Fulcra Files without a provider account. |
+| [`packages/notion`](../packages/notion/README.md) | Explicitly selected Notion page snapshots with read-only setup and preview. |
 | [`packages/purpleair`](../packages/purpleair) | Air-quality readings from an API or local sensor. |
 | [`attention`](../packages/attention) | Browsing-attention capture: a relayless Chrome MV3 extension that POSTs tab/idle events **directly to the Fulcra API**. Collect only shows an install-the-extension pointer — there is no daemon relay route or pairing. |
 | [`packages/csv-importer`](../packages/csv-importer) | Generic CSV → Fulcra annotation importer (library + CLI). The same logic the `generic-csv` Collect plugin uses. |

@@ -40,5 +40,6 @@ BUNDLED_PLUGINS: tuple[tuple[str, str], ...] = (
     ("local-folders", "fulcra_local_sources.collect_plugins:LOCAL_FOLDERS_PLUGIN"),
     ("meeting-transcripts",
      "fulcra_local_sources.collect_plugins:MEETING_TRANSCRIPTS_PLUGIN"),
+    ("notion-pages", "fulcra_notion.collect_plugin:PLUGIN"),
     ("purpleair", "fulcra_purpleair.collect_plugin:PLUGIN"),
 )

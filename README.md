@@ -130,6 +130,7 @@ is not a requirement to run every piece together.
 | [dayone](packages/dayone/README.md) | Imports selected journal entries from a local Day One database or JSON export. |
 | [gmail](packages/gmail/README.md) | Read-only Gmail polling, filtering, file uploads, and optional bus relay. |
 | [local-sources](packages/local-sources/README.md) | Selected local folders, Obsidian vaults, and exported meeting transcripts, with no provider sign-in. |
+| [notion](packages/notion/README.md) | Selected Notion pages copied to Fulcra Files; read-only preview and internal connection setup. Source only; not in the 0.1.3 installer. |
 | [media-helpers](packages/media-helpers/README.md) | Media-history importers for APIs, exports, local libraries, feeds, and webhooks. |
 | [csv-importer](packages/csv-importer/README.md) | Maps CSV columns into Fulcra records with import checks and deduplication. |
 | [netflix-skill](packages/netflix-skill/README.md) | An agent-led Netflix viewing-history import and optional sharing workflow. |
