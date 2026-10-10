@@ -70,7 +70,7 @@ type Config = {
   everyMs: number; defaultMode: ResponseMode; agentName: string; meshOutbox: string; workspaceNames: string[]; fulcraCli: string
 }
 
-// Module state: starts over on reload; cursors, mode and wake history persist in $.store.
+// Module state: starts over on reload (view cursors included); the arrival-ledger cursors, mode and wake history persist in $.store.
 const cfg: Config = { coordTeam: 'fulcra', coordEngine: '~/.local/bin/coord-engine', owner: 'ash', everyMs: 120_000, defaultMode: 'notify', agentName: '', meshOutbox: '', workspaceNames: [], fulcraCli: '~/.local/bin/fulcra' }
 let cli = ''
 let me = ''
@@ -82,6 +82,13 @@ let tick = 0
 let polling = false
 let wakeQueued = false
 const quietReads = new Map<string, number>()
+// Two cursors per source, because the inbox lives in this session's $.state while $.store is shared by
+// every session on the machine and outlives each one:
+// - viewCursors (here, per session) decide what enters THIS session's inbox. They start empty, so each
+//   new session backfills its own window instead of inheriting "seen" marks for messages it never held.
+// - the durable `cursor:<key>` in $.store is the shared arrival ledger: a message notifies or wakes only
+//   while no session (this one, an earlier one, or a sibling) has recorded it yet.
+const viewCursors = new Map<string, Cursor>()
 // Ids this agent sent (persisted): what makes a thread this agent's own.
 let sentIds: string[] = []
 let theme = ''
@@ -375,10 +382,17 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
     await refreshTopology($, degraded)
     const now = await nowIso($)
     const cursors = new Map<string, Cursor>()
+    const windows = new Map<string, Cursor>()
     const srcs = sourcesFor(now, new Map())
-    for (const src of srcs) cursors.set(src.key, ((await $.store.get(`cursor:${src.key}`)) as Cursor | undefined) ?? EMPTY_CURSOR)
+    for (const src of srcs) {
+      const ledger = ((await $.store.get(`cursor:${src.key}`)) as Cursor | undefined) ?? EMPTY_CURSOR
+      const viewAt = (viewCursors.get(src.key) ?? EMPTY_CURSOR).at
+      cursors.set(src.key, ledger)
+      // One read serves both cursors, so it starts at the earlier of the two (an empty one means the lookback).
+      windows.set(src.key, { at: viewAt === null || ledger.at === null ? null : viewAt < ledger.at ? viewAt : ledger.at, seen: [] })
+    }
     // Active sources every tick; long-quiet ones every QUIET_EVERY ticks (a manual Check now reads all).
-    const work = sourcesFor(now, cursors).filter(src => forceAll || (quietReads.get(src.key) ?? 0) < QUIET_AFTER || tick % QUIET_EVERY === 0)
+    const work = sourcesFor(now, windows).filter(src => forceAll || (quietReads.get(src.key) ?? 0) < QUIET_AFTER || tick % QUIET_EVERY === 0)
 
     const results: SourceRead[] = []
     for (let i = 0; i < work.length; i += POOL) {
@@ -393,6 +407,9 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
         quietReads.set(src.key, 0)
         continue
       }
+      const viewBefore = viewCursors.get(src.key) ?? EMPTY_CURSOR
+      const shown = advance(viewBefore, msgs)
+      viewCursors.set(src.key, incomplete ? { at: viewBefore.at, seen: shown.cursor.seen } : shown.cursor)
       const before = cursors.get(src.key) ?? EMPTY_CURSOR
       const { fresh, cursor: advanced } = advance(before, msgs)
       // Unreadable records are reported once each (by record id), then remembered, never silently dropped.
@@ -404,9 +421,9 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
       // message later is an arrival, not quiet backfill.
       const cursor = incomplete ? { at: before.at, seen } : { at: advanced.at ?? (before.at === null ? now : null), seen }
       if (incomplete) degraded.push(`${src.label} (incomplete read)`)
-      quietReads.set(src.key, fresh.length || incomplete || newBad.length ? 0 : (quietReads.get(src.key) ?? 0) + 1)
+      quietReads.set(src.key, shown.fresh.length || incomplete || newBad.length ? 0 : (quietReads.get(src.key) ?? 0) + 1)
       await $.store.set(`cursor:${src.key}`, cursor)
-      added.push(...fresh)
+      added.push(...shown.fresh)
       if (before.at !== null) arrived.push(...fresh.filter(m => m.direction === 'in'))
     }
 

@@ -316,6 +316,38 @@ describe('mod', () => {
     expect(res.includes('needs-reply') && res.includes('please review')).toBe(true)
   })
 
+  // The durable cursors are shared by every session on the machine and outlive each one; the inbox is
+  // per session. A new session (or a sibling that polled first) must still show what is already seen.
+  test('a new session shows messages an earlier or sibling session already saw, without re-notifying', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { schema: 2, [`cursor:in:${PEER}:${V1_IN}`]: { at: '2026-10-07T11:00:00Z', seen: ['seen-before'] } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([v1Row({ message_id: 'seen-before', body: 'already handled elsewhere', topic: 'review' }, '2026-10-07T11:00:00Z')]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    const res = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never))
+    expect(res.includes('already handled elsewhere')).toBe(true)
+    expect(sink.toasts.length).toBe(0)
+    expect(sink.prompts.length).toBe(0)
+  })
+
+  test('a message that arrived while no session ran is still an arrival in the next one', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on, { schema: 2, [`cursor:in:${PEER}:${V1_IN}`]: { at: '2026-10-07T10:00:00Z', seen: ['older'] } })
+    mock.env(on, { HOME: '/home/t' })
+    const sink = sinkOf()
+    engine(on, fake([
+      v1Row({ message_id: 'older', body: 'older one', topic: 'review' }, '2026-10-07T10:00:00Z'),
+      v1Row({ message_id: 'while-away', body: 'sent while you were away', topic: 'review' }, '2026-10-07T11:30:00Z'),
+    ]), sink)
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    expect(sink.toasts.length).toBe(1)
+    const res = JSON.stringify(await $.tool.call({ tool: 'mcp__aicq__aicq_inbox' } as never))
+    expect(res.includes('older one') && res.includes('sent while you were away')).toBe(true)
+  })
+
   test('a failed read is degraded, never an empty all-clear', async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
