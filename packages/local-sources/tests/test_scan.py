@@ -61,3 +61,31 @@ def test_scan_fails_closed_when_file_or_byte_limit_is_exceeded(tmp_path: Path):
             allowed_extensions={".md"},
             limits=ScanLimits(max_files=10, max_file_bytes=10, max_total_bytes=4),
         )
+
+
+@pytest.mark.parametrize("name", ["token.json", "credentials.yaml", "service_account.json",
+                                  "client_secret_synthetic.json", "oauth_token.json",
+                                  "access_token.toml", "refresh_token.json"])
+def test_scan_excludes_common_credential_variants(tmp_path, name):
+    (tmp_path / name).write_text("synthetic credential fixture")
+    result = scan_tree(tmp_path, allowed_extensions={".json", ".yaml", ".toml"})
+    assert not result.files
+    assert result.skipped_by_reason == {"likely-secret": 1}
+
+
+def test_scan_rejects_non_regular_files_without_waiting(tmp_path):
+    import os
+    import subprocess
+    import sys
+    os.mkfifo(tmp_path / "pipe.txt")
+    script = ("from pathlib import Path; from fulcra_local_sources.scan import scan_tree; "
+              "import sys; r=scan_tree(Path(sys.argv[1]), allowed_extensions={'.txt'}); "
+              "assert not r.files; assert r.skipped_by_reason == {'non-regular': 1}")
+    subprocess.run([sys.executable, "-c", script, str(tmp_path)], check=True, timeout=3)
+
+
+def test_scan_stops_at_traversal_budget_even_when_files_are_unsupported(tmp_path):
+    for name in ("a.exe", "b.exe"):
+        (tmp_path / name).write_bytes(b"synthetic")
+    with pytest.raises(ValueError, match="traversal entry limit"):
+        scan_tree(tmp_path, allowed_extensions={".md"}, limits=ScanLimits(max_entries=1))

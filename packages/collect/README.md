@@ -31,6 +31,11 @@ and [local-sources](../local-sources/README.md) expose plugin entry points for i
 have standalone CLIs. A connector can adopt the plugin contract to reuse
 scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
 
+The local-source plugins bind uploads to Collect's signed-in account. They check
+live configuration before each upload and copy verified regular-file snapshots;
+changing a selection or disabling a source stops its pending work. Their
+[README](../local-sources/README.md) explains the limits and source-install setup.
+
 ## What it does
 
 * **Discovers plugins.** Any installed Python distribution that

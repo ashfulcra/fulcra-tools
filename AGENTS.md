@@ -77,6 +77,17 @@ configuration saves and automatic token refresh must never clear it.
 
 ## Public repository privacy
 
+**Selected local-source uploads:** use Collect's captured Fulcra token, never
+the CLI's independently stored account. Partition content-hash state by the
+authenticated destination account. Before each source read and upload, validate
+the captured plugin epoch, source/collection selection, preview mode, enabled
+state and account-transition gate. Hold the shared configuration/account lease
+through the final consent check and upload. Use descriptor-anchored no-follow
+regular-file reads and a private snapshot whose identity, size and hash match
+the scan; consumers upload or render that snapshot instead of reopening the
+source pathname. Preserve file/traversal byte limits and suppress private paths
+and credentials from complete error tracebacks.
+
 All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow
 [`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree

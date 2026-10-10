@@ -42,6 +42,9 @@ Obsidian Markdown plus common attachments. It does not follow links or upload
 hidden, generated, likely credential, unsupported, or oversized files. Source
 deletions do not delete Fulcra copies. This plugin is planned for the next Mac
 installer and is not in the 0.1.3 download.
+Uploads use Collect's signed-in account. Changing the selected folder or account,
+turning on preview, or disabling the plugin stops pending uploads. Files changed
+since the scan are left for the next run.
 [Setup and limits](../packages/local-sources/README.md).
 
 ## Meeting transcripts

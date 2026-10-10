@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable, Iterable
 
 from .scan import ScannedFile
+from .source_io import snapshot
 
 
 @dataclass(frozen=True)
@@ -16,8 +18,8 @@ class SyncResult:
     previewed: int = 0
 
 
-def _state_key(item: ScannedFile) -> str:
-    digest = hashlib.sha256(item.relative_path.as_posix().encode("utf-8")).hexdigest()
+def _state_key(item: ScannedFile, namespace: str) -> str:
+    digest = hashlib.sha256((namespace + "\0" + item.relative_path.as_posix()).encode()).hexdigest()
     return f"file:{digest}"
 
 
@@ -42,6 +44,9 @@ def sync_files(
     render_text: Callable[[ScannedFile], str] | None = None,
     force_markdown: bool = False,
     dry_run: bool = False,
+    namespace: str = "local",
+    still_allowed=None,
+    mutation_scope=nullcontext,
 ) -> SyncResult:
     planned = [
         (item, _remote_path(destination_root, item, force_markdown=force_markdown))
@@ -52,7 +57,7 @@ def sync_files(
         raise ValueError("two source files map to the same destination")
     uploaded = unchanged = previewed = 0
     for item, remote in planned:
-        key = _state_key(item)
+        key = _state_key(item, namespace)
         prior = state_get(key, None)
         if isinstance(prior, dict) and prior.get("digest") == item.digest and prior.get("remote") == remote:
             unchanged += 1
@@ -60,17 +65,18 @@ def sync_files(
         if dry_run:
             previewed += 1
             continue
-        if render_text is None:
-            writer.upload_file(item.path, remote)
-        else:
-            writer.write_text(remote, render_text(item))
-        state_set(
-            key,
-            {
-                "digest": item.digest,
-                "relative_path": item.relative_path.as_posix(),
-                "remote": remote,
-            },
-        )
+        with mutation_scope():
+            if still_allowed is not None:
+                still_allowed()
+            with snapshot(item) as staged:
+                if render_text is None:
+                    writer.upload_file(staged.path, remote)
+                else:
+                    content = render_text(staged)
+                    if still_allowed is not None:
+                        still_allowed()
+                    writer.write_text(remote, content)
+            state_set(key, {"digest": item.digest,
+                           "relative_path": item.relative_path.as_posix(), "remote": remote})
         uploaded += 1
     return SyncResult(uploaded=uploaded, unchanged=unchanged, previewed=previewed)

@@ -61,13 +61,25 @@ removed. The source export is never changed.
 
 - Nothing is selected or enabled by default.
 - Traversal never follows symbolic links.
+- Only regular files are read. Each upload uses a private temporary copy whose
+  file identity, size, and hash match the scan. A replacement, symlink swap, or
+  edit after scanning stops the run; **Run Now** scans the current folder again.
 - Hidden files and folders, version-control metadata, generated dependency
-  folders, and likely credential files are excluded.
+  folders, and likely credential files are excluded. This includes common
+  `credentials`, `token`, `service_account`, and `client_secret` filename variants.
+  Filename filtering cannot recognize every secret inside an ordinary document;
+  choose a folder whose contents you intend to copy.
 - A run is limited to 5,000 eligible files, 50 MiB per file, and 2 GiB total.
+  Traversal stops after 100,000 directory entries.
   Exceeding the file or total limit stops the run instead of silently taking a
   partial snapshot. Oversized individual files are reported as skipped.
 - Content hashes prevent unchanged files from uploading again. A changed file
-  replaces its own remote path after a successful upload.
+  replaces its own remote path after a successful upload. Hash state is separate
+  for each Fulcra account, so signing into another account does not skip its import.
+- Uploads use the Fulcra account signed into Collect, independent of any CLI
+  account. Changing the source, collection name, preview setting, enabled state,
+  or account invalidates pending work. An upload already holding the shared
+  configuration lease finishes before the change is saved; subsequent uploads stop.
 - Source deletions never delete the Fulcra copy. Moving or renaming a source
   file can leave the earlier copy in Fulcra.
 - The destination is additive and owned by the plugin. Do not use the same
@@ -79,10 +91,13 @@ removed. The source export is never changed.
 From the repository root:
 
 ```bash
-uv sync --all-packages
-uv run --package fulcra-local-sources pytest
-uv run --all-packages fulcra-collect daemon
+uv sync --all-packages --extra dev --extra macos
+uv run --all-packages --extra dev --extra macos pytest packages/local-sources/tests
+uv run --all-packages --extra macos fulcra-collect daemon
 ```
+
+On Linux, leave out `--extra macos`. The native folder chooser requires macOS;
+the scanner, upload engine, and tests do not.
 
 The package registers `local-folders` and `meeting-transcripts` in the
 `fulcra_collect.plugins` entry-point group. The macOS bundle gets the package

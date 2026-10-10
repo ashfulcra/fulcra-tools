@@ -5,6 +5,12 @@ from unittest.mock import Mock
 import pytest
 
 from fulcra_local_sources import collect_plugins
+from fulcra_collect import config as collect_config
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path / "private-config"))
 
 
 class Context:
@@ -14,6 +20,14 @@ class Context:
         self.log = Mock()
         self._state = {}
         self.progress_events = []
+        saved = collect_config.load()
+        saved.enable(plugin_id)
+        saved.update_plugin_settings(plugin_id, config)
+        collect_config.save(saved)
+        self.config_epoch = saved.plugin_epochs[plugin_id]
+
+    def fulcra_token(self):
+        return "synthetic-token"
 
     def kv_get(self, key, default=None):
         return self._state.get(key, default)
@@ -26,6 +40,8 @@ class Context:
 
 
 class Writer:
+    namespace = "synthetic-account"
+
     def __init__(self):
         self.uploads = []
         self.text = []
@@ -119,3 +135,45 @@ def test_transcript_read_failure_does_not_expose_absolute_path(tmp_path: Path):
 def test_collection_name_must_have_a_safe_component(name: str):
     with pytest.raises(ValueError, match="collection name"):
         collect_plugins.collection_slug(name)
+
+
+@pytest.mark.parametrize("change", ["disable", "source_path", "collection_name", "dry_run",
+                                    "account_transition", "epoch"])
+def test_changed_consent_stops_in_flight_upload(tmp_path, change):
+    (tmp_path / "brief.md").write_text("synthetic selected data")
+    ctx = Context("local-folders", {"source_path": str(tmp_path),
+                                    "collection_name": "chosen", "dry_run": False})
+    writer = Writer()
+
+    def progress(**fields):
+        if fields.get("stage") != "scanned":
+            return
+        cfg = collect_config.load()
+        if change == "disable":
+            cfg.disable("local-folders")
+        elif change == "account_transition":
+            try:
+                with collect_config.fulcra_account_transition():
+                    raise RuntimeError("synthetic interrupted sign-in")
+            except RuntimeError:
+                pass
+            return
+        elif change == "epoch":
+            cfg.rotate_plugin_epoch("local-folders")
+        else:
+            value = True if change == "dry_run" else "different"
+            cfg.update_plugin_settings("local-folders", {change: value})
+        collect_config.save(cfg)
+
+    ctx.progress = progress
+    with pytest.raises(RuntimeError, match="configuration changed"):
+        collect_plugins.run_local_folders(ctx, writer=writer)
+    assert not writer.uploads
+    assert not ctx._state
+
+
+def test_preview_requires_an_actual_boolean(tmp_path):
+    ctx = Context("local-folders", {"source_path": str(tmp_path),
+                                    "collection_name": "chosen", "dry_run": "false"})
+    with pytest.raises(ValueError, match="Preview only"):
+        collect_plugins.run_local_folders(ctx, writer=Writer())

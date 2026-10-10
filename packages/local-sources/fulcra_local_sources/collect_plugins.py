@@ -4,8 +4,12 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from pathlib import Path
+from functools import partial
+from copy import deepcopy
 
 from fulcra_collect.plugin import HealthResult, Plugin, RunContext, Setting, SetupStep
+from fulcra_collect import config as collect_config
+from fulcra_collect.config_leases import task_mutation_scope
 
 from .scan import ScanResult, scan_tree
 from .sync import SyncResult, sync_files
@@ -70,6 +74,17 @@ def meeting_transcripts_health(ctx: RunContext) -> HealthResult:
     return _health(ctx, extensions=TRANSCRIPT_EXTENSIONS, noun="transcripts")
 
 
+def _still_allowed(plugin_id, settings, epoch):
+    current = collect_config.load()
+    now = current.plugin_settings.get(plugin_id, {})
+    if (current.account_transition or plugin_id not in current.enabled
+            or current.plugin_epochs.get(plugin_id, "") != epoch
+            or any(now.get(key, False if key == "dry_run" else None)
+                   != settings.get(key, False if key == "dry_run" else None)
+                   for key in ("source_path", "collection_name", "dry_run"))):
+        raise RuntimeError("Collect configuration changed; run the selected source again")
+
+
 def _run(
     ctx: RunContext,
     *,
@@ -79,24 +94,34 @@ def _run(
     render_text=None,
     force_markdown: bool = False,
 ) -> SyncResult:
+    preview = ctx.config.get("dry_run", False)
+    if type(preview) is not bool:
+        raise ValueError("Preview only must be on or off")
+    allowed = partial(_still_allowed, ctx.plugin_id, deepcopy(ctx.config), ctx.config_epoch)
+    allowed()
     collection = collection_slug(ctx.config.get("collection_name"))
-    scan = scan_tree(_source(ctx), allowed_extensions=extensions)
+    scan = scan_tree(_source(ctx), allowed_extensions=extensions, still_allowed=allowed)
     ctx.progress(
         stage="scanned",
         eligible=len(scan.files),
         skipped=sum(scan.skipped_by_reason.values()),
         bytes=scan.total_bytes,
     )
-    result = sync_files(
-        scan.files,
-        writer=writer,
-        state_get=ctx.kv_get,
-        state_set=ctx.kv_set,
-        destination_root=f"{destination}/{collection}",
-        render_text=render_text,
-        force_markdown=force_markdown,
-        dry_run=bool(ctx.config.get("dry_run", False)),
-    )
+    owns_writer = writer is None and not preview
+    if owns_writer:
+        writer = VaultWriter(ctx.fulcra_token())
+    try:
+        with task_mutation_scope():
+            allowed()
+            namespace = "preview" if preview else writer.namespace
+        result = sync_files(scan.files, writer=writer,
+            state_get=ctx.kv_get, state_set=ctx.kv_set,
+            destination_root=f"{destination}/{collection}", render_text=render_text,
+            force_markdown=force_markdown, dry_run=preview, namespace=namespace,
+            still_allowed=allowed, mutation_scope=task_mutation_scope)
+    finally:
+        if owns_writer:
+            writer.close()
     ctx.log.info(
         "%s: eligible=%d uploaded=%d unchanged=%d previewed=%d skipped=%d",
         ctx.plugin_id,
@@ -120,7 +145,7 @@ def run_local_folders(ctx: RunContext, *, writer=None) -> SyncResult:
         ctx,
         extensions=LOCAL_FOLDER_EXTENSIONS,
         destination="/vault/imports/local-folders",
-        writer=writer or VaultWriter(),
+        writer=writer,
     )
 
 
@@ -138,7 +163,7 @@ def run_meeting_transcripts(ctx: RunContext, *, writer=None) -> SyncResult:
         ctx,
         extensions=TRANSCRIPT_EXTENSIONS,
         destination="/vault/meetings/imported",
-        writer=writer or VaultWriter(),
+        writer=writer,
         render_text=render,
         force_markdown=True,
     )

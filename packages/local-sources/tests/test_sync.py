@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 from fulcra_local_sources.scan import scan_tree
 from fulcra_local_sources.sync import sync_files
@@ -125,3 +126,57 @@ def test_two_transcript_extensions_cannot_overwrite_the_same_remote_path(tmp_pat
         )
     assert not writer.text
     assert not state.values
+
+
+@pytest.mark.parametrize("replace_parent", [False, True])
+def test_changed_path_cannot_upload_a_symlink_target(tmp_path, replace_parent):
+    root = tmp_path / "chosen"
+    root.mkdir()
+    (root / "notes").mkdir()
+    source = root / "notes" / "brief.md"
+    source.write_text("chosen content")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "brief.md").write_text("unselected content")
+    files = scan_tree(root, allowed_extensions={".md"}).files
+    if replace_parent:
+        source.unlink()
+        source.parent.rmdir()
+        source.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        source.unlink()
+        source.symlink_to(outside / "brief.md")
+    state = MemoryState()
+    writer = RecordingWriter()
+    with pytest.raises(ValueError, match="source changed|source unavailable"):
+        sync_files(files, writer=writer, state_get=state.get, state_set=state.set,
+                   destination_root="/vault/imports/chosen")
+    assert not writer.uploads
+    assert not state.values
+
+
+def test_file_growth_after_scan_cannot_upload_unscanned_content(tmp_path):
+    source = tmp_path / "brief.md"
+    source.write_text("small")
+    files = scan_tree(tmp_path, allowed_extensions={".md"}).files
+    source.write_text("unscanned" * 100)
+    state = MemoryState()
+    writer = RecordingWriter()
+    with pytest.raises(ValueError, match="source changed"):
+        sync_files(files, writer=writer, state_get=state.get, state_set=state.set,
+                   destination_root="/vault/imports/chosen")
+    assert not writer.uploads
+    assert not state.values
+
+
+def test_same_files_are_uploaded_separately_for_each_fulcra_account(tmp_path):
+    (tmp_path / "brief.md").write_text("synthetic")
+    files = scan_tree(tmp_path, allowed_extensions={".md"}).files
+    state = MemoryState()
+    writer = RecordingWriter()
+    counts = []
+    for account in ("synthetic-a", "synthetic-b", "synthetic-a"):
+        result = sync_files(files, writer=writer, state_get=state.get, state_set=state.set,
+                            destination_root="/vault/imports/chosen", namespace=account)
+        counts.append((result.uploaded, result.unchanged))
+    assert counts == [(1, 0), (1, 0), (0, 1)]

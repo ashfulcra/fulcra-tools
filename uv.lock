@@ -646,6 +646,7 @@ source = { editable = "packages/local-sources" }
 dependencies = [
     { name = "fulcra-collect" },
     { name = "fulcra-common" },
+    { name = "httpx" },
 ]
 
 [package.optional-dependencies]
@@ -658,6 +659,7 @@ dev = [
 requires-dist = [
     { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
