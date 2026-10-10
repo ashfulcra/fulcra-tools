@@ -471,8 +471,8 @@ describe('mod', () => {
     type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown>; input: (t: unknown) => Promise<unknown> }
     const ui = await $.ui.mount({ plugin: 'aicq', surface: 'desktop', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
     await ui.press({ key: `ds-new-mesh:${PEER}` })
-    await ui.input({ key: 'drename', text: 'Kristina' })
-    expect((await ui.findAll({ type: 'Button', text: /^Kristina$/ })).length).toBeGreaterThan(0)
+    await ui.input({ key: 'drename', text: 'Renamed Contact' })
+    expect((await ui.findAll({ type: 'Button', text: /^Renamed Contact$/ })).length).toBeGreaterThan(0)
     await ui.press({ key: `ds-open-mesh:${PEER}` })
     await ui.press({ key: 'dhide' })
     expect((await ui.findAll({ text: /1 hidden/ })).length).toBeGreaterThan(0)
