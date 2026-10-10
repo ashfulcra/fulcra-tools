@@ -82,7 +82,9 @@ the CLI's independently stored account. Use `RunContext.collect_token()` for
 selected-source uploads; its missing/expired token requires reconnecting in Collect.
 The legacy `fulcra_token()` helper still supports independent CLI/env fallback
 and is unsuitable for account-bound sources. Capture and compare the stored
-token as well as the epoch before uploading. Do not re-canonicalize a selected
+token as well as the epoch before uploading. Use the bounded
+`credentials.get_user_secret_fresh()` read for capture and final upload guards;
+the ordinary cached reader cannot detect another process changing the token. Do not re-canonicalize a selected
 folder path on subsequent scans: substituted ancestor/root links must fail closed.
 Partition content-hash state by the
 authenticated destination account. Before each source read and upload, validate

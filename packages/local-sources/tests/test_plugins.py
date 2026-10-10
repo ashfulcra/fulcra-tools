@@ -11,7 +11,8 @@ from fulcra_collect import config as collect_config, credentials as collect_cred
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path / "private-config"))
-    monkeypatch.setattr(collect_credentials, "get_user_secret", lambda key: "synthetic-token")
+    collect_credentials._clear_caches()
+    monkeypatch.setattr(collect_credentials, "_keyring_get", lambda service, key: "synthetic-token")
 
 
 class Context:
@@ -184,10 +185,12 @@ def test_unannounced_token_replacement_stops_upload(tmp_path, monkeypatch):
     (tmp_path / "brief.md").write_text("synthetic")
     ctx = Context("local-folders", {"source_path": str(tmp_path), "collection_name": "Test"})
     writer = Writer()
+    assert collect_credentials.get_user_secret("bearer-token") == "synthetic-token"
     scan = collect_plugins.scan_tree
     def changed(*args, **kwargs):
         result = scan(*args, **kwargs)
-        monkeypatch.setattr(collect_credentials, "get_user_secret", lambda key: "different-account")
+        monkeypatch.setattr(collect_credentials, "_keyring_get", lambda service, key: "different-account")
+        assert collect_credentials.get_user_secret("bearer-token") == "synthetic-token"
         return result
     monkeypatch.setattr(collect_plugins, "scan_tree", changed)
     with pytest.raises(RuntimeError, match="configuration changed"):

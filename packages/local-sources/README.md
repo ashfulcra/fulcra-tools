@@ -108,3 +108,6 @@ Selected local-source uploads require Collect's own current sign-in. If it is
 missing or expired, reconnect to Fulcra in Collect; these sources do not fall
 back to the CLI's account or refresh through it. Replacing a selected folder or
 its parent with a symbolic link stops the scan; choose the folder again.
+
+Upload consent checks re-read the stored account token with a bounded Keychain
+read, so a worker cannot miss a token replacement made by another process.

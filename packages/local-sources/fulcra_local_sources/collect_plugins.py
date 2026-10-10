@@ -75,10 +75,10 @@ def meeting_transcripts_health(ctx: RunContext) -> HealthResult:
     return _health(ctx, extensions=TRANSCRIPT_EXTENSIONS, noun="transcripts")
 
 
-def _still_allowed(plugin_id, settings, epoch, token=None):
+def _still_allowed(plugin_id, settings, epoch, token=None, *, fresh=False):
     current = collect_config.load()
     now = current.plugin_settings.get(plugin_id, {})
-    current_token = collect_credentials.get_user_secret("bearer-token") if token else None
+    current_token = collect_credentials.get_user_secret_fresh("bearer-token") if token and fresh else token
     if ((token is not None and (not current_token or not hmac.compare_digest(token, current_token)))
             or current.account_transition or plugin_id not in current.enabled
             or current.plugin_epochs.get(plugin_id, "") != epoch
@@ -105,6 +105,7 @@ def _run(
         raise ValueError("Reconnect to Fulcra in Collect before uploading.")
     allowed = partial(_still_allowed, ctx.plugin_id, deepcopy(ctx.config), ctx.config_epoch, token)
     allowed()
+    upload_allowed = partial(allowed, fresh=True)
     collection = collection_slug(ctx.config.get("collection_name"))
     scan = scan_tree(_source(ctx), allowed_extensions=extensions, still_allowed=allowed)
     ctx.progress(
@@ -118,13 +119,13 @@ def _run(
         writer = VaultWriter(token)
     try:
         with task_mutation_scope():
-            allowed()
+            upload_allowed()
             namespace = "preview" if preview else writer.namespace
         result = sync_files(scan.files, writer=writer,
             state_get=ctx.kv_get, state_set=ctx.kv_set,
             destination_root=f"{destination}/{collection}", render_text=render_text,
             force_markdown=force_markdown, dry_run=preview, namespace=namespace,
-            still_allowed=allowed, mutation_scope=task_mutation_scope)
+            still_allowed=upload_allowed, mutation_scope=task_mutation_scope)
     finally:
         if owns_writer:
             writer.close()

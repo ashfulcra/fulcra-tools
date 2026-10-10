@@ -631,7 +631,7 @@ class RunContext:
         Reconnect in Collect until refresh can verify the same principal.
         """
         from . import credentials
-        token = credentials.get_user_secret("bearer-token")
+        token = credentials.get_user_secret_fresh("bearer-token")
         return token if token and not _jwt_expired(token) else None
 
     def fulcra_token(self) -> str | None:
