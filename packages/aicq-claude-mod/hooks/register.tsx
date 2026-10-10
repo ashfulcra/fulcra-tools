@@ -411,7 +411,18 @@ async function poll($: $, forceAll = false): Promise<AicqMessage[]> {
       const shown = advance(viewBefore, msgs)
       viewCursors.set(src.key, incomplete ? { at: viewBefore.at, seen: shown.cursor.seen } : shown.cursor)
       const before = cursors.get(src.key) ?? EMPTY_CURSOR
-      const { fresh, cursor: advanced } = advance(before, msgs)
+      // The ledger only judges what its own window would have read (its watermark minus the overlap).
+      // The wider display backfill reaches older messages, and the ledger's seen set is bounded, so an
+      // old handled id that aged out of it would otherwise come back as a "new" arrival and wake again.
+      const ledgerFrom = before.at === null ? null : Date.parse(windowStart(before, Date.parse(now)))
+      const widened = ledgerFrom !== null && Date.parse(windowStart(windows.get(src.key) ?? EMPTY_CURSOR, Date.parse(now))) < ledgerFrom
+      const inLedgerWindow = (m: AicqMessage) => {
+        if (ledgerFrom === null) return true
+        const t = m.at ? Date.parse(m.at) : NaN
+        // An undated message can only be placed by the read that returned it: keep it unless that read was widened.
+        return Number.isFinite(t) ? t >= ledgerFrom : !widened
+      }
+      const { fresh, cursor: advanced } = advance(before, msgs.filter(inLedgerWindow))
       // Unreadable records are reported once each (by record id), then remembered, never silently dropped.
       const newBad = malformedIds.filter(id => !before.seen.includes(`bad:${id}`))
       if (newBad.length) degraded.push(`${src.label}: ${newBad.length} unreadable`)
