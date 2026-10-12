@@ -3,7 +3,8 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AicqMessage } from '../types'
 import { collaborations, contextBlock, isStale, isStaleAt, replyStats } from './collab'
 import { modeOf, wakePrompt, withinBudget } from './policy'
-import { buildUniverse, deeplink, grouped, labelOf, parseClaudeSession, parseCodexIndex, placeIdentity, sessionFor, workspaceMembers } from './universe'
+import { buildUniverse, deeplink, grouped, isAllowedLink, labelOf, parseAgentLinks, parseClaudeSession, parseCodexIndex, placeIdentity, reportedPlacement, sessionFor, workspaceMembers } from './universe'
+import { waitingOnYou } from './waiting'
 import {
   EMPTY_CURSOR, advance, encode, isWakeWorthy, outboxFor, parseJsonl, parsePeers, parseRow,
   parseWorkspaceChannel, readbackHas, splitMarkers, windowStart,
@@ -202,7 +203,7 @@ describe('universe', () => {
 
   test('sessions: app records parse, links use each app\u2019s own route', () => {
     const c = parseClaudeSession(JSON.stringify({ sessionId: CLAUDE_LOCAL, cliSessionId: CLI_ID, title: 'Coord Boss', cwd: '/w', lastActivityAt: T0, isArchived: false }))
-    expect(c).toEqual({ app: 'claude', id: CLAUDE_LOCAL, cliId: CLI_ID, title: 'Coord Boss', cwd: '/w', at: '2026-10-07T12:00:00.000Z', archived: false, instance: '' })
+    expect(c).toEqual({ app: 'claude', id: CLAUDE_LOCAL, cliId: CLI_ID, title: 'Coord Boss', cwd: '/w', at: '2026-10-07T12:00:00.000Z', archived: false, instance: '', web: null })
     expect(parseClaudeSession('{"sessionId":"not-a-desktop-id"}')).toBe(null)
     expect(parseClaudeSession('{bad')).toBe(null)
     expect(parseClaudeSession(JSON.stringify({ sessionId: 'remote_0123456789abcdef', title: 'On another host' }), 'work')?.instance).toBe('work')
@@ -227,8 +228,8 @@ describe('universe', () => {
 
   test('sessions: exact binding or pin only; a name match never makes a link', () => {
     const sessions = [
-      { app: 'claude' as const, id: CLAUDE_LOCAL, cliId: CLI_ID, title: 'coord-boss', cwd: '', at: null, archived: false, instance: '' },
-      { app: 'codex' as const, id: CODEX_THREAD, cliId: null, title: 'Codex Coder', cwd: '', at: null, archived: false, instance: '' },
+      { app: 'claude' as const, id: CLAUDE_LOCAL, cliId: CLI_ID, title: 'coord-boss', cwd: '', at: null, archived: false, instance: '', web: null },
+      { app: 'codex' as const, id: CODEX_THREAD, cliId: null, title: 'Codex Coder', cwd: '', at: null, archived: false, instance: '', web: null },
     ]
     expect(sessionFor('agent:coord-boss', CLI_ID, {}, sessions)?.href).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
     expect(sessionFor('agent:coord-boss', CLAUDE_LOCAL.replace('local_', ''), {}, sessions)?.via).toBe('v5 binding')
@@ -238,6 +239,76 @@ describe('universe', () => {
     const pinned = sessionFor('agent:coord-boss', CLI_ID, { 'agent:coord-boss': { app: 'codex', id: CODEX_THREAD } }, sessions)
     expect([pinned?.href, pinned?.via]).toEqual([`codex://threads/${CODEX_THREAD}`, 'pinned'])
     expect(sessionFor('agent:coord-boss', CLI_ID, { 'agent:coord-boss': 'none' }, sessions)).toBe(null)
+  })
+
+  test('links: only the allowlisted shapes are ever clickable', () => {
+    for (const ok of [
+      `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`, 'https://claude.ai/code/session_01KxJWf5XCcZ8M8yKuoKecx9', 'https://claude.ai/chat/abc-123',
+      `codex://threads/${CODEX_THREAD}`, `codex://threads/${CODEX_THREAD}?hostId=remote-control%3Aenv_e_6a24`, 'https://chatgpt.com/c/68a1-77b2',
+    ]) expect([ok, isAllowedLink(ok)]).toEqual([ok, true])
+    for (const bad of [
+      'https://claude.ai.evil.example/code/x', 'https://evil.example/claude.ai/x', 'file:///etc/passwd', 'javascript:alert(1)',
+      'claude://claude.ai/../../x', `codex://threads/${CODEX_THREAD}?hostId=x&cmd=rm`, 'codex://settings', 'https://chatgpt.com/share/x', 'http://claude.ai/code/x',
+    ]) expect([bad, isAllowedLink(bad)]).toEqual([bad, false])
+  })
+
+  test('links: agent-links/1 parses; bad links are dropped; the web link comes from Remote Control', () => {
+    const l = parseAgentLinks(JSON.stringify({ schema: 'agent-links/1', identity: 'coord-boss', aliases: ['boss'], platform: 'claude-code', machine: 'DeskBookPro', updated_at: '2026-10-10T20:00:00Z',
+      links: [{ kind: 'app', url: 'file:///nope' }, { kind: 'app', url: `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}` }, { kind: 'web', url: 'https://claude.ai/code/session_01AbcDefGhi' }] }))
+    expect([l?.identity, l?.aliases, l?.app, l?.web]).toEqual(['coord-boss', ['boss'], `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`, 'https://claude.ai/code/session_01AbcDefGhi'])
+    expect(parseAgentLinks(JSON.stringify({ identity: 'x', links: [] }))).toBe(null)
+    // Valid JSON that is not a record is not a report, and a null link entry is skipped, not fatal.
+    expect(parseAgentLinks('null')).toBe(null)
+    expect(parseAgentLinks(JSON.stringify({ schema: 'agent-links/1', identity: 'y', links: [null, { kind: 'web', url: 'https://claude.ai/code/session_01Okokokok' }] }))?.web).toBe('https://claude.ai/code/session_01Okokokok')
+    const c = parseClaudeSession(JSON.stringify({ sessionId: CLAUDE_LOCAL, bridgeSessionIds: ['session_01OldOldOld', 'session_01NewNewNew'] }))
+    expect(c?.web).toBe('https://claude.ai/code/session_01NewNewNew')
+    // Precedence: the local record (with its web link) beats the agent's own report; the report fills a node with no binding.
+    const local = [{ ...c!, cliId: CLI_ID }]
+    const reported = [l!]
+    expect(sessionFor('agent:coord-boss', CLI_ID, {}, local, reported)).toMatchObject({ via: 'v5 binding', web: 'https://claude.ai/code/session_01NewNewNew' })
+    expect(sessionFor('agent:boss', '', {}, [], reported)).toMatchObject({ via: 'self-reported', app: 'claude', web: 'https://claude.ai/code/session_01AbcDefGhi' })
+    expect(sessionFor('agent:someone-else', '', {}, [], reported)).toBe(null)
+  })
+
+  test('placement: an agent\u2019s own report beats the name guess; the owner\u2019s correction beats both', () => {
+    const links = [parseAgentLinks(JSON.stringify({ schema: 'agent-links/1', identity: 'coord-boss', aliases: ['tycho'], platform: 'claude-code', machine: 'cloud', updated_at: '2026-10-10T20:00:00Z', links: [] }))!]
+    const build = (placement: Record<string, { machine?: string; platform?: string }>) => buildUniverse({
+      builtAt: '2026-10-07T12:00:00Z', agents: COORD.agents as never, board: COORD.board as never, health: COORD.health as never,
+      v5: [], sessions: [], sessionPins: {}, agentLinks: links, workspaces: {}, peers: [], owner: 'ash',
+      thisAgent: { name: 'aicq', machine: 'DeskBookPro', platform: 'Claude Code' }, placement, degraded: [],
+    })
+    const boss = build({}).nodes.find(n => n.key === 'agent:coord-boss')!
+    expect([boss.machine, boss.platform]).toEqual(['Cloud', 'Claude Code'])
+    const corrected = build({ 'agent:coord-boss': { machine: 'SingularityServer' } }).nodes.find(n => n.key === 'agent:coord-boss')!
+    expect([corrected.machine, corrected.platform]).toEqual(['SingularityServer', 'Claude Code'])
+    expect(reportedPlacement({ ...links[0]!, machine: '', platform: 'something-new' }, [])).toEqual({ machine: '', platform: '' })
+    // coord-boss reports alias tycho: a tycho node (a workspace member here) folds into coord-boss.
+    const withTycho = buildUniverse({
+      builtAt: '2026-10-07T12:00:00Z', agents: COORD.agents as never, board: COORD.board as never, health: COORD.health as never,
+      v5: [], sessions: [], sessionPins: {}, agentLinks: links, workspaces: { team: '## Members\n- tycho — cloud tester\n' }, peers: [], owner: 'ash',
+      thisAgent: { name: 'aicq', machine: 'DeskBookPro', platform: 'Claude Code' }, placement: {}, degraded: [],
+    })
+    expect(withTycho.nodes.some(n => n.key === 'agent:tycho')).toBe(false)
+    expect(withTycho.meshes.find(m => m.key === 'ws:team')?.members).toEqual(['agent:coord-boss'])
+    expect(withTycho.nodes.find(n => n.key === 'agent:coord-boss')?.meshes).toEqual(['ws:team'])
+    expect(reportedPlacement({ ...links[0]!, machine: 'deskbookpro' }, ['DeskBookPro']).machine).toBe('DeskBookPro')
+  })
+
+  test('waiting on you: friends\u2019 threads and own blocked agents in one ranked list', () => {
+    const u = buildUniverse({
+      builtAt: '2026-10-07T12:00:00Z', agents: COORD.agents as never, board: { blocked: [{ ...COORD.board.blocked[0], timestamp: '2026-10-07T08:00:00Z' }, { id: 'other', title: 'blocked on someone else', owner: 'coord-boss', blocked_on: 'codex-coder', priority: 'P0' }], waiting: [] } as never, health: COORD.health as never,
+      v5: [], sessions: [], sessionPins: {}, workspaces: {}, peers: [{ userId: PEER, label: 'Peer Agent' }], owner: 'ash',
+      thisAgent: { name: 'aicq', machine: 'DeskBookPro', platform: 'Claude Code' }, placement: {}, degraded: [],
+    })
+    const collabs = collaborations([msg({ id: 'q', topic: 'review', body: 'Can you review?', at: '2026-10-07T11:00:00Z' })], { paused: [], drafts: [] })
+    const w = waitingOnYou(collabs, u, 'ash', c => c.contact)
+    expect(w.map(x => [x.kind, x.who, x.whose, x.priority])).toEqual([['task', 'coord-boss', 'mine', 'P1'], ['thread', 'Peer Agent', 'friend', '']])
+    expect(w[0]!.ask.includes('OK work.write')).toBe(true)
+    // Workspace traffic: only a message that names the owner (or this agent) waits on the owner.
+    const ws = (id: string, to: string, topic: string) => msg({ id, source: 'workspace', workspace: 'team', channel: WS_CH, contactUserId: null, contact: 'tycho', to, topic, at: '2026-10-07T11:30:00Z' })
+    const wsCollabs = collaborations([ws('a', 'codex-coder', 'between-agents'), ws('b', 'all', 'broadcast'), ws('c', 'ash', 'asks-owner'), ws('d', 'aicq', 'asks-this-agent')], { paused: [], drafts: [] })
+    expect(waitingOnYou(wsCollabs, null, 'ash', c => c.contact, 'aicq').map(x => x.title).sort()).toEqual(['asks-owner', 'asks-this-agent'])
+    expect(waitingOnYou(wsCollabs, null, 'ash', c => c.contact).map(x => x.title)).toEqual(['asks-owner'])
   })
 })
 
@@ -272,6 +343,8 @@ const COORD_FAULTS = { boardThrows: false }
 /** Scripted outcomes for post-write readback reads, consumed in order ('ok' once exhausted). */
 const READBACK: { plan: ('lag' | 'trunc' | 'fail' | 'ok')[] } = { plan: [] }
 const ROSTER = { text: '' }
+/** Agent-links files in the fake team store: file name -> content. */
+const AGENT_LINKS: { files: Record<string, string> } = { files: {} }
 const COORD = {
   agents: [
     { agent: 'claude-code:DeskBookPro:fulcra-tools-coord', liveness: 'live', state: 'live', summary: '', annotation: '', open: { active: 1 } },
@@ -306,6 +379,11 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
     if (cmd === 'share' && sub === 'list-outgoing') return ok(JSON.stringify({ created_at: '2026-10-01', fulcra_data_types: [V1_OUT], permissions: [{ allowed_fulcra_userid: PEER }] }))
     if (cmd === 'file' && (sub === 'upload' || sub === 'share')) return ok('ok')
     if (cmd === 'file' && sub === 'download' && String(r.argv[3]) === 'workspace/team/index.md') return ok(ROSTER.text)
+    if (cmd === 'file' && sub === 'list' && String(r.argv[3]) === 'team/fulcra/agent-links/') return ok(Object.keys(AGENT_LINKS.files).map(n => `426B    2026-10-10 08:39PM UTC  ${n}`).join('\n'))
+    if (cmd === 'file' && sub === 'download' && String(r.argv[3]).startsWith('team/fulcra/agent-links/')) {
+      const body = AGENT_LINKS.files[String(r.argv[3]).replace('team/fulcra/agent-links/', '')]
+      return body === undefined ? { value: { exitCode: 1, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false } } : ok(body)
+    }
     if (cmd === 'record') {
       const ch = String(r.argv[2])
       recorded.set(ch, [...(recorded.get(ch) ?? []), r.init?.stdin ?? ''])
@@ -1010,16 +1088,16 @@ describe('mod', () => {
       const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
       await ui.press({ key: 'un-agent:coord-boss' })
       expect((await ui.findAll({ text: /Coord Boss session · v5 binding/ })).length).toBeGreaterThan(0)
-      await ui.press({ key: 'usessionopen' })
+      await ui.press({ key: 'usessionopen-app' })
       expect(opened().at(-1)).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
       // A pin overrides the binding, `none` clears the link, and `auto` returns to the binding.
       await ui.select({ key: 'usessionpick', value: `codex:${CODEX_THREAD}` })
-      await ui.press({ key: 'usessionopen' })
+      await ui.press({ key: 'usessionopen-app' })
       expect(opened().at(-1)).toBe(`codex://threads/${CODEX_THREAD}`)
       await ui.select({ key: 'usessionpick', value: 'none' })
-      expect((await ui.findAll({ type: 'Button', text: /Open session in/ })).length).toBe(0)
+      expect((await ui.findAll({ type: 'Button', text: /Open in (Claude|Codex)/ })).length).toBe(0)
       await ui.select({ key: 'usessionpick', value: 'auto' })
-      expect((await ui.findAll({ type: 'Button', text: /Open session in Claude/ })).length).toBe(1)
+      expect((await ui.findAll({ type: 'Button', text: /Open in Claude/ })).length).toBe(1)
       await ui.press({ key: 'uback' })
       await $.command.run({ command: 'aicq', args: 'map' } as never)
     }
@@ -1063,6 +1141,143 @@ describe('mod', () => {
       for (const re of expectWarn) expect((await ui.findAll({ text: re })).length).toBeGreaterThan(0)
     })
   }
+  test('waiting on you: the demo view, a friend and an own agent with a working web link', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    AGENT_LINKS.files = {
+      'coord-boss.json': JSON.stringify({ schema: 'agent-links/1', identity: 'coord-boss', aliases: [], platform: 'claude-code', machine: 'DeskBookPro', updated_at: '2026-10-07T11:00:00Z',
+        links: [{ kind: 'app', url: `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}` }, { kind: 'web', url: 'https://claude.ai/code/session_01BossBossBoss' }] }),
+      'broken.json': '{not json',
+    }
+    try {
+      const f = fake([v1Row({ message_id: 'ask-1', topic: 'review', body: 'Can you review the draft?' }, '2026-10-07T11:00:00Z')])
+      const sink = sinkOf()
+      engine(on, f, sink)
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(5000)
+      type UI = { findAll: (q: unknown) => Promise<{ props?: Record<string, unknown> }[]>; press: (t: unknown) => Promise<unknown> }
+      for (const surface of ['terminal', 'desktop'] as const) {
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+        const p = surface === 'terminal' ? 'wait' : 'dwait'
+        if (surface === 'terminal') expect((await ui.findAll({ text: /Waiting on you \(2\)/ })).length).toBeGreaterThan(0)
+        else expect((await ui.findAll({ type: 'Svg' })).some(x => x.props?.alt === 'Waiting on you (2)')).toBe(true)
+        expect((await ui.findAll({ text: /Blocked on you · P1/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ text: /A friend\u2019s agent/ })).length).toBeGreaterThan(0)
+        const links = (await ui.findAll({ type: 'Link' })).map(l => l.props?.href)
+        expect(links.includes('https://claude.ai/code/session_01BossBossBoss')).toBe(true)
+        await ui.press({ key: `${p}-task:agent:coord-boss:t9-x-session-app` })
+        expect(f.calls.filter(c => c.argv[0] === '/usr/bin/open').at(-1)?.argv[1]).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
+        await ui.press({ key: `${p}-task:agent:coord-boss:t9-x-help` })
+        expect(sink.prompts.at(-1)?.includes('t9-x')).toBe(true)
+        await ui.press({ key: `${p}-thread:mesh:${PEER}#review-thread` })
+        // The thread view replaced the home view.
+        expect((await ui.findAll({ text: /Help me unblock/ })).length).toBe(0)
+        await ui.press({ key: surface === 'terminal' ? 'back' : 'dback' })
+        if (surface === 'terminal') {
+          // One unreadable report is named on the map, never silently dropped.
+          await $.command.run({ command: 'aicq', args: 'map' } as never)
+          await clock.advance(10)
+          expect((await ui.findAll({ text: /agent links: 1 unreadable/ })).length).toBeGreaterThan(0)
+          await ui.press({ key: 'uback' })
+        }
+      }
+    } finally {
+      AGENT_LINKS.files = {}
+    }
+  })
+
+  test('my agents: every own agent is listed with its session links, without any workspace configured', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    AGENT_LINKS.files = {
+      'fulcra-tools-coord.json': JSON.stringify({ schema: 'agent-links/1', identity: 'claude-code:DeskBookPro:fulcra-tools-coord', aliases: [], platform: 'claude-code', machine: 'DeskBookPro', updated_at: '2026-10-07T11:00:00Z',
+        links: [{ kind: 'app', url: `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}` }, { kind: 'web', url: 'https://claude.ai/code/session_01CoordCoordC' }] }),
+    }
+    try {
+      const f = fake([])
+      engine(on, f, sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(5000)
+      type UI = { findAll: (q: unknown) => Promise<{ props?: Record<string, unknown> }[]>; press: (t: unknown) => Promise<unknown> }
+      for (const surface of ['terminal', 'desktop'] as const) {
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+        const p = surface === 'terminal' ? 'my' : 'dmy'
+        expect((await ui.findAll({ text: /Add workspaces/ })).length).toBe(0)
+        expect((await ui.findAll({ type: 'Button', text: /fulcra-tools-coord/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ type: 'Button', text: /coord-boss  ⚑1 on you/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ type: 'Link' })).map(l => l.props?.href).includes('https://claude.ai/code/session_01CoordCoordC')).toBe(true)
+        await ui.press({ key: `${p}-agent:claude-code:DeskBookPro:fulcra-tools-coord-session-app` })
+        expect(f.calls.filter(c => c.argv[0] === '/usr/bin/open').at(-1)?.argv[1]).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
+        // Clicking the agent opens its detail on the map, where the session is marked.
+        await ui.press({ key: `${p}-agent:claude-code:DeskBookPro:fulcra-tools-coord-open` })
+        expect((await ui.findAll({ type: 'Button', text: /fulcra-tools-coord ↗/ })).length).toBeGreaterThan(0)
+        await ui.press({ key: 'uback' })
+      }
+    } finally {
+      AGENT_LINKS.files = {}
+    }
+  })
+
+  test('settings say where agent name and workspaces are configured, on both surfaces', { options: { agentName: 'deskbook-aicq', workspaces: 'team' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    engine(on, fake([]), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown> }
+      await ui.press({ key: surface === 'terminal' ? 'settings' : 'dsettings' })
+      expect((await ui.findAll({ text: /This agent: deskbook-aicq · Workspaces: team\. These are plugin options.*claude plugin configure aicq@fulcra-tools/ })).length).toBeGreaterThan(0)
+      await ui.press({ key: surface === 'terminal' ? 'settings' : 'dsettings' })
+    }
+  })
+
+  test('waiting on you: a failed board read is named, never a false all-clear', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    COORD_FAULTS.boardThrows = true
+    try {
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(5000)
+      for (const surface of ['terminal', 'desktop'] as const) {
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+        expect((await ui.findAll({ text: /Partial: could not read .*coord board/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ text: /Nothing is waiting on you/ })).length).toBe(0)
+        expect((await ui.findAll({ text: /Nothing waiting in the sources that were read/ })).length).toBeGreaterThan(0)
+      }
+    } finally {
+      COORD_FAULTS.boardThrows = false
+    }
+  })
+
+  // Blocked on the owner is a live obligation until it is unblocked, so age never hides it (Ash, 2026-10-12).
+  test('waiting on you: a blocked task stays a red card however old, past the ignore-after limit', { options: { agentName: 'aicq' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const task = COORD.board.blocked[0] as Record<string, unknown>
+    task.timestamp = new Date(T0 - 40 * 86_400_000).toISOString()
+    try {
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(5000)
+      for (const surface of ['terminal', 'desktop'] as const) {
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+        expect((await ui.findAll({ text: /Blocked on you · P1/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ text: /blocked items? untouched/ })).length).toBe(0)
+        expect((await ui.findAll({ text: /Coord bus read .* · 1 blocked on you/ })).length).toBeGreaterThan(0)
+        // coord-boss has no known session here, so its card offers to link one, and that opens its detail.
+        expect((await ui.findAll({ type: 'Button', text: /Link its session…/ })).length).toBeGreaterThan(0)
+      }
+    } finally {
+      delete task.timestamp
+    }
+  })
 
   for (const [first, second, verified] of [['lag', 'ok', true], ['trunc', 'ok', true], ['fail', 'ok', true], ['lag', 'lag', false]] as const) {
     test(`readback: first read ${first}, second ${second} -> ${verified ? 'verified' : 'UNVERIFIED'}; one write, two reads`, async ($, on) => {

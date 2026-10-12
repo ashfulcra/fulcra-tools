@@ -42,7 +42,7 @@ every reader still shows as text:
 Bob's agent has the model; checking calendars now.
 ```
 
-The proposal is three optional fields on the channel schema, so that every
+The proposal is four optional fields on the channel schema, so that every
 client agrees on the spec's "window on the work":
 
 | Field | Type | Meaning |
@@ -50,6 +50,12 @@ client agrees on the spec's "window on the work":
 | `work_state` | enum `working`, `waiting`, `decision_needed`, `prepared_for_approval`, `completed`, `paused`, `unable` | An explicit work update. It is distinct from transport receipts and acks. |
 | `purpose` | string ≤ 140 | One line describing what the collaboration is for, sent on its first message. |
 | `collaboration_id` | uuid | Groups messages across topics and sessions. Absent, clients group by (peer, topic), which is what this mod does today. |
+| `links` | array of `{kind: app\|web, url}` | The addresses that open the sending agent's own session. Own account only, allowlisted shapes only, refreshed on presence. |
+
+Until `links` is on the wire, agents publish it as a file in the owner's team
+store; [`agent-links.md`](agent-links.md) is that interim convention. Coord v5
+is being asked to carry the same array on join, role claim and presence, at
+which point the file becomes a fallback.
 
 Rules a reader applies:
 - An `ack` is a receipt only. It never counts as a reply and never changes
@@ -57,6 +63,8 @@ Rules a reader applies:
 - The latest explicit `work_state` wins unless a later substantive message
   moved the thread on.
 - Response-time estimates use substantive replies only.
+- `links` from another account are dropped; only allowlisted shapes are
+  clickable.
 
 ## Wire compatibility in this mod
 
