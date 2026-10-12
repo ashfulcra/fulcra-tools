@@ -402,6 +402,30 @@ export function buildUniverse(i: UniverseInputs): Universe {
   if (!nodes.has(`agent:${i.thisAgent.name}`)) add(i.thisAgent.name, null)
   for (const [who] of blockedBy) if (!nodes.has(`agent:${who}`)) add(who, null)
 
+  // One agent, one entry: an agent's own report names the other identities it goes by (a v3 bus name and a V5
+  // id, say), so those nodes fold into the reported identity instead of showing the same agent twice.
+  for (const l of i.agentLinks ?? []) {
+    const primary = nodes.get(`agent:${l.identity}`)
+    if (!primary) continue
+    for (const alias of l.aliases) {
+      const aliasKey = `agent:${alias}`
+      const dup = nodes.get(aliasKey)
+      if (!dup || dup === primary) continue
+      primary.blocked = [...primary.blocked, ...dup.blocked.filter(b => !primary.blocked.some(p => p.id === b.id))]
+      primary.blockedOnOwner = primary.blocked.filter(b => b.blockedOn === `user:${i.owner}`).length
+      for (const [k, c] of Object.entries(dup.open)) primary.open[k] = (primary.open[k] ?? 0) + c
+      if (LIVENESS.indexOf(dup.liveness) < LIVENESS.indexOf(primary.liveness)) primary.liveness = dup.liveness
+      primary.summary ||= dup.summary
+      primary.annotation ||= dup.annotation
+      primary.session ??= dup.session
+      nodes.delete(aliasKey)
+      for (const m of meshes) {
+        if (!m.members.includes(aliasKey)) continue
+        m.members = [...new Set(m.members.map(k => (k === aliasKey ? primary.key : k)))]
+      }
+    }
+  }
+
   const peerMesh: Mesh = { key: 'mesh:cross-account', label: 'Cross-account mesh', kind: 'cross-account', members: [] }
   for (const p of i.peers) {
     const key = `peer:${p.userId}`

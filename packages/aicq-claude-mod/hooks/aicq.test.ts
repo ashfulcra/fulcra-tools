@@ -282,6 +282,15 @@ describe('universe', () => {
     const corrected = build({ 'agent:coord-boss': { machine: 'SingularityServer' } }).nodes.find(n => n.key === 'agent:coord-boss')!
     expect([corrected.machine, corrected.platform]).toEqual(['SingularityServer', 'Claude Code'])
     expect(reportedPlacement({ ...links[0]!, machine: '', platform: 'something-new' }, [])).toEqual({ machine: '', platform: '' })
+    // coord-boss reports alias tycho: a tycho node (a workspace member here) folds into coord-boss.
+    const withTycho = buildUniverse({
+      builtAt: '2026-10-07T12:00:00Z', agents: COORD.agents as never, board: COORD.board as never, health: COORD.health as never,
+      v5: [], sessions: [], sessionPins: {}, agentLinks: links, workspaces: { team: '## Members\n- tycho — cloud tester\n' }, peers: [], owner: 'ash',
+      thisAgent: { name: 'aicq', machine: 'DeskBookPro', platform: 'Claude Code' }, placement: {}, degraded: [],
+    })
+    expect(withTycho.nodes.some(n => n.key === 'agent:tycho')).toBe(false)
+    expect(withTycho.meshes.find(m => m.key === 'ws:team')?.members).toEqual(['agent:coord-boss'])
+    expect(withTycho.nodes.find(n => n.key === 'agent:coord-boss')?.meshes).toEqual(['ws:team'])
     expect(reportedPlacement({ ...links[0]!, machine: 'deskbookpro' }, ['DeskBookPro']).machine).toBe('DeskBookPro')
   })
 
@@ -1167,6 +1176,39 @@ describe('mod', () => {
           expect((await ui.findAll({ text: /agent links: 1 unreadable/ })).length).toBeGreaterThan(0)
           await ui.press({ key: 'uback' })
         }
+      }
+    } finally {
+      AGENT_LINKS.files = {}
+    }
+  })
+
+  test('my agents: every own agent is listed with its session links, without any workspace configured', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    AGENT_LINKS.files = {
+      'fulcra-tools-coord.json': JSON.stringify({ schema: 'agent-links/1', identity: 'claude-code:DeskBookPro:fulcra-tools-coord', aliases: [], platform: 'claude-code', machine: 'DeskBookPro', updated_at: '2026-10-07T11:00:00Z',
+        links: [{ kind: 'app', url: `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}` }, { kind: 'web', url: 'https://claude.ai/code/session_01CoordCoordC' }] }),
+    }
+    try {
+      const f = fake([])
+      engine(on, f, sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(5000)
+      type UI = { findAll: (q: unknown) => Promise<{ props?: Record<string, unknown> }[]>; press: (t: unknown) => Promise<unknown> }
+      for (const surface of ['terminal', 'desktop'] as const) {
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+        const p = surface === 'terminal' ? 'my' : 'dmy'
+        expect((await ui.findAll({ text: /Add workspaces/ })).length).toBe(0)
+        expect((await ui.findAll({ type: 'Button', text: /fulcra-tools-coord/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ type: 'Button', text: /coord-boss  ⚑1 on you/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ type: 'Link' })).map(l => l.props?.href).includes('https://claude.ai/code/session_01CoordCoordC')).toBe(true)
+        await ui.press({ key: `${p}-agent:claude-code:DeskBookPro:fulcra-tools-coord-session-app` })
+        expect(f.calls.filter(c => c.argv[0] === '/usr/bin/open').at(-1)?.argv[1]).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
+        // Clicking the agent opens its detail on the map, where the session is marked.
+        await ui.press({ key: `${p}-agent:claude-code:DeskBookPro:fulcra-tools-coord-open` })
+        expect((await ui.findAll({ type: 'Button', text: /fulcra-tools-coord ↗/ })).length).toBeGreaterThan(0)
+        await ui.press({ key: 'uback' })
       }
     } finally {
       AGENT_LINKS.files = {}

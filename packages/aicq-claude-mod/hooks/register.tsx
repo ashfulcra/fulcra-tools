@@ -1294,7 +1294,7 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
     return {
       machine: g.machine,
       subtitle: m?.reconciledAt ? `reconciled ${m.stale ? 'STALE' : 'fresh'}` : g.machine === 'Friends’ accounts' ? 'cross-account mesh' : g.machine === 'Unplaced' ? 'set a machine on each node' : 'no reconcile host',
-      platforms: g.platforms.map(pf => ({ platform: pf.platform, nodes: pf.nodes.map(n => ({ key: n.key, label: n.label, liveness: n.liveness, blocked: n.blocked.length, blockedOnOwner: n.blockedOnOwner, peer: n.kind === 'peer' })) })),
+      platforms: g.platforms.map(pf => ({ platform: pf.platform, nodes: pf.nodes.map(n => ({ key: n.key, label: n.session ? `${n.label} ↗` : n.label, liveness: n.liveness, blocked: n.blocked.length, blockedOnOwner: n.blockedOnOwner, peer: n.kind === 'peer' })) })),
     }
   })
   const summary = (
@@ -1304,7 +1304,7 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
     </Text>
   )
   const nodeButton = (n: UniverseNode) => (
-    <Button key={`un-${n.key}`} plain label={`${LIVE_GLYPH[n.liveness] ?? '·'} ${n.label}${n.blocked.length ? `  ⚑${n.blocked.length}` : ''}${n.blockedOnOwner ? ' (you)' : ''}`} onPress={() => openNode($, n.key)} />
+    <Button key={`un-${n.key}`} plain label={`${LIVE_GLYPH[n.liveness] ?? '·'} ${n.label}${n.session ? ' ↗' : ''}${n.blocked.length ? `  ⚑${n.blocked.length}` : ''}${n.blockedOnOwner ? ' (you)' : ''}`} onPress={() => openNode($, n.key)} />
   )
   const tree = (
     <Box key="utree" flexDirection="row" flexWrap="wrap">
@@ -1821,6 +1821,30 @@ export const register: Register = (on, options) => {
     const selectedKey = v.kind === 'collab' ? collabs.find(c => c.key === v.key)?.contactKey : undefined
     const matches = (p: ContactSummary) => !query || titleOf(p.contactUserId, p.contact, p.workspace).toLowerCase().includes(query) || p.contact.toLowerCase().includes(query)
 
+    // ---- my agents: every own agent the universe knows, each one jumpable ------------
+    // Workspace contacts are only the agents that share a workspace with this one; the owner's agents are the
+    // universe's own-account identities (coord bus, V5, workspaces), listed live first with their session links.
+    const myAgents = (universeNow?.nodes ?? [])
+      .filter(n => n.kind === 'agent' && !n.key.startsWith('agent:coord-reconcile:'))
+      .filter(n => !query || n.label.toLowerCase().includes(query) || n.key.toLowerCase().includes(query))
+      .sort((a, b) => (a.liveness === 'live' ? 0 : 1) - (b.liveness === 'live' ? 0 : 1) || (a.session ? 0 : 1) - (b.session ? 0 : 1) || a.label.localeCompare(b.label))
+    const myAgentsList = (prefix: string) => {
+      if (!universeNow) return <Text key={`${prefix}-reading`} dimColor>  Reading your agents…</Text>
+      if (myAgents.length === 0) return <Text key={`${prefix}-none`} dimColor>  {query ? 'No agent matches' : 'No agents found on the coord bus or V5'}</Text>
+      return (
+        <Box key={`${prefix}-list`} flexDirection="column">
+          {myAgents.slice(0, 12).map(n => (
+            <Box key={`${prefix}-${n.key}`} flexDirection="column" marginBottom={1}>
+              <Button key={`${prefix}-${n.key}-open`} plain label={`${LIVE_GLYPH[n.liveness] ?? '·'} ${n.label}${n.blockedOnOwner ? `  ⚑${n.blockedOnOwner} on you` : ''}`} onPress={() => openNode($, n.key)} />
+              <Text dimColor wrap="truncate-end">  {n.platform} · {n.machine}</Text>
+              {n.session && sessionControls($, waitingEls, n.session, e.surface, `${prefix}-${n.key}-session`)}
+            </Box>
+          ))}
+          {myAgents.length > 12 && <Button key={`${prefix}-more`} plain label={`+ ${myAgents.length - 12} more on the map`} onPress={() => openMap($)} />}
+        </Box>
+      )
+    }
+
     // ---- small parts -------------------------------------------------------
     const avatar = (label: string, key: string, mine: boolean) => (
       <Box key={key} width={3} height={1} marginRight={1} justifyContent="center" backgroundColor={mine ? AVATAR_MINE : AVATAR_FRIEND}>
@@ -1925,7 +1949,8 @@ export const register: Register = (on, options) => {
         <Box key="dside" flexDirection="column" width={wide ? '28%' : '100%'} minWidth={0} overflow="hidden" marginRight={wide ? 2 : 0}>
           <Input key="dsearch" placeholder="Search agents" value={query} onInput={value => update($, queryAtom, () => value).then(() => undefined)} onSubmit={value => update($, queryAtom, () => value).then(() => undefined)} />
           <Svg key="dl-mine" alt="My agents" source={sideLabelSvg('My agents')} />
-          {dMine.length === 0 ? <Text dimColor>Add workspaces in Settings</Text> : dMine.map(dSide)}
+          {dMine.map(dSide)}
+          {myAgentsList('dmy')}
           <Svg key="dl-friends" alt="Friends agents" source={sideLabelSvg('Friends agents')} />
           {dFriends.length === 0 ? <Text dimColor>No connected agents yet</Text> : dFriends.map(dSide)}
           {dFriendsAll.length > dFriends.length && <Text dimColor>+ {dFriendsAll.length - dFriends.length} more (search)</Text>}
@@ -2140,7 +2165,8 @@ export const register: Register = (on, options) => {
       <Box key="sidebar" flexDirection="column" width={wide ? 34 : '100%'} marginRight={wide ? 2 : 0}>
         <Input key="search" placeholder="Search agents" value={query} onInput={value => update($, queryAtom, () => value).then(() => undefined)} onSubmit={value => update($, queryAtom, () => value).then(() => undefined)} />
         <Text dimColor bold>MY AGENTS</Text>
-        {mine.length === 0 ? <Text dimColor>  {cfg.workspaceNames.length ? 'None in view' : 'Add workspaces in settings'}</Text> : mine.map(contactItem)}
+        {mine.map(contactItem)}
+        {myAgentsList('my')}
         <Text dimColor bold>FRIENDS AGENTS</Text>
         {friends.length === 0 ? <Text dimColor>  None yet · + Invite</Text> : friends.map(contactItem)}
         {folded > 0 && <Text dimColor>  + {folded} connected with no recent work (search to find)</Text>}
