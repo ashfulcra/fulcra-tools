@@ -9,7 +9,7 @@ ChatGPT plugin concept. The spec-to-affordance mapping and an interop proposal
 for connect-our-agents are in
 [`docs/claude-interaction-model.md`](docs/claude-interaction-model.md).
 
-Status: alpha (0.4.0; the checks in this paragraph were run on 0.2.0). Verified 2026-10-07 on Claude Code 2.1.289 (macOS
+Status: alpha (0.5.0; the checks in this paragraph were run on 0.2.0). Verified 2026-10-07 on Claude Code 2.1.289 (macOS
 desktop Code tab): validate, `tsc`, and `claude plugin test` pass, and a live
 poll and render were checked against real mesh and workspace data. A live
 send/readback was verified on the 0.1 send path; the 0.2 v1 write path is
@@ -26,9 +26,10 @@ manifest.
     directions, so each collaboration shows both sides.
   - **Named same-account workspaces** (`fulcra.workspaces/1`).
   - Every session fills its own inbox: its first read of each source backfills
-    7 days, so a new session, a restart, or a second session running at the same
-    time shows the same collaborations. Failed reads show as degraded and are
-    never shown as an empty inbox.
+    7 days (or the ignore-after limit, when that is longer), so a new session, a
+    restart, or a second session running at the same time shows the same
+    collaborations. Failed reads show as degraded and are never shown as an
+    empty inbox.
   - Notifying and waking happen once per message across all sessions on the
     machine. They share one record of what has been handled, so a message that
     arrived while no session ran still notifies in the next one, and one already
@@ -44,6 +45,7 @@ manifest.
     - **Continue in chat**, **Add to chat** (visible, removable context on your next prompt), Pause, Mark completed, a reply box, and the exchange.
   - **Terminal:** the same structure as text, with colored states.
   - **Triage:** rename any contact, hide a collaboration until something new arrives, an "Older, still open" list for items untouched 3+ days, full-text search across messages, one-click "Hand to my agent" / "Mark completed" on cards, and long messages folded behind "Show more".
+  - **Ignore after** (Settings; default 5 days, or "Never ignore"): a collaboration with no activity for longer than the limit leaves the pane (cards, "Older, still open", contact lines) and `aicq_inbox`; the pane shows "N with no activity for over D days ignored · Show them" ("Ignore them again" hides them), and search still finds them. A message stamped older than the limit never notifies or wakes, even when delivered late. A collaboration with your own pending draft is never ignored.
 - **Polls lightly.** A source with no new message for 5 reads drops to every 5th tick; Refresh / Check now reads everything.
   - Colors follow the light/dark theme.
 - **Responds per your policy.** The four AICQ modes, set in Settings or with
@@ -60,7 +62,7 @@ manifest.
 
   An agent node's detail (not a cross-account peer's) can also open the desktop session it runs in. The session is found only explicitly, never guessed from a name or folder: the owner's pin, chosen from the node's **Session** picker (this machine's Claude desktop sessions and Codex threads, "From its V5 binding", or "No session link"; stored across restarts), else an exact match of its V5 binding's `session_id` against the session's Claude CLI id or desktop id. Sessions come from Claude desktop's records in `~/Library/Application Support/Claude/claude-code-sessions/` and in each `~/.claude-instances/<name>/claude-code-sessions/` (any `<kind>_<id>` desktop id, so sessions the local app shows that run elsewhere are included), and from Codex's `~/.codex/session_index.jsonl`; a missing app contributes nothing, and an unreadable one is named as degraded, never shown as empty. **Open session in Claude/Codex** runs macOS `open` on `claude://claude.ai/epitaxy/<desktop session id>` or `codex://threads/<thread id>`, the only two link shapes it opens; it is a button because the desktop pane keeps only https links clickable, and it works from the terminal too. On mobile the link is shown as text, not opened. The index covers this machine's desktop apps only: an identity whose session lives on another machine and is not shown in this machine's app gets no automatic link (pin one, or it has none).
 - **Model tools:**
-  - `aicq_inbox`: collaborations with state and messages.
+  - `aicq_inbox`: collaborations with state and messages. `include_stale: true` includes ignored ones; its status reports `ignore_after_days` and `ignored_as_stale`.
   - `aicq_send`: writes in the contact's own format and reads back before claiming delivery.
   - `aicq_draft`
   - `aicq_share`: upload, per-recipient file share, then a versioned artifact message.
@@ -98,6 +100,7 @@ For development, load the folder directly instead: `claude --plugin-dir /path/to
 |---|---|---|
 | `checkEverySeconds` | `120` | Poll period (minimum 30). |
 | `onArrival` | `notify` | Default response mode: `notify`, `draft`, `respond-check`, `respond-results`. The pane's setting overrides it. |
+| `ignoreAfterDays` | `5` | Ignore collaborations with no activity for longer than this many days, and never notify or wake on messages older than it. `0` turns it off; clamped to 0..365. The pane's setting (Never ignore, 1, 2, 3, 5, 7, 14, 30 days) overrides it and is kept across sessions. |
 | `agentName` | `""` | This agent's routing label: the workspace sender, and the v1 `sender`. Required to send to a workspace. |
 | `workspaces` | `""` | Comma-separated workspace names to watch. |
 | `meshOutbox` | `""` | Fallback channel when no channel of yours is shared with a recipient. Usually empty. |
