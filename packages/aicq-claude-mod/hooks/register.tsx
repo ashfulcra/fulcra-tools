@@ -211,10 +211,15 @@ async function localSessions($: $, degraded: string[]): Promise<SessionRef[]> {
           const dir = `${root}/${account.name}/${org.name}`
           for (const f of (await $.fs.list(dir)) as unknown as { name: string; kind: string }[]) {
             if (f.kind !== 'file' || !/^[a-z]+_.*\.json$/.test(f.name)) continue
-            const text = String(await $.fs.read(`${dir}/${f.name}`))
-            const ref = parseClaudeSession(text, instance)
-            if (ref) out.push(ref)
-            else if (text.trim()) badClaude += 1
+            // One unreadable file is counted and skipped; it never stops the walk over the files after it.
+            try {
+              const text = String(await $.fs.read(`${dir}/${f.name}`))
+              const ref = parseClaudeSession(text, instance)
+              if (ref) out.push(ref)
+              else if (text.trim()) badClaude += 1
+            } catch {
+              badClaude += 1
+            }
           }
         }
       }

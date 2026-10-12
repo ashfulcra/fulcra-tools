@@ -216,6 +216,11 @@ describe('universe', () => {
     expect(x.bad).toBe(1)
     expect(parseCodexIndex('\n\n').bad).toBe(0)
     expect(parseCodexIndex('{"id":"not-a-thread"}\n{torn').bad).toBe(2)
+    // Valid JSON that is not a record (null, arrays, scalars) is unreadable, and the good rows around it survive.
+    const mixed = parseCodexIndex([JSON.stringify({ id: CODEX_THREAD, thread_name: 'kept' }), 'null', '[1]', '7'].join('\n'))
+    expect([mixed.sessions.map(t => t.title), mixed.bad]).toEqual([['kept'], 3])
+    expect(parseClaudeSession('null')).toBe(null)
+    expect(parseClaudeSession('[]')).toBe(null)
     expect(deeplink({ app: 'claude', id: CLAUDE_LOCAL })).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
     expect(deeplink({ app: 'codex', id: CODEX_THREAD })).toBe(`codex://threads/${CODEX_THREAD}`)
   })
@@ -910,6 +915,8 @@ describe('mod', () => {
     ['malformed-only Codex index', {}, '{torn', [/Codex threads: 1 unreadable index line/]],
     ['mixed Codex index keeps the good thread', {}, `${JSON.stringify({ id: CODEX_THREAD, thread_name: 'ok' })}\n{torn`, [/Codex threads: 1 unreadable index line/]],
     ['malformed Claude session file', { 'local_00000000-0000-4000-8000-0000000000f9.json': '{torn' }, '', [/Claude desktop sessions: 1 unreadable record/]],
+    ['null Codex row after a good one', {}, `${JSON.stringify({ id: CODEX_THREAD, thread_name: 'ok' })}\nnull`, [/Codex threads: 1 unreadable index line/]],
+    ['null Claude session file before a good one', { 'local_00000000-0000-4000-8000-0000000000f8.json': 'null', [`${CLAUDE_LOCAL}.json`]: JSON.stringify({ sessionId: CLAUDE_LOCAL, title: 'still here' }) }, '', [/Claude desktop sessions: 1 unreadable record/]],
   ] as const) {
     test(`universe: a ${label} is named as degraded, never an empty inventory`, async ($, on) => {
       const clock = mock.clock(on, { now: T0 })

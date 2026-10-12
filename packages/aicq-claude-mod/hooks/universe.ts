@@ -68,6 +68,8 @@ export type Placement = Record<string, { machine?: string; platform?: string }>
 
 type Json = Record<string, unknown>
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+/** A decoded JSON record we can read fields from: `null`, arrays and scalars are valid JSON but not records. */
+const isRecord = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 const PLATFORMS: [RegExp, string][] = [
   [/^claude-code|claude/i, 'Claude Code'],
@@ -163,12 +165,13 @@ const DESKTOP_SESSION_ID = /^[a-z]+_[0-9A-Za-z-]{8,}$/
 
 /** One Claude desktop session file (`claude-code-sessions/<account>/<org>/<id>.json`); null when it is not one. */
 export function parseClaudeSession(text: string, instance = ''): SessionRef | null {
-  let d: Json
+  let d: unknown
   try {
-    d = JSON.parse(text) as Json
+    d = JSON.parse(text)
   } catch {
     return null
   }
+  if (!isRecord(d)) return null
   const id = str(d.sessionId)
   if (!DESKTOP_SESSION_ID.test(id)) return null
   const at = typeof d.lastActivityAt === 'number' ? new Date(d.lastActivityAt).toISOString() : null
@@ -185,10 +188,14 @@ export function parseCodexIndex(text: string): { sessions: SessionRef[]; bad: nu
   let bad = 0
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
-    let d: Json
+    let d: unknown
     try {
-      d = JSON.parse(line) as Json
+      d = JSON.parse(line)
     } catch {
+      bad += 1
+      continue
+    }
+    if (!isRecord(d)) {
       bad += 1
       continue
     }
