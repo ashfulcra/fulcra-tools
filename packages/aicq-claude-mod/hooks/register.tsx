@@ -1757,7 +1757,7 @@ export const register: Register = (on, options) => {
     // ---- waiting on you: friends' agents and your own, in one ranked list --------
     const waitingEls = $.ui.resolve(e) as unknown as SessionElements
     const universeNow = ((await read($, universeAtom)) as Universe | null) ?? null
-    const waitingAll: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace))
+    const waitingAll: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace), cfg.agentName)
     // Threads past the ignore-after limit are already out of `collabs`; a blocked task whose doc has not been
     // touched past the limit is ignored the same way (shown on request, found by search).
     const staleTaskKeys = new Set(waitingAll.filter(it => it.kind === 'task' && it.since && isStaleAt(it.since, nowMs, ignoreDays)).map(it => it.key))
@@ -1946,7 +1946,7 @@ export const register: Register = (on, options) => {
       const dFriendsAll = people.filter(p => p.group === 'friends').filter(matches)
       const dFriends = query ? dFriendsAll : dFriendsAll.filter(p => p.lastWorkedAt || p.contact !== (p.contactUserId ?? '').slice(0, 8))
       const dSidebar = (
-        <Box key="dside" flexDirection="column" width={wide ? '28%' : '100%'} minWidth={0} overflow="hidden" marginRight={wide ? 2 : 0}>
+        <Box key="dside" flexDirection="column" width={wide ? '30%' : '100%'} minWidth={wide ? 260 : 0} flexShrink={0} overflow="hidden" marginRight={wide ? 2 : 0}>
           <Input key="dsearch" placeholder="Search agents" value={query} onInput={value => update($, queryAtom, () => value).then(() => undefined)} onSubmit={value => update($, queryAtom, () => value).then(() => undefined)} />
           <Svg key="dl-mine" alt="My agents" source={sideLabelSvg('My agents')} />
           {dMine.map(dSide)}

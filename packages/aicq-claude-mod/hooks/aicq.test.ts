@@ -304,6 +304,11 @@ describe('universe', () => {
     const w = waitingOnYou(collabs, u, 'ash', c => c.contact)
     expect(w.map(x => [x.kind, x.who, x.whose, x.priority])).toEqual([['task', 'coord-boss', 'mine', 'P1'], ['thread', 'Peer Agent', 'friend', '']])
     expect(w[0]!.ask.includes('OK work.write')).toBe(true)
+    // Workspace traffic: only a message that names the owner (or this agent) waits on the owner.
+    const ws = (id: string, to: string, topic: string) => msg({ id, source: 'workspace', workspace: 'team', channel: WS_CH, contactUserId: null, contact: 'tycho', to, topic, at: '2026-10-07T11:30:00Z' })
+    const wsCollabs = collaborations([ws('a', 'codex-coder', 'between-agents'), ws('b', 'all', 'broadcast'), ws('c', 'ash', 'asks-owner'), ws('d', 'aicq', 'asks-this-agent')], { paused: [], drafts: [] })
+    expect(waitingOnYou(wsCollabs, null, 'ash', c => c.contact, 'aicq').map(x => x.title).sort()).toEqual(['asks-owner', 'asks-this-agent'])
+    expect(waitingOnYou(wsCollabs, null, 'ash', c => c.contact).map(x => x.title)).toEqual(['asks-owner'])
   })
 })
 

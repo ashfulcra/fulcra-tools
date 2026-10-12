@@ -53,11 +53,23 @@ function nodeForCollab(c: Collaboration, nodes: readonly UniverseNode[]): Univer
   return nodes.find(n => n.kind === 'agent' && (n.key === `agent:${c.contact}` || n.label === c.contact))
 }
 
+/**
+ * A shared workspace carries traffic between other agents and broadcasts to `all`; neither waits on the owner.
+ * A workspace thread counts only when its latest inbound message names the owner or this agent. Cross-account
+ * threads arrive on channels shared with the owner's account, so they are addressed to the owner already.
+ */
+function addressedToOwner(to: string, owner: string, agentName: string): boolean {
+  const names = to.split(',').map(x => x.trim().toLowerCase()).filter(Boolean)
+  const me = [owner, `user:${owner}`, agentName].map(x => x.toLowerCase()).filter(Boolean)
+  return names.some(n => me.includes(n))
+}
+
 export function waitingOnYou(
   collabs: readonly Collaboration[],
   universe: Universe | null,
   owner: string,
   nameOf: (c: Collaboration) => string,
+  agentName = '',
 ): WaitingItem[] {
   const nodes = universe?.nodes ?? []
   const out: WaitingItem[] = []
@@ -65,6 +77,7 @@ export function waitingOnYou(
     if (!WAITING_STATES.includes(c.state)) continue
     const node = nodeForCollab(c, nodes)
     const last = [...c.messages].reverse().find(m => m.direction === 'in')
+    if (c.workspace && !addressedToOwner(last?.to ?? '', owner, agentName)) continue
     out.push({
       key: `thread:${c.key}`, kind: 'thread', who: nameOf(c), whose: c.workspace ? 'mine' : 'friend',
       platform: node?.platform ?? '', machine: node?.machine ?? (c.workspace ? '' : 'Friends’ accounts'),
