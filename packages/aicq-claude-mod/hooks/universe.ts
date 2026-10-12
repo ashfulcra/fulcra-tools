@@ -239,14 +239,14 @@ export function isAllowedLink(url: string): boolean {
 
 /** One `agent-links/1` file; null when it is not one. Links outside the allowlist are dropped, not kept. */
 export function parseAgentLinks(text: string): AgentLinks | null {
-  let d: Json
+  let d: unknown
   try {
-    d = JSON.parse(text) as Json
+    d = JSON.parse(text)
   } catch {
     return null
   }
-  if (d.schema !== 'agent-links/1' || !str(d.identity)) return null
-  const links = Array.isArray(d.links) ? (d.links as Json[]) : []
+  if (!isRecord(d) || d.schema !== 'agent-links/1' || !str(d.identity)) return null
+  const links = Array.isArray(d.links) ? d.links.filter(isRecord) : []
   const pick = (kind: string) => links.map(l => (str(l.kind) === kind ? str(l.url) : '')).find(u => u && isAllowedLink(u)) ?? null
   const aliases = Array.isArray(d.aliases) ? d.aliases.map(str).filter(Boolean) : []
   return { identity: str(d.identity), aliases, platform: str(d.platform), machine: str(d.machine), updatedAt: str(d.updated_at), app: pick('app'), web: pick('web') }

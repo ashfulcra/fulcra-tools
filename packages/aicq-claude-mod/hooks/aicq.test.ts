@@ -257,6 +257,9 @@ describe('universe', () => {
       links: [{ kind: 'app', url: 'file:///nope' }, { kind: 'app', url: `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}` }, { kind: 'web', url: 'https://claude.ai/code/session_01AbcDefGhi' }] }))
     expect([l?.identity, l?.aliases, l?.app, l?.web]).toEqual(['coord-boss', ['boss'], `claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`, 'https://claude.ai/code/session_01AbcDefGhi'])
     expect(parseAgentLinks(JSON.stringify({ identity: 'x', links: [] }))).toBe(null)
+    // Valid JSON that is not a record is not a report, and a null link entry is skipped, not fatal.
+    expect(parseAgentLinks('null')).toBe(null)
+    expect(parseAgentLinks(JSON.stringify({ schema: 'agent-links/1', identity: 'y', links: [null, { kind: 'web', url: 'https://claude.ai/code/session_01Okokokok' }] }))?.web).toBe('https://claude.ai/code/session_01Okokokok')
     const c = parseClaudeSession(JSON.stringify({ sessionId: CLAUDE_LOCAL, bridgeSessionIds: ['session_01OldOldOld', 'session_01NewNewNew'] }))
     expect(c?.web).toBe('https://claude.ai/code/session_01NewNewNew')
     // Precedence: the local record (with its web link) beats the agent's own report; the report fills a node with no binding.
@@ -1167,6 +1170,26 @@ describe('mod', () => {
       }
     } finally {
       AGENT_LINKS.files = {}
+    }
+  })
+
+  test('waiting on you: a failed board read is named, never a false all-clear', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    COORD_FAULTS.boardThrows = true
+    try {
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(5000)
+      for (const surface of ['terminal', 'desktop'] as const) {
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+        expect((await ui.findAll({ text: /Partial: could not read .*coord board/ })).length).toBeGreaterThan(0)
+        expect((await ui.findAll({ text: /Nothing is waiting on you/ })).length).toBe(0)
+        expect((await ui.findAll({ text: /Nothing waiting in the sources that were read/ })).length).toBeGreaterThan(0)
+      }
+    } finally {
+      COORD_FAULTS.boardThrows = false
     }
   })
 

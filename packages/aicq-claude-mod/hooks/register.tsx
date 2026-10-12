@@ -1771,16 +1771,26 @@ export const register: Register = (on, options) => {
           </Box>
         )
         : null
+      // Coverage: a source that could not be read makes the list partial, never an all-clear.
+      const gaps = [...(universeNow?.degraded ?? []), ...st.degraded]
+      const gapLine = gaps.length > 0
+        ? <Text key={`${prefix}-gaps`} color="red" wrap="wrap">Partial: could not read {gaps.join(', ')}. Anything waiting there is missing from this list.</Text>
+        : null
+      const notReadLine = universeNow ? null : <Text key={`${prefix}-unread`} dimColor>The coord bus has not been read yet; only AICQ threads are shown.</Text>
       if (waiting.length === 0) {
         return (
           <Box key={`${prefix}-list`} flexDirection="column" marginBottom={1}>
-            <Text dimColor>Nothing is waiting on you{universeNow ? '' : ' in your AICQ threads (the coord bus has not been read yet)'}.</Text>
+            {gapLine}
+            {notReadLine}
+            <Text dimColor>{gaps.length || !universeNow ? 'Nothing waiting in the sources that were read.' : 'Nothing is waiting on you.'}</Text>
             {ignoredLine}
           </Box>
         )
       }
       return (
         <Box key={`${prefix}-list`} flexDirection="column" marginBottom={1}>
+          {gapLine}
+          {notReadLine}
           {waiting.slice(0, 8).map(it => {
             const k = `${prefix}-${it.key}`
             return (
