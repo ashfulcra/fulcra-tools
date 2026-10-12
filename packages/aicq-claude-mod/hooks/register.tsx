@@ -1804,6 +1804,9 @@ export const register: Register = (on, options) => {
                   {it.collabKey && <Button key={`${k}-thread`} label="Open thread" onPress={() => openCollab($, it.collabKey!)} />}
                   {it.kind === 'task' && <Button key={`${k}-help`} label="Help me unblock" onPress={() => $.prompt.submit({ text: `Help me with a blocked item on the coord bus (team ${cfg.coordTeam}): task ${it.taskId} owned by ${it.nodeKey?.replace(/^agent:/, '')}, blocked on user:${cfg.owner}. Title: ${it.title}. Next action recorded: ${it.ask}. Read the task doc, tell me exactly what it needs from me in one or two lines, and propose the unblock step. Don't act on the bus until I confirm.` }).then(() => undefined, () => undefined)} />}
                   {it.session && sessionControls($, waitingEls, it.session, e.surface, `${k}-session`)}
+                  {!it.session && it.whose === 'mine' && it.nodeKey && !it.nodeKey.startsWith('agent:coord-reconcile:') && (
+                    <Button key={`${k}-pick`} plain label="Link its session…" onPress={() => openNode($, it.nodeKey!)} />
+                  )}
                 </Box>
               </Box>
             )

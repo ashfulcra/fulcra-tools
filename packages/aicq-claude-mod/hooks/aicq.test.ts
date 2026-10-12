@@ -1271,6 +1271,8 @@ describe('mod', () => {
         expect((await ui.findAll({ text: /Blocked on you · P1/ })).length).toBeGreaterThan(0)
         expect((await ui.findAll({ text: /blocked items? untouched/ })).length).toBe(0)
         expect((await ui.findAll({ text: /Coord bus read .* · 1 blocked on you/ })).length).toBeGreaterThan(0)
+        // coord-boss has no known session here, so its card offers to link one, and that opens its detail.
+        expect((await ui.findAll({ type: 'Button', text: /Link its session…/ })).length).toBeGreaterThan(0)
       }
     } finally {
       delete task.timestamp
