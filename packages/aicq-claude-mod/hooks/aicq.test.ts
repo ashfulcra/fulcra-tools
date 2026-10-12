@@ -1270,6 +1270,7 @@ describe('mod', () => {
         const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
         expect((await ui.findAll({ text: /Blocked on you · P1/ })).length).toBeGreaterThan(0)
         expect((await ui.findAll({ text: /blocked items? untouched/ })).length).toBe(0)
+        expect((await ui.findAll({ text: /Coord bus read .* · 1 blocked on you/ })).length).toBeGreaterThan(0)
       }
     } finally {
       delete task.timestamp

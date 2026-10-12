@@ -1757,6 +1757,7 @@ export const register: Register = (on, options) => {
     // ---- waiting on you: friends' agents and your own, in one ranked list --------
     const waitingEls = $.ui.resolve(e) as unknown as SessionElements
     const universeNow = ((await read($, universeAtom)) as Universe | null) ?? null
+    const universeLoading = ((await read($, universeLoadingAtom)) as boolean | undefined) ?? false
     const waitingAll: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace), cfg.agentName)
     // Threads past the ignore-after limit are already out of `collabs`. Blocked tasks are never ignored for age:
     // something blocked on the owner stays a live obligation until it is unblocked (Ash, 2026-10-12).
@@ -1768,11 +1769,17 @@ export const register: Register = (on, options) => {
         ? <Text key={`${prefix}-gaps`} color="red" wrap="wrap">Partial: could not read {gaps.join(', ')}. Anything waiting there is missing from this list.</Text>
         : null
       const notReadLine = universeNow ? null : <Text key={`${prefix}-unread`} dimColor>The coord bus has not been read yet; only AICQ threads are shown.</Text>
+      // Always say what the blocker count rests on, so a missing card can be told apart from a missing read.
+      const blockedOnYou = waiting.filter(it => it.kind === 'task').length
+      const coverageLine = universeNow
+        ? <Text key={`${prefix}-cov`} dimColor>Coord bus read {new Date(universeNow.builtAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} · {blockedOnYou} blocked on you{universeLoading ? ' · re-reading…' : ''}</Text>
+        : null
       if (waiting.length === 0) {
         return (
           <Box key={`${prefix}-list`} flexDirection="column" marginBottom={1}>
             {gapLine}
             {notReadLine}
+            {coverageLine}
             <Text dimColor>{gaps.length || !universeNow ? 'Nothing waiting in the sources that were read.' : 'Nothing is waiting on you.'}</Text>
           </Box>
         )
@@ -1781,6 +1788,7 @@ export const register: Register = (on, options) => {
         <Box key={`${prefix}-list`} flexDirection="column" marginBottom={1}>
           {gapLine}
           {notReadLine}
+          {coverageLine}
           {waiting.slice(0, 8).map(it => {
             const k = `${prefix}-${it.key}`
             return (
@@ -1934,8 +1942,9 @@ export const register: Register = (on, options) => {
       const dMine = people.filter(p => p.group === 'mine').filter(matches)
       const dFriendsAll = people.filter(p => p.group === 'friends').filter(matches)
       const dFriends = query ? dFriendsAll : dFriendsAll.filter(p => p.lastWorkedAt || p.contact !== (p.contactUserId ?? '').slice(0, 8))
+      // Sizes are character cells on every surface: 28% of the row, at least 30 cells, never squeezed by the main column.
       const dSidebar = (
-        <Box key="dside" flexDirection="column" width={wide ? '30%' : '100%'} minWidth={wide ? 260 : 0} flexShrink={0} overflow="hidden" marginRight={wide ? 2 : 0}>
+        <Box key="dside" flexDirection="column" width={wide ? '28%' : '100%'} minWidth={wide ? 30 : 0} flexShrink={0} overflow="hidden" marginRight={wide ? 2 : 0}>
           <Input key="dsearch" placeholder="Search agents" value={query} onInput={value => update($, queryAtom, () => value).then(() => undefined)} onSubmit={value => update($, queryAtom, () => value).then(() => undefined)} />
           <Svg key="dl-mine" alt="My agents" source={sideLabelSvg('My agents')} />
           {dMine.map(dSide)}
