@@ -1758,19 +1758,10 @@ export const register: Register = (on, options) => {
     const waitingEls = $.ui.resolve(e) as unknown as SessionElements
     const universeNow = ((await read($, universeAtom)) as Universe | null) ?? null
     const waitingAll: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace), cfg.agentName)
-    // Threads past the ignore-after limit are already out of `collabs`; a blocked task whose doc has not been
-    // touched past the limit is ignored the same way (shown on request, found by search).
-    const staleTaskKeys = new Set(waitingAll.filter(it => it.kind === 'task' && it.since && isStaleAt(it.since, nowMs, ignoreDays)).map(it => it.key))
-    const waiting = showStale || query ? waitingAll : waitingAll.filter(it => !staleTaskKeys.has(it.key))
+    // Threads past the ignore-after limit are already out of `collabs`. Blocked tasks are never ignored for age:
+    // something blocked on the owner stays a live obligation until it is unblocked (Ash, 2026-10-12).
+    const waiting = waitingAll
     const waitingSection = (prefix: string) => {
-      const ignoredLine = staleTaskKeys.size > 0 && !query
-        ? (
-          <Box key={`${prefix}-stale`}>
-            <Text dimColor>{showStale ? `Showing ${staleTaskKeys.size} blocked item${staleTaskKeys.size > 1 ? 's' : ''} untouched for over ${ignoreDays} days · ` : `${staleTaskKeys.size} blocked item${staleTaskKeys.size > 1 ? 's' : ''} untouched for over ${ignoreDays} days ignored · `}</Text>
-            <Button key={`${prefix}-stale-t`} plain label={showStale ? 'Ignore them again' : 'Show them'} onPress={() => update($, showStaleAtom, x => !x).then(() => undefined)} />
-          </Box>
-        )
-        : null
       // Coverage: a source that could not be read makes the list partial, never an all-clear.
       const gaps = [...(universeNow?.degraded ?? []), ...st.degraded]
       const gapLine = gaps.length > 0
@@ -1783,7 +1774,6 @@ export const register: Register = (on, options) => {
             {gapLine}
             {notReadLine}
             <Text dimColor>{gaps.length || !universeNow ? 'Nothing waiting in the sources that were read.' : 'Nothing is waiting on you.'}</Text>
-            {ignoredLine}
           </Box>
         )
       }
@@ -1811,7 +1801,6 @@ export const register: Register = (on, options) => {
             )
           })}
           {waiting.length > 8 && <Text dimColor>+ {waiting.length - 8} more waiting · the map shows every blocked item</Text>}
-          {ignoredLine}
         </Box>
       )
     }

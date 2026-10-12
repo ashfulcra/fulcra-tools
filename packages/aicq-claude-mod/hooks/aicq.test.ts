@@ -1255,25 +1255,21 @@ describe('mod', () => {
     }
   })
 
-  test('waiting on you: a blocked task untouched past the ignore-after limit is ignored, and comes back on request', { options: { agentName: 'aicq' } }, async ($, on) => {
+  // Blocked on the owner is a live obligation until it is unblocked, so age never hides it (Ash, 2026-10-12).
+  test('waiting on you: a blocked task stays a red card however old, past the ignore-after limit', { options: { agentName: 'aicq' } }, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     mock.env(on, { HOME: '/home/t' })
     const task = COORD.board.blocked[0] as Record<string, unknown>
-    task.timestamp = new Date(T0 - 10 * 86_400_000).toISOString()
+    task.timestamp = new Date(T0 - 40 * 86_400_000).toISOString()
     try {
       engine(on, fake([]), sinkOf())
       await $.session.start({ cwd: '/tmp' } as never)
       await clock.advance(5000)
-      type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown> }
       for (const surface of ['terminal', 'desktop'] as const) {
-        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
-        const p = surface === 'terminal' ? 'wait' : 'dwait'
-        expect((await ui.findAll({ text: /1 blocked item untouched for over 5 days ignored/ })).length).toBeGreaterThan(0)
-        expect((await ui.findAll({ text: /Blocked on you/ })).length).toBe(0)
-        await ui.press({ key: `${p}-stale-t` })
+        const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
         expect((await ui.findAll({ text: /Blocked on you · P1/ })).length).toBeGreaterThan(0)
-        await ui.press({ key: `${p}-stale-t` })
+        expect((await ui.findAll({ text: /blocked items? untouched/ })).length).toBe(0)
       }
     } finally {
       delete task.timestamp
