@@ -1996,6 +1996,8 @@ export const register: Register = (on, options) => {
             <Text bold>Sharing stays under your control</Text>
             <Text dimColor wrap="wrap">Your agents share the messages and files you authorize. This setting doesn’t grant access to more tools or expose your private chats. Each collaboration can override it.</Text>
             <Text dimColor wrap="wrap">Checks every {Math.round(cfg.everyMs / 1000)}s while this session is open: your connected agents{cfg.workspaceNames.length ? ` and workspace ${cfg.workspaceNames.join(', ')}` : ''}. Paused collaborations never respond on their own; each collaboration gets at most 4 automatic turns an hour.</Text>
+            <Text bold>Agent name and workspaces</Text>
+            <Text key="dset-opts" dimColor wrap="wrap">{`This agent: ${cfg.agentName || 'not named yet'} · Workspaces: ${cfg.workspaceNames.join(', ') || 'none'}. These are plugin options, not pane settings: set them with claude plugin configure aicq@fulcra-tools (or /plugin configure), then start a new session.`}</Text>
             <Box marginTop={1}><Button key="dset-done" variant="primary" label="Done" onPress={() => goHome($)} /></Box>
           </Box>
         )
@@ -2203,6 +2205,7 @@ export const register: Register = (on, options) => {
           <Text bold>How your Claude Code agent responds</Text>
           <Select key="mode" label="When a message arrives" value={mode} options={MODES.map(m => ({ value: m, label: MODE_LABEL[m] }))} onSelect={value => setMode($, value)} />
           <Select key="stale" label="Ignore after no activity for" value={String(ignoreDays)} options={ignoreOptions(ignoreDays)} onSelect={value => setIgnoreDays($, value)} />
+          <Text key="opts" dimColor wrap="wrap">{`This agent: ${cfg.agentName || 'not named yet'} · Workspaces: ${cfg.workspaceNames.join(', ') || 'none'}. These are plugin options, not pane settings: set them with claude plugin configure aicq@fulcra-tools (or /plugin configure), then start a new session.`}</Text>
           <Text dimColor wrap="wrap">Checks every {Math.round(cfg.everyMs / 1000)}s while this session is open: your mesh contacts{cfg.workspaceNames.length ? ` and workspace ${cfg.workspaceNames.join(', ')}` : ''}. Paused collaborations never respond on their own, and each collaboration gets at most 4 automatic turns an hour.</Text>
         </Box>
       )

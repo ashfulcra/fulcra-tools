@@ -1215,6 +1215,21 @@ describe('mod', () => {
     }
   })
 
+  test('settings say where agent name and workspaces are configured, on both surfaces', { options: { agentName: 'deskbook-aicq', workspaces: 'team' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    engine(on, fake([]), sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown> }
+      await ui.press({ key: surface === 'terminal' ? 'settings' : 'dsettings' })
+      expect((await ui.findAll({ text: /This agent: deskbook-aicq · Workspaces: team\. These are plugin options.*claude plugin configure aicq@fulcra-tools/ })).length).toBeGreaterThan(0)
+      await ui.press({ key: surface === 'terminal' ? 'settings' : 'dsettings' })
+    }
+  })
+
   test('waiting on you: a failed board read is named, never a false all-clear', async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
