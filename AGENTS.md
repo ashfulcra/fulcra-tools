@@ -18,6 +18,11 @@ Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
 
+Coord V5 has an opt-in parallel `transport read-updates` route. Use shadow mode
+before gated deployment; update watermarks are not record cursors or complete-history
+proof. Quiet hints never cancel retained delivery obligations. Preserve the direct
+route, private journals and per-source scope; see the package README for audit/fallback limits.
+
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
 fixes, plugins, installers, commands, and workflows. If a package has no README,
@@ -267,6 +272,18 @@ under `skills/`, each package with its own README, build, and tests.
   versioned policy, a pure diff plan, a Linear adapter). Workflow order, lane
   policy, and adapter contracts:
   [`packages/coord-tracker-bridge/README.md`](packages/coord-tracker-bridge/README.md).
+- **`packages/aicq-claude-mod`** — alpha Claude Code **mod** (function-hook
+  plugin, not a Python package; excluded from the uv workspace): AICQ in a
+  Claude Code session. It polls connect-our-agents/1, legacy mesh and
+  `fulcra.workspaces/1` on a timer through the `fulcra` CLI, groups messages
+  into collaborations with work states, draws `/aicq` (SVG on desktop), and
+  responds per the four AICQ modes (heartbeats and acks never wake;
+  4 auto-turns/hour/collaboration cap). Sends read back before claiming
+  delivery. Gate: `claude plugin validate` + `claude plugin test` on a
+  mods-capable build. Install anywhere from the repo's plugin marketplace
+  (`.claude-plugin/marketplace.json`): `/plugin marketplace add ashfulcra/fulcra-tools`,
+  then `/plugin install aicq@fulcra-tools`. Details:
+  [`packages/aicq-claude-mod/README.md`](packages/aicq-claude-mod/README.md).
 - Coord retention is on by default: terminal and quiet proposed tasks archive
   after 14 days, settled review families after 7 days, and dead presence shards
   are pruned after 7 days. `COORD_RETENTION_DAYS=0` or
@@ -582,6 +599,13 @@ it (not on PyPI).
     over two weeks by a notifier that woke a human, a headless invoke that
     could not authenticate, and a peek that never consumed — none ran the
     agent, while every layer reported success.
+- **`bus-v3 tag-provision` never writes a registry entry without `agent`.**
+  One such entry makes every reader reject `_coord/bus-v3/tags.json`, which
+  untags the whole fleet's events. The verb exits 2 instead, leaves the
+  registry unchanged, and prints the uuids it created for a `--tag-id-*`
+  retry. Tag names are capped at 30 characters by the platform, so an
+  identity over 24 characters needs a shorter, hand-created agent tag passed
+  as `--tag-id-agent`; the verb checks names before creating anything.
 - **Durable tooling stash.** An agent's operational bundle survives ephemeral
   machines via `coord-engine stash push/pull/list`: push refreshes a
   `manifest.json` (per-file sha256 + exec bit) and runs a **fail-closed
@@ -962,6 +986,9 @@ it (not on PyPI).
   fan-out uses `budget.Deadline` for its deadline check (never a hand-rolled
   `time.monotonic() >= deadline`) and `budget.degraded_row` for its marker**, so the whole family
   keeps one `>=` boundary and one degraded shape.
+  Undecodable CLI stdout/stderr is normalized to `TransportError`, never replacement-decoded;
+  classified reads report `error`, not content or absence. A malformed source remains
+  unreadable and needs repair; this does not prove a clean fold.
 - **Ship-gate: a verb that mutates durable state does not ship on decision-function tests alone.**
   It ships with at least one test that invokes the ACTUATOR end to end, or with a recorded live dry
   run against a real team. `review residue` shipped its decision function under thirteen passing
@@ -995,6 +1022,17 @@ it (not on PyPI).
   budgets) or `_JSON_EXEMPT` with a stated reason — `_JSON_EXEMPT` is empty today, pinned paths must
   print SOMETHING, and the widened sweep immediately found a live leak (`headroom --json` printed
   prose on its no-accounts early return).
+- **Digest uncertainty travels with the payload.** `digest` text, stored body and
+  timeline note must carry the same read-degraded reason and last-known/unverified
+  row warning as JSON; an unreadable index never licenses "no open work". Its
+  additive source timestamp/age uses summaries `generated_at` or, on the validated
+  generation path, the attested coverage horizon, never the render clock as a
+  fallback. Preserve first-written window snapshots, but withhold their pending
+  unqualified historical timeline body while the current read is degraded; render
+  a current warned note instead, preserving same-ID retries and already-confirmed
+  emissions. A False store/emit-marker
+  write or mismatched readback cannot be reported as confirmed persistence;
+  UNKNOWN marker reads preserve existing history and withhold emission.
 - **A finished review does not close its request row unless something closes it.**
   The review store and task board need explicit closure propagation. The DECISION verbs (`review close`, `review conclude`) close their own rows at settle time —
   best-effort and loud, because the marker is durable truth and bookkeeping must not fail a verified

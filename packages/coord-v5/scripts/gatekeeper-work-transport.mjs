@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { validateWorkTransportConfig } from '../src/lib/server/gatekeeper/work-transport-config.js';
 import { readWorkWindow } from '../src/lib/server/gatekeeper/work-transport-read.js';
+import { readWorkUpdates } from '../src/lib/server/gatekeeper/work-transport-updates.js';
 import { openWorkTransportStore } from '../src/lib/server/gatekeeper/work-transport-store.js';
 import {
   publishWorkOnce,
@@ -14,6 +15,7 @@ const MAX_FILE = 64 * 1024;
 const MAX_STDIN = 16 * 1024;
 const COMMANDS = {
   read: ['config', 'db', 'start', 'end'],
+  'read-updates': ['config', 'db', 'start', 'end', 'updates-start', 'mode'],
   publish: ['config', 'db', 'event'],
   inspect: ['config', 'db'],
   replay: ['config', 'db']
@@ -126,10 +128,14 @@ async function main() {
   const { command, args } = argumentsFor(process.argv.slice(2));
   const config = validateWorkTransportConfig(privateFile(args.config));
   const event = command === 'publish' ? privateFile(args.event) : null;
-  const token = command === 'read' || command === 'publish' ? await bearer() : null;
+  if (command === 'read-updates' && !['shadow', 'gated'].includes(args.mode)) throw new Error('INVALID_ARGUMENTS');
+  const token = ['read', 'read-updates', 'publish'].includes(command) ? await bearer() : null;
   const store = openWorkTransportStore({ dbPath: args.db, config });
   try {
     if (command === 'inspect') return { status: 'ready', ...store.inspect() };
+    if (command === 'read-updates')
+      return await readWorkUpdates({ fetch: globalThis.fetch, token, config, store,
+        start: args.start, end: args.end, updatesStart: args['updates-start'], mode: args.mode, now: Date.now });
     if (command === 'publish')
       return await publishWorkOnce({
         fetch: globalThis.fetch,

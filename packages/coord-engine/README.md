@@ -53,7 +53,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Wake routing | `wake` (queue-file/consume — local SessionStart nudges) · `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |
-| Fleet ops | `health` (two separate facts per host: `fresh` is SHARD RECENCY, `advanced` is whether the pass moved the index — every reconcile exit writes a shard, aborts included, so a fresh host can have advanced nothing; a shard without the field is UNKNOWN, never fine) · `doctor` · `acceptance pair` · `forge` · `annotate` · `bus-v3 tag-provision` (register an identity's four timeline-tag dimensions — agent/platform/harness/model — in `_coord/bus-v3/tags.json`, so every event this agent writes is filterable in the Fulcra visual explorer; `model` is a declaration the engine cannot verify, and a switch is a cheap re-provision) · `bus-v3 send` (the supported hand-send for a bare event — resolves the stream from the records authority and attaches those tags, which a raw `fulcra-api record` pipe cannot do) |
+| Fleet ops | `health` (two separate facts per host: `fresh` is SHARD RECENCY, `advanced` is whether the pass moved the index — every reconcile exit writes a shard, aborts included, so a fresh host can have advanced nothing; a shard without the field is UNKNOWN, never fine) · `doctor` · `acceptance pair` · `forge` · `annotate` · `bus-v3 tag-provision` (register an identity's four timeline-tag dimensions — agent/platform/harness/model — in `_coord/bus-v3/tags.json`, so every event this agent writes is filterable in the Fulcra visual explorer; `model` is a declaration the engine cannot verify, and a switch is a cheap re-provision; it never writes an entry without the required `agent` tag, which would make every reader reject the registry, and it refuses a tag name over the platform's 30-character limit before creating anything) · `bus-v3 send` (the supported hand-send for a bare event — resolves the stream from the records authority and attaches those tags, which a raw `fulcra-api record` pipe cannot do) |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. Sub-verb lists above are by concern, not exhaustive — the parser's help is the inventory. The
@@ -108,6 +108,27 @@ coverage horizon, and per-surface coverage. The current transport keeps
 while public reads use canonical authorities. Generation serving is a separate
 activation; its presence in the code is not evidence that a team has enabled it.
 Epsilon is not a repair for an incomplete or unknown read.
+
+`digest` carries an unreadable-index/freshness warning in the same rendered body
+used by text output, `--store` and `--emit-timeline`, not only on stderr. Retained
+rows/counts are explicitly last-known/unverified; empty counts under UNKNOWN do
+not claim no open work. The existing digest-v1 JSON adds `source:{kind,at,age_hours}`:
+the summaries timestamp is its `generated_at`, while a validated generation uses
+the attested coverage horizon. Missing/invalid time stays unknown; the render
+clock is never substituted for source time. Source age does not prove complete
+history or healthy presence reads. Existing per-window stored bodies remain
+historical snapshots; a degraded current read withholds their pending timeline
+body and emits the current explicitly warned note instead. Same-ID retries remain
+available after transient emit failure, and confirmed emitted records are left
+untouched. New store and emit-marker
+writes require confirmed absence before writing, then success and exact readback
+before confirmation; unreadable markers preserve history and withhold emission.
+Persistence or confirmation failure returns
+rc 3, meaning persistence is unconfirmed, not that data was lost: readback may
+observe a stale superseded version; a later confirmed marker read can resolve
+that uncertainty without blindly retrying an ambiguous external effect.
+Read degradation itself keeps the existing digest exit contract and JSON
+marker. No schedule or timeline configuration is changed by this behavior.
 
 `roles status` now returns one `liveness_fact` that carries lease and presence
 observations plus both store-prefix provenance fields. Fresh holder presence and
@@ -191,6 +212,12 @@ transport bounds.
 - **Structured logs** to stderr (`$COORD_LOG_LEVEL`).
 
 ## Environment / tuning
+
+Malformed CLI stdout or stderr is a transport failure, not usable text.
+The file transport converts decoding failures to `TransportError`; classified
+reads return `(None, "error")`, never an empty body or affirmative absence.
+It does not replace invalid bytes. The unreadable source still needs repair;
+this boundary prevents a raw decoding exception from crashing a fold.
 
 Common transport, identity, and fold settings. Command-specific settings are
 documented with their skills and CLI help. **Prefix rule:**

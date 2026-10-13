@@ -12,7 +12,7 @@ if (major < 22 || (major === 22 && minor < 16)) {
   const [command, ...args] = process.argv.slice(2);
   if (!command || ["help", "--help", "-h"].includes(command)) {
     process.stdout.write(`coord-v5 — opt-in coordination alpha\n
-Usage: coord-v5 transport <read|publish|inspect|replay> [flags]
+Usage: coord-v5 transport <read|read-updates|publish|inspect|replay> [flags]
        coord-v5 listener <configure|prepare|settle|ack|inspect|dispatch-claude> [flags]
        coord-v5 listener dispatch-claude --db ABS --scope JSON --holder ID --executable ABS [--timeout-ms N]
        coord-v5 observation --config ABS --policy ABS --db ABS

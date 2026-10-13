@@ -316,6 +316,39 @@ def test_tag_provision_prints_a_recipe_per_unresolvable_dimension(capsys):
     assert _entry(t) == {"agent": AGENT}    # partial progress still recorded
 
 
+def test_an_entry_without_the_agent_tag_is_never_written(capsys):
+    """The agent tag failed but platform succeeded. Writing that entry would
+    make every reader refuse the whole registry and untag every agent, so the
+    registry stays as it was and the created uuid is reported for the retry."""
+    t = ProvisioningTransport({"platform:claude-code": PLATFORM})
+    t.put(bus_tags.tags_path(TEAM), _registry({"coder": FULL}))
+    assert _provision(t, "--platform", "claude-code") == 2
+    assert _entry(t) is None
+    assert _entry(t, "coder") == FULL
+    assert bus_tags.parse_registry(t.store[bus_tags.tags_path(TEAM)])
+    err = capsys.readouterr().err
+    assert "NOT written" in err and f"--tag-id-platform {PLATFORM}" in err
+
+
+def test_a_tag_name_over_the_platform_limit_is_refused_before_creating(capsys):
+    long_agent = "example-long-agent-identity"   # agent:<it> is 33 characters
+    t = ProvisioningTransport({"platform:claude-code": PLATFORM})
+    t.put(bus_tags.tags_path(TEAM), _registry({}))
+    assert _provision(t, "--platform", "claude-code", agent=long_agent) == 2
+    assert t.ensured == []                  # nothing minted, nothing orphaned
+    assert _entry(t, long_agent) is None
+    err = capsys.readouterr().err
+    assert "at most 30" in err and "--tag-id-agent" in err
+
+
+def test_a_long_identity_registers_with_an_explicit_agent_tag():
+    long_agent = "example-long-agent-identity"
+    t = ProvisioningTransport()
+    t.put(bus_tags.tags_path(TEAM), _registry({}))
+    assert _provision(t, "--tag-id-agent", AGENT, agent=long_agent) == 0
+    assert _entry(t, long_agent) == {"agent": AGENT}
+
+
 def test_tag_provision_is_idempotent_for_an_already_registered_identity(capsys):
     t = ProvisioningTransport({"agent:coord-boss": CODER})
     t.put(bus_tags.tags_path(TEAM), _registry({"coord-boss": FULL}))
