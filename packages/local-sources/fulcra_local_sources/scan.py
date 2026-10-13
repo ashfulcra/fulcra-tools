@@ -70,6 +70,8 @@ def _scan_tree(
     on each file object for the local reader and is excluded from its repr.
     """
     limits = limits or ScanLimits()
+    if still_allowed is not None:
+        still_allowed()
     root = Path(os.path.abspath(Path(source).expanduser()))
     if root == Path("/"):
         raise ValueError("select a folder below the filesystem root")
@@ -91,6 +93,8 @@ def _scan_tree(
         root_identity = (root_info.st_dev, root_info.st_ino)
         for current, dirnames, filenames, directory_fd in os.fwalk(
                 ".", dir_fd=root_fd, follow_symlinks=False):
+            if still_allowed is not None:
+                still_allowed()
             entries += len(dirnames) + len(filenames)
             if entries > limits.max_entries:
                 raise ValueError("selected folder exceeds the traversal entry limit")
@@ -128,7 +132,8 @@ def _scan_tree(
                     try:
                         with open_regular(root_fd, relative) as handle:
                             before = identity(os.fstat(handle.fileno()))
-                            digest, size = hash_file(handle, limits.max_file_bytes)
+                            digest, size = hash_file(handle, limits.max_file_bytes,
+                                                     still_allowed=still_allowed)
                             if before != identity(os.fstat(handle.fileno())) or size != before[2]:
                                 raise ValueError("source changed during scan; try again")
                     except OSError:

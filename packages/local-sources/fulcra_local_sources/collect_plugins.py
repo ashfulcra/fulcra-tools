@@ -52,10 +52,18 @@ def _preview(scan: ScanResult) -> list[dict]:
     ]
 
 
-def _health(ctx, *, extensions: set[str], noun: str) -> HealthResult:
+def _health(ctx, *, plugin_id: str, extensions: set[str], noun: str) -> HealthResult:
     try:
+        current = collect_config.load()
+        allowed = partial(_still_allowed, plugin_id, deepcopy(ctx.config),
+                          current.plugin_epochs.get(plugin_id, ""), require_enabled=False)
+        allowed()
         collection_slug(ctx.config.get("collection_name"))
-        scan = scan_tree(_source(ctx), allowed_extensions=extensions)
+        scan = scan_tree(_source(ctx), allowed_extensions=extensions, still_allowed=allowed)
+        allowed()
+    except RuntimeError:
+        return HealthResult(ok=False, summary="The folder selection or account changed; "
+                            "run the check again.", preview=[])
     except (OSError, ValueError) as exc:
         return HealthResult(ok=False, summary=str(exc), preview=[])
     skipped = sum(scan.skipped_by_reason.values())
@@ -68,19 +76,20 @@ def _health(ctx, *, extensions: set[str], noun: str) -> HealthResult:
 
 
 def local_folders_health(ctx: RunContext) -> HealthResult:
-    return _health(ctx, extensions=LOCAL_FOLDER_EXTENSIONS, noun="files")
+    return _health(ctx, plugin_id="local-folders", extensions=LOCAL_FOLDER_EXTENSIONS, noun="files")
 
 
 def meeting_transcripts_health(ctx: RunContext) -> HealthResult:
-    return _health(ctx, extensions=TRANSCRIPT_EXTENSIONS, noun="transcripts")
+    return _health(ctx, plugin_id="meeting-transcripts", extensions=TRANSCRIPT_EXTENSIONS,
+                   noun="transcripts")
 
 
-def _still_allowed(plugin_id, settings, epoch, token=None, *, fresh=False):
+def _still_allowed(plugin_id, settings, epoch, token=None, *, fresh=False, require_enabled=True):
     current = collect_config.load()
     now = current.plugin_settings.get(plugin_id, {})
     current_token = collect_credentials.get_user_secret_fresh("bearer-token") if token and fresh else token
     if ((token is not None and (not current_token or not hmac.compare_digest(token, current_token)))
-            or current.account_transition or plugin_id not in current.enabled
+            or current.account_transition or (require_enabled and plugin_id not in current.enabled)
             or current.plugin_epochs.get(plugin_id, "") != epoch
             or any(now.get(key, False if key == "dry_run" else None)
                    != settings.get(key, False if key == "dry_run" else None)

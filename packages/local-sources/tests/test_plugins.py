@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -73,7 +72,7 @@ def test_plugins_are_scheduled_local_sources_with_folder_picker_and_preview():
 def test_health_preview_returns_only_relative_names(tmp_path: Path):
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "brief.md").write_text("synthetic", encoding="utf-8")
-    ctx = SimpleNamespace(config={"source_path": str(tmp_path), "collection_name": "Project A"})
+    ctx = Context("local-folders", {"source_path": str(tmp_path), "collection_name": "Project A"})
 
     result = collect_plugins.local_folders_health(ctx)
 

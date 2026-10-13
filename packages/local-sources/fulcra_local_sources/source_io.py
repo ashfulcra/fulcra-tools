@@ -53,10 +53,15 @@ def open_regular(root_fd: int, relative: Path):
             os.close(fd)
 
 
-def hash_file(handle, max_bytes: int) -> tuple[str, int]:
+def hash_file(handle, max_bytes: int, *, still_allowed=None) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
-    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    while True:
+        if still_allowed is not None:
+            still_allowed()
+        chunk = handle.read(1024 * 1024)
+        if not chunk:
+            break
         size += len(chunk)
         if size > max_bytes:
             raise ValueError("source changed or exceeds the file byte limit")

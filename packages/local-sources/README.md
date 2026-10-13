@@ -31,6 +31,11 @@ does not contain them yet.
    first run to write nothing.
 5. Choose **Enable & start sync**.
 
+The folder review works before you enable the plugin. If you change the folder,
+collection name, preview setting, or Fulcra account while it is scanning, Collect
+stops the check and discards its preview. Run **Review the folder** or
+**Review the transcripts** again with your current selection.
+
 Local folders run every six hours. Transcript folders run every fifteen
 minutes so an app that exports after each call can feed Collect without its own
 connector. **Run Now** checks immediately.

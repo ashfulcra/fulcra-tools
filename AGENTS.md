@@ -96,6 +96,13 @@ the scan; consumers upload or render that snapshot instead of reopening the
 source pathname. Preserve file/traversal byte limits and suppress private paths
 and credentials from complete error tracebacks.
 
+Local-source setup health checks capture the current persisted plugin epoch,
+allow checks before enablement, and validate saved selection/settings plus the
+account-transition gate before scanning and before each bounded content read.
+Recheck after the scan; revoked consent must return a failed health result with
+no preview. Do not use the setup context's empty worker epoch or bypass these
+guards for local-only previews.
+
 All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow
 [`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree
