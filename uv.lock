@@ -23,6 +23,7 @@ members = [
     "fulcra-media-helpers",
     "fulcra-menubar",
     "fulcra-netflix-skill",
+    "fulcra-notion",
     "fulcra-okf",
     "fulcra-prefs",
     "fulcra-purpleair",
@@ -760,6 +761,32 @@ dev = [
 requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "fulcra-notion"
+version = "0.1.0"
+source = { editable = "packages/notion" }
+dependencies = [
+    { name = "fulcra-collect" },
+    { name = "fulcra-local-sources" },
+    { name = "httpx" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fulcra-collect", editable = "packages/collect" },
+    { name = "fulcra-local-sources", editable = "packages/local-sources" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
 provides-extras = ["dev"]
 

@@ -108,6 +108,21 @@ Recheck after the scan; revoked consent must return a failed health result with
 no preview. Do not use the setup context's empty worker epoch or bypass these
 guards for local-only previews.
 
+**Selected Notion pages:** the `notion-pages` plugin reads only explicitly
+selected page roots and ordinary nested blocks. Never add workspace search,
+child-page/database traversal, synced-block following or attachment downloads
+implicitly. Use omission markers for unsupported content. Keep credentials in
+Keychain, preview on by default, content hashes scoped to the destination
+account, and captured settings/epoch/credentials checked before reads and
+under the shared configuration/account lease before uploads. Use the strict
+Collect token and bounded fresh credential checks. Its source-tree registration
+is not a claim that the released installer includes it; live provider and
+signed-installer verification remain separate release prerequisites. Setup
+health probes must capture the current persisted epoch and guard each read too;
+allow probes before enablement but abort changed selection/credentials. Reject
+missing known block fields and inconsistent pagination instead of saving a
+partial page as an empty success.
+
 All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow
 [`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree

@@ -26,8 +26,8 @@ web UI on `127.0.0.1:9292`, and stores per-plugin state in a single
 SQLite database at `~/.config/fulcra-collect/state.db`.
 
 The [menubar app](../menubar/README.md) and [web UI](../web-ui/README.md)
-control this daemon. Packages such as [media-helpers](../media-helpers/README.md)
-and [local-sources](../local-sources/README.md) expose plugin entry points for it; some also
+control this daemon. Packages such as [media-helpers](../media-helpers/README.md),
+[local-sources](../local-sources/README.md), and [notion](../notion/README.md) expose plugin entry points for it; some also
 have standalone CLIs. A connector can adopt the plugin contract to reuse
 scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
 
@@ -483,3 +483,13 @@ its parent with a symbolic link stops the scan; choose the folder again.
 
 Upload consent checks re-read the stored account token with a bounded Keychain
 read, so a worker cannot miss a token replacement made by another process.
+
+The source-tree **Notion pages** plugin copies explicitly selected pages as
+Markdown, with preview on by default. It needs a read-only internal Notion
+connection; setup currently requires a workspace owner. Linked pages,
+databases and attachments are marked as omitted. It is not in the 0.1.3
+installer. See [setup and limits](../notion/README.md).
+
+Notion setup probes check the live page selection and credentials before each
+request, including while the plugin is disabled. A selection change cancels the
+probe; malformed page content is never saved as an empty successful copy.
