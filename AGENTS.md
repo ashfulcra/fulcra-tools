@@ -82,6 +82,32 @@ configuration saves and automatic token refresh must never clear it.
 
 ## Public repository privacy
 
+**Selected local-source uploads:** use Collect's captured Fulcra token, never
+the CLI's independently stored account. Use `RunContext.collect_token()` for
+selected-source uploads; its missing/expired token requires reconnecting in Collect.
+The legacy `fulcra_token()` helper still supports independent CLI/env fallback
+and is unsuitable for account-bound sources. Capture and compare the stored
+token as well as the epoch before uploading. Use the bounded
+`credentials.get_user_secret_fresh()` read for capture and final upload guards;
+the ordinary cached reader cannot detect another process changing the token. Do not re-canonicalize a selected
+folder path on subsequent scans: substituted ancestor/root links must fail closed.
+Partition content-hash state by the
+authenticated destination account. Before each source read and upload, validate
+the captured plugin epoch, source/collection selection, preview mode, enabled
+state and account-transition gate. Hold the shared configuration/account lease
+through the final consent check and upload. Use descriptor-anchored no-follow
+regular-file reads and a private snapshot whose identity, size and hash match
+the scan; consumers upload or render that snapshot instead of reopening the
+source pathname. Preserve file/traversal byte limits and suppress private paths
+and credentials from complete error tracebacks.
+
+Local-source setup health checks capture the current persisted plugin epoch,
+allow checks before enablement, and validate saved selection/settings plus the
+account-transition gate before scanning and before each bounded content read.
+Recheck after the scan; revoked consent must return a failed health result with
+no preview. Do not use the setup context's empty worker epoch or bypass these
+guards for local-only previews.
+
 All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow
 [`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree

@@ -1,8 +1,9 @@
 # Beta packaging — signed macOS `.dmg`
 
 How to produce the signed, notarized **Fulcra Collect.dmg** that beta testers
-install. The `.dmg` bundles the app (collect core + every plugin, gmail
-included), the built attention Chrome extension, and install instructions.
+install. The `.dmg` bundles the app (collect core + every plugin listed in the
+menubar package requirements, including Gmail and the local-source plugins),
+the built attention Chrome extension, and install instructions.
 
 ## What's automated vs. what's yours
 

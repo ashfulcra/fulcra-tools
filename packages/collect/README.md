@@ -27,9 +27,14 @@ SQLite database at `~/.config/fulcra-collect/state.db`.
 
 The [menubar app](../menubar/README.md) and [web UI](../web-ui/README.md)
 control this daemon. Packages such as [media-helpers](../media-helpers/README.md)
-and [Day One](../dayone/README.md) expose plugin entry points for it; some also
+and [local-sources](../local-sources/README.md) expose plugin entry points for it; some also
 have standalone CLIs. A connector can adopt the plugin contract to reuse
 scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
+
+The local-source plugins bind uploads to Collect's signed-in account. They check
+live configuration before each upload and copy verified regular-file snapshots;
+changing a selection or disabling a source stops its pending work. Their
+[README](../local-sources/README.md) explains the limits and source-install setup.
 
 ## What it does
 
@@ -44,6 +49,11 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   terminate the daemon loop or stop unrelated plugins. Service workers also
   run in their own process groups, so disabling Collect or shutting it down
   terminates helper commands started by the service.
+* **Lets setup choose a local folder without copying its path into the browser.**
+  A plugin can declare a `folder_picker` step for a `path` setting. The explicit
+  **Choose folder** action opens a fixed macOS chooser; the daemon validates and
+  stores the path in private local configuration, while the UI receives only the
+  display name. Choosing a folder does not enable the plugin or upload data.
 * **Runs them in worker subprocesses.** Each scheduled or manual run
   spawns a fresh `fulcra-collect _worker <id>` process, isolating ordinary
   importer crashes from the daemon. The worker streams structured
@@ -200,7 +210,7 @@ fulcra_collect/
         status.py           /api/status, /api/version, /api/reload
         plugins.py          /api/plugin/{id}/{run,enable,disable,credentials,settings,
                             contract,setting_options/{key},health_check,check_permission,
-                            request_permission,upload}
+                            request_permission,upload,choose-folder}
         definitions.py      /api/definitions, /api/plugin/{id}/definition (bind/clear)
         fulcra_auth.py      /api/fulcra/auth/{status,token,cli_status,cli_login}
         oauth.py            /api/oauth/{plugin_id}/{start,callback}
@@ -465,3 +475,11 @@ Use `[]` to clear the selection; a required empty selection cannot be enabled.
 The dashboard discovers IDs and labels for you, so it is the easier setup path.
 
 OAuth completion uses a packaged same-origin script and inert escaped plugin data, so the strict browser CSP allows the wizard to advance after sign-in. Failed or expired callbacks do not signal completion.
+
+Selected local-source uploads require Collect's own current sign-in. If it is
+missing or expired, reconnect to Fulcra in Collect; these sources do not fall
+back to the CLI's account or refresh through it. Replacing a selected folder or
+its parent with a symbolic link stops the scan; choose the folder again.
+
+Upload consent checks re-read the stored account token with a bounded Keychain
+read, so a worker cannot miss a token replacement made by another process.

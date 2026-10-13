@@ -113,10 +113,9 @@ _USER_SERVICE = "fulcra-collect:user"
 # macOS each keychain read can trigger a separate "Allow / Always Allow"
 # prompt; without caching, a freshly-restarted daemon whose binary isn't yet
 # in the item's ACL prompts the user over and over (observed: ten times in a
-# row). Caching collapses that to ONE read per daemon lifetime. This process
-# is the only writer of user secrets (the daemon's web routes + refresh path),
-# so the cache can't drift behind an external writer; set/delete keep it in
-# sync, and a stale token still self-heals via refresh-on-401.
+# row). Caching collapses that to ONE read per daemon lifetime. Workers and the daemon have separate caches. Account-bound upload guards
+# use get_user_secret_fresh to observe writes made by another process.
+# Ordinary UI reads retain this cache; set/delete keep the current process in sync.
 _user_secret_cache: dict[str, str | None] = {}
 _user_secret_cache_lock = Lock()
 
@@ -150,6 +149,14 @@ def get_user_secret(key: str) -> str | None:
     with _user_secret_cache_lock:
         _user_secret_cache[key] = value
     return value
+
+
+def get_user_secret_fresh(key: str) -> str | None:
+    """Bounded keychain read for account-bound workers, bypassing process cache."""
+    try:
+        return _keyring_get(_USER_SERVICE, key)
+    except TimeoutError:
+        return None
 
 
 def has_user_secret(key: str) -> bool:

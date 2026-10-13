@@ -975,3 +975,17 @@ def test_fulcra_token_expired_with_failed_refresh_falls_back_to_cli(monkeypatch)
                         lambda self: "cli-token")
     ctx = _make_bare_ctx()
     assert ctx.fulcra_token() == "cli-token"
+
+
+@pytest.mark.parametrize("stored", [None, "expired-token", "collect-token"])
+def test_collect_token_never_uses_an_independent_account(monkeypatch, stored):
+    from fulcra_collect import credentials, plugin
+    import fulcra_common
+    monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda key: stored)
+    monkeypatch.setattr(plugin, "_jwt_expired", lambda token: token == "expired-token")
+    def forbidden(*args):
+        pytest.fail("selected-source credentials must not use CLI refresh or fallback")
+    monkeypatch.setattr(credentials, "refresh_fulcra_access_token", forbidden)
+    monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token", forbidden)
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "different-account")
+    assert _make_bare_ctx().collect_token() == ("collect-token" if stored == "collect-token" else None)
