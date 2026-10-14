@@ -25,12 +25,19 @@ notarized, and includes Apple Notes, Apple Reminders, and Todoist.
 
 Collect 0.1.4 source is on the main branch. Its Mac installer will replace this
 link after signing, notarization, and Gatekeeper checks finish.
+The signed development candidate includes all 26 plugin entries. It has not
+been published; the three new sources are unavailable in the current download.
 
 1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
 2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.
 3. Choose **Install & start daemon** if prompted, then open the dashboard and
    **Sign in with Fulcra**.
 4. Choose a source and follow **Set up**. For Apple Notes, use the steps below.
+
+When upgrading, quit Collect, drag the new app into Applications, and choose
+**Replace** when Finder asks. Open it from Applications again. Your saved
+settings stay on the Mac. If Collect asks you to sign in, use **Sign in with
+Fulcra** in its dashboard.
 
 Requires an Apple silicon Mac running macOS 12 or later. The app includes Python,
 Collect, the Fulcra client, and the plugins; you do not need Terminal or Homebrew.

@@ -37,6 +37,11 @@ Attention is an optional extension in the disk image with separate setup.
 
 The commands below are for development.
 
+The disk image's [install instructions](resources/dmg/INSTALL.txt) cover the
+0.1.4 candidate, including folders, transcript exports, and Notion. The current
+public download is still 0.1.3. A signed development build is not a release:
+notarization, stapling, and Gatekeeper acceptance must finish before publication.
+
 ## Run in dev mode
 
     cd path/to/fulcra-tools
