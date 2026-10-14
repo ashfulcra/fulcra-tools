@@ -189,9 +189,9 @@ API writes are also available.
 
 **[Download Collect 0.1.3 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.3-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The repository contains Collect 0.1.4 source. The current signed and notarized
-Mac installer is 0.1.3; this link will change after the 0.1.4 build passes the
-same release checks.
+Collect 0.1.4 source is merged. A development candidate with 26 plugin entries
+has been built and signed; it still needs notarization and release checks. The
+public Mac installer remains 0.1.3; this link will change when 0.1.4 is ready.
 
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)

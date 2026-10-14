@@ -61,6 +61,21 @@ bash packages/menubar/scripts/release_dmg.sh
 
 Output: `dist/Fulcra Collect.dmg`, signed + notarized + stapled.
 
+Before starting, check the saved notarization profile with a read-only request:
+
+```sh
+xcrun notarytool history --keychain-profile fulcra-notary --output-format json
+```
+
+Use your configured profile name if it differs. If the tool cannot find it,
+check the login keychain while the Mac is unlocked. Restore missing credentials
+through the secure setup above; never put a password in the repo or a build log.
+
+If submission stops without an ID, preserve the disk image and the private log.
+Check submission history and any macOS prompts before trying again. An unfinished
+command does not prove Apple received nothing. Keep submission receipts and
+machine diagnostics outside the public tree.
+
 Environment variables:
 
 | var | required | default | meaning |

@@ -1,6 +1,10 @@
 Fulcra Collect — beta install
 ==============================
 
+These instructions cover the 0.1.4 candidate. The public download remains
+0.1.3 until the new installer passes notarization and release checks. That
+older download does not include folders, transcript exports, or Notion.
+
 This disk image contains two pieces:
 
   • Fulcra Collect.app         — the app that collects your data into Fulcra.
@@ -13,6 +17,11 @@ This disk image contains two pieces:
 Drag "Fulcra Collect.app" onto the Applications folder in this window, then
 launch it from Applications. A Fulcra icon appears in your menu bar (top-right
 of the screen) — click it to open the app.
+
+You do not need Terminal, Homebrew, or a separate Python installation.
+If you already have Collect, quit it first and choose Replace when you drag
+the new app into Applications. Open it from Applications again. Your saved
+settings stay on the Mac.
 
 On first launch the app walks you through:
   • signing in to Fulcra,
@@ -46,7 +55,41 @@ uploading or changing tasks. To start syncing, return to setup, turn Preview
 only off, and choose Enable & start sync. Completion then syncs both ways for
 ordinary tasks. Recurring tasks must be completed in Reminders or Todoist.
 
-4. Set up the browser extension (optional)
+4. Copy a folder or meeting transcripts (0.1.4)
+-----------------------------------------------
+For documents or an Obsidian vault, choose Local folders and Obsidian in the
+dashboard, then Set up. For transcript exports, choose Meeting transcript
+exports instead. Your meeting app must save those exports into a folder first.
+
+Click Choose folder and pick only the folder you want copied. Give the
+collection a short name. Turn Preview only on for your first run, review the
+files Collect finds, then enable the plugin. The preview uploads nothing.
+
+When you want copies in Fulcra, return to setup, turn Preview only off, and
+start sync. Collect checks document folders every six hours and transcript
+folders every fifteen minutes. It leaves the originals alone. Removing a
+file from your Mac does not remove its Fulcra copy.
+
+5. Copy selected Notion pages (0.1.4)
+--------------------------------------
+A Notion workspace owner must create an internal connection with Read content
+access. They must also grant that connection access to each page you want
+copied. Collect's Notion setup links to the connection instructions.
+
+Choose Notion pages, then Set up. Paste the connection token into Collect and
+a page link on each line. The token stays in your Mac's Keychain. Keep Preview
+only on, check the chosen pages, and enable the preview. Nothing uploads yet.
+
+To copy them into Fulcra, turn Preview only off and run again. Collect checks
+every six hours. It leaves Notion unchanged and does not search your workspace
+or follow child pages. Select a child page separately if you want its content.
+Attachments, databases, and other unsupported content get omission markers.
+Live Notion verification is still pending; this is an unsupported beta.
+
+If Collect asks you to reconnect, sign in through its dashboard. Never paste a
+token into a GitHub issue or a support message.
+
+6. Set up the browser extension (optional)
 ------------------------------------------
 The attention extension is loaded manually in Chrome:
 

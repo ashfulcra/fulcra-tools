@@ -233,6 +233,13 @@ under `skills/`, each package with its own README, build, and tests.
   `Contents/MacOS`. The release script signs each with Developer ID, a secure
   timestamp, and hardened runtime before Briefcase seals the outer app. A valid
   outer resource seal alone does not establish notarization eligibility.
+- **Reconcile interrupted notarization before submitting again.** Verify the
+  configured profile with `notarytool history` before a release build. A submit
+  command that ends without an ID does not prove that Apple received nothing.
+  Preserve the artifact and private log, check history and native prompts, and
+  reconcile the existing attempt first. Keep receipts, credentials, and machine
+  diagnostics outside the public tree. Do not publish a signed candidate until
+  notarization, stapling, and Gatekeeper acceptance are verified.
 - **Shipping a new plugin in the frozen macOS app** — the menubar Briefcase
   `requires` is the ONLY list you edit, but it is not sufficient on its own: a
   monorepo package isn't on PyPI, so the release build must also build a local
