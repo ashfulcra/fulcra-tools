@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="2a408acdfadebda7c46199b3613c97f5c3ad2657"   # coord-engine at 2a408acd. TWENTY-FIRST pin move. Carries PR 814: the change detector reads the `start_time`/`end_time` window that `fulcra-api data-updates` (0.1.46+) attests, as well as `after`/`through`. Before this every live poll fell back to the full-scan recovery and the cursor never advanced, so the review projection re-read every unsettled review under one budget and passes aborted on incomplete reviews/forge. An empty start/end window wider than the corroboration bound returns FEED_WIDE_EMPTY_UNPROVEN (the same full-scan recovery, never a trusted CLEAR). Everything in 281e8bff is still here.
+PIN="28ecbc5c54dd11544fde8f2073221f472ea32e2d"   # coord-engine at 28ecbc5c. TWENTY-SECOND pin move. Carries PR 817 and PR 818. PR 817: a coordination channel absent from the `data_types` map of a data-updates answer counts as zero, but a CLEAR still needs the record cursor's proof. PR 818: after a sealed full-scan recovery in which every listed task was read, a stale cursor re-anchors to the feed's server-attested end_time instead of staying frozen; an aborted pass, a refused projection or any unread task keeps the old cursor. Everything in 2a408acd is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
