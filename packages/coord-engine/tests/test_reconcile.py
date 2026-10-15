@@ -324,6 +324,145 @@ def test_reconcile_named_boundary_recovery_restores_absent_generation_substrate(
     } == generation_paths
 
 
+def test_wide_empty_recovery_re_anchors_the_cursor_to_the_attested_frontier():
+    """A cursor far in the past makes every poll ask for a window so wide the
+    live feed answers [] (2026-10-15: 38 days, while one day held 3790). That
+    empty is unproven, so the pass full-scans; the server attested the window
+    [cursor, end_time] before the scan began, so once the scan completes the
+    cursor moves to exactly that end_time -- never to a local clock -- and the
+    next poll asks for a narrow window again."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    asked = []
+
+    def wide_empty_data_updates(since, *, deadline=None):
+        asked.append(since)
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(days=38)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    t.data_updates = wide_empty_data_updates
+    result = _run(t)
+
+    assert asked == [before]
+    assert result["recovery"] == "detector-full-scan"
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert {row["name"] for row in aggregate["rows"]} == {"a", "b"}
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(days=38)).isoformat().replace("+00:00", "Z")
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+    _run(t)
+    assert asked[-1] == expected
+
+
+def test_wide_empty_recovery_never_re_anchors_on_a_budget_cut_pass(monkeypatch):
+    """The re-anchor persists only with summaries.json; a pass whose review
+    projection was cut returns before that write, so the cursor stays put and
+    the next pass re-covers the same attested window."""
+    from coord_engine import projection as projection_mod
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+
+    def wide_empty_data_updates(since, *, deadline=None):
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(days=38)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    original = projection_mod.build_review_projection
+
+    def budget_cut(*args, **kwargs):
+        section = dict(original(*args, **kwargs))
+        section["complete"] = False
+        return section
+
+    t.data_updates = wide_empty_data_updates
+    monkeypatch.setattr(projection_mod, "build_review_projection", budget_cut)
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "projection publication refused" in result["reason"]
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == before
+
+
+def test_wide_empty_recovery_keeps_the_cursor_when_a_listed_task_was_not_read(
+        monkeypatch):
+    """codex-reviewer's PR 818 regression, made permanent (ruling 6c80ed8a).
+
+    A listed task whose read fails during the recovery scan is silently left
+    out of the rows, yet review/forge and publication can still succeed. If the
+    cursor re-anchored past that window, the next quiet poll would be trusted
+    and the task would stay hidden. The fold is incomplete, so the cursor holds
+    and the next pass reads the task."""
+    monkeypatch.delenv("COORD_FEED_EMPTY_CORROBORATION", raising=False)
+    monkeypatch.delenv("COORD_FEED_EMPTY_CORROBORATION_HOURS", raising=False)
+
+    class Transport(FakeTransport):
+        unreadable = False
+
+        def read(self, path):
+            if self.unreadable and path == "team/r/task/b.md":
+                return None
+            return super().read(path)
+
+    transport = Transport()
+    transport.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert not _run(transport)["degraded"]
+    path = reconcile.summaries_path("r")
+    aggregate = json.loads(transport.store[path])
+    before = "2026-09-07T20:00:00Z"
+    aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] = before
+    aggregate["generated_at"] = before
+    transport.store[path] = json.dumps(aggregate)
+    transport.put("team/r/task/b.md", _task("Bravo", "active"))
+    transport.unreadable = True
+    asked = []
+
+    def feed(since, *, deadline=None):
+        asked.append(since)
+        return {
+            "start_time": since,
+            "end_time": ("2026-10-15T20:00:00Z" if len(asked) == 1
+                         else "2026-10-15T20:01:00Z"),
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    transport.data_updates = feed
+    reconcile.reconcile(transport, "r", now="2026-10-15T20:00:00Z",
+                        today="2026-10-15", host="h", retention_days=0)
+    after = json.loads(transport.store[path])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    assert after == before
+
+    transport.unreadable = False
+    reconcile.reconcile(transport, "r", now="2026-10-15T20:01:00Z",
+                        today="2026-10-15", host="h", retention_days=0)
+    aggregate = json.loads(transport.store[path])
+    assert {row["name"] for row in aggregate["rows"]} == {"a", "b"}
+    assert asked == [before, before]
+    # With every listed task read, that second recovery may re-anchor.
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == (
+        "2026-10-15T20:01:00Z")
+
+
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     """Only the approved outer-window reason family may enter the full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES

@@ -1219,12 +1219,16 @@ def _project_task_row(
 def _full_scan_task_rows(
     transport: Any, team: str, listing: list, prior_by_name: dict[str, Any],
     last_reconcile_iso: Any, log: Any,
-) -> tuple[list[dict[str, Any]], list[str], int, int]:
+) -> tuple[list[dict[str, Any]], list[str], int, int, list[str]]:
     """Fold the full ``task/`` listing into rows, reusing unchanged prior rows.
     The authoritative pass — the fail-closed fallback and the drift self-check's
-    reference. Returns ``(rows, warnings, reused, parsed)``."""
+    reference. Returns ``(rows, warnings, reused, parsed, uncertain)``;
+    ``uncertain`` names every listed task this pass did not positively read and
+    parse (a read failure or unparseable frontmatter), so a caller can tell a
+    complete fold from one that kept a prior row or skipped a slug."""
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
+    uncertain: list[str] = []
     reused = parsed = 0
     for entry in listing:
         name = entry.get("name") or ""
@@ -1252,8 +1256,10 @@ def _full_scan_task_rows(
             rows.append(prior)
             reused += 1
             continue
-        row, warning, _read_failed = _project_task_row(
+        row, warning, read_failed = _project_task_row(
             transport, team, slug, mtime=entry_mtime, size=entry_size, log=log)
+        if read_failed or (row is None and warning is not None):
+            uncertain.append(slug)
         if row is None:
             # unparseable / unreadable / non-task: never drop a task — keep prior.
             if warning is not None:
@@ -1265,7 +1271,7 @@ def _full_scan_task_rows(
             continue
         rows.append(row)
         parsed += 1
-    return rows, warnings, reused, parsed
+    return rows, warnings, reused, parsed, uncertain
 
 
 def _incremental_reconcile_rows(
@@ -1713,7 +1719,7 @@ def reconcile(
             log.error("list failed, pass aborted (prior artifacts intact)",
                       team=team, error=str(e))
             return {"degraded": True, "reason": str(e), "tasks": 0}
-        rows, warnings, reused, parsed = _full_scan_task_rows(
+        rows, warnings, reused, parsed, task_scan_uncertain = _full_scan_task_rows(
             transport, team, listing, prior_by_name, last_reconcile_iso, log)
         # A directory listing can return rc 0 with only a tiny prefix of the
         # real directory.  The feed-folded rows are the independently
@@ -1747,8 +1753,24 @@ def reconcile(
                 team=team, missing=len(uncorroborated_missing),
             )
             return result
+        attested_frontier = getattr(batch, "attested_frontier", None)
         if batch.trusted and (prior_cursor is None or not stale):
             new_cursor = {"watermark": now, "processed": {}, "streak": 0}
+        elif (recovery_requested and prior_cursor is not None
+              and isinstance(attested_frontier, str) and attested_frontier
+              and not task_scan_uncertain):
+            # The feed attested [cursor, F] (start_time matched the cursor) but
+            # an empty answer that wide is unproven.  F was stamped by the
+            # server before this full scan began, so the completed scan has
+            # seen every change at or before F: re-anchor to F, never to a
+            # local or scan-derived time.  Only a COMPLETE task fold licenses it
+            # (ruling 6c80ed8a): every listed task read and parsed this pass --
+            # a read failure keeps a prior row or skips the slug, and moving
+            # the cursor would consume the window that still owes that read.
+            # It persists only with summaries.json, which an aborted or
+            # projection-refused pass never writes.
+            new_cursor = {"watermark": attested_frontier, "processed": {},
+                          "streak": 0}
         elif prior_cursor is not None:
             # The listing repairs canonical rows but says nothing about whether
             # this feed window was complete. Keep the old frontier so the next

@@ -110,6 +110,7 @@ def test_captured_live_envelope_preserves_the_named_boundary_recovery_reason():
 
     assert batch.trusted is False
     assert batch.reason == "data-updates coverage boundary unavailable or unparseable"
+    assert batch.attested_frontier is None
 
 
 def test_every_supported_namespace_is_explicitly_covered():
@@ -677,6 +678,10 @@ def test_wide_empty_with_dormant_corroboration_recovers_instead_of_trusting(monk
     assert batch.trusted is False
     assert batch.reason == FEED_WIDE_EMPTY_UNPROVEN
     assert detector_recovery_reason(batch) == FEED_WIDE_EMPTY_UNPROVEN
+    # The server-attested frontier rides the untrusted batch for re-anchoring;
+    # it is never the trusted watermark.
+    assert batch.attested_frontier == "2026-10-15T13:30:21.685020Z"
+    assert batch.watermark is None
 
 
 def test_channel_absent_from_live_data_types_is_a_zero_signal_the_cursor_proves():

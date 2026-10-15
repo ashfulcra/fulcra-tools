@@ -975,8 +975,14 @@ it (not on PyPI).
     `start_time`/`end_time` window wider than the corroboration bound while
     corroboration is dormant is UNKNOWN (`FEED_WIDE_EMPTY_UNPROVEN`) and takes
     the named full-scan recovery, never a trusted CLEAR; `after`/`through`
-    keep the dormant default. Re-anchoring a long-stale cursor after a sealed
-    full scan, and enabling corroboration, are not built yet.
+    keep the dormant default. That recovery re-anchors the persisted cursor to
+    the server-attested `end_time` (`attested_frontier`, never a trusted
+    watermark) only when the task fold is complete — every listed task read
+    and parsed this pass (any read failure or unparseable shard keeps the prior
+    cursor) — and an aborted or projection-refused pass never writes
+    `summaries.json`, so it cannot move the cursor either.
+    Boundary/frontier-unknown recoveries keep the prior cursor. Enabling
+    corroboration by default is not built yet.
     Review projection v3 rows carry the full direct-query tally; one shared
     validator requires `of`/`head`, unique row slugs, settled invariants, and
     all three orphan/tombstone slug lists before producer carry, publication,
