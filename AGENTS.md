@@ -962,11 +962,19 @@ it (not on PyPI).
     least one immutable identity; positive-with-none is `UNKNOWN`/nonzero. A
     zero signal is not proof of CLEAR: a bounded enumeration must prove the
     whole outer feed window. The outer feed must attest the exact requested
-    `after`; the record cursor must repeat that boundary and reach or pass the
-    outer `through`. A missing, lagging, mismatched, or incomparable horizon is
-    UNKNOWN, advances no watermark, and leaves freshness overlay NOT_RUN/nonzero.
-    Bootstrap is complete only when an outer `after` supplies its boundary and
-    the record cursor covers the same full frontier.
+    boundary — `after`, or the `start_time` that `fulcra-api data-updates`
+    (0.1.46+) actually emits, with `through`/`end_time` as its frontier; an
+    envelope with neither takes the named boundary recovery — and the record
+    cursor must repeat that boundary and reach or pass the outer frontier. A
+    missing, lagging, mismatched, or incomparable horizon is UNKNOWN, advances
+    no watermark, and leaves freshness overlay NOT_RUN/nonzero. Bootstrap is
+    complete only when an outer `after`/`start_time` supplies its boundary and
+    the record cursor covers the same full frontier. An EMPTY
+    `start_time`/`end_time` window wider than the corroboration bound while
+    corroboration is dormant is UNKNOWN (`FEED_WIDE_EMPTY_UNPROVEN`) and takes
+    the named full-scan recovery, never a trusted CLEAR; `after`/`through`
+    keep the dormant default. Re-anchoring a long-stale cursor after a sealed
+    full scan, and enabling corroboration, are not built yet.
     Review projection v3 rows carry the full direct-query tally; one shared
     validator requires `of`/`head`, unique row slugs, settled invariants, and
     all three orphan/tombstone slug lists before producer carry, publication,
