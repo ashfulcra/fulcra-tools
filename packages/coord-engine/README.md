@@ -317,9 +317,12 @@ recovery **re-anchors** the cursor: the batch carries the server's `end_time`
 as `attested_frontier` (never as its trusted watermark), and once the full
 scan completes the persisted cursor moves to exactly that instant — the
 server stamped it before the scan began, so the scan has seen every change at
-or before it; it is never a local or scan-derived time. The cursor persists
+or before it; it is never a local or scan-derived time. Only a **complete
+task fold** licenses it: every task the scan listed was read and parsed this
+pass — a single read failure or unparseable shard keeps the prior cursor, so
+the window that still owes that read is re-covered next pass. It also persists
 only with `summaries.json`, which an aborted or projection-refused (e.g.
-review budget-cut) pass never writes, so a partial pass cannot move it.
+review budget-cut) pass never writes.
 Boundary/frontier-unknown recoveries keep the prior cursor. Enabling
 corroboration by default is not built yet. The concrete
 count key always comes from the stored `_coord/bus-v3/records.json` authority:

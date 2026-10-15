@@ -977,8 +977,10 @@ it (not on PyPI).
     the named full-scan recovery, never a trusted CLEAR; `after`/`through`
     keep the dormant default. That recovery re-anchors the persisted cursor to
     the server-attested `end_time` (`attested_frontier`, never a trusted
-    watermark) once the full scan completes; an aborted or projection-refused
-    pass never writes `summaries.json`, so it cannot move the cursor.
+    watermark) only when the task fold is complete — every listed task read
+    and parsed this pass (any read failure or unparseable shard keeps the prior
+    cursor) — and an aborted or projection-refused pass never writes
+    `summaries.json`, so it cannot move the cursor either.
     Boundary/frontier-unknown recoveries keep the prior cursor. Enabling
     corroboration by default is not built yet.
     Review projection v3 rows carry the full direct-query tally; one shared
