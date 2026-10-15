@@ -307,15 +307,23 @@ def test_authority_lookup_stops_at_detector_deadline_without_retry(monkeypatch):
     assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
 
 
-def test_missing_configured_channel_count_is_unknown_not_clear():
-    """A missing live count cannot silently become a zero-count record window."""
-    batch = _poll(ConfiguredFeedTransport({
+def test_absent_channel_zero_still_needs_cursor_proof_before_clear():
+    """Absent from a well-formed data_types is a zero SIGNAL (ruling 2adfcb99),
+    never a shortcut to CLEAR: with no attested record-cursor window to prove
+    the zero, the pass stays UNKNOWN. Formerly
+    test_missing_configured_channel_count_is_unknown_not_clear."""
+    transport = ConfiguredFeedTransport({
         "data_types": {"AppleLocationUpdate": 50, CHECKPOINT_TYPE: 4},
         "file_changes": [],
-    }))
+    })
+
+    batch = _poll(transport)
 
     assert batch.trusted is False
     assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
+    # The zero reached the cursor stage: UNKNOWN is the missing proof, not
+    # an unreadable count.
+    assert transport.record_calls == 1
 
 
 def test_captured_engine_owned_file_shapes_are_explicit_and_trusted():
@@ -696,9 +704,20 @@ def test_channel_absent_from_live_data_types_is_a_zero_signal_the_cursor_proves(
     assert batch.coverage["acknowledgments_responses"].value == "CLEAR"
 
 
-def test_malformed_configured_channel_count_stays_unknown():
+@pytest.mark.parametrize("data_types", [
+    {COORDINATION_TYPE: "27"},
+    {COORDINATION_TYPE: -1},
+    {COORDINATION_TYPE: True},
+    {COORDINATION_TYPE: 2.5},
+    {COORDINATION_TYPE: None},
+    [COORDINATION_TYPE],
+    "not-a-mapping",
+])
+def test_malformed_configured_channel_count_stays_unknown(data_types):
+    """Only ABSENCE from a well-formed map is a zero; a non-Mapping data_types
+    or a present malformed value stays UNKNOWN even with a clean cursor."""
     batch = _poll(ConfiguredFeedTransport({
-        "data_types": {COORDINATION_TYPE: "27"},
+        "data_types": data_types,
         "file_changes": [],
     }, records={"after": "2026-08-20T11:00:00Z",
                 "through": "2026-08-20T12:00:00Z", "records": []}))
