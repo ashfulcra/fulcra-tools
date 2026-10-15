@@ -11307,7 +11307,10 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
                     shards.append(sh)
     except TransportError:
         pass
-    view = health_mod.fold(shards, now=_iso(_now()))
+    # One read of the adoption authority so the fold can say which fresh hosts
+    # run the pinned build. An unreadable pin is reported, never assumed.
+    pin, pin_status = pin_currency.load_pin(transport, args.team)
+    view = health_mod.fold(shards, now=_iso(_now()), pin=pin, pin_status=pin_status)
     code = 0 if view["healthy"] else 1
     # Tier-1 continuity audit: an agent beating presence but with no fresh
     # snapshot is working without a recoverable trail. Compute it here so both
@@ -11387,6 +11390,20 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     if view.get("unknown_advance"):
         print(f"  note: {view['unknown_advance']} fresh host(s) on an engine too old"
               f" to report whether the pass advanced — UNKNOWN, not fine")
+    # Build currency. The version label cannot carry this (it read "2.0.6" on
+    # every host while they ran different code), so it rides on the build sha.
+    # A host on a different build may be ahead of the pin or behind it; offline
+    # there is no way to tell which, so the line says "not the pin", not "behind".
+    if view["fresh"]:
+        if view.get("fleet_pin"):
+            print(f"  engine pin {view['fleet_pin'][:12]}: {view['at_pin']} fresh host(s) at the pin,"
+                  f" {view['off_pin']} on a different build,"
+                  f" {view['unknown_build']} build UNKNOWN")
+        else:
+            reason = {"absent": "adoption authority absent",
+                      "invalid": "adoption authority carries no PIN= line"}.get(
+                          view.get("pin_status"), "adoption authority unreadable")
+            print(f"  engine pin UNKNOWN ({reason}) — cannot say which hosts run the pinned build")
     if view["total"] == 0:
         print("  (no health shards at all — nobody has ever reconciled this team)")
     for h in view["hosts"]:
@@ -11399,8 +11416,19 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
                 advance = f"  DID NOT ADVANCE: {reason}"
             elif h["advanced"] is None:
                 advance = "  advance UNKNOWN (engine predates the field)"
+        build = h.get("engine_build")
+        verdict = h.get("pin_verdict")
+        if not build:
+            build_desc = "build UNKNOWN"
+        elif verdict == "current":
+            build_desc = f"build {build[:12]} = pin"
+        elif verdict == "mismatch":
+            build_desc = f"build {build[:12]} NOT the pin"
+        else:
+            build_desc = f"build {build[:12]}"
         print(f"  [{flag:5}] {h['host']} — last reconcile {age} ago"
-              f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)"
+              f" (v{h.get('engine_version')}, {build_desc}, {h.get('tasks')} tasks,"
+              f" {h.get('warnings')} warn)"
               f"{advance}")
     # Tier-1 continuity audit (computed above): an agent beating presence but
     # with no fresh snapshot is working without a recoverable trail.

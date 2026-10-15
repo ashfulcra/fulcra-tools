@@ -213,7 +213,9 @@ def _write_health_shard(transport: Any, team: str, *, host: str, now: str,
     """Best-effort health beat + retention GC — never fails the pass."""
     try:
         from . import __version__ as _v
-        shard = health_mod.build_shard(host=host, now=now, engine_version=_v, result=result)
+        from . import pin_currency
+        shard = health_mod.build_shard(host=host, now=now, engine_version=_v, result=result,
+                                       engine_build=pin_currency.build_sha())
         transport.write(f"{health_mod.health_prefix(team)}{agent_key(host)}.json",
                         json.dumps(shard, indent=1))
         for e in transport.list_dir(health_mod.health_prefix(team)):

@@ -16,8 +16,8 @@ role-escalation sweep land here too — A5b.)
 
 ## How it works
 - Every `coord-engine reconcile` writes a small **health shard**
-  (`_coord/health/<host-key>.json`: host, timestamp, engine version, task count, warnings,
-  `advanced`, `degraded_reason`) and prunes shards older than 30 days (age-based GC).
+  (`_coord/health/<host-key>.json`: host, timestamp, engine version, `engine_build`, task
+  count, warnings, `advanced`, `degraded_reason`) and prunes shards older than 30 days (age-based GC).
   **EVERY exit writes one, aborts included** — the shard write runs before the early
   `return` — so a shard proves a pass *ran*, never that it *advanced the index*.
 - **`coord-engine health <team>`** folds the shards into TWO separate facts per host:
@@ -35,6 +35,16 @@ role-escalation sweep land here too — A5b.)
 
   Earned live: `team/fulcra` went ~16h without the index advancing while `health` read
   `4/7 host(s) fresh` with four `[ok]` rows; the only trace was an unlabelled `1 warn`.
+  - **build vs the fleet pin** — `health` reads the `PIN=` line of the store's
+    `_coord/bus-v3/adopt-latest.sh` once and compares each shard's `engine_build` (the
+    VCS commit from the install's `direct_url.json`). Each host row shows
+    `build <sha> = pin`, `build <sha> NOT the pin` (ahead or behind; offline the engine
+    cannot tell which) or `build UNKNOWN`, and a headline counts FRESH hosts:
+    `at_pin`, `off_pin`, `unknown_build` (JSON also carries `fleet_pin`, `pin_status` and
+    per-host `pin_verdict`). **A shard with no `engine_build` (an older writer or a
+    non-VCS install) is UNKNOWN, never current, and an unreadable pin makes every host
+    UNKNOWN.** The exit code is unchanged. The version label cannot answer this: it read
+    `v2.0.6` on every host across fifteen engine merges while they ran different code.
 - **`coord-engine doctor [team]`** is the local preflight: storage CLI on PATH, File Store reachable,
   engine version. Run it after install and inside scheduled jobs' self-tests (the parent project's
   heartbeats failed silently on exactly these).
