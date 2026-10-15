@@ -296,11 +296,23 @@ a coverage test. A positive signal must materialize at least one
 immutable identity in one bounded attested cursor read or coverage is
 `UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.
 The outer feed and record cursor must attest one contiguous window: exact
-requested `after`, and record `through` at or beyond feed `through`. A lagging,
-missing, mismatched, or incomparable boundary/frontier is `UNKNOWN`, advances
-no watermark, and leaves the public overlay `NOT_RUN`/nonzero. Bootstrap is
-licensed only by an outer `after` plus a cursor covering the same full
-frontier. The concrete
+requested boundary, and record `through` at or beyond the feed frontier. The
+outer feed's boundary/frontier is read from `after`/`through`, or from the
+`start_time`/`end_time` keys `fulcra-api data-updates` (0.1.46+) actually emits
+(space-separated ISO accepted); an envelope with neither takes the named
+boundary recovery. A lagging, missing, mismatched, or incomparable
+boundary/frontier is `UNKNOWN`, advances no watermark, and leaves the public
+overlay `NOT_RUN`/nonzero. Bootstrap is licensed only by an outer boundary
+(`after` or `start_time`) plus a cursor covering the same full frontier.
+An EMPTY `start_time`/`end_time` window wider than the corroboration bound
+(`COORD_FEED_EMPTY_CORROBORATION_HOURS`) while corroboration is dormant is
+`UNKNOWN` with reason `FEED_WIDE_EMPTY_UNPROVEN` and takes the same named
+full-scan recovery, never a trusted `CLEAR` (live 2026-10-15: a 38-day window
+answered `file_changes: []` while one day of it held 3790 changes);
+`after`/`through` envelopes keep the dormant default unchanged. **Not yet
+built:** re-anchoring a long-stale cursor after a sealed full scan, and
+enabling corroboration by default — until then a cursor far in the past leaves
+recovery only when a wide poll returns rows. The concrete
 count key always comes from the stored `_coord/bus-v3/records.json` authority:
 the host-local `COORD_RECORDS_TYPE` writer/test override cannot redirect
 detection. That authority read and its optional one retry spend the detector's
