@@ -269,8 +269,12 @@ def _coordination_count(
 
     ``data-updates`` reports counts by concrete data type, not an invented
     ``record_counts.coordination`` alias.  The queue's classified records
-    authority is the only proof of which stream belongs to this team.  Missing
-    or malformed evidence is UNKNOWN rather than a zero-count observation.
+    authority is the only proof of which stream belongs to this team.  An
+    unreadable authority or a malformed map/count is UNKNOWN.  A channel absent
+    from a well-formed map is a zero count: live ``data-updates`` omits types
+    with no records in the window (2026-10-15: the coordination channel was
+    absent over 30 minutes and counted 27 over six hours).  A zero is still
+    only a signal; CLEAR needs the attested record-cursor window to prove it.
     """
     data_types = envelope.get("data_types")
     if not isinstance(data_types, Mapping) or deadline.expired():
@@ -284,9 +288,9 @@ def _coordination_count(
     if deadline.expired() or status != "ok" or not isinstance(config, Mapping):
         return None
     channel = config.get("data_type")
-    if not isinstance(channel, str) or not channel.strip() or channel not in data_types:
+    if not isinstance(channel, str) or not channel.strip():
         return None
-    count = data_types[channel]
+    count = data_types.get(channel, 0)
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         return None
     return channel, count
