@@ -1747,8 +1747,21 @@ def reconcile(
                 team=team, missing=len(uncorroborated_missing),
             )
             return result
+        attested_frontier = getattr(batch, "attested_frontier", None)
         if batch.trusted and (prior_cursor is None or not stale):
             new_cursor = {"watermark": now, "processed": {}, "streak": 0}
+        elif (recovery_requested and prior_cursor is not None
+              and isinstance(attested_frontier, str) and attested_frontier):
+            # The feed attested [cursor, F] (start_time matched the cursor) but
+            # an empty answer that wide is unproven.  F was stamped by the
+            # server before this full scan began, so the completed scan has
+            # seen every change at or before F: re-anchor to F, never to a
+            # local or scan-derived time.  The cursor persists only when every
+            # projection section completed (an aborted or projection-refused
+            # pass returns before summaries.json is written), so a budget-cut
+            # pass cannot move it.
+            new_cursor = {"watermark": attested_frontier, "processed": {},
+                          "streak": 0}
         elif prior_cursor is not None:
             # The listing repairs canonical rows but says nothing about whether
             # this feed window was complete. Keep the old frontier so the next

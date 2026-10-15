@@ -72,6 +72,11 @@ class ChangeBatch:
     # feed window.  Its digest keeps generation identity content-specific while
     # the feed watermark deliberately stays at the last proven frontier.
     recovery_snapshot: Optional[str] = None
+    # Set only on an untrusted FEED_WIDE_EMPTY_UNPROVEN batch: the server's
+    # end_time for a window whose start_time matched the requested cursor.
+    # Never a trusted watermark; reconcile may re-anchor to it only after the
+    # full scan that follows has completed (see reconcile).  Not digested.
+    attested_frontier: Optional[str] = None
 
     def for_namespace(self, namespace: str) -> tuple[Change, ...]:
         return tuple(change for change in self.changes if change.namespace == namespace)
@@ -428,9 +433,15 @@ class ChangeDetector:
             # trusted; an after/through empty keeps its pinned dormant default.
             start = _instant({"uploaded_at": feed_start}, "uploaded")
             frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")
-            if (start is None or frontier is None
-                    or start[0] < _corroboration_window(frontier[0])):
+            if start is None or frontier is None:
                 return _unknown(FEED_WIDE_EMPTY_UNPROVEN)
+            if start[0] < _corroboration_window(frontier[0]):
+                return ChangeBatch(
+                    (), MappingProxyType(
+                        {name: Coverage.UNKNOWN for name in NAMESPACES}),
+                    False, reason=FEED_WIDE_EMPTY_UNPROVEN,
+                    attested_frontier=feed_watermark,
+                )
 
         coverage = {name: Coverage.CLEAR for name in NAMESPACES}
         changes: list[Change] = []

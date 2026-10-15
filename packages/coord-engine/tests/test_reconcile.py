@@ -324,6 +324,84 @@ def test_reconcile_named_boundary_recovery_restores_absent_generation_substrate(
     } == generation_paths
 
 
+def test_wide_empty_recovery_re_anchors_the_cursor_to_the_attested_frontier():
+    """A cursor far in the past makes every poll ask for a window so wide the
+    live feed answers [] (2026-10-15: 38 days, while one day held 3790). That
+    empty is unproven, so the pass full-scans; the server attested the window
+    [cursor, end_time] before the scan began, so once the scan completes the
+    cursor moves to exactly that end_time -- never to a local clock -- and the
+    next poll asks for a narrow window again."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    asked = []
+
+    def wide_empty_data_updates(since, *, deadline=None):
+        asked.append(since)
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(days=38)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    t.data_updates = wide_empty_data_updates
+    result = _run(t)
+
+    assert asked == [before]
+    assert result["recovery"] == "detector-full-scan"
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert {row["name"] for row in aggregate["rows"]} == {"a", "b"}
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(days=38)).isoformat().replace("+00:00", "Z")
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+    _run(t)
+    assert asked[-1] == expected
+
+
+def test_wide_empty_recovery_never_re_anchors_on_a_budget_cut_pass(monkeypatch):
+    """The re-anchor persists only with summaries.json; a pass whose review
+    projection was cut returns before that write, so the cursor stays put and
+    the next pass re-covers the same attested window."""
+    from coord_engine import projection as projection_mod
+
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+
+    def wide_empty_data_updates(since, *, deadline=None):
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(days=38)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    original = projection_mod.build_review_projection
+
+    def budget_cut(*args, **kwargs):
+        section = dict(original(*args, **kwargs))
+        section["complete"] = False
+        return section
+
+    t.data_updates = wide_empty_data_updates
+    monkeypatch.setattr(projection_mod, "build_review_projection", budget_cut)
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "projection publication refused" in result["reason"]
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == before
+
+
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     """Only the approved outer-window reason family may enter the full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
