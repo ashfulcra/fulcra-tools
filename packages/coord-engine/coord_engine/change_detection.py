@@ -89,13 +89,25 @@ FEED_EMPTY_DISPROVEN = (
 FEED_EMPTY_UNCORROBORATED = (
     "data-updates reported no changes over a long window and corroboration could not be read"
 )
-#: Only BOUNDARY/FRONTIER license the established-cursor full-scan recovery. The
+#: A long-window empty that corroboration (dormant) did not check. Measured live
+#: 2026-10-15: a 38-day window returned ``file_changes: []`` while the last day
+#: alone held 3790 changes. Unlike the two reasons above this is not evidence the
+#: feed lied, only that an empty this wide is unproven -- so it keeps the same
+#: full-scan recovery an unattested boundary gets, never a trusted CLEAR.
+FEED_WIDE_EMPTY_UNPROVEN = (
+    "data-updates reported no changes over a window wider than the corroboration "
+    "bound and corroboration is dormant"
+)
+#: Only BOUNDARY/FRONTIER, and the unproven wide empty (which keeps a window that
+#: was never trusted on the recovery it already took), license the
+#: established-cursor full-scan recovery. The
 #: two empty-corroboration reasons are deliberately NOT here: whether a feed
 #: caught lying should trigger a full scan is a separate decision from whether an
 #: unreadable coverage boundary should.
 RECOVERABLE_FEED_WINDOW_REASONS = frozenset({
     FEED_BOUNDARY_UNKNOWN,
     FEED_FRONTIER_UNKNOWN,
+    FEED_WIDE_EMPTY_UNPROVEN,
 })
 
 #: Corroborate a long-window empty against a recent sub-window. DORMANT BY
@@ -284,8 +296,14 @@ def _feed_window(
     envelope: Mapping[str, Any], prior_watermark: Optional[str],
 ) -> tuple[Optional[tuple[str, str]], str]:
     """Accept one exact outer feed window and normalize both boundaries."""
-    boundary = _instant({"uploaded_at": envelope.get("after")}, "uploaded")
-    frontier = _instant({"uploaded_at": envelope.get("through")}, "uploaded")
+    # fulcra-api >= 0.1.46 attests its server-side window as start_time /
+    # end_time (space-separated ISO, e.g. "2026-09-07 15:00:41.309344+00:00");
+    # after/through remain accepted. An envelope carrying neither still routes
+    # to the named boundary recovery.
+    boundary = _instant(
+        {"uploaded_at": envelope.get("after", envelope.get("start_time"))}, "uploaded")
+    frontier = _instant(
+        {"uploaded_at": envelope.get("through", envelope.get("end_time"))}, "uploaded")
     if boundary is None:
         return None, FEED_BOUNDARY_UNKNOWN
     if frontier is None:
@@ -401,6 +419,14 @@ class ChangeDetector:
                 reader, feed_start, feed_watermark, deadline)
             if not corroborated:
                 return _unknown(reason)
+        elif not rows and "after" not in envelope:
+            # Only the start_time/end_time shape, which no prior engine ever
+            # trusted; an after/through empty keeps its pinned dormant default.
+            start = _instant({"uploaded_at": feed_start}, "uploaded")
+            frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")
+            if (start is None or frontier is None
+                    or start[0] < _corroboration_window(frontier[0])):
+                return _unknown(FEED_WIDE_EMPTY_UNPROVEN)
 
         coverage = {name: Coverage.CLEAR for name in NAMESPACES}
         changes: list[Change] = []

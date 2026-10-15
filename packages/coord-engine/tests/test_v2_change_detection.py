@@ -610,3 +610,62 @@ def test_transport_failure_without_an_envelope_is_unknown():
     assert batch.trusted is False
     assert batch.changes == ()
     assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
+
+
+def test_live_start_end_time_envelope_is_an_attested_window():
+    """fulcra-api 0.1.46 attests its window as start_time/end_time (captured
+    2026-10-15); that shape must bind the cursor instead of forcing a full scan."""
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 12:00:00+00:00",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [_row("team/r/task/a.md", update_id="task")],
+    }
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope  # exactly as the CLI emits it: no after/through
+
+    batch = _poll(transport)
+
+    assert batch.reason != "data-updates coverage boundary unavailable or unparseable"
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:00:00Z"
+
+
+def test_live_start_time_mismatching_requested_watermark_is_unknown():
+    envelope = {
+        "start_time": "2026-08-19 11:00:00+00:00",
+        "end_time": "2026-08-20 12:00:00+00:00",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [],
+    }
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope
+
+    batch = _poll(transport)
+
+    assert batch.trusted is False
+
+
+def test_wide_empty_with_dormant_corroboration_recovers_instead_of_trusting(monkeypatch):
+    """A 38-day live window returned [] while one day held 3790 changes
+    (2026-10-15). With corroboration dormant, such an empty must keep the
+    full-scan recovery, never advance the cursor as a trusted CLEAR."""
+    from coord_engine.change_detection import (
+        ChangeDetector, FEED_WIDE_EMPTY_UNPROVEN, detector_recovery_reason)
+
+    monkeypatch.delenv("COORD_FEED_EMPTY_CORROBORATION", raising=False)
+    envelope = {
+        "start_time": "2026-09-07 15:00:41.309344+00:00",
+        "end_time": "2026-10-15 13:30:21.685020+00:00",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [],
+    }
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-09-07T15:00:41.309344Z", Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert batch.reason == FEED_WIDE_EMPTY_UNPROVEN
+    assert detector_recovery_reason(batch) == FEED_WIDE_EMPTY_UNPROVEN
