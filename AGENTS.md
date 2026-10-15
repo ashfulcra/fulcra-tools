@@ -462,6 +462,13 @@ under `skills/`, each package with its own README, build, and tests.
   call site never sees that reason, so it reports `advanced: True` with its
   warnings — "advanced" means *was not aborted and wrote the index*, never
   *published a clean generation*.
+  **The same shard now carries `engine_build`**, and `health` compares it with the
+  `PIN=` line of the store's `adopt-latest.sh`: each host reads `= pin`, `NOT the
+  pin`, or `build UNKNOWN`, with `at_pin`/`off_pin`/`unknown_build` rollups over
+  fresh hosts. The version label cannot do this: `__version__` changes only on a
+  release, so hosts running different commits can report the same version. A
+  missing build is UNKNOWN, never current; "not the pin" may be
+  ahead or behind, so it is never rendered as "behind". The exit code is unchanged.
 - The `.settled` marker's MERGE EVIDENCE is never overwritten by the tally
   cache: a settleable tally once stamped `state: APPROVED` over
   `state: MERGED` + `merge_sha` — found in production, where the very
