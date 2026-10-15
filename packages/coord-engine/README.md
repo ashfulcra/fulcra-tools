@@ -291,7 +291,10 @@ acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
 permission/read doubt, incomplete namespace, or unsupported team path is
 `UNKNOWN`, triggers the named full-scan recovery, and never advances the
 watermark. A record count is only a zero/nonzero detector signal, never a
-cardinality, threshold, diff, or identity. Counts and enumerated identities need not match; numeric equality is not
+cardinality, threshold, diff, or identity. Live `data-updates` omits types with no records in
+the window, so the configured coordination channel ABSENT from a well-formed
+`data_types` map is a zero signal (an unreadable authority or a malformed
+count stays `UNKNOWN`). Counts and enumerated identities need not match; numeric equality is not
 a coverage test. A positive signal must materialize at least one
 immutable identity in one bounded attested cursor read or coverage is
 `UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.

@@ -956,7 +956,9 @@ it (not on PyPI).
     components, hidden leaves, and the legacy singular `response/` namespace
     are not authoritative coverage.
     `data-updates` record counts are detector signals only, never cardinality,
-    a diff, a threshold, or an identity. Live measurements persistently showed
+    a diff, a threshold, or an identity. Live `data-updates` omits zero-record types,
+    so the configured channel absent from a well-formed `data_types` map is a
+    zero signal; a malformed count or unreadable authority stays UNKNOWN. Live measurements persistently showed
     `2721 -> 9`, `1444 -> 0`, and `2737 -> 25` count/enumeration pairs. A
     positive signal therefore requires a bounded attested enumeration with at
     least one immutable identity; positive-with-none is `UNKNOWN`/nonzero. A

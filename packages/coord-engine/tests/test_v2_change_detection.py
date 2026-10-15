@@ -307,15 +307,23 @@ def test_authority_lookup_stops_at_detector_deadline_without_retry(monkeypatch):
     assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
 
 
-def test_missing_configured_channel_count_is_unknown_not_clear():
-    """A missing live count cannot silently become a zero-count record window."""
-    batch = _poll(ConfiguredFeedTransport({
+def test_absent_channel_zero_still_needs_cursor_proof_before_clear():
+    """Absent from a well-formed data_types is a zero SIGNAL (ruling 2adfcb99),
+    never a shortcut to CLEAR: with no attested record-cursor window to prove
+    the zero, the pass stays UNKNOWN. Formerly
+    test_missing_configured_channel_count_is_unknown_not_clear."""
+    transport = ConfiguredFeedTransport({
         "data_types": {"AppleLocationUpdate": 50, CHECKPOINT_TYPE: 4},
         "file_changes": [],
-    }))
+    })
+
+    batch = _poll(transport)
 
     assert batch.trusted is False
     assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
+    # The zero reached the cursor stage: UNKNOWN is the missing proof, not
+    # an unreadable count.
+    assert transport.record_calls == 1
 
 
 def test_captured_engine_owned_file_shapes_are_explicit_and_trusted():
@@ -669,3 +677,49 @@ def test_wide_empty_with_dormant_corroboration_recovers_instead_of_trusting(monk
     assert batch.trusted is False
     assert batch.reason == FEED_WIDE_EMPTY_UNPROVEN
     assert detector_recovery_reason(batch) == FEED_WIDE_EMPTY_UNPROVEN
+
+
+def test_channel_absent_from_live_data_types_is_a_zero_signal_the_cursor_proves():
+    """Live data-updates omits zero-record types (2026-10-15: the coordination
+    channel was absent over 30 minutes, 27 over six hours). Absence is a zero
+    signal, so an attested empty record window makes the pass trusted instead
+    of a non-recoverable UNKNOWN that aborts every quiet interval."""
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 12:00:00+00:00",
+        "data_types": {"AppleLocationUpdate": 50},
+        "file_changes": [_row("team/r/task/a.md", update_id="task")],
+    }
+    transport = ConfiguredFeedTransport(envelope, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    })
+    transport.envelope = envelope
+
+    batch = _poll(transport)
+
+    assert batch.trusted is True
+    assert transport.record_channels == [(COORDINATION_TYPE, "2026-08-20T11:00:00Z")]
+    assert batch.coverage["acknowledgments_responses"].value == "CLEAR"
+
+
+@pytest.mark.parametrize("data_types", [
+    {COORDINATION_TYPE: "27"},
+    {COORDINATION_TYPE: -1},
+    {COORDINATION_TYPE: True},
+    {COORDINATION_TYPE: 2.5},
+    {COORDINATION_TYPE: None},
+    [COORDINATION_TYPE],
+    "not-a-mapping",
+])
+def test_malformed_configured_channel_count_stays_unknown(data_types):
+    """Only ABSENCE from a well-formed map is a zero; a non-Mapping data_types
+    or a present malformed value stays UNKNOWN even with a clean cursor."""
+    batch = _poll(ConfiguredFeedTransport({
+        "data_types": data_types,
+        "file_changes": [],
+    }, records={"after": "2026-08-20T11:00:00Z",
+                "through": "2026-08-20T12:00:00Z", "records": []}))
+
+    assert batch.trusted is False
