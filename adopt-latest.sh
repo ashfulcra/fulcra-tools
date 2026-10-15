@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="281e8bff952d0c41ae63ddd51fc9c22215e06dd1"   # coord-engine at 281e8bff. TWENTIETH pin move. Carries every engine change merged since d187e546: PR 812 (reconcile health shards record the engine build, and `health` names each host as at the pin, not the pin, or build UNKNOWN); the health shard `advanced`/`degraded_reason` fields; the detector corroboration of an empty long feed window (dormant by default); obligations no longer asserting why an absent fold checkpoint is absent (PR 761); digest uncertainty and undecodable transport failures preserved (PR 793); and tag-provision never writing a registry entry readers reject (PR 807). The engine version string is unchanged, so the build sha, not the version, identifies this pin.
+PIN="2a408acdfadebda7c46199b3613c97f5c3ad2657"   # coord-engine at 2a408acd. TWENTY-FIRST pin move. Carries PR 814: the change detector reads the `start_time`/`end_time` window that `fulcra-api data-updates` (0.1.46+) attests, as well as `after`/`through`. Before this every live poll fell back to the full-scan recovery and the cursor never advanced, so the review projection re-read every unsettled review under one budget and passes aborted on incomplete reviews/forge. An empty start/end window wider than the corroboration bound returns FEED_WIDE_EMPTY_UNPROVEN (the same full-scan recovery, never a trusted CLEAR). Everything in 281e8bff is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
