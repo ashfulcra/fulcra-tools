@@ -318,9 +318,11 @@ as `attested_frontier` (never as its trusted watermark), and once the full
 scan completes the persisted cursor moves to exactly that instant — the
 server stamped it before the scan began, so the scan has seen every change at
 or before it; it is never a local or scan-derived time. Only a **complete
-task fold** licenses it: every task the scan listed was read and parsed this
-pass — a single read failure or unparseable shard keeps the prior cursor, so
-the window that still owes that read is re-covered next pass. It also persists
+task fold** licenses it: every task the scan listed was READ this pass — a
+single read failure keeps the prior cursor, so the window that still owes that
+read is re-covered next pass. A shard that was read but has unparseable
+frontmatter is skipped identically every pass and does not hold the cursor
+(re-reading cannot change it). It also persists
 only with `summaries.json`, which an aborted or projection-refused (e.g.
 review budget-cut) pass never writes.
 Boundary/frontier-unknown recoveries keep the prior cursor. Enabling

@@ -463,6 +463,41 @@ def test_wide_empty_recovery_keeps_the_cursor_when_a_listed_task_was_not_read(
         "2026-10-15T20:01:00Z")
 
 
+def test_wide_empty_recovery_re_anchors_despite_a_permanently_unparseable_shard(
+        monkeypatch):
+    """Live 2026-10-15: five task/ shards with unparseable frontmatter (one a
+    charter with none, one an invalid YAML escape) are skipped identically
+    every pass. They were READ; re-reading cannot change them, so they must
+    not hold the re-anchor off forever. Only a failed READ does (see the
+    transient-read test above)."""
+    monkeypatch.delenv("COORD_FEED_EMPTY_CORROBORATION", raising=False)
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.put("team/r/task/charter.md", "# A charter, not a Task\n\nno frontmatter\n")
+
+    def wide_empty_data_updates(since, *, deadline=None):
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(days=38)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 0},
+            "file_changes": [],
+        }
+
+    t.data_updates = wide_empty_data_updates
+    result = _run(t)
+
+    assert result["recovery"] == "detector-full-scan"
+    assert any("unparseable frontmatter" in w for w in result["warnings"])
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(days=38)).isoformat().replace("+00:00", "Z")
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     """Only the approved outer-window reason family may enter the full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES

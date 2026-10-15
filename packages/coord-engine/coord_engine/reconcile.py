@@ -1223,9 +1223,12 @@ def _full_scan_task_rows(
     """Fold the full ``task/`` listing into rows, reusing unchanged prior rows.
     The authoritative pass — the fail-closed fallback and the drift self-check's
     reference. Returns ``(rows, warnings, reused, parsed, uncertain)``;
-    ``uncertain`` names every listed task this pass did not positively read and
-    parse (a read failure or unparseable frontmatter), so a caller can tell a
-    complete fold from one that kept a prior row or skipped a slug."""
+    ``uncertain`` names every listed task whose READ failed this pass, so a
+    caller can tell a complete fold from one that still owes a read.  A shard
+    that was read but has unparseable frontmatter is not uncertain: its bytes
+    are what they are, every pass skips it identically, and re-reading the
+    same window cannot change that (live 2026-10-15: five such shards held the
+    re-anchor off forever)."""
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     uncertain: list[str] = []
@@ -1258,7 +1261,7 @@ def _full_scan_task_rows(
             continue
         row, warning, read_failed = _project_task_row(
             transport, team, slug, mtime=entry_mtime, size=entry_size, log=log)
-        if read_failed or (row is None and warning is not None):
+        if read_failed:
             uncertain.append(slug)
         if row is None:
             # unparseable / unreadable / non-task: never drop a task — keep prior.
@@ -1764,9 +1767,10 @@ def reconcile(
             # server before this full scan began, so the completed scan has
             # seen every change at or before F: re-anchor to F, never to a
             # local or scan-derived time.  Only a COMPLETE task fold licenses it
-            # (ruling 6c80ed8a): every listed task read and parsed this pass --
+            # (rulings 6c80ed8a + amendment): every listed task READ this pass --
             # a read failure keeps a prior row or skips the slug, and moving
             # the cursor would consume the window that still owes that read.
+            # A read-but-unparseable shard is deterministic and does not hold it.
             # It persists only with summaries.json, which an aborted or
             # projection-refused pass never writes.
             new_cursor = {"watermark": attested_frontier, "processed": {},
