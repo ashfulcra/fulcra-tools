@@ -465,9 +465,9 @@ under `skills/`, each package with its own README, build, and tests.
   **The same shard now carries `engine_build`**, and `health` compares it with the
   `PIN=` line of the store's `adopt-latest.sh`: each host reads `= pin`, `NOT the
   pin`, or `build UNKNOWN`, with `at_pin`/`off_pin`/`unknown_build` rollups over
-  fresh hosts. The version label cannot do this — it read `2.0.6` on every host
-  across fifteen engine merges (2026-08-23 → 2026-10-10) while the hosts ran
-  different code. A missing build is UNKNOWN, never current; "not the pin" may be
+  fresh hosts. The version label cannot do this: `__version__` changes only on a
+  release, so hosts running different commits can report the same version. A
+  missing build is UNKNOWN, never current; "not the pin" may be
   ahead or behind, so it is never rendered as "behind". The exit code is unchanged.
 - The `.settled` marker's MERGE EVIDENCE is never overwritten by the tally
   cache: a settleable tally once stamped `state: APPROVED` over

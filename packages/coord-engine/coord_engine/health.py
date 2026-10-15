@@ -52,10 +52,9 @@ def build_shard(*, host: str, now: str, engine_version: str,
 
     ``engine_build`` is the VCS commit this engine was installed from
     (:func:`coord_engine.pin_currency.build_sha`). ``engine_version`` cannot
-    stand in for it: the version string did not move from 2.0.6 across fifteen
-    engine merges (2026-08-23 to 2026-10-10), so three hosts running different
-    code all reported "v2.0.6" and no reader could tell which of them matched
-    the fleet pin. The key is always written; ``None`` means the build is
+    stand in for it: ``__version__`` changes only on a release, so hosts running
+    different commits can report the same version and no reader could tell
+    which of them matched the fleet pin. The key is always written; ``None`` means the build is
     unknowable on that host (editable or non-VCS install), never "current".
     """
     return {

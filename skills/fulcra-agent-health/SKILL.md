@@ -43,8 +43,8 @@ role-escalation sweep land here too — A5b.)
     `at_pin`, `off_pin`, `unknown_build` (JSON also carries `fleet_pin`, `pin_status` and
     per-host `pin_verdict`). **A shard with no `engine_build` (an older writer or a
     non-VCS install) is UNKNOWN, never current, and an unreadable pin makes every host
-    UNKNOWN.** The exit code is unchanged. The version label cannot answer this: it read
-    `v2.0.6` on every host across fifteen engine merges while they ran different code.
+    UNKNOWN.** The exit code is unchanged. The version label cannot answer this: it changes only
+    on a release, so hosts running different commits can report the same version.
 - **`coord-engine doctor [team]`** is the local preflight: storage CLI on PATH, File Store reachable,
   engine version. Run it after install and inside scheduled jobs' self-tests (the parent project's
   heartbeats failed silently on exactly these).

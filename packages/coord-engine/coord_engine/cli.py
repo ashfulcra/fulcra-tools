@@ -11390,8 +11390,8 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     if view.get("unknown_advance"):
         print(f"  note: {view['unknown_advance']} fresh host(s) on an engine too old"
               f" to report whether the pass advanced — UNKNOWN, not fine")
-    # Build currency. The version label cannot carry this (it read "2.0.6" on
-    # every host while they ran different code), so it rides on the build sha.
+    # Build currency. The version label cannot carry this (it changes only on a
+    # release, so different commits share one), so it rides on the build sha.
     # A host on a different build may be ahead of the pin or behind it; offline
     # there is no way to tell which, so the line says "not the pin", not "behind".
     if view["fresh"]:

@@ -1,10 +1,8 @@
 """`health` must say which fresh hosts run the pinned engine BUILD.
 
-The version label cannot answer it. ``__version__`` stayed at 2.0.6 across
-fifteen engine merges, so three reconciling hosts running different code all
-reported ``v2.0.6`` and a reader of ``health`` could not name the hosts that were
-off the fleet pin -- one of them was writing the post-pin ``advanced`` field and
-two were not, under the same label.
+The version label cannot answer it: ``__version__`` changes only on a release,
+so hosts running different commits report the same version, and a reader of
+``health`` could not name the hosts that were off the fleet pin.
 
 What is pinned here:
 
