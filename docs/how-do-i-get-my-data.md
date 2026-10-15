@@ -8,7 +8,8 @@ For a dashboard and scheduled imports, [install Collect](collect.md#get-started-
 Some importers also run as standalone commands; browser extensions send directly
 to Fulcra. The [package index](../README.md#package-index) links each tool's setup.
 [Plugin status](collect.md#plugin-status) distinguishes the current installer
-from unfinished work. The current 0.1.3 download includes Apple Notes, Reminders, and Todoist.
+from unfinished work. The current 0.1.4 download includes Apple Notes, Reminders, Todoist, local folders,
+meeting transcript exports, and selected Notion pages.
 
 Pathways fall into three rough buckets:
 
@@ -33,15 +34,14 @@ worth a look when nothing else matches.
 
 ## Local folders and Obsidian
 
-The source tree includes a `local-folders` plugin. Choose one folder through
+Collect 0.1.4 includes a `local-folders` plugin. Choose one folder through
 Collect's macOS folder picker, review the eligible-file preview, name the
 collection, and enable it. Collect checks every six hours and copies only new
 or changed supported files to `vault/imports/local-folders/<collection>/`.
 It preserves relative layout, which covers ordinary document folders and
 Obsidian Markdown plus common attachments. It does not follow links or upload
 hidden, generated, likely credential, unsupported, or oversized files. Source
-deletions do not delete Fulcra copies. This plugin is planned for the next Mac
-installer and is not in the 0.1.3 download.
+deletions do not delete Fulcra copies.
 Uploads use Collect's signed-in account. Changing the selected folder or account,
 turning on preview, or disabling the plugin stops pending uploads. Files changed
 since the scan are left for the next run.
@@ -49,26 +49,25 @@ since the scan are left for the next run.
 
 ## Meeting transcripts
 
-The source tree includes a `meeting-transcripts` plugin for meeting tools that
+Collect 0.1.4 includes a `meeting-transcripts` plugin for meeting tools that
 can export into a folder on your Mac. Choose that folder once; Collect checks it
 every fifteen minutes for Markdown, text, VTT, SRT, and supported JSON exports.
 Subtitle timing is removed and each transcript becomes Markdown under
 `vault/meetings/imported/<collection>/`. The plugin never changes the export and
-needs no meeting-provider sign-in. This plugin is planned for the next Mac
-installer and is not in the 0.1.3 download.
+needs no meeting-provider sign-in.
 [Supported formats and limits](../packages/local-sources/README.md).
 
 ## Notion pages
 
-The source tree includes `notion-pages`. A workspace owner creates an internal
+Collect 0.1.4 includes `notion-pages`. A workspace owner creates an internal
 Notion connection with Read content access, grants it access to chosen pages,
 and gives you its token. Paste the token and a page link on each line into
 Collect, check the selected pages, and run a preview before turning uploads on.
 Collect checks every six hours and copies selected page content as Markdown
 under `vault/imports/notion/`. It leaves Notion unchanged and does not search
 the workspace. Linked pages, databases, synced blocks and attachments are marked
-as omitted; select a child page separately to copy it. This plugin is not in
-the 0.1.3 installer, and live verification remains pending.
+as omitted; select a child page separately to copy it. Live Notion verification
+remains pending.
 [Setup and limits](../packages/notion/README.md).
 
 ## Apple Reminders

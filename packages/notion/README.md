@@ -2,8 +2,8 @@
 
 Copies the Notion pages you choose into Fulcra Files so your agents can read
 them. It leaves Notion alone. This is part of the unofficial, unsupported
-Fulcra Tools collection; the source is available, but the published Collect
-0.1.3 installer does not include this plugin yet.
+Fulcra Tools collection and is bundled in the Collect 0.1.4 Mac installer.
+Offline tests and bundle checks pass; live Notion verification is still pending.
 
 The `notion-pages` plugin checks every six hours while Collect is running.
 No pages are selected for you, and **Preview only** starts on. Turn it off

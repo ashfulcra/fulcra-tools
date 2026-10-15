@@ -17,16 +17,15 @@ imports and saves progress between runs. This page is the installation guide;
 
 ### Mac app (Apple silicon)
 
-**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.3-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The current download is **0.1.3 beta**, released October 5, 2026. It is signed,
+The current download is **0.1.4 beta**. It is signed,
 notarized, and includes Apple Notes, Apple Reminders, and Todoist.
-[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.3-macos-arm64).
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.4-macos-arm64).
 
-Collect 0.1.4 source is on the main branch. Its Mac installer will replace this
-link after signing, notarization, and Gatekeeper checks finish.
-The signed development candidate includes all 26 plugin entries. It has not
-been published; the three new sources are unavailable in the current download.
+This release also bundles local folders, meeting transcript exports, and
+selected Notion pages. Notion needs a read-only internal connection and selected
+pages; its live verification remains pending.
 
 1. Open the downloaded disk image and drag **Fulcra Collect** into **Applications**.
 2. Open **Fulcra Collect** from Applications. Click its icon in the menu bar.
@@ -75,14 +74,10 @@ checkout current with `bash scripts/update.sh`.
 
 ## Plugin status
 
-The current Mac beta bundles **23 plugin entries**. Bundled means the plugin is
+The current Mac beta bundles **26 plugin entries**. Bundled means the plugin is
 installed; it still needs its own setup. An entry may be a scheduled importer,
 an export reader you run manually, a webhook receiver, or instructions for a
 separate browser extension.
-
-The 0.1.4 source tree has **26 plugin entries**: the same set plus Local folders
-and Obsidian, Meeting transcript exports, and selected Notion pages. They will become installer claims
-only after a new signed, notarized, Gatekeeper-accepted build is published.
 
 | Source | What is available |
 |---|---|
@@ -92,15 +87,15 @@ only after a new signed, notarized, Gatekeeper-accepted build is published.
 | [Day One](../packages/dayone/README.md) | Local journal database or JSON export import. |
 | [Media](../packages/media-helpers/README.md) | 16 entries: Last.fm, Deezer, Trakt, Netflix CSV, Spotify extended history, YouTube takeout, Apple TV takeout, Apple Music takeout, generic RSS, Letterboxd, Goodreads, Apple Podcasts, Podcasts Time Machine recovery, local Apple TV, generic media CSV, and Plex/Jellyfin webhooks. |
 | [Gmail](../packages/gmail/README.md) | Read-only polling with local filters, selected messages in Fulcra Files, and optional agent-bus relay. Requires Google OAuth setup. |
-| [Local folders and meeting transcripts](../packages/local-sources/README.md) | Two source-tree plugins with a native folder picker, preview, bounded additive sync, and no provider sign-in. Planned for the next installer; not in the 0.1.3 download. |
-| [Notion pages](../packages/notion/README.md) | Selected page content copied as Markdown. Preview on by default; internal connection setup requires a workspace owner. Source only, with live verification pending. |
+| [Local folders and meeting transcripts](../packages/local-sources/README.md) | Two bundled plugins with a native folder picker, preview, bounded additive sync, and no provider sign-in. |
+| [Notion pages](../packages/notion/README.md) | Selected page content copied as Markdown. Preview on by default; internal connection setup requires a workspace owner. Bundled, with live verification pending. |
 | [PurpleAir](how-do-i-get-my-data.md#air-quality-purpleair) | Readings from the cloud API or sensors on your local network. |
 | [Fulcra Attention](../packages/attention/README.md) | A setup entry for the separate Chrome extension. The extension sends browsing activity directly to Fulcra and signs in separately. Its install folder is included in the disk image. |
 
 The [source guide](how-do-i-get-my-data.md) has permissions, credentials, import
 formats, and known gaps. These sources have different setup requirements and
-have not all been verified against every service or account. The 0.1.3 download
-includes `fulcra-api` 0.1.43; source installs use their own environment and
+have not all been verified against every service or account. The 0.1.4 download
+includes `fulcra-api` 0.1.53; source installs use their own environment and
 dependency lock.
 
 Apple Reminders and Todoist have passed live checks with disposable tasks:

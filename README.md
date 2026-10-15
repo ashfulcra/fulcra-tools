@@ -131,7 +131,7 @@ is not a requirement to run every piece together.
 | [dayone](packages/dayone/README.md) | Imports selected journal entries from a local Day One database or JSON export. |
 | [gmail](packages/gmail/README.md) | Read-only Gmail polling, filtering, file uploads, and optional bus relay. |
 | [local-sources](packages/local-sources/README.md) | Selected local folders, Obsidian vaults, and exported meeting transcripts, with no provider sign-in. |
-| [notion](packages/notion/README.md) | Selected Notion pages copied to Fulcra Files; read-only preview and internal connection setup. Source only; not in the 0.1.3 installer. |
+| [notion](packages/notion/README.md) | Selected Notion pages copied to Fulcra Files; read-only preview and internal connection setup. Bundled in Collect 0.1.4; live Notion verification is pending. |
 | [media-helpers](packages/media-helpers/README.md) | Media-history importers for APIs, exports, local libraries, feeds, and webhooks. |
 | [csv-importer](packages/csv-importer/README.md) | Maps CSV columns into Fulcra records with import checks and deduplication. |
 | [netflix-skill](packages/netflix-skill/README.md) | An agent-led Netflix viewing-history import and optional sharing workflow. |
@@ -187,11 +187,11 @@ Use Collect when you want one of its connectors or a common place to schedule
 imports. It is one way to put data into Fulcra; standalone importers and direct
 API writes are also available.
 
-**[Download Collect 0.1.3 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.3-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Collect 0.1.4 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-Collect 0.1.4 source is merged. A development candidate with 26 plugin entries
-has been built and signed; it still needs notarization and release checks. The
-public Mac installer remains 0.1.3; this link will change when 0.1.4 is ready.
+The 0.1.4 Mac beta is signed and notarized. It bundles 26 plugin entries,
+including local folders, meeting transcript exports, and selected Notion pages.
+Each source needs its own setup; Notion live verification is still pending.
 
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)

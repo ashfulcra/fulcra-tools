@@ -17,8 +17,7 @@ at a folder that matters.
 
 ## Set it up in Collect
 
-These plugins are in the 0.1.4 source tree. The published 0.1.3 Mac installer
-does not contain them yet.
+Both plugins are included in the Collect 0.1.4 Mac installer.
 
 1. Open Collect's dashboard and choose **Local folders and Obsidian** or
    **Meeting transcript exports**.
