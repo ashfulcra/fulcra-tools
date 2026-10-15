@@ -95,7 +95,7 @@ separate browser extension.
 The [source guide](how-do-i-get-my-data.md) has permissions, credentials, import
 formats, and known gaps. These sources have different setup requirements and
 have not all been verified against every service or account. The 0.1.4 download
-includes `fulcra-api` 0.1.52; source installs use their own environment and
+includes `fulcra-api` 0.1.53; source installs use their own environment and
 dependency lock.
 
 Apple Reminders and Todoist have passed live checks with disposable tasks:
