@@ -1,9 +1,7 @@
 Fulcra Collect — beta install
 ==============================
 
-These instructions cover the 0.1.4 candidate. The public download remains
-0.1.3 until the new installer passes notarization and release checks. That
-older download does not include folders, transcript exports, or Notion.
+These instructions cover Fulcra Collect 0.1.4 beta for Apple silicon Macs.
 
 This disk image contains two pieces:
 

@@ -484,11 +484,11 @@ its parent with a symbolic link stops the scan; choose the folder again.
 Upload consent checks re-read the stored account token with a bounded Keychain
 read, so a worker cannot miss a token replacement made by another process.
 
-The source-tree **Notion pages** plugin copies explicitly selected pages as
+The bundled **Notion pages** plugin copies explicitly selected pages as
 Markdown, with preview on by default. It needs a read-only internal Notion
 connection; setup currently requires a workspace owner. Linked pages,
-databases and attachments are marked as omitted. It is not in the 0.1.3
-installer. See [setup and limits](../notion/README.md).
+databases and attachments are marked as omitted. It ships in the 0.1.4
+Mac installer; live Notion verification remains pending. See [setup and limits](../notion/README.md).
 
 Notion setup probes check the live page selection and credentials before each
 request, including while the plugin is disabled. A selection change cancels the
