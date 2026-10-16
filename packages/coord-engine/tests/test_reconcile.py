@@ -498,6 +498,86 @@ def test_wide_empty_recovery_re_anchors_despite_a_permanently_unparseable_shard(
     assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
 
 
+class _MidPassStoreTransport(FakeTransport):
+    """Serves summaries.json as it was at pass start on the FIRST read, then
+    whatever ``later`` says: another host's write landing mid-pass."""
+
+    def __init__(self):
+        super().__init__()
+        self.summaries_reads = 0
+        self.later = None
+
+    def read(self, path):
+        if path == reconcile.summaries_path("r"):
+            self.summaries_reads += 1
+            if self.summaries_reads > 1 and self.later is not None:
+                return self.later()
+        return super().read(path)
+
+
+def _seed_cursor(t, watermark):
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    path = reconcile.summaries_path("r")
+    agg = json.loads(t.store[path])
+    agg[reconcile.RECONCILE_CURSOR_KEY]["watermark"] = watermark
+    t.store[path] = json.dumps(agg)
+    t.summaries_reads = 0
+    return agg
+
+
+def test_pass_skips_its_write_when_the_store_cursor_is_newer():
+    """Ruling 05df6cab: another host re-anchored mid-pass. Writing this pass's
+    rows would roll that cursor back; keeping the newer cursor over these rows
+    would claim coverage they never saw. Skip, say why, leave the store be."""
+    t = _MidPassStoreTransport()
+    agg = _seed_cursor(t, "2026-06-30T00:00:00Z")
+    newer = dict(agg)
+    newer[reconcile.RECONCILE_CURSOR_KEY] = {
+        "watermark": "2026-07-01T00:30:00Z", "processed": {}, "streak": 0}
+    t.later = lambda: json.dumps(newer)
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    before = t.store[reconcile.summaries_path("r")]
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert result["reason"] == reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    assert t.store[reconcile.summaries_path("r")] == before
+    shards = [json.loads(v) for k, v in t.store.items()
+              if k.startswith("team/r/_coord/health/")]
+    assert any(s.get("degraded_reason") == reconcile.SUPERSEDED_BY_NEWER_CURSOR
+               and s.get("advanced") is False for s in shards)
+
+
+def test_pass_writes_as_today_when_the_store_cursor_is_unchanged():
+    t = _MidPassStoreTransport()
+    _seed_cursor(t, "2026-06-30T00:00:00Z")
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+
+    result = _run(t)
+
+    assert result.get("reason") != reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    rows = json.loads(t.store[reconcile.summaries_path("r")])["rows"]
+    assert {row["name"] for row in rows} == {"a", "b"}
+
+
+def test_pass_writes_and_says_so_when_the_store_cursor_is_unreadable():
+    t = _MidPassStoreTransport()
+    _seed_cursor(t, "2026-06-30T00:00:00Z")
+    t.later = lambda: None
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    log, stream = _capture_log()
+
+    result = reconcile.reconcile(t, "r", now="2026-07-01T00:00:00Z",
+                                 today="2026-07-01", host="h", logger=log)
+
+    assert result.get("reason") != reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    rows = json.loads(t.store[reconcile.summaries_path("r")])["rows"]
+    assert {row["name"] for row in rows} == {"a", "b"}
+    assert "store cursor unreadable before publication" in stream.getvalue()
+
+
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     """Only the approved outer-window reason family may enter the full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
