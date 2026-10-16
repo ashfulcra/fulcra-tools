@@ -1233,24 +1233,33 @@ def _feed_task_delta(
 
 
 def _feed_uploaded_task_slugs(team: str, batch: Any) -> set[str]:
-    """Slugs the detector saw UPLOADED as direct ``task/<slug>.md`` shards.
+    """Slugs whose LATEST lifecycle state in the batch is an upload of a direct
+    ``task/<slug>.md`` shard -- the tasks a complete listing must contain.
 
-    Only uploads are references: a deleted or archived change says the row may
-    legitimately be gone.  Index/log and nested paths are not task rows.
+    Events are collapsed per path with the existing E1 rules (latest instant
+    wins; equal instants prefer ``uploaded > deleted > archived``), never by
+    response order, so an upload later deleted or archived in the same window
+    is not a reference, while a re-upload after a delete still is.  If the
+    batch cannot be ordered (an event without a usable instant), every upload
+    stays a reference: doubt keeps the guard fail-closed.
     """
     prefix = f"team/{team}/task/"
-    slugs: set[str] = set()
-    for change in getattr(batch, "changes", ()) or ():
-        if getattr(change, "state", None) != "uploaded":
-            continue
-        path = str(getattr(change, "path", "") or "").strip().lstrip("/")
+    rows: list[dict[str, Any]] = []
+    for row in _batch_feed_rows(batch):
+        path = str(row.get("path") or "").strip().lstrip("/")
         if not path.startswith(prefix):
             continue
         rest = path[len(prefix):]
         if "/" in rest or not rest.endswith(".md") or rest in ("index.md", "log.md"):
             continue
-        slugs.add(rest[:-3])
-    return slugs
+        if row.get("state") not in _FEED_STATE_PRIORITY:
+            continue
+        rows.append({**row, "path": path})
+    collapsed = _collapse_feed_changes(rows)
+    if collapsed is None:
+        return {r["path"][len(prefix):-3] for r in rows if r.get("state") == "uploaded"}
+    return {path[len(prefix):-3] for path, (_at, event) in collapsed.items()
+            if event.get("state") == "uploaded"}
 
 
 def _batch_feed_rows(batch: ChangeBatch) -> list[dict[str, Any]]:
