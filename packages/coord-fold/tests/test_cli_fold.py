@@ -176,3 +176,12 @@ def test_a_retention_close_to_all_retires_a_directed_open_whoever_sent_it():
                 _rec("close", "a", "2026-09-04T10:05:00Z", "4", to="all", sender="coord-reconcile:host"),
                 _rec("close", "b", "2026-09-04T10:05:00Z", "5", to="all", sender="me")])
     _run(st); assert set(_ckpt(st)["open"]) == {"c"}
+
+
+def test_archive_close_then_restore_reopen_brings_the_row_back():
+    """coord-engine `task restore` re-opens what retention closed: archive -> fold -> restore -> fold."""
+    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1"),
+                _rec("close", "a", "2026-09-04T10:05:00Z", "2", to="all", sender="coord-reconcile:host")])
+    _run(st); assert _ckpt(st)["open"] == {}
+    st.events.append(_rec("open", "a", "2026-09-04T10:10:00Z", "3", sender="boss"))
+    _run(st, now="2026-09-04T11:30:00Z"); assert set(_ckpt(st)["open"]) == {"a"}

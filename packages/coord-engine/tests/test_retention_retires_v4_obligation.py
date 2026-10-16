@@ -8,7 +8,7 @@ that held the open owed the row forever. These tests drive the actuator
 """
 import json
 
-from coord_engine import reconcile
+from coord_engine import cli, reconcile
 
 from test_reconcile import FakeTransport
 
@@ -31,6 +31,13 @@ class RecordingTransport(FakeTransport):
         return self.record_ok
 
 
+class UnreadableConfigTransport(RecordingTransport):
+    def read_classified(self, path, *, deadline=None):
+        if path == "team/r/_coord/bus-v4/records.json":
+            return None, "error"
+        return super().read_classified(path, deadline=deadline)
+
+
 class DeleteRefusingTransport(RecordingTransport):
     def delete(self, path):
         if path.startswith("team/r/task/") and "/archive/" not in path:
@@ -38,18 +45,22 @@ class DeleteRefusingTransport(RecordingTransport):
         return super().delete(path)
 
 
-def _quiet_proposed(t, slug, *, priority="P1", status="proposed", mtime=OLD_MTIME):
+def _quiet_proposed(t, slug, *, priority="P1", status="proposed", mtime=OLD_MTIME, assignee="some-agent"):
     t.put(f"team/r/task/{slug}.md",
           f"---\ntype: Task\ntitle: {slug}\nid: {slug}\nstatus: {status}\npriority: {priority}\n"
-          f"assignee: some-agent\ntimestamp: {OLD}\n---\nbody", mtime=mtime)
+          f"owner: asker\nassignee: \"{assignee}\"\ntimestamp: {OLD}\n---\nbody", mtime=mtime)
 
 
 def _run(t):
     return reconcile.reconcile(t, "r", now="2026-07-01T00:00:00Z", today="2026-07-01", host="reconciler")
 
 
+def _v4(t, kind):
+    return [w["note"] for w in t.records_written if w["data_type"] == V4_TYPE and w["note"].get("kind") == kind]
+
+
 def _v4_closes(t):
-    return [w["note"] for w in t.records_written if w["data_type"] == V4_TYPE and w["note"].get("kind") == "close"]
+    return _v4(t, "close")
 
 
 def test_archiving_a_task_writes_one_v4_close_to_every_fold():
@@ -108,3 +119,57 @@ def test_live_and_recent_work_is_never_closed():
     _run(t)
     assert "team/r/task/busy.md" in t.store and "team/r/task/recently-touched.md" in t.store
     assert _v4_closes(t) == []
+
+
+def test_an_unreadable_bus_v4_config_is_a_failed_close_never_no_plane():
+    """The source doc is already gone and no later pass revisits it: skipping silently would leave the open forever."""
+    t = UnreadableConfigTransport()
+    _quiet_proposed(t, "quiet-ask")
+    res = _run(t)
+    assert "team/r/task/archive/2020-01/quiet-ask.md" in t.store
+    assert t.records_written == []
+    assert any("v4 close FAILED" in w and "quiet-ask" in w for w in res["warnings"]), res["warnings"]
+
+
+# --- task restore re-opens what retention closed -------------------------------
+
+def _archived(t, slug, **kw):
+    _quiet_proposed(t, slug, **kw)
+    _run(t)
+    assert f"team/r/task/archive/2020-01/{slug}.md" in t.store
+    t.records_written.clear()
+
+
+def test_restore_reopens_the_obligation_retention_closed():
+    t = RecordingTransport()
+    _archived(t, "quiet-ask")
+    assert cli.main(["task", "restore", "r", "quiet-ask"], transport=t) == 0
+    assert "team/r/task/quiet-ask.md" in t.store
+    opens = _v4(t, "open")
+    assert len(opens) == 1, t.records_written
+    o = opens[0]
+    assert (o["slug"], o["to"], o["from"], o["pri"], o["ptr"]) == (
+        "quiet-ask", "some-agent", "asker", "P1", "task/quiet-ask.md")
+
+
+def test_restore_of_a_broadcast_reopens_to_all():
+    t = RecordingTransport()
+    _archived(t, "fleet-ask", assignee="*")
+    assert cli.main(["task", "restore", "r", "fleet-ask"], transport=t) == 0
+    assert [(o["to"], o["from"]) for o in _v4(t, "open")] == [("all", "asker")]
+
+
+def test_restore_of_a_terminal_task_opens_nothing():
+    t = RecordingTransport()
+    _archived(t, "old-done", status="done")
+    assert cli.main(["task", "restore", "r", "old-done"], transport=t) == 0
+    assert _v4(t, "open") == []
+
+
+def test_a_failed_reopen_is_loud_and_nonzero_but_keeps_the_restored_doc(capsys):
+    t = RecordingTransport()
+    _archived(t, "quiet-ask")
+    t.record_ok = False
+    assert cli.main(["task", "restore", "r", "quiet-ask"], transport=t) == 3
+    assert "team/r/task/quiet-ask.md" in t.store
+    assert "bus-v4 open was NOT written" in capsys.readouterr().err
