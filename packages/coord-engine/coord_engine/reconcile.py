@@ -932,8 +932,8 @@ def _store_cursor_supersedes(
         current = _load_prior_aggregate(transport, team)
     except Exception:
         return None
-    if current is None:
-        return None
+    if not isinstance(current, dict):
+        return None  # absent, unparseable, or a non-object document: unreadable
     cursor, reason = _parse_reconcile_cursor(current.get(RECONCILE_CURSOR_KEY))
     if reason is not None or cursor is None:
         return None

@@ -540,12 +540,24 @@ def test_pass_skips_its_write_when_the_store_cursor_is_newer():
     t.later = lambda: json.dumps(newer)
     t.put("team/r/task/b.md", _task("Bravo", "active"))
     before = t.store[reconcile.summaries_path("r")]
+    written = []
+    original_write = t.write
 
+    def recording_write(path, content, *args, **kwargs):
+        written.append(path)
+        return original_write(path, content, *args, **kwargs)
+
+    t.write = recording_write
     result = _run(t)
 
     assert result["degraded"] is True
     assert result["reason"] == reconcile.SUPERSEDED_BY_NEWER_CURSOR
     assert t.store[reconcile.summaries_path("r")] == before
+    # Generation publication is skipped too: no immutable generation and no
+    # current-pointer write for this superseded pass.
+    assert not [p for p in written
+                if p.startswith("team/r/_coord/projections/generations/")
+                or p == generation.current_path("r")], written
     shards = [json.loads(v) for k, v in t.store.items()
               if k.startswith("team/r/_coord/health/")]
     assert any(s.get("degraded_reason") == reconcile.SUPERSEDED_BY_NEWER_CURSOR
@@ -623,6 +635,23 @@ def test_fast_path_writes_as_today_when_the_store_cursor_is_unchanged():
     cursor = json.loads(transport.store[reconcile.summaries_path("r")])[
         reconcile.RECONCILE_CURSOR_KEY]
     assert cursor["watermark"] == "2026-07-01T12:30:00Z"
+
+
+@pytest.mark.parametrize("document", ["[]", '"a string"', "42"])
+def test_pass_writes_when_the_store_summaries_is_a_non_object(document):
+    """Greptile on PR 822: a summaries.json that parses as a non-object must
+    take the documented unreadable path (write as before + warn), not crash."""
+    t = _MidPassStoreTransport()
+    _seed_cursor(t, "2026-06-30T00:00:00Z")
+    t.later = lambda: document
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    log, stream = _capture_log()
+
+    result = reconcile.reconcile(t, "r", now="2026-07-01T00:00:00Z",
+                                 today="2026-07-01", host="h", logger=log)
+
+    assert result.get("reason") != reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    assert "store cursor unreadable before publication" in stream.getvalue()
 
 
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
