@@ -976,7 +976,9 @@ it (not on PyPI).
     full-scan recovery (re-anchoring under the complete-task-read gate). So on
     current builds **every reconcile pass is a full-scan recovery**; the
     trusted incremental path waits for an endpoint that attests the record
-    window. A mismatched or unparseable record window stays non-recoverable. Bootstrap is
+    window. That recovery keeps the attested feed's task uploads as references,
+    so an rc-0 partial `task/` listing that omits one fails closed (no publish,
+    no re-anchor). A mismatched or unparseable record window stays non-recoverable. Bootstrap is
     complete only when an outer `after`/`start_time` supplies its boundary and
     the record cursor covers the same full frontier. An EMPTY
     `start_time`/`end_time` window wider than the corroboration bound while

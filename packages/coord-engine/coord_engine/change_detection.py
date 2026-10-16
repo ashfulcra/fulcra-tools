@@ -508,9 +508,12 @@ class ChangeDetector:
                                  RECORD_WINDOW_INCOMPLETE):
                 # The outer feed window [cursor, feed_watermark] is attested at
                 # this point; only the record leg is unattestable.  Carry the
-                # frontier for the re-anchor gate (complete task read).
+                # frontier for the re-anchor gate (complete task read) AND the
+                # parsed outer-feed changes (ruling 2a301eab): untrusted,
+                # coverage UNKNOWN, never a watermark -- reconcile uses them as
+                # positive evidence that a partial task listing is partial.
                 return ChangeBatch(
-                    (), MappingProxyType(
+                    tuple(changes), MappingProxyType(
                         {name: Coverage.UNKNOWN for name in NAMESPACES}),
                     False, reason=window_reason,
                     attested_frontier=feed_watermark,

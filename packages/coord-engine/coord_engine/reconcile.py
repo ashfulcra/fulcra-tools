@@ -1232,6 +1232,27 @@ def _feed_task_delta(
     return changed, deleted, new_processed, changes
 
 
+def _feed_uploaded_task_slugs(team: str, batch: Any) -> set[str]:
+    """Slugs the detector saw UPLOADED as direct ``task/<slug>.md`` shards.
+
+    Only uploads are references: a deleted or archived change says the row may
+    legitimately be gone.  Index/log and nested paths are not task rows.
+    """
+    prefix = f"team/{team}/task/"
+    slugs: set[str] = set()
+    for change in getattr(batch, "changes", ()) or ():
+        if getattr(change, "state", None) != "uploaded":
+            continue
+        path = str(getattr(change, "path", "") or "").strip().lstrip("/")
+        if not path.startswith(prefix):
+            continue
+        rest = path[len(prefix):]
+        if "/" in rest or not rest.endswith(".md") or rest in ("index.md", "log.md"):
+            continue
+        slugs.add(rest[:-3])
+    return slugs
+
+
 def _batch_feed_rows(batch: ChangeBatch) -> list[dict[str, Any]]:
     """Adapt one sealed batch to E1's lifecycle collapse shape without I/O."""
     rows: list[dict[str, Any]] = []
@@ -1803,6 +1824,12 @@ def reconcile(
         reference_names = (
             set(aggregate.rows_by_name(inc[0])) if inc is not None else set()
         )
+        if recovery_requested:
+            # A recovery batch may carry the attested outer feed's changes
+            # (ruling 2a301eab): every task it saw uploaded must be listed, or
+            # this full scan is a partial listing and must not publish or
+            # re-anchor past the omission.
+            reference_names |= _feed_uploaded_task_slugs(team, batch)
         listed_names = set(aggregate.rows_by_name(rows))
         uncorroborated_missing = sorted(reference_names - listed_names)
         if uncorroborated_missing:

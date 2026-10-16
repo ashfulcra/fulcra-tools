@@ -700,6 +700,71 @@ def test_unattestable_record_cursor_recovers_and_re_anchors_through_reconcile():
     assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
 
 
+class _IntermittentListingTransport(FakeTransport):
+    partial_task_listing = False
+
+    def list_dir(self, prefix):
+        if self.partial_task_listing and prefix == "team/r/task/":
+            return [{"name": "archive/", "mtime": None, "is_dir": True}]
+        return super().list_dir(prefix)
+
+
+def _upload(slug, at):
+    return {"full_name": f"/team/r/task/{slug}.md", "state": "uploaded",
+            "uploaded_at": at, "id": f"u-{slug}"}
+
+
+def test_record_window_recovery_refuses_a_partial_listing_and_keeps_the_cursor():
+    """Greptile on PR 824 (ruling 2a301eab): the recovery batch carries the
+    attested feed's task uploads; an rc-0 partial task/ listing that omits one
+    must fail closed -- no summaries/generation write and no re-anchor past the
+    omitted update -- instead of publishing an incomplete board."""
+    t = _IntermittentListingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    assert _run(t)["degraded"] is False
+    path = reconcile.summaries_path("r")
+    before = json.loads(t.store[path])[reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    summaries_before = t.store[path]
+    current_before = t.store[generation.current_path("r")]
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=[_upload("b", before)])
+    t.partial_task_listing = True
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "task listing implausibly shrank" in result["reason"]
+    assert t.store[path] == summaries_before
+    assert t.store[generation.current_path("r")] == current_before
+    assert json.loads(t.store[path])[reconcile.RECONCILE_CURSOR_KEY][
+        "watermark"] == before
+
+
+def test_record_window_recovery_does_not_treat_deletes_as_references():
+    """Only uploads are references: a feed change that deleted a task says its
+    row may legitimately be gone, so its absence from the listing is fine."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=[
+        _upload("a", before),
+        {"full_name": "/team/r/task/gone.md", "state": "deleted",
+         "uploaded_at": before, "deleted_at": before, "id": "d-gone"}])
+
+    result = _run(t)
+
+    assert result["recovery"] == "detector-full-scan"
+    assert "implausibly shrank" not in (result.get("reason") or "")
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    assert json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+
 def test_transient_outer_feed_failure_still_aborts_without_recovery():
     """Only an attested outer window licenses the record-leg recovery; a feed
     read that fails outright stays a bare UNKNOWN and aborts the pass."""
