@@ -103,9 +103,17 @@ FEED_WIDE_EMPTY_UNPROVEN = (
     "data-updates reported no changes over a window wider than the corroboration "
     "bound and corroboration is dormant"
 )
-#: Only BOUNDARY/FRONTIER, and the unproven wide empty (which keeps a window that
-#: was never trusted on the recovery it already took), license the
-#: established-cursor full-scan recovery. The
+#: The record-cursor leg cannot be attested with today's CLI: ``get-records``
+#: answers JSONL with no ``after``/``through``, so the transport returns no
+#: window at all.  That is an absent capability, not evidence of a wrong
+#: answer, so it takes the same named full-scan recovery (never a trusted
+#: CLEAR or watermark).  Mismatched/unparseable windows stay non-recoverable.
+RECORD_WINDOW_UNAVAILABLE = "record cursor window unavailable or malformed"
+RECORD_WINDOW_INCOMPLETE = "record cursor window missing after, through, or records"
+#: Only BOUNDARY/FRONTIER, the unproven wide empty (which keeps a window that
+#: was never trusted on the recovery it already took) and the unattestable
+#: record-cursor leg (ruling 7adff21a) license the established-cursor
+#: full-scan recovery. The
 #: two empty-corroboration reasons are deliberately NOT here: whether a feed
 #: caught lying should trigger a full scan is a separate decision from whether an
 #: unreadable coverage boundary should.
@@ -113,6 +121,8 @@ RECOVERABLE_FEED_WINDOW_REASONS = frozenset({
     FEED_BOUNDARY_UNKNOWN,
     FEED_FRONTIER_UNKNOWN,
     FEED_WIDE_EMPTY_UNPROVEN,
+    RECORD_WINDOW_UNAVAILABLE,
+    RECORD_WINDOW_INCOMPLETE,
 })
 
 #: Corroborate a long-window empty against a recent sub-window. DORMANT BY
@@ -241,12 +251,12 @@ def _record_window(
     cardinality, threshold, diff, or substitute identity.
     """
     if not isinstance(value, Mapping):
-        return None, "record cursor window unavailable or malformed"
+        return None, RECORD_WINDOW_UNAVAILABLE
     if not isinstance(prior_watermark, str):
         return None, "record cursor prior watermark unavailable"
     after, through, rows = value.get("after"), value.get("through"), value.get("records")
     if not isinstance(after, str) or not isinstance(through, str) or not isinstance(rows, list):
-        return None, "record cursor window missing after, through, or records"
+        return None, RECORD_WINDOW_INCOMPLETE
     requested = _instant({"uploaded_at": prior_watermark}, "uploaded")
     start = _instant({"uploaded_at": after}, "uploaded")
     end = _instant({"uploaded_at": through}, "uploaded")
@@ -494,6 +504,20 @@ class ChangeDetector:
             cursor, prior_watermark=record_start,
         )
         if window is None:
+            if window_reason in (RECORD_WINDOW_UNAVAILABLE,
+                                 RECORD_WINDOW_INCOMPLETE):
+                # The outer feed window [cursor, feed_watermark] is attested at
+                # this point; only the record leg is unattestable.  Carry the
+                # frontier for the re-anchor gate (complete task read) AND the
+                # parsed outer-feed changes (ruling 2a301eab): untrusted,
+                # coverage UNKNOWN, never a watermark -- reconcile uses them as
+                # positive evidence that a partial task listing is partial.
+                return ChangeBatch(
+                    tuple(changes), MappingProxyType(
+                        {name: Coverage.UNKNOWN for name in NAMESPACES}),
+                    False, reason=window_reason,
+                    attested_frontier=feed_watermark,
+                )
             return _unknown(window_reason)
         record_through, record_rows = window
         feed_frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")

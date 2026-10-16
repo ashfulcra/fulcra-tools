@@ -1232,6 +1232,36 @@ def _feed_task_delta(
     return changed, deleted, new_processed, changes
 
 
+def _feed_uploaded_task_slugs(team: str, batch: Any) -> set[str]:
+    """Slugs whose LATEST lifecycle state in the batch is an upload of a direct
+    ``task/<slug>.md`` shard -- the tasks a complete listing must contain.
+
+    Events are collapsed per path with the existing E1 rules (latest instant
+    wins; equal instants prefer ``uploaded > deleted > archived``), never by
+    response order, so an upload later deleted or archived in the same window
+    is not a reference, while a re-upload after a delete still is.  If the
+    batch cannot be ordered (an event without a usable instant), every upload
+    stays a reference: doubt keeps the guard fail-closed.
+    """
+    prefix = f"team/{team}/task/"
+    rows: list[dict[str, Any]] = []
+    for row in _batch_feed_rows(batch):
+        path = str(row.get("path") or "").strip().lstrip("/")
+        if not path.startswith(prefix):
+            continue
+        rest = path[len(prefix):]
+        if "/" in rest or not rest.endswith(".md") or rest in ("index.md", "log.md"):
+            continue
+        if row.get("state") not in _FEED_STATE_PRIORITY:
+            continue
+        rows.append({**row, "path": path})
+    collapsed = _collapse_feed_changes(rows)
+    if collapsed is None:
+        return {r["path"][len(prefix):-3] for r in rows if r.get("state") == "uploaded"}
+    return {path[len(prefix):-3] for path, (_at, event) in collapsed.items()
+            if event.get("state") == "uploaded"}
+
+
 def _batch_feed_rows(batch: ChangeBatch) -> list[dict[str, Any]]:
     """Adapt one sealed batch to E1's lifecycle collapse shape without I/O."""
     rows: list[dict[str, Any]] = []
@@ -1803,6 +1833,12 @@ def reconcile(
         reference_names = (
             set(aggregate.rows_by_name(inc[0])) if inc is not None else set()
         )
+        if recovery_requested:
+            # A recovery batch may carry the attested outer feed's changes
+            # (ruling 2a301eab): every task it saw uploaded must be listed, or
+            # this full scan is a partial listing and must not publish or
+            # re-anchor past the omission.
+            reference_names |= _feed_uploaded_task_slugs(team, batch)
         listed_names = set(aggregate.rows_by_name(rows))
         uncorroborated_missing = sorted(reference_names - listed_names)
         if uncorroborated_missing:

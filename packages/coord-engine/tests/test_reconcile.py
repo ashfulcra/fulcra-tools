@@ -654,6 +654,222 @@ def test_pass_writes_when_the_store_summaries_is_a_non_object(document):
     assert "store cursor unreadable before publication" in stream.getvalue()
 
 
+def _attested_narrow_feed(t, *, rows):
+    """A live-shaped data-updates answer: start_time echoes the cursor, a narrow
+    end_time, and the coordination channel counted (so the record leg runs)."""
+    asked = []
+
+    def feed(since, *, deadline=None):
+        asked.append(since)
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(minutes=30)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 10},
+            "file_changes": rows,
+        }
+
+    t.data_updates = feed
+    return asked
+
+
+def test_unattestable_record_cursor_recovers_and_re_anchors_through_reconcile():
+    """Ruling 7adff21a (P0): today's get-records answers JSONL with no
+    after/through, so the record leg can never be attested. With the outer
+    feed window attested, the pass must take the named full-scan recovery and
+    re-anchor to the feed's end_time -- not abort every pass."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    t.records_cursor = lambda *args, **kwargs: None   # JSONL-only CLI
+    asked = _attested_narrow_feed(t, rows=[{
+        "full_name": "/team/r/task/b.md", "state": "uploaded",
+        "uploaded_at": before, "id": "u-b"}])
+
+    result = _run(t)
+
+    assert asked == [before]
+    assert result["recovery"] == "detector-full-scan"
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert {row["name"] for row in aggregate["rows"]} == {"a", "b"}
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+
+class _IntermittentListingTransport(FakeTransport):
+    partial_task_listing = False
+
+    def list_dir(self, prefix):
+        if self.partial_task_listing and prefix == "team/r/task/":
+            return [{"name": "archive/", "mtime": None, "is_dir": True}]
+        return super().list_dir(prefix)
+
+
+def _upload(slug, at):
+    return {"full_name": f"/team/r/task/{slug}.md", "state": "uploaded",
+            "uploaded_at": at, "id": f"u-{slug}"}
+
+
+def test_record_window_recovery_refuses_a_partial_listing_and_keeps_the_cursor():
+    """Greptile on PR 824 (ruling 2a301eab): the recovery batch carries the
+    attested feed's task uploads; an rc-0 partial task/ listing that omits one
+    must fail closed -- no summaries/generation write and no re-anchor past the
+    omitted update -- instead of publishing an incomplete board."""
+    t = _IntermittentListingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    assert _run(t)["degraded"] is False
+    path = reconcile.summaries_path("r")
+    before = json.loads(t.store[path])[reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    summaries_before = t.store[path]
+    current_before = t.store[generation.current_path("r")]
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=[_upload("b", before)])
+    t.partial_task_listing = True
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "task listing implausibly shrank" in result["reason"]
+    assert t.store[path] == summaries_before
+    assert t.store[generation.current_path("r")] == current_before
+    assert json.loads(t.store[path])[reconcile.RECONCILE_CURSOR_KEY][
+        "watermark"] == before
+
+
+def test_record_window_recovery_does_not_treat_deletes_as_references():
+    """Only uploads are references: a feed change that deleted a task says its
+    row may legitimately be gone, so its absence from the listing is fine."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=[
+        _upload("a", before),
+        {"full_name": "/team/r/task/gone.md", "state": "deleted",
+         "uploaded_at": before, "deleted_at": before, "id": "d-gone"}])
+
+    result = _run(t)
+
+    assert result["recovery"] == "detector-full-scan"
+    assert "implausibly shrank" not in (result.get("reason") or "")
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    assert json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+
+def _cursor_and_clock(t):
+    before = json.loads(t.store[reconcile.summaries_path("r")])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    start = datetime.fromisoformat(before.replace("Z", "+00:00"))
+
+    def at(minutes):
+        return (start + timedelta(minutes=minutes)).isoformat().replace(
+            "+00:00", "Z")
+    return before, at
+
+
+@pytest.mark.parametrize("terminal", ["deleted", "archived"])
+@pytest.mark.parametrize("include_upload", [False, True])
+def test_recovery_reference_uses_the_latest_lifecycle_state(terminal, include_upload):
+    """codex-reviewer's PR 824 round-2 regression, made permanent: a task
+    uploaded and then deleted/archived in the same window is legitimately
+    absent from a complete listing; it must not freeze reconciliation."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert not _run(t)["degraded"]
+    before, at = _cursor_and_clock(t)
+    upload = {"full_name": "/team/r/task/transient.md", "state": "uploaded",
+              "uploaded_at": at(5), "id": "upload-transient"}
+    removed = {"full_name": "/team/r/task/transient.md", "state": terminal,
+               "uploaded_at": at(5), terminal + "_at": at(10),
+               "id": "remove-transient"}
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=([upload] if include_upload else []) + [removed])
+
+    attempts = [_run(t), _run(t)]
+
+    assert not any(r["degraded"] for r in attempts), attempts
+    aggregate = json.loads(t.store[reconcile.summaries_path("r")])
+    assert {row["name"] for row in aggregate["rows"]} == {"a"}
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] != before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_recovery_reference_counts_a_reupload_after_a_terminal_event(reverse):
+    """A delete followed by a later re-upload leaves a LIVE task: an omitted
+    listing for it must still fail closed, whatever the response order."""
+    t = _IntermittentListingTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    assert not _run(t)["degraded"]
+    before, at = _cursor_and_clock(t)
+    rows = [
+        {"full_name": "/team/r/task/b.md", "state": "deleted",
+         "uploaded_at": at(1), "deleted_at": at(5), "id": "del-b"},
+        {"full_name": "/team/r/task/b.md", "state": "uploaded",
+         "uploaded_at": at(10), "id": "reup-b"},
+    ]
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=list(reversed(rows)) if reverse else rows)
+    t.partial_task_listing = True
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "task listing implausibly shrank" in result["reason"]
+    assert json.loads(t.store[reconcile.summaries_path("r")])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"] == before
+
+
+def test_recovery_reference_orders_by_instant_not_response_order():
+    """The terminal event arrives FIRST in the response but is the latest by
+    instant: the task is gone, so a complete listing without it publishes."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert not _run(t)["degraded"]
+    before, at = _cursor_and_clock(t)
+    t.records_cursor = lambda *args, **kwargs: None
+    _attested_narrow_feed(t, rows=[
+        {"full_name": "/team/r/task/x.md", "state": "deleted",
+         "uploaded_at": at(2), "deleted_at": at(9), "id": "del-x"},
+        {"full_name": "/team/r/task/x.md", "state": "uploaded",
+         "uploaded_at": at(2), "id": "up-x"},
+    ])
+
+    result = _run(t)
+
+    assert result["degraded"] is False, result
+    assert json.loads(t.store[reconcile.summaries_path("r")])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"] != before
+
+
+def test_transient_outer_feed_failure_still_aborts_without_recovery():
+    """Only an attested outer window licenses the record-leg recovery; a feed
+    read that fails outright stays a bare UNKNOWN and aborts the pass."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.records_cursor = lambda *args, **kwargs: None
+    t.data_updates = lambda since, *, deadline=None: None
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "recovery" not in result
+    assert json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"] == before
+
+
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     """Only the approved outer-window reason family may enter the full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
@@ -672,7 +888,9 @@ def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     unknown = ChangeBatch(
         (), {name: Coverage.UNKNOWN for name in NAMESPACES}, False,
-        reason="record cursor window unavailable or malformed",
+        # A WRONG record window (not an unattestable one, which ruling
+        # 7adff21a made recoverable) stays outside the recovery family.
+        reason="record cursor boundary does not match requested watermark",
     )
     monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: unknown)
 

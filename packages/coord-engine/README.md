@@ -307,6 +307,17 @@ boundary recovery. A lagging, missing, mismatched, or incomparable
 boundary/frontier is `UNKNOWN`, advances no watermark, and leaves the public
 overlay `NOT_RUN`/nonzero. Bootstrap is licensed only by an outer boundary
 (`after` or `start_time`) plus a cursor covering the same full frontier.
+**With today's CLI the record leg is never attested:** `get-records` answers
+JSONL with no `after`/`through`, so the transport returns no record window. An
+unavailable or incomplete record window behind an attested outer window takes
+the named full-scan recovery (and re-anchors under the complete-task-read gate
+below), so on current builds **every reconcile pass is a full-scan recovery**;
+the trusted incremental path waits for an endpoint that attests the record
+window. That recovery keeps the tasks whose latest lifecycle state in the
+attested feed is an upload (collapsed by event instant with the E1 tie rules,
+so an upload later deleted or archived in the same window is not one) as
+references, so an rc-0 partial `task/` listing that omits one fails closed (no publish, no
+re-anchor). A mismatched or unparseable record window stays non-recoverable.
 An EMPTY `start_time`/`end_time` window wider than the corroboration bound
 (`COORD_FEED_EMPTY_CORROBORATION_HOURS`) while corroboration is dormant is
 `UNKNOWN` with reason `FEED_WIDE_EMPTY_UNPROVEN` and takes the same named

@@ -728,3 +728,54 @@ def test_malformed_configured_channel_count_stays_unknown(data_types):
                 "through": "2026-08-20T12:00:00Z", "records": []}))
 
     assert batch.trusted is False
+
+
+@pytest.mark.parametrize("records", [None, {"records": []},
+                                     [{"id": "jsonl-line"}]])
+def test_unattestable_record_cursor_is_a_recoverable_reason(records):
+    """Ruling 7adff21a: a JSONL-only get-records (no after/through) is an absent
+    capability, not a wrong answer. With the outer window attested, the batch
+    stays untrusted but licenses the named recovery and carries the frontier."""
+    from coord_engine.change_detection import (
+        ChangeDetector, RECORD_WINDOW_INCOMPLETE, RECORD_WINDOW_UNAVAILABLE,
+        detector_recovery_reason)
+
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 11:30:00+00:00",
+        "data_types": {COORDINATION_TYPE: 10},
+        "file_changes": [_row("team/r/task/a.md", update_id="task")],
+    }
+    transport = FeedTransport(envelope, records=records)
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-08-20T11:00:00Z", Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert batch.reason in (RECORD_WINDOW_UNAVAILABLE, RECORD_WINDOW_INCOMPLETE)
+    assert detector_recovery_reason(batch) == batch.reason
+    assert batch.attested_frontier == "2026-08-20T11:30:00Z"
+
+
+def test_a_wrong_record_window_stays_non_recoverable():
+    from coord_engine.change_detection import ChangeDetector, detector_recovery_reason
+
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 11:30:00+00:00",
+        "data_types": {COORDINATION_TYPE: 10},
+        "file_changes": [],
+    }
+    transport = FeedTransport(envelope, records={
+        "after": "2026-08-19T00:00:00Z", "through": "2026-08-20T11:30:00Z",
+        "records": []})
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-08-20T11:00:00Z", Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert detector_recovery_reason(batch) is None
+    assert batch.attested_frontier is None
