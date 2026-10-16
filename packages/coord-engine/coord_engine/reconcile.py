@@ -18,7 +18,7 @@ from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import __version__, aggregate, config, generation, health as health_mod, jsonutil, model, okf, review
+from . import __version__, aggregate, config, dual_emit, generation, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .change_detection import (
@@ -647,13 +647,18 @@ def _quiet_mtime_old_enough(value: Any, *, now: str, days: float) -> bool:
 
 
 def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: str,
-                   days: float, log: Any) -> tuple[list, list[str], dict]:
+                   days: float, log: Any, sender: Optional[str] = None) -> tuple[list, list[str], dict]:
     """Cold-archive quiet work older than ``days``, reversibly and fail-closed.
 
     Eligible tasks are terminal or ``proposed``; ``active``/``waiting`` are never
     retention candidates. A doc-less review directory is eligible only when its
     verdict listing is KNOWN and proves exactly one ``codex-reviewer`` verdict.
     Every move is copy -> verify -> delete, capped per pass and throttled daily.
+
+    An archived task is owed by nobody, so each completed move also retires the
+    obligation on bus-v4 (``dual_emit.retire_archived``) — only AFTER the source
+    delete, because closing a task that is still hot would hide live work. A
+    failed close is a warning, never a reason to undo the archive.
     """
     notes: list[str] = []
     archived_map: dict = {}  # slug -> (month, title), for the log's Archived bullets
@@ -705,6 +710,12 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                         shards_moved = False
                 if shards_moved and hasattr(transport, "delete") and transport.delete(src):
                     notes.append(f"retention: archived {slug} -> archive/{month}/")
+                    if sender and dual_emit.retire_archived(
+                            transport, team, sender=sender, slug=slug,
+                            ptr=f"task/archive/{month}/{slug}.md",
+                            priority=str(r.get("priority") or ""), at=now) is False:
+                        notes.append(f"retention: v4 close FAILED for archived {slug}; "
+                                     "the obligation stays open in the folds that hold it")
                     continue
                 archived -= 1
                 if hasattr(transport, "delete"):
@@ -1923,7 +1934,8 @@ def reconcile(
     days = config.retention_days(DEFAULT_RETENTION_DAYS, override=retention_days)
     if days > 0:
         rows, notes, archived_map = _run_retention(
-            transport, team, rows, now=now, today=today, days=days, log=log)
+            transport, team, rows, now=now, today=today, days=days, log=log,
+            sender=host)
         # `notes` that match none of these are DISCARDED — nothing else reads the
         # list. "cap reached" is here because a note the caller never sees is the
         # same silence the note exists to end.

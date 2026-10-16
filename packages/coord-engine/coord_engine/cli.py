@@ -1744,7 +1744,8 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
     """Move an archived task back into the hot path (verified move)."""
     for month in sorted(_archive_months(transport, args.team), reverse=True):
         src = f"{rec.archive_prefix(args.team)}{month}/{args.name}.md"
-        if transport.read(src) is None:
+        archived_doc = transport.read(src)
+        if archived_doc is None:
             continue
         dst = _task_path(args.team, args.name)
         # ABSENT, not merely unreadable. This guard is the only thing standing
@@ -1765,6 +1766,17 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
             return 1
         if rec._crash_safe_move(transport, src, dst):
             print(f"restored {args.name} from archive/{month}/ (run reconcile to reindex)")
+            # Retention closed this task on bus-v4 when it archived it, so the fold-backed reads
+            # (needs-me, obligations) would never show it again without a matching open.
+            from . import dual_emit
+            reopened = dual_emit.reopen_restored(
+                transport, args.team, actor=_host(), slug=args.name, doc=archived_doc, at=_iso(_now()))
+            if reopened is False:
+                print(f"restore incomplete: the doc is back but its bus-v4 open was NOT written, so "
+                      f"fold-backed needs-me/obligations will not show {args.name}. Re-export it with "
+                      f"`coord-engine obligations {args.team} --agent <assignee> --export-open --force`.",
+                      file=sys.stderr)
+                return 3
             return 0
         print(f"restore failed: verified move from archive/{month}/ failed", file=sys.stderr)
         return 1
