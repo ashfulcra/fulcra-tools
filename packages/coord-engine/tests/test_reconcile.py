@@ -1,4 +1,6 @@
 import json
+
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from coord_engine import aggregate as aggregate_mod, generation
@@ -576,6 +578,51 @@ def test_pass_writes_and_says_so_when_the_store_cursor_is_unreadable():
     rows = json.loads(t.store[reconcile.summaries_path("r")])["rows"]
     assert {row["name"] for row in rows} == {"a", "b"}
     assert "store cursor unreadable before publication" in stream.getvalue()
+
+
+@pytest.mark.parametrize("force_full", [False, True])
+def test_every_publication_path_preserves_an_already_newer_store_cursor(
+        monkeypatch, force_full):
+    """codex-reviewer's PR 822 regression, made permanent: another host commits
+    a newer cursor after this pass's starting snapshot. Neither the no-change
+    fast path nor the full pass may write over it."""
+    transport = FakeTransport()
+    transport.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(transport)
+    _with_updates(transport, [])
+    path = reconcile.summaries_path("r")
+    newer = json.loads(transport.store[path])
+    newer[reconcile.RECONCILE_CURSOR_KEY] = {
+        "watermark": "2026-07-01T12:31:00Z", "processed": {}, "streak": 0}
+    published = json.dumps(newer)
+    feed = transport.data_updates
+
+    def concurrent_write(since, *, deadline=None):
+        batch = feed(since, deadline=deadline)
+        transport.store[path] = published
+        return batch
+
+    transport.data_updates = concurrent_write
+    if force_full:
+        monkeypatch.setenv("COORD_RECONCILE_FULL_EVERY", "1")
+    result = _reconciled(transport, now="2026-07-01T12:30:00Z")
+
+    assert transport.store[path] == published
+    assert result.get("reason") == reconcile.SUPERSEDED_BY_NEWER_CURSOR
+
+
+def test_fast_path_writes_as_today_when_the_store_cursor_is_unchanged():
+    transport = FakeTransport()
+    transport.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(transport)
+    _with_updates(transport, [])
+
+    result = _reconciled(transport, now="2026-07-01T12:30:00Z")
+
+    assert result.get("fast_path") is True
+    cursor = json.loads(transport.store[reconcile.summaries_path("r")])[
+        reconcile.RECONCILE_CURSOR_KEY]
+    assert cursor["watermark"] == "2026-07-01T12:30:00Z"
 
 
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):

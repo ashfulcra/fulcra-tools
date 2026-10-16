@@ -328,7 +328,7 @@ review budget-cut) pass never writes.
 Boundary/frontier-unknown recoveries keep the prior cursor. Enabling
 corroboration by default is not built yet. Because `summaries.json` is
 last-writer-wins across hosts, a pass re-reads the store's cursor just before
-publishing and **skips its generation + summaries write** when that cursor is
+publishing on every path (full, incremental and the no-change fast path) and **skips its generation + summaries write** when that cursor is
 strictly newer than the one it started from (health: `superseded by a newer
 cursor in the store`), so it cannot roll another host's re-anchor back; equal or
 older writes as before, an unreadable store cursor writes as before and logs it.

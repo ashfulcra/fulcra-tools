@@ -943,6 +943,35 @@ def _store_cursor_supersedes(
     return stored > started
 
 
+def _superseded_pass(
+    transport: Any, team: str, *, started_from: Optional[dict[str, Any]],
+    host: str, now: str, tasks: int, warnings: list[str], rows: Any, log: Any,
+) -> Optional[dict[str, Any]]:
+    """Guard EVERY summaries publication path (full, incremental, fast path).
+
+    Returns the degraded result to return when the store's cursor is strictly
+    newer than the one this pass started from -- after writing the health
+    shard and logging -- or None when the pass may publish.  Never merges the
+    newer cursor over this pass's rows.
+    """
+    superseded = _store_cursor_supersedes(transport, team, started_from)
+    if superseded is None:
+        log.warn("reconcile: store cursor unreadable before publication; "
+                 "writing as before (no superseded check)", team=team)
+        return None
+    if superseded is not True:
+        return None
+    reason = SUPERSEDED_BY_NEWER_CURSOR
+    result = {"degraded": True, "reason": reason, "tasks": tasks,
+              "warnings": [*warnings, reason], "rows": rows}
+    _write_health_shard(transport, team, host=host, now=now,
+                        result=result, log=log)
+    log.error("reconcile publication skipped: store cursor is newer than "
+              "this pass's starting cursor", team=team,
+              started_from=(started_from or {}).get("watermark"))
+    return result
+
+
 def _publication_generation(aggregate_doc: Any) -> Optional[str]:
     """The exact public generation a private build may be based on."""
     fence = ((aggregate_doc or {}).get(projection_mod.PUBLICATION_FENCE_KEY)
@@ -1686,6 +1715,11 @@ def reconcile(
     if fast_delta is not None:
         fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
         if not fast_changed and not fast_deleted:
+            superseded_result = _superseded_pass(
+                transport, team, started_from=prior_cursor, host=host, now=now,
+                tasks=len(prior_rows), warnings=[], rows=prior_rows, log=log)
+            if superseded_result is not None:
+                return superseded_result
             fast_agg = dict(prior_agg or {})
             fast_agg[RECONCILE_CURSOR_KEY] = {
                 "watermark": now,
@@ -2112,21 +2146,11 @@ def reconcile(
     # has since advanced the store's cursor, writing would roll that cursor
     # back; keeping the newer cursor over these rows would claim coverage they
     # never saw.  So skip this pass's publication entirely (ruling 05df6cab).
-    superseded = _store_cursor_supersedes(transport, team, prior_cursor)
-    if superseded is True:
-        reason = SUPERSEDED_BY_NEWER_CURSOR
-        warnings.append(reason)
-        result = {"degraded": True, "reason": reason, "tasks": len(rows),
-                  "warnings": warnings, "rows": rows}
-        _write_health_shard(transport, team, host=host, now=now,
-                            result=result, log=log)
-        log.error("reconcile publication skipped: store cursor is newer than "
-                  "this pass's starting cursor", team=team,
-                  started_from=(prior_cursor or {}).get("watermark"))
-        return result
-    if superseded is None:
-        log.warn("reconcile: store cursor unreadable before publication; "
-                 "writing as before (no superseded check)", team=team)
+    superseded_result = _superseded_pass(
+        transport, team, started_from=prior_cursor, host=host, now=now,
+        tasks=len(rows), warnings=warnings, rows=rows, log=log)
+    if superseded_result is not None:
+        return superseded_result
 
     # Unit 4's generation is the publication authority.  The legacy aggregate
     # remains a compatibility cache for existing readers, and is written only

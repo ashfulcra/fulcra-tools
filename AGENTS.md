@@ -1438,7 +1438,7 @@ it (not on PyPI).
     never rebuild the aggregate from a fixed key set. The same last-writer-wins shape applies to
     `reconcile_cursor`: a pass writes the cursor it STARTED from (or advances it), so a pass that
     began before another host's re-anchor would roll that cursor back. Immediately before
-    publishing, `reconcile` re-reads the store's cursor; if its watermark is strictly newer than
+    publishing — on every path, including the no-change fast path — `reconcile` re-reads the store's cursor; if its watermark is strictly newer than
     the one this pass started from, the pass **skips its generation + summaries write** and its
     health shard reads `advanced: false`, `degraded_reason: superseded by a newer cursor in the
     store` (never "keep the newer cursor over my rows" — those rows never saw the changes in
