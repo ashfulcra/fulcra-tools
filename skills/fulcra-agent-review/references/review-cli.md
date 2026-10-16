@@ -152,9 +152,10 @@ self-heals on direct query.
   soft-delete tombstone (a `<review-slug>/` dir with no `<review-slug>.md`).
   **Terminal**: a retry never resurrects it.
 - `...: no such review (ABSENT) — no doc and no review dir` — the slug was never
-  created (no doc and no `<review-slug>/` dir under the review root). **Terminal**
-  and NOT a deletion: nothing was ever reviewed under that slug. If the review-root
-  listing itself fails, presence is UNKNOWN and you get the `, retry` message above.
+  created: the review root lists neither `<review-slug>.md` nor a `<review-slug>/`
+  dir. **Terminal** and NOT a deletion. If the root LISTS the doc but its read
+  failed (a live pending review), or the root listing itself fails, presence is
+  UNKNOWN and you get the `, retry` message above — never ABSENT.
 
 The `, retry` suffix means retryable; a `tombstone` or `ABSENT` mention means
 terminal — the convention is load-bearing, so match on it, not on the whole string.

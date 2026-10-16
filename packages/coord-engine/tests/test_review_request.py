@@ -1327,3 +1327,36 @@ def test_review_status_absent_check_fails_closed_when_the_root_listing_raises(ca
     cap = capsys.readouterr()
     assert "ABSENT" not in cap.err and "tombstone" not in cap.err, cap.err
     assert "retry" in cap.err, cap.err
+
+
+def test_review_status_retries_a_listed_review_doc_whose_read_failed(capsys):
+    """codex-reviewer's PR 827 regression, made permanent: a pending review with a
+    doc and no verdict dir yet, whose doc READ fails, is listed in the review
+    root -- it EXISTS, so the answer is UNKNOWN/retry, never terminal ABSENT."""
+    class DocReadTimesOut(FakeTransport):
+        failing = False
+
+        def read(self, path):
+            if self.failing and path == "team/r/review/pr-pending.md":
+                return None
+            return super().read(path)
+
+    t = DocReadTimesOut()
+    t.put("team/r/review/pr-pending.md", "---\ntype: Review\nrequired: [alice]\n---\n")
+    assert cli._review_presence(t, "r", "pr-pending") == "doc"
+    t.failing = True
+    capsys.readouterr()
+
+    assert cli.main(["review", "status", "r", "pr-pending"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "retry" in cap.err, cap.err
+    assert "ABSENT" not in cap.err and "tombstone" not in cap.err, cap.err
+
+
+def test_review_presence_distinguishes_doc_dir_and_absent():
+    t = FakeTransport()
+    t.put("team/r/review/pr-doc.md", "---\ntype: Review\n---\n")
+    t.put("team/r/review/pr-ghost/verdicts/.settled", "x")
+    assert cli._review_presence(t, "r", "pr-doc") == "doc"
+    assert cli._review_presence(t, "r", "pr-ghost") == "dir"
+    assert cli._review_presence(t, "r", "pr-never") == "absent"
