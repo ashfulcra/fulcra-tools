@@ -299,7 +299,11 @@ under `skills/`, each package with its own README, build, and tests.
   index instead of repeatedly classifying historical tombstones, and the legacy
   `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
   hot, moves are copy-verified rather than destructive-only, and archived work
-  reverses through `task restore` or `review restore`. Note the age thresholds
+  reverses through `task restore` or `review restore`. An archived task is owed by
+  nobody: retention writes one bus-v4 `close` to `all` for it after the source
+  delete succeeds (never before — closing hot work hides it), and a failed close
+  is a `v4 close FAILED` warning, not a rollback. Archives from before this rule
+  left phantom opens in the folds; those need a separate verified cleanup. Note the age thresholds
   above are necessary, not sufficient: tasks and reviews share ONE per-pass
   archive cap and tasks are swept first, so a large task backlog defers review
   archiving indefinitely. When that happens the pass now warns `retention: cap

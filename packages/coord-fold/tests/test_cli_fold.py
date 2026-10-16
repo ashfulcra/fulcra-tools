@@ -165,3 +165,14 @@ def test_a_broadcast_opens_for_everyone_except_its_sender():
     st = _team([_rec("open", "theirs", "2026-09-04T10:00:00Z", "1", to="all", sender="boss"),
                 _rec("open", "mine-bcast", "2026-09-04T10:01:00Z", "2", to="all", sender="me")])
     _run(st); assert set(_ckpt(st)["open"]) == {"theirs"}
+
+
+def test_a_retention_close_to_all_retires_a_directed_open_whoever_sent_it():
+    """coord-engine retention retires an archived task with ONE close to `all` from the reconciling identity.
+    It must land in the assignee's fold whether that identity is a third party or the assignee itself."""
+    st = _team([_rec("open", "a", "2026-09-04T10:00:00Z", "1"),
+                _rec("open", "b", "2026-09-04T10:00:00Z", "2"),
+                _rec("open", "c", "2026-09-04T10:00:00Z", "3"),
+                _rec("close", "a", "2026-09-04T10:05:00Z", "4", to="all", sender="coord-reconcile:host"),
+                _rec("close", "b", "2026-09-04T10:05:00Z", "5", to="all", sender="me")])
+    _run(st); assert set(_ckpt(st)["open"]) == {"c"}

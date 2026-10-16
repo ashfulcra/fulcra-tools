@@ -11,6 +11,9 @@ Contract, each clause a failure it prevents:
 * Kind map is total over the kinds that carry obligations; anything else is not mirrored:
   directive->open, response->close (of the slug it closes), claim->claim, verdict->note.
 * The payload is the eight-field coord-fold event, written literally (v, at, from, to, kind, slug, pri, ptr).
+
+The one write that is NOT a v3 event is retention: ``retire_archived`` is called by reconcile's retention pass
+for each task it archives, because no v3 record exists to mirror.
 """
 from __future__ import annotations
 
@@ -69,6 +72,28 @@ def _opens_an_obligation(transport: Any, team: str, ptr: Optional[str]) -> bool:
         return str(fm.get("status") or "").strip() not in TERMINAL_STATUSES
     except Exception:
         return True
+
+
+def retire_archived(transport: Any, team: str, *, sender: str, slug: str, ptr: str, priority: str,
+                    at: str) -> Optional[bool]:
+    """Close a retention-archived task on bus-v4 for EVERY fold. None = no bus-v4 plane; True/False = write verdict.
+
+    Retention moves a quiet task into ``task/archive/`` and the old plane stops listing it, but it is not a v3 write,
+    so nothing passed through ``records.emit_event`` and no v4 close was ever mirrored: every fold that held the open
+    owed the row forever (measured 2026-10-16: most of a coordinator's owed rows pointed at archived docs). The close
+    goes to ``all`` because retention cannot know which folds hold the open: the assignee's, a role holder's seeded
+    copy, or every recipient of a broadcast. An archived task is owed by nobody, and a close of a slug a fold does
+    not hold is a no-op there. Never raises."""
+    try:
+        cfg = v4_config(transport, team)
+        if cfg is None:
+            return None
+        pri = priority if priority in PRIORITIES else "P2"
+        note = json.dumps(payload(at=at, sender=sender, to="all", kind="close", slug=slug, pri=pri, ptr=ptr),
+                          sort_keys=True)
+        return bool(transport.record_write(cfg["data_type"], cfg["api_version"], note, sender))
+    except Exception:
+        return False
 
 
 def mirror(transport: Any, team: Optional[str], *, sender: str, to: str, kind: str, priority: str, slug: str,
