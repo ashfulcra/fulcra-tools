@@ -465,11 +465,11 @@ def test_wide_empty_recovery_keeps_the_cursor_when_a_listed_task_was_not_read(
 
 def test_wide_empty_recovery_re_anchors_despite_a_permanently_unparseable_shard(
         monkeypatch):
-    """Live 2026-10-15: five task/ shards with unparseable frontmatter (one a
-    charter with none, one an invalid YAML escape) are skipped identically
-    every pass. They were READ; re-reading cannot change them, so they must
-    not hold the re-anchor off forever. Only a failed READ does (see the
-    transient-read test above)."""
+    """A task/ shard that was READ but has unparseable frontmatter is
+    deterministic: it is skipped identically every pass and only a new write
+    (a feed event) can change it. It stays a loud warning but must not hold
+    the re-anchor off forever; only a failed READ does (ruling 93a9965d; see
+    the transient-read test above)."""
     monkeypatch.delenv("COORD_FEED_EMPTY_CORROBORATION", raising=False)
     t = FakeTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))

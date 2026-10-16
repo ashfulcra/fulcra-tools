@@ -1225,10 +1225,10 @@ def _full_scan_task_rows(
     reference. Returns ``(rows, warnings, reused, parsed, uncertain)``;
     ``uncertain`` names every listed task whose READ failed this pass, so a
     caller can tell a complete fold from one that still owes a read.  A shard
-    that was read but has unparseable frontmatter is not uncertain: its bytes
-    are what they are, every pass skips it identically, and re-reading the
-    same window cannot change that (live 2026-10-15: five such shards held the
-    re-anchor off forever)."""
+    that was read but has unparseable frontmatter is not uncertain (ruling
+    93a9965d): it is deterministic -- its content cannot change without a new
+    write, which is a feed event the next poll reads -- and it stays a loud
+    warning."""
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     uncertain: list[str] = []
@@ -1767,7 +1767,7 @@ def reconcile(
             # server before this full scan began, so the completed scan has
             # seen every change at or before F: re-anchor to F, never to a
             # local or scan-derived time.  Only a COMPLETE task fold licenses it
-            # (rulings 6c80ed8a + amendment): every listed task READ this pass --
+            # (rulings 6c80ed8a, amended by 93a9965d): every listed task READ --
             # a read failure keeps a prior row or skips the slug, and moving
             # the cursor would consume the window that still owes that read.
             # A read-but-unparseable shard is deterministic and does not hold it.
