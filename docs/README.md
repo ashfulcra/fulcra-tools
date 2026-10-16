@@ -36,6 +36,11 @@ technical rationale; private team records belong in the team's own storage.
 - [`coord/BUS-V3.md`](coord/BUS-V3.md) — the bus v3 contract (adopted
   2026-07-27): events as typed records, documents as files, one queue read
   per wake, no resident listeners.
+- [`coord/SYSTEM-SPEC.md`](coord/SYSTEM-SPEC.md) — the canonical rebuild and
+  interoperability specification for Collect + Coord. §12 is target work, not
+  fully shipped: each subsection says what is live today (host reconcile
+  heartbeats as `coord-reconcile:<host>`; the pin in the store `adopt-latest.sh`;
+  the version floor in the store `records.json`; no fence yet).
 - [`coord/wake-router-SPEC.md`](coord/wake-router-SPEC.md) and
   [`coord/wake-router-PLAN.md`](coord/wake-router-PLAN.md) — the gated spec and
   implementation plan for the wake router + engagement model build
@@ -69,5 +74,9 @@ evidence, rollout records, internal pitch material, audit artifacts — lives in
 - [`coord/proposals/`](coord/proposals) and [`proposals/`](proposals) —
   design proposals that shipped code still cites as its source. Historical, but
   load-bearing: two `coord-engine` modules name them as their design.
+- [`coord/NO-JANITOR-SPEC.md`](coord/NO-JANITOR-SPEC.md) — historical draft
+  (2026-08-13), kept for its reasoning. The repo manifest it names as the single
+  authority was never built; authority is the store `_coord/bus-v3/records.json`
+  (see [`coord/BUS-V3.md`](coord/BUS-V3.md)).
 - [`skill-quality-pattern.md`](skill-quality-pattern.md) — the maintainer
   convention for skill quality across the `fulcra-agent-*` set.
