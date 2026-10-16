@@ -2832,6 +2832,29 @@ def _review_tally(
     return tally, raw is not None, vok, listing_ok
 
 
+def _review_presence(transport: Any, team: str, slug: str) -> Optional[str]:
+    """What the review root lists for ``slug``, via ONE root listing.
+
+    ``"doc"``    -- ``<slug>.md`` is listed: the review EXISTS, so a failed doc
+                    read is UNKNOWN (retry), never ABSENT or a tombstone.
+    ``"dir"``    -- only a ``<slug>/`` prefix: a tombstone candidate (soft
+                    deletes leave the dir behind).
+    ``"absent"`` -- neither is listed: the slug was never created.
+    ``None``     -- the listing raised: UNKNOWN, never assume absent."""
+    try:
+        entries = transport.list_dir(f"team/{team}/review/")
+    except TransportError:
+        return None
+    has_dir = False
+    for e in entries:
+        name = (e.get("name") or "")
+        if name == f"{slug}.md" and not e.get("is_dir"):
+            return "doc"
+        if name.rstrip("/") == slug and (e.get("is_dir") or name.endswith("/")):
+            has_dir = True
+    return "dir" if has_dir else "absent"
+
+
 def _classify_orphan_dir(transport: Any, team: str, slug: str) -> str:
     """Classify a dir-only review slug — a ``<slug>/`` prefix under the review root
     with NO ``<slug>.md`` doc — via ONE listing of its verdicts prefix (the same
@@ -4931,7 +4954,16 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         # A dir with real verdict shards (orphan) or a verdicts listing that RAISED
         # (unknown) is NOT a tombstone — fall through to the generic fail-closed
         # message, where a retry may genuinely help.
-        if _classify_orphan_dir(transport, team, slug) == "tombstone":
+        presence = _review_presence(transport, team, slug)
+        if presence == "absent":
+            # Never created (or not even a lingering dir): ABSENT, not a
+            # tombstone -- "deleted" would tell the caller to stop looking for a
+            # review that simply does not exist.  rc 1, and no "retry".
+            print(f"review status: {slug} in team/{team}: no such review "
+                  f"(ABSENT) — no doc and no review dir",
+                  file=sys.stderr)
+            return 1
+        if presence == "dir" and _classify_orphan_dir(transport, team, slug) == "tombstone":
             print(f"review status: {slug} in team/{team} is a tombstone "
                   f"(archived/deleted review) — no doc, no verdicts",
                   file=sys.stderr)

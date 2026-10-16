@@ -1403,8 +1403,8 @@ it (not on PyPI).
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
   unknown — e.g. `review status` `tally unknown, retry`, `roles status` `lease state unknown … retry`,
-  `tell` `cannot verify delivery, retry`) and names a **tombstone** iff terminal (a `review status` on a
-  soft-deleted review — a retry never resurrects it). An **UNEXPECTED** exception is neither: the
+  `tell` `cannot verify delivery, retry`) and names a **tombstone** or **ABSENT** iff terminal (a `review
+  status` on a soft-deleted review, or on a slug that was never created — a retry never changes either). An **UNEXPECTED** exception is neither: the
   top-level guard emits a registered envelope `coord-engine: error: command=<cmd> type=<Exc>: <msg>`
   (rc 1) — the `error:` token distinguishes an engine fault from a retryable degrade.
 - **Views never lie past the current read — the index-freshness invariant.** Two mechanisms keep
