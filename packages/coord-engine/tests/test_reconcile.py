@@ -654,6 +654,71 @@ def test_pass_writes_when_the_store_summaries_is_a_non_object(document):
     assert "store cursor unreadable before publication" in stream.getvalue()
 
 
+def _attested_narrow_feed(t, *, rows):
+    """A live-shaped data-updates answer: start_time echoes the cursor, a narrow
+    end_time, and the coordination channel counted (so the record leg runs)."""
+    asked = []
+
+    def feed(since, *, deadline=None):
+        asked.append(since)
+        start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return {
+            "start_time": start.isoformat(sep=" "),
+            "end_time": (start + timedelta(minutes=30)).isoformat(sep=" "),
+            "data_types": {COORDINATION_TYPE: 10},
+            "file_changes": rows,
+        }
+
+    t.data_updates = feed
+    return asked
+
+
+def test_unattestable_record_cursor_recovers_and_re_anchors_through_reconcile():
+    """Ruling 7adff21a (P0): today's get-records answers JSONL with no
+    after/through, so the record leg can never be attested. With the outer
+    feed window attested, the pass must take the named full-scan recovery and
+    re-anchor to the feed's end_time -- not abort every pass."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    t.records_cursor = lambda *args, **kwargs: None   # JSONL-only CLI
+    asked = _attested_narrow_feed(t, rows=[{
+        "full_name": "/team/r/task/b.md", "state": "uploaded",
+        "uploaded_at": before, "id": "u-b"}])
+
+    result = _run(t)
+
+    assert asked == [before]
+    assert result["recovery"] == "detector-full-scan"
+    aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
+    assert {row["name"] for row in aggregate["rows"]} == {"a", "b"}
+    expected = (datetime.fromisoformat(before.replace("Z", "+00:00"))
+                + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+
+def test_transient_outer_feed_failure_still_aborts_without_recovery():
+    """Only an attested outer window licenses the record-leg recovery; a feed
+    read that fails outright stays a bare UNKNOWN and aborts the pass."""
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    before = json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"]
+    t.records_cursor = lambda *args, **kwargs: None
+    t.data_updates = lambda since, *, deadline=None: None
+
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert "recovery" not in result
+    assert json.loads(t.store["team/r/_coord/summaries.json"])[
+        reconcile.RECONCILE_CURSOR_KEY]["watermark"] == before
+
+
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     """Only the approved outer-window reason family may enter the full scan."""
     from coord_engine.change_detection import ChangeBatch, Coverage, NAMESPACES
@@ -672,7 +737,9 @@ def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
     t.put("team/r/task/a.md", _task("Alpha", "active"))
     unknown = ChangeBatch(
         (), {name: Coverage.UNKNOWN for name in NAMESPACES}, False,
-        reason="record cursor window unavailable or malformed",
+        # A WRONG record window (not an unattestable one, which ruling
+        # 7adff21a made recoverable) stays outside the recovery family.
+        reason="record cursor boundary does not match requested watermark",
     )
     monkeypatch.setattr(reconcile.ChangeDetector, "poll", lambda *args: unknown)
 

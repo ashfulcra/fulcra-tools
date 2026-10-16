@@ -969,7 +969,14 @@ it (not on PyPI).
     envelope with neither takes the named boundary recovery — and the record
     cursor must repeat that boundary and reach or pass the outer frontier. A
     missing, lagging, mismatched, or incomparable horizon is UNKNOWN, advances
-    no watermark, and leaves freshness overlay NOT_RUN/nonzero. Bootstrap is
+    no watermark, and leaves freshness overlay NOT_RUN/nonzero. **With today's
+    CLI the record leg is never attested** — `get-records` answers JSONL with no
+    `after`/`through`, so the transport returns no window — and an unavailable
+    or incomplete record window with an attested outer window takes the named
+    full-scan recovery (re-anchoring under the complete-task-read gate). So on
+    current builds **every reconcile pass is a full-scan recovery**; the
+    trusted incremental path waits for an endpoint that attests the record
+    window. A mismatched or unparseable record window stays non-recoverable. Bootstrap is
     complete only when an outer `after`/`start_time` supplies its boundary and
     the record cursor covers the same full frontier. An EMPTY
     `start_time`/`end_time` window wider than the corroboration bound while
