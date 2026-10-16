@@ -40,7 +40,7 @@
 # installed"; and when you cannot repair something, leave it alone and say so
 # loudly instead of deleting it.
 set -u
-PIN="38b97f23a86130538049a081e7bc382c380693eb"   # coord-engine at 38b97f23. TWENTY-THIRD pin move. Carries PR 820: a task shard that was read but has unparseable frontmatter no longer holds the stale-cursor re-anchor (only a READ failure does); it stays a loud warning. Without it one permanently malformed task doc keeps the cursor frozen on every pass. Everything in 28ecbc5c is still here.
+PIN="b953b195069f0b98145d63e2237f3d3ea0fe1f63"   # coord-engine at b953b195. TWENTY-FOURTH pin move. Carries PR 822: just before publishing, a reconcile pass re-reads the store cursor and SKIPS its summaries write and generation publication when that cursor is strictly newer than the one the pass started from (health reason "superseded by a newer cursor in the store"); it never keeps a newer cursor over its own older rows. A narrowing, not a fence (no compare-and-swap). Everything in 38b97f23 is still here.
 # DERIVED FROM PIN, never hand-set. VER is embedded in SLUG, and SLUG keys the
 # durable adoption-claim marker in the store, so a VER that does not move with
 # PIN makes every agent whose rc and rescued-step count match its last rollout
