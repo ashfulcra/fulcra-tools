@@ -909,6 +909,69 @@ def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]
         return None
 
 
+#: Health/result reason when a pass skips its summaries write because another
+#: host already advanced the store's cursor past the one this pass started from.
+SUPERSEDED_BY_NEWER_CURSOR = "superseded by a newer cursor in the store"
+
+
+def _store_cursor_supersedes(
+    transport: Any, team: str, started_from: Optional[dict[str, Any]],
+) -> Optional[bool]:
+    """Re-read the store's cursor just before publishing (ruling 05df6cab).
+
+    True when its watermark is strictly newer than the one this pass started
+    from; False when equal/older, or when this pass started from no watermark
+    (nothing to compare: write as today); None when the store cursor cannot be
+    read or parsed.  A narrowing, not a fence: there is no compare-and-swap,
+    so a write can still race this read.
+    """
+    started = _parse_iso_utc((started_from or {}).get("watermark"))
+    if started is None:
+        return False
+    try:
+        current = _load_prior_aggregate(transport, team)
+    except Exception:
+        return None
+    if not isinstance(current, dict):
+        return None  # absent, unparseable, or a non-object document: unreadable
+    cursor, reason = _parse_reconcile_cursor(current.get(RECONCILE_CURSOR_KEY))
+    if reason is not None or cursor is None:
+        return None
+    stored = _parse_iso_utc(cursor.get("watermark"))
+    if stored is None:
+        return False
+    return stored > started
+
+
+def _superseded_pass(
+    transport: Any, team: str, *, started_from: Optional[dict[str, Any]],
+    host: str, now: str, tasks: int, warnings: list[str], rows: Any, log: Any,
+) -> Optional[dict[str, Any]]:
+    """Guard EVERY summaries publication path (full, incremental, fast path).
+
+    Returns the degraded result to return when the store's cursor is strictly
+    newer than the one this pass started from -- after writing the health
+    shard and logging -- or None when the pass may publish.  Never merges the
+    newer cursor over this pass's rows.
+    """
+    superseded = _store_cursor_supersedes(transport, team, started_from)
+    if superseded is None:
+        log.warn("reconcile: store cursor unreadable before publication; "
+                 "writing as before (no superseded check)", team=team)
+        return None
+    if superseded is not True:
+        return None
+    reason = SUPERSEDED_BY_NEWER_CURSOR
+    result = {"degraded": True, "reason": reason, "tasks": tasks,
+              "warnings": [*warnings, reason], "rows": rows}
+    _write_health_shard(transport, team, host=host, now=now,
+                        result=result, log=log)
+    log.error("reconcile publication skipped: store cursor is newer than "
+              "this pass's starting cursor", team=team,
+              started_from=(started_from or {}).get("watermark"))
+    return result
+
+
 def _publication_generation(aggregate_doc: Any) -> Optional[str]:
     """The exact public generation a private build may be based on."""
     fence = ((aggregate_doc or {}).get(projection_mod.PUBLICATION_FENCE_KEY)
@@ -1652,6 +1715,11 @@ def reconcile(
     if fast_delta is not None:
         fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
         if not fast_changed and not fast_deleted:
+            superseded_result = _superseded_pass(
+                transport, team, started_from=prior_cursor, host=host, now=now,
+                tasks=len(prior_rows), warnings=[], rows=prior_rows, log=log)
+            if superseded_result is not None:
+                return superseded_result
             fast_agg = dict(prior_agg or {})
             fast_agg[RECONCILE_CURSOR_KEY] = {
                 "watermark": now,
@@ -2074,6 +2142,16 @@ def reconcile(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
     )
+    # A pass holds rows read from the cursor it STARTED from.  If another host
+    # has since advanced the store's cursor, writing would roll that cursor
+    # back; keeping the newer cursor over these rows would claim coverage they
+    # never saw.  So skip this pass's publication entirely (ruling 05df6cab).
+    superseded_result = _superseded_pass(
+        transport, team, started_from=prior_cursor, host=host, now=now,
+        tasks=len(rows), warnings=warnings, rows=rows, log=log)
+    if superseded_result is not None:
+        return superseded_result
+
     # Unit 4's generation is the publication authority.  The legacy aggregate
     # remains a compatibility cache for existing readers, and is written only
     # after the immutable generation and digest-bound current manifest verify.

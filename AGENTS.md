@@ -1435,7 +1435,16 @@ it (not on PyPI).
     fence but cannot mint its section bindings is fail-closed by newer readers; a host older than the
     passthrough can still remove any fence. **A general new top-level key is live only once the whole
     fleet is upgraded** — check `health` before assuming a fold-state key is doing anything, and
-    never rebuild the aggregate from a fixed key set.
+    never rebuild the aggregate from a fixed key set. The same last-writer-wins shape applies to
+    `reconcile_cursor`: a pass writes the cursor it STARTED from (or advances it), so a pass that
+    began before another host's re-anchor would roll that cursor back. Immediately before
+    publishing — on every path, including the no-change fast path — `reconcile` re-reads the store's cursor; if its watermark is strictly newer than
+    the one this pass started from, the pass **skips its generation + summaries write** and its
+    health shard reads `advanced: false`, `degraded_reason: superseded by a newer cursor in the
+    store` (never "keep the newer cursor over my rows" — those rows never saw the changes in
+    between). Equal/older writes as before; an unreadable store cursor writes as before and logs
+    it. This is a **narrowing, not a fence** (no compare-and-swap, so a write can still race the
+    re-read), and it protects only against hosts running the build that has it.
 
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and

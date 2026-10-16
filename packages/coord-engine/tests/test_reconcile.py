@@ -1,4 +1,6 @@
 import json
+
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from coord_engine import aggregate as aggregate_mod, generation
@@ -496,6 +498,160 @@ def test_wide_empty_recovery_re_anchors_despite_a_permanently_unparseable_shard(
                 + timedelta(days=38)).isoformat().replace("+00:00", "Z")
     aggregate = json.loads(t.store["team/r/_coord/summaries.json"])
     assert aggregate[reconcile.RECONCILE_CURSOR_KEY]["watermark"] == expected
+
+
+class _MidPassStoreTransport(FakeTransport):
+    """Serves summaries.json as it was at pass start on the FIRST read, then
+    whatever ``later`` says: another host's write landing mid-pass."""
+
+    def __init__(self):
+        super().__init__()
+        self.summaries_reads = 0
+        self.later = None
+
+    def read(self, path):
+        if path == reconcile.summaries_path("r"):
+            self.summaries_reads += 1
+            if self.summaries_reads > 1 and self.later is not None:
+                return self.later()
+        return super().read(path)
+
+
+def _seed_cursor(t, watermark):
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    assert _run(t)["degraded"] is False
+    path = reconcile.summaries_path("r")
+    agg = json.loads(t.store[path])
+    agg[reconcile.RECONCILE_CURSOR_KEY]["watermark"] = watermark
+    t.store[path] = json.dumps(agg)
+    t.summaries_reads = 0
+    return agg
+
+
+def test_pass_skips_its_write_when_the_store_cursor_is_newer():
+    """Ruling 05df6cab: another host re-anchored mid-pass. Writing this pass's
+    rows would roll that cursor back; keeping the newer cursor over these rows
+    would claim coverage they never saw. Skip, say why, leave the store be."""
+    t = _MidPassStoreTransport()
+    agg = _seed_cursor(t, "2026-06-30T00:00:00Z")
+    newer = dict(agg)
+    newer[reconcile.RECONCILE_CURSOR_KEY] = {
+        "watermark": "2026-07-01T00:30:00Z", "processed": {}, "streak": 0}
+    t.later = lambda: json.dumps(newer)
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    before = t.store[reconcile.summaries_path("r")]
+    written = []
+    original_write = t.write
+
+    def recording_write(path, content, *args, **kwargs):
+        written.append(path)
+        return original_write(path, content, *args, **kwargs)
+
+    t.write = recording_write
+    result = _run(t)
+
+    assert result["degraded"] is True
+    assert result["reason"] == reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    assert t.store[reconcile.summaries_path("r")] == before
+    # Generation publication is skipped too: no immutable generation and no
+    # current-pointer write for this superseded pass.
+    assert not [p for p in written
+                if p.startswith("team/r/_coord/projections/generations/")
+                or p == generation.current_path("r")], written
+    shards = [json.loads(v) for k, v in t.store.items()
+              if k.startswith("team/r/_coord/health/")]
+    assert any(s.get("degraded_reason") == reconcile.SUPERSEDED_BY_NEWER_CURSOR
+               and s.get("advanced") is False for s in shards)
+
+
+def test_pass_writes_as_today_when_the_store_cursor_is_unchanged():
+    t = _MidPassStoreTransport()
+    _seed_cursor(t, "2026-06-30T00:00:00Z")
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+
+    result = _run(t)
+
+    assert result.get("reason") != reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    rows = json.loads(t.store[reconcile.summaries_path("r")])["rows"]
+    assert {row["name"] for row in rows} == {"a", "b"}
+
+
+def test_pass_writes_and_says_so_when_the_store_cursor_is_unreadable():
+    t = _MidPassStoreTransport()
+    _seed_cursor(t, "2026-06-30T00:00:00Z")
+    t.later = lambda: None
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    log, stream = _capture_log()
+
+    result = reconcile.reconcile(t, "r", now="2026-07-01T00:00:00Z",
+                                 today="2026-07-01", host="h", logger=log)
+
+    assert result.get("reason") != reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    rows = json.loads(t.store[reconcile.summaries_path("r")])["rows"]
+    assert {row["name"] for row in rows} == {"a", "b"}
+    assert "store cursor unreadable before publication" in stream.getvalue()
+
+
+@pytest.mark.parametrize("force_full", [False, True])
+def test_every_publication_path_preserves_an_already_newer_store_cursor(
+        monkeypatch, force_full):
+    """codex-reviewer's PR 822 regression, made permanent: another host commits
+    a newer cursor after this pass's starting snapshot. Neither the no-change
+    fast path nor the full pass may write over it."""
+    transport = FakeTransport()
+    transport.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(transport)
+    _with_updates(transport, [])
+    path = reconcile.summaries_path("r")
+    newer = json.loads(transport.store[path])
+    newer[reconcile.RECONCILE_CURSOR_KEY] = {
+        "watermark": "2026-07-01T12:31:00Z", "processed": {}, "streak": 0}
+    published = json.dumps(newer)
+    feed = transport.data_updates
+
+    def concurrent_write(since, *, deadline=None):
+        batch = feed(since, deadline=deadline)
+        transport.store[path] = published
+        return batch
+
+    transport.data_updates = concurrent_write
+    if force_full:
+        monkeypatch.setenv("COORD_RECONCILE_FULL_EVERY", "1")
+    result = _reconciled(transport, now="2026-07-01T12:30:00Z")
+
+    assert transport.store[path] == published
+    assert result.get("reason") == reconcile.SUPERSEDED_BY_NEWER_CURSOR
+
+
+def test_fast_path_writes_as_today_when_the_store_cursor_is_unchanged():
+    transport = FakeTransport()
+    transport.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(transport)
+    _with_updates(transport, [])
+
+    result = _reconciled(transport, now="2026-07-01T12:30:00Z")
+
+    assert result.get("fast_path") is True
+    cursor = json.loads(transport.store[reconcile.summaries_path("r")])[
+        reconcile.RECONCILE_CURSOR_KEY]
+    assert cursor["watermark"] == "2026-07-01T12:30:00Z"
+
+
+@pytest.mark.parametrize("document", ["[]", '"a string"', "42"])
+def test_pass_writes_when_the_store_summaries_is_a_non_object(document):
+    """Greptile on PR 822: a summaries.json that parses as a non-object must
+    take the documented unreadable path (write as before + warn), not crash."""
+    t = _MidPassStoreTransport()
+    _seed_cursor(t, "2026-06-30T00:00:00Z")
+    t.later = lambda: document
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    log, stream = _capture_log()
+
+    result = reconcile.reconcile(t, "r", now="2026-07-01T00:00:00Z",
+                                 today="2026-07-01", host="h", logger=log)
+
+    assert result.get("reason") != reconcile.SUPERSEDED_BY_NEWER_CURSOR
+    assert "store cursor unreadable before publication" in stream.getvalue()
 
 
 def test_reconcile_does_not_recover_non_window_detector_unknown(monkeypatch):
