@@ -151,9 +151,13 @@ self-heals on direct query.
 - `... tombstone (archived/deleted review) — no doc, no verdicts` — the slug is a
   soft-delete tombstone (a `<review-slug>/` dir with no `<review-slug>.md`).
   **Terminal**: a retry never resurrects it.
+- `...: no such review (ABSENT) — no doc and no review dir` — the slug was never
+  created (no doc and no `<review-slug>/` dir under the review root). **Terminal**
+  and NOT a deletion: nothing was ever reviewed under that slug. If the review-root
+  listing itself fails, presence is UNKNOWN and you get the `, retry` message above.
 
-The `, retry` suffix means retryable; a `tombstone` mention means terminal — the
-convention is load-bearing, so match on it, not on the whole string.
+The `, retry` suffix means retryable; a `tombstone` or `ABSENT` mention means
+terminal — the convention is load-bearing, so match on it, not on the whole string.
 
 ## Bring an archived review back
 

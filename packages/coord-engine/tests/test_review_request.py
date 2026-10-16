@@ -1296,3 +1296,34 @@ def test_review_status_on_tombstone_says_tombstone_not_retry(capsys):
     cap = capsys.readouterr()
     assert "tombstone" in cap.err, cap.err
     assert "retry" not in cap.err, "a tombstone retry never helps — do not say retry"
+
+
+def test_review_status_on_a_never_created_slug_says_absent_not_tombstone(capsys):
+    """A slug with no doc AND no review dir was never created: ABSENT, not a
+    tombstone (an archived/deleted review leaves its dir prefix behind). Saying
+    'deleted' tells the caller to stop looking for a review that never existed."""
+    t = FakeTransport()
+    t.put("team/r/review/pr-real.md", "---\ntype: Review\n---\n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "zz-never-existed"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "no such review" in cap.err and "ABSENT" in cap.err, cap.err
+    assert "tombstone" not in cap.err, cap.err
+    assert "retry" not in cap.err, cap.err
+
+
+def test_review_status_absent_check_fails_closed_when_the_root_listing_raises(capsys):
+    """If the review-root listing raises, presence is UNKNOWN: never call it
+    ABSENT or a tombstone; the generic fail-closed 'retry' message stands."""
+    class RootListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/":
+                raise TransportError("listing 500")
+            return super().list_dir(prefix)
+
+    t = RootListFails()
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-maybe"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "ABSENT" not in cap.err and "tombstone" not in cap.err, cap.err
+    assert "retry" in cap.err, cap.err

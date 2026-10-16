@@ -2832,6 +2832,24 @@ def _review_tally(
     return tally, raw is not None, vok, listing_ok
 
 
+def _review_dir_present(transport: Any, team: str, slug: str) -> Optional[bool]:
+    """Whether ``<slug>/`` exists under the review root, via ONE root listing.
+
+    A tombstone is a soft-deleted review whose dir prefix lingered; a slug that
+    was never created has no dir at all, and its (empty) verdicts listing looks
+    identical.  True/False from the listing; None when the listing raised
+    (UNKNOWN -- never assume absent on a transport failure)."""
+    try:
+        entries = transport.list_dir(f"team/{team}/review/")
+    except TransportError:
+        return None
+    for e in entries:
+        name = (e.get("name") or "")
+        if name.rstrip("/") == slug and (e.get("is_dir") or name.endswith("/")):
+            return True
+    return False
+
+
 def _classify_orphan_dir(transport: Any, team: str, slug: str) -> str:
     """Classify a dir-only review slug — a ``<slug>/`` prefix under the review root
     with NO ``<slug>.md`` doc — via ONE listing of its verdicts prefix (the same
@@ -4931,7 +4949,16 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         # A dir with real verdict shards (orphan) or a verdicts listing that RAISED
         # (unknown) is NOT a tombstone — fall through to the generic fail-closed
         # message, where a retry may genuinely help.
-        if _classify_orphan_dir(transport, team, slug) == "tombstone":
+        present = _review_dir_present(transport, team, slug)
+        if present is False:
+            # Never created (or not even a lingering dir): ABSENT, not a
+            # tombstone -- "deleted" would tell the caller to stop looking for a
+            # review that simply does not exist.  rc 1, and no "retry".
+            print(f"review status: {slug} in team/{team}: no such review "
+                  f"(ABSENT) — no doc and no review dir",
+                  file=sys.stderr)
+            return 1
+        if present and _classify_orphan_dir(transport, team, slug) == "tombstone":
             print(f"review status: {slug} in team/{team} is a tombstone "
                   f"(archived/deleted review) — no doc, no verdicts",
                   file=sys.stderr)
