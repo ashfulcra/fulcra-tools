@@ -49,7 +49,7 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
-| Review handshake | `review` (request/status) — one `pr-N` slug advances through exact `--head` rounds; obligation persists until active-head verdict files exist |
+| Review handshake | `review` (request/status) — one `pr-N` slug advances through exact `--head` rounds; obligation persists until active-head verdict files exist; `review status` with no readable doc answers ABSENT (never created), a tombstone (soft-deleted dir) or `… retry` (doc listed but unreadable, or listing failed) — see [`review-cli.md`](../../skills/fulcra-agent-review/references/review-cli.md) |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Wake routing | `wake` (queue-file/consume — local SessionStart nudges) · `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |
