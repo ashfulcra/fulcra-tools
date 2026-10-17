@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AicqMessage } from '../types'
 import { collaborations, contextBlock, replyStats } from './collab'
 import { modeOf, wakePrompt, withinBudget } from './policy'
-import { buildUniverse, grouped, labelOf, placeIdentity, workspaceMembers } from './universe'
+import { buildUniverse, deeplink, grouped, labelOf, parseClaudeSession, parseCodexIndex, placeIdentity, sessionFor, workspaceMembers } from './universe'
 import {
   EMPTY_CURSOR, advance, encode, isWakeWorthy, outboxFor, parseJsonl, parsePeers, parseRow,
   parseWorkspaceChannel, readbackHas, splitMarkers, windowStart,
@@ -18,6 +18,9 @@ const V1_IN = 'Event/00000000-0000-4000-8000-0000000000c4'
 const V1_OUT = 'Event/00000000-0000-4000-8000-0000000000c5'
 const LEGACY_OUT = 'MomentAnnotation/00000000-0000-4000-8000-0000000000c6'
 const WS_CH = 'MomentAnnotation/00000000-0000-4000-8000-0000000000d4'
+const CLI_ID = '00000000-0000-4000-8000-0000000000e1'
+const CLAUDE_LOCAL = 'local_00000000-0000-4000-8000-0000000000e2'
+const CODEX_THREAD = '00000000-0000-4000-8000-0000000000e3'
 
 const ctxIn: RowContext = { source: 'mesh', channel: V1_IN, direction: 'in', contact: 'Peer Agent', contactUserId: PEER, workspace: null, me: ME, agentName: 'aicq' }
 const wsCtx: RowContext = { source: 'workspace', channel: WS_CH, direction: 'in', contact: '', contactUserId: null, workspace: 'team', me: ME, agentName: 'aicq' }
@@ -182,7 +185,7 @@ describe('universe', () => {
   test('build: blocked-on-owner, meshes, owner excluded, this agent placed', () => {
     const u = buildUniverse({
       builtAt: '2026-10-07T12:00:00Z', agents: COORD.agents as never, board: COORD.board as never, health: COORD.health as never,
-      v5: [{ logicalAgentId: 'arc-maintainer', instanceId: 'singularityserver', workspaceId: 'w1' }],
+      v5: [{ logicalAgentId: 'arc-maintainer', instanceId: 'singularityserver', workspaceId: 'w1', sessionId: '' }], sessions: [], sessionPins: {},
       workspaces: { team: '## Members\n- codex-coder — joined; implementation\n- tycho — Linux Claude Code cloud tester\n\n## Messaging' },
       peers: [{ userId: PEER, label: 'Peer Agent' }], owner: 'ash',
       thisAgent: { name: 'aicq', machine: 'SingularityServer', platform: 'Claude Code' }, placement: {}, degraded: [],
@@ -195,6 +198,46 @@ describe('universe', () => {
     expect(u.meshes.map(m => m.kind).sort()).toEqual(['cross-account', 'v5', 'workspace'])
     expect(grouped(u, 'SingularityServer')[0]!.machine).toBe('SingularityServer')
     expect(workspaceMembers('## Members\n- a — x\n## Other\n- b — y').map(m => m.name)).toEqual(['a'])
+  })
+
+  test('sessions: app records parse, links use each app\u2019s own route', () => {
+    const c = parseClaudeSession(JSON.stringify({ sessionId: CLAUDE_LOCAL, cliSessionId: CLI_ID, title: 'Coord Boss', cwd: '/w', lastActivityAt: T0, isArchived: false }))
+    expect(c).toEqual({ app: 'claude', id: CLAUDE_LOCAL, cliId: CLI_ID, title: 'Coord Boss', cwd: '/w', at: '2026-10-07T12:00:00.000Z', archived: false, instance: '' })
+    expect(parseClaudeSession('{"sessionId":"not-a-desktop-id"}')).toBe(null)
+    expect(parseClaudeSession('{bad')).toBe(null)
+    expect(parseClaudeSession(JSON.stringify({ sessionId: 'remote_0123456789abcdef', title: 'On another host' }), 'work')?.instance).toBe('work')
+    const x = parseCodexIndex([
+      JSON.stringify({ id: CODEX_THREAD, thread_name: 'old name', updated_at: '2026-10-01T00:00:00Z' }),
+      JSON.stringify({ id: CODEX_THREAD, thread_name: 'Codex Coder', updated_at: '2026-10-05T00:00:00Z' }),
+      '{torn',
+    ].join('\n'))
+    expect(x.sessions.map(t => [t.id, t.title])).toEqual([[CODEX_THREAD, 'Codex Coder']])
+    // A torn line is counted, not silently dropped; blank lines are not records.
+    expect(x.bad).toBe(1)
+    expect(parseCodexIndex('\n\n').bad).toBe(0)
+    expect(parseCodexIndex('{"id":"not-a-thread"}\n{torn').bad).toBe(2)
+    // Valid JSON that is not a record (null, arrays, scalars) is unreadable, and the good rows around it survive.
+    const mixed = parseCodexIndex([JSON.stringify({ id: CODEX_THREAD, thread_name: 'kept' }), 'null', '[1]', '7'].join('\n'))
+    expect([mixed.sessions.map(t => t.title), mixed.bad]).toEqual([['kept'], 3])
+    expect(parseClaudeSession('null')).toBe(null)
+    expect(parseClaudeSession('[]')).toBe(null)
+    expect(deeplink({ app: 'claude', id: CLAUDE_LOCAL })).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
+    expect(deeplink({ app: 'codex', id: CODEX_THREAD })).toBe(`codex://threads/${CODEX_THREAD}`)
+  })
+
+  test('sessions: exact binding or pin only; a name match never makes a link', () => {
+    const sessions = [
+      { app: 'claude' as const, id: CLAUDE_LOCAL, cliId: CLI_ID, title: 'coord-boss', cwd: '', at: null, archived: false, instance: '' },
+      { app: 'codex' as const, id: CODEX_THREAD, cliId: null, title: 'Codex Coder', cwd: '', at: null, archived: false, instance: '' },
+    ]
+    expect(sessionFor('agent:coord-boss', CLI_ID, {}, sessions)?.href).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
+    expect(sessionFor('agent:coord-boss', CLAUDE_LOCAL.replace('local_', ''), {}, sessions)?.via).toBe('v5 binding')
+    // Title "coord-boss" equals the node name, but with no binding there is no link.
+    expect(sessionFor('agent:coord-boss', '', {}, sessions)).toBe(null)
+    expect(sessionFor('agent:coord-boss', 'unknown-session', {}, sessions)).toBe(null)
+    const pinned = sessionFor('agent:coord-boss', CLI_ID, { 'agent:coord-boss': { app: 'codex', id: CODEX_THREAD } }, sessions)
+    expect([pinned?.href, pinned?.via]).toEqual([`codex://threads/${CODEX_THREAD}`, 'pinned'])
+    expect(sessionFor('agent:coord-boss', CLI_ID, { 'agent:coord-boss': 'none' }, sessions)).toBe(null)
   })
 })
 
@@ -243,6 +286,7 @@ function fake(inboxRows: (Record<string, unknown> | string)[], opts: { failRecor
       if (cmd === 'health') return ok(JSON.stringify(COORD.health))
       if (cmd === 'tell') return ok(`directive ${String(r.argv[4]).slice(0, 20)}-abcd1234 -> ${String(r.argv[3])}`)
     }
+    if (String(r.argv[0]) === '/usr/bin/open') return ok('')
     if (cmd === 'user-info') return ok(JSON.stringify({ userid: ME }))
     if (cmd === 'share' && sub === 'list-incoming') return ok(JSON.stringify({ sharing_fulcra_userid: PEER, sharing_fulcra_user_name: 'Peer Agent', fulcra_data_types: [V1_IN] }))
     if (cmd === 'share' && sub === 'list-outgoing') return ok(JSON.stringify({ created_at: '2026-10-01', fulcra_data_types: [V1_OUT], permissions: [{ allowed_fulcra_userid: PEER }] }))
@@ -815,6 +859,95 @@ describe('mod', () => {
       ROSTER.text = ''
     }
   })
+
+  test('universe: a V5-bound node opens its desktop session; the owner can pin or clear one', async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    mock.env(on, { HOME: '/home/t' })
+    const S = '/home/t/Library/Application Support/Claude/claude-code-sessions'
+    const files: Record<string, string> = {
+      '/home/t/.local/share/coord-v5-boss/state/config.json': JSON.stringify({ workspaceId: 'w1', actorBinding: { principal_id: ME, logical_agent_id: 'coord-boss', instance_id: 'claude-code-deskbookpro-boss', session_id: CLI_ID } }),
+      [`${S}/acct/org/${CLAUDE_LOCAL}.json`]: JSON.stringify({ sessionId: CLAUDE_LOCAL, cliSessionId: CLI_ID, title: 'Coord Boss session', cwd: '/w', lastActivityAt: T0 }),
+      '/home/t/.codex/session_index.jsonl': JSON.stringify({ id: CODEX_THREAD, thread_name: 'Codex Coder', updated_at: '2026-10-07T11:00:00Z' }),
+    }
+    const isDir = (p: string) => Object.keys(files).some(f => f.startsWith(`${p}/`))
+    on('fs.exists', (_$: unknown, e: { path: string }) => ({ value: e.path in files || isDir(e.path) }))
+    on('fs.read', (_$: unknown, e: { path: string }) => (e.path in files ? { value: files[e.path]! } : { deny: 'ENOENT' }))
+    on('fs.list', (_$: unknown, e: { path: string }) => {
+      if (!isDir(e.path)) return { deny: 'ENOENT' }
+      const names = new Map<string, 'file' | 'dir'>()
+      for (const f of Object.keys(files)) {
+        if (!f.startsWith(`${e.path}/`)) continue
+        const [head, ...rest] = f.slice(e.path.length + 1).split('/')
+        names.set(head!, rest.length ? 'dir' : 'file')
+      }
+      return { value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
+    })
+    const f = fake([])
+    engine(on, f, sinkOf())
+    await $.session.start({ cwd: '/tmp' } as never)
+    await clock.advance(2000)
+    await $.command.run({ command: 'aicq', args: 'map' } as never)
+    await clock.advance(10)
+    type UI = { findAll: (q: unknown) => Promise<unknown[]>; press: (t: unknown) => Promise<unknown>; select: (t: unknown) => Promise<unknown> }
+    const opened = () => f.calls.filter(c => c.argv[0] === '/usr/bin/open').map(c => String(c.argv[1]))
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'aicq', surface, component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as UI
+      await ui.press({ key: 'un-agent:coord-boss' })
+      expect((await ui.findAll({ text: /Coord Boss session · v5 binding/ })).length).toBeGreaterThan(0)
+      await ui.press({ key: 'usessionopen' })
+      expect(opened().at(-1)).toBe(`claude://claude.ai/epitaxy/${CLAUDE_LOCAL}`)
+      // A pin overrides the binding, `none` clears the link, and `auto` returns to the binding.
+      await ui.select({ key: 'usessionpick', value: `codex:${CODEX_THREAD}` })
+      await ui.press({ key: 'usessionopen' })
+      expect(opened().at(-1)).toBe(`codex://threads/${CODEX_THREAD}`)
+      await ui.select({ key: 'usessionpick', value: 'none' })
+      expect((await ui.findAll({ type: 'Button', text: /Open session in/ })).length).toBe(0)
+      await ui.select({ key: 'usessionpick', value: 'auto' })
+      expect((await ui.findAll({ type: 'Button', text: /Open session in Claude/ })).length).toBe(1)
+      await ui.press({ key: 'uback' })
+      await $.command.run({ command: 'aicq', args: 'map' } as never)
+    }
+    expect(opened().length).toBe(4)
+  })
+
+  for (const [label, claudeFiles, codexIndex, expectWarn] of [
+    ['malformed-only Codex index', {}, '{torn', [/Codex threads: 1 unreadable index line/]],
+    ['mixed Codex index keeps the good thread', {}, `${JSON.stringify({ id: CODEX_THREAD, thread_name: 'ok' })}\n{torn`, [/Codex threads: 1 unreadable index line/]],
+    ['malformed Claude session file', { 'local_00000000-0000-4000-8000-0000000000f9.json': '{torn' }, '', [/Claude desktop sessions: 1 unreadable record/]],
+    ['null Codex row after a good one', {}, `${JSON.stringify({ id: CODEX_THREAD, thread_name: 'ok' })}\nnull`, [/Codex threads: 1 unreadable index line/]],
+    ['null Claude session file before a good one', { 'local_00000000-0000-4000-8000-0000000000f8.json': 'null', [`${CLAUDE_LOCAL}.json`]: JSON.stringify({ sessionId: CLAUDE_LOCAL, title: 'still here' }) }, '', [/Claude desktop sessions: 1 unreadable record/]],
+  ] as const) {
+    test(`universe: a ${label} is named as degraded, never an empty inventory`, async ($, on) => {
+      const clock = mock.clock(on, { now: T0 })
+      mock.store(on)
+      mock.env(on, { HOME: '/home/t' })
+      const S = '/home/t/Library/Application Support/Claude/claude-code-sessions/acct/org'
+      const files: Record<string, string> = {}
+      for (const [n, body] of Object.entries(claudeFiles)) files[`${S}/${n}`] = body as string
+      if (codexIndex) files['/home/t/.codex/session_index.jsonl'] = codexIndex
+      const isDir = (p: string) => Object.keys(files).some(f => f.startsWith(`${p}/`))
+      on('fs.exists', (_$: unknown, e: { path: string }) => ({ value: e.path in files || isDir(e.path) }))
+      on('fs.read', (_$: unknown, e: { path: string }) => (e.path in files ? { value: files[e.path]! } : { deny: 'ENOENT' }))
+      on('fs.list', (_$: unknown, e: { path: string }) => {
+        if (!isDir(e.path)) return { deny: 'ENOENT' }
+        const names = new Map<string, 'file' | 'dir'>()
+        for (const f of Object.keys(files)) {
+          if (!f.startsWith(`${e.path}/`)) continue
+          const [head, ...rest] = f.slice(e.path.length + 1).split('/')
+          names.set(head!, rest.length ? 'dir' : 'file')
+        }
+        return { value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
+      })
+      engine(on, fake([]), sinkOf())
+      await $.session.start({ cwd: '/tmp' } as never)
+      await clock.advance(2000)
+      await $.command.run({ command: 'aicq', args: 'map' } as never)
+      await clock.advance(10)
+      const ui = await $.ui.mount({ plugin: 'aicq', surface: 'terminal', component: 'Pane', requestId: 'aicq', props: {} } as never) as unknown as { findAll: (q: unknown) => Promise<unknown[]> }
+      for (const re of expectWarn) expect((await ui.findAll({ text: re })).length).toBeGreaterThan(0)
+    })
+  }
 
   for (const [first, second, verified] of [['lag', 'ok', true], ['trunc', 'ok', true], ['fail', 'ok', true], ['lag', 'lag', false]] as const) {
     test(`readback: first read ${first}, second ${second} -> ${verified ? 'verified' : 'UNVERIFIED'}; one write, two reads`, async ($, on) => {
