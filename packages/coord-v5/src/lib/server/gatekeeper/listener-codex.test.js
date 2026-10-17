@@ -61,6 +61,7 @@ it('commits a claim visible from a fresh SQLite connection before exact native s
 });
 
 it.each([
+  ['unloaded without opt-in', rawRead(target, 'notLoaded'), 'THREAD_NOT_IDLE'],
   ['active', rawRead(target, 'active'), 'THREAD_NOT_IDLE'],
   ['busy', rawRead(target, 'busy'), 'THREAD_NOT_IDLE'],
   ['unknown', rawRead(target, 'unknown'), 'THREAD_NOT_IDLE'],
@@ -416,4 +417,63 @@ it('refuses structured send evidence whose serialization produces no JSON value'
   expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, {
     ...options(f), sendMessage: async () => ({ structuredContent: { threadId: target.threadId, toJSON: () => undefined } })
   })).toMatchObject({ state: 'uncertain', code: 'INVALID_NATIVE_RESULT' });
+});
+
+it('cold-wakes an exact unloaded target only with explicit host opt-in, claiming before send', async () => {
+  const f = setup();
+  let sends = 0;
+  const opts = {
+    ...options(f), allowColdWake: true,
+    readThread: async args => { expect(args).toEqual(target); return wrapped(rawRead(target, 'notLoaded')); },
+    sendMessage: async args => {
+      sends++;
+      const independent = openListenerStore(f.path);
+      try {
+        expect(independent.inspect(scope).state.attempts[f.input.wakeId]).toMatchObject({
+          state: 'dispatching', dispatchStatus: 'claimed', attemptId: f.input.attemptId
+        });
+      } finally { independent.close(); }
+      expect(args.threadId).toBe(target.threadId);
+      expect(args.hostId).toBe(target.hostId);
+      expect(args.prompt).toContain(`Wake ${f.input.wakeId}; attempt ${f.input.attemptId}`);
+      return wrapped({ threadId: target.threadId });
+    }
+  };
+  expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, opts)).toMatchObject({ state: 'accepted' });
+  expect(attemptOf(f).state).not.toBe('acknowledged');
+  expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, opts)).toMatchObject({ code: 'NOT_DISPATCHABLE' });
+  expect(sends).toBe(1);
+});
+
+it.each(['active', 'busy', 'systemError', 'unknown', undefined])('cold-wake opt-in still refuses %s', async type => {
+  const f = setup();
+  let sends = 0;
+  const result = await runtime.dispatchCodexWake(f.store, f.lease, f.input, {
+    ...options(f), allowColdWake: true,
+    readThread: async () => wrapped(type === undefined ? { schemaVersion: 1, thread: { id: target.threadId, hostId: target.hostId } } : rawRead(target, type)),
+    sendMessage: async () => { sends++; return wrapped({ threadId: target.threadId }); }
+  });
+  expect(result).toMatchObject({ state: 'prepared', code: 'THREAD_NOT_IDLE' });
+  expect(sends).toBe(0);
+});
+
+it('keeps a failed cold invocation uncertain without retry', async () => {
+  const f = setup();
+  let sends = 0;
+  const opts = { ...options(f), allowColdWake: true,
+    readThread: async () => wrapped(rawRead(target, 'notLoaded')),
+    sendMessage: async () => { sends++; throw new Error('synthetic unavailable host'); }
+  };
+  expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, opts)).toMatchObject({ state: 'uncertain', code: 'NATIVE_FAILED' });
+  expect(await runtime.dispatchCodexWake(f.store, f.lease, f.input, opts)).toMatchObject({ code: 'NOT_DISPATCHABLE' });
+  expect(sends).toBe(1);
+});
+
+it.each(['yes', 1, null])('rejects non-boolean cold-wake opt-in %s before native effects', async allowColdWake => {
+  const f = setup();
+  let reads = 0;
+  await expect(runtime.dispatchCodexWake(f.store, f.lease, f.input, {
+    ...options(f), allowColdWake, readThread: async () => { reads++; return wrapped(rawRead()); }
+  })).rejects.toThrow('Invalid Codex executor');
+  expect(reads).toBe(0);
 });
