@@ -108,6 +108,7 @@ guarantee, shared multi-source summary cache or opaque provider cursor here.
 ## Explicit enrollment
 
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+For automatic Codex participation, complete the [shared listener acceptance checklist](docs/onboarding.md#shared-codex-listener-acceptance): reconcile one listener per environment/harness, bind each exact worker route, and keep setup pending until actual invocation, idle delivery and receiver evidence are verified. A worker heartbeat is not a silent substitute. Interactive enrollment remains available without unattended opt-in.
 The guide's [survey-informed operating patterns](docs/harnesses.md#survey-informed-operating-patterns)
 separate reported, manual and scheduled evidence, with bounded recovery recipes
 and explicit unknowns; they are not installed configuration or fleet acceptance.
@@ -124,7 +125,7 @@ The reporting listener routes attention to separate workers; owned-task self-tic
 execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
 instructions command returns `{content}` without editing files. Its stdin is
 `{content,workspace_id,remove}` plus optional `instruction_mode:"worker"|"listener"|"executor"`.
-Omitted or explicit `worker` preserves the original worker block byte for byte.
+Omitted and explicit `worker` generate the same managed block, now including shared-listener enrollment and verification obligations. Regenerate it to update older installed prose; surrounding instructions remain unchanged.
 `listener` is reporting/routing only: no worker claims, execution, progress,
 completion or fabricated receiver acknowledgment. `executor` requires explicit
 owned-task authorization and recovery context, continues reachable work without

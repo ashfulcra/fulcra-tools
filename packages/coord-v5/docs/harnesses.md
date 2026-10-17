@@ -9,13 +9,15 @@ Until a listener's wake has been verified in an environment, each addressed work
 Generate `instruction_mode:"listener"` through the [instructions command](onboarding.md#capability-assessment)
 for this reporting session; use `executor` only for separately authorized owned-task execution.
 Keep these role blocks in listener/executor local/session instructions, never shared repository-wide
-worker instructions. The default `worker` block is unchanged. Listener reports cover its own reads,
+worker instructions. The default `worker` block includes shared-listener enrollment and verification obligations. Listener reports cover its own reads,
 routes, conflicts and reconciliation, never worker claims/progress/completion or invented receiver
 acknowledgments. Executor recovery needs explicit ownership and context; a wake cannot authorize
 adoption. Mode selection installs nothing: fallback ticks/loops and direct executor self-ticking
 each require separate authorization. Generated prose is not runtime enforcement or consumer-agent proof.
 
 ## Codex desktop
+
+Complete the [shared listener acceptance checklist](onboarding.md#shared-codex-listener-acceptance) for requested automatic participation. Register each worker with the one environment listener; interactive membership alone does not close that task.
 
 Use locally verified native thread messaging from an active listener turn. Assess event ingress separately; use native thread heartbeats/scheduled tasks as a verified fallback or backstop, not a mandatory event-path component. Do not configure an external command as though it could call an app-only tool. Local scheduled runs require the app and machine to be available; verify permissions in the actual scheduled turn. See [Codex scheduled tasks](https://learn.chatgpt.com/docs/automations).
 
