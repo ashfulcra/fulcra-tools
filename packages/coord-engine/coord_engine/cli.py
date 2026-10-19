@@ -1535,8 +1535,21 @@ def cmd_task_start(args: argparse.Namespace, transport: Any) -> int:
     if not args.force and transport.read(path) is not None:
         print(f"task {slug} already exists (use --force)", file=sys.stderr)
         return 1
-    transport.write(path, content)
+    written = transport.write(path, content)
     print(f"created team/{args.team}/task/{slug}.md ({args.status})")
+    if not written:
+        return 0
+    # `tell` announces the obligation as a v3 directive, which the mirror opens on bus-v4. `task start` writes the
+    # doc and nothing else, so an assigned task it created never entered the assignee's fold (33073a42).
+    from . import dual_emit
+    opened = dual_emit.open_task_doc(
+        transport, args.team, actor=_host(), slug=slug, doc=content, at=_iso(_now()))
+    if opened is False:
+        print(f"task start incomplete: the doc is written but its bus-v4 open was NOT, so fold-backed "
+              f"needs-me/obligations will not show {slug}. Re-export it with "
+              f"`coord-engine obligations {args.team} --agent <assignee> --export-open --force`.",
+              file=sys.stderr)
+        return 3
     return 0
 
 
