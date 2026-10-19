@@ -866,7 +866,10 @@ it (not on PyPI).
   a *different* `of`/required-set/requester is a loud rc 1 conflict and a
   present-but-unreadable doc fails closed (never overwritten).
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
-  and gates the merge. The `<artifact>` is an opaque ref, so the handshake
+  and gates the merge; `coord-engine review merge-ready <team> <slug>
+  [--notify <merger>]` adds the forge half before the click (PR head ==
+  register head == verdict head, CI green; rc 0 READY / 2 NOT READY / 1
+  UNKNOWN) and never merges. The `<artifact>` is an opaque ref, so the handshake
   works with any forge or none — a forge-only "Approve" does NOT count
   (co-located agents often share one forge account); the bus verdict, keyed
   by agent identity, is the source of truth. **The verdict FILE discharges

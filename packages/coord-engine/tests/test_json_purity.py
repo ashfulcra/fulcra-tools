@@ -196,6 +196,7 @@ _JSON_PINNED = {
     "router run": ["router", "run", "r", "--once", "--shadow"],
     "engagement gate": ["engagement", "gate", "r"],
     "review status": ["review", "status", "r", "pr1"],
+    "review merge-ready": ["review", "merge-ready", "r", "pr1"],
     "route": ["route", "r", "--needs", "review"],
 }
 
