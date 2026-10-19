@@ -132,9 +132,23 @@ proceed to request a new review or advance an existing one below.
    every call, so a stale or wrong marker self-heals on direct query.
 
    `review status` **exits 1** with `... unreadable (missing slug or degraded transport) — tally unknown,
-   retry` when the review doc can't be read — a transport failure or a nonexistent slug, indistinguishable
-   and both UNKNOWN (without the `required` list a lone approval would tally as a clean APPROVED and
-   durably hide a pending review). A watcher must read rc 1 as *transport down, retry*, never as a state.
+   retry` when the review doc can't be read but the review root still lists it (or the listing itself
+   failed): UNKNOWN, because without the `required` list a lone approval would tally as a clean APPROVED
+   and durably hide a pending review. A watcher must read that rc 1 as *transport down, retry*, never as
+   a state. A slug the review root does not list at all exits 1 with `no such review (ABSENT)` and no
+   "retry", and a soft-deleted one exits 1 naming a **tombstone**; retrying either changes nothing.
+4. **Verify before merging** (the merger) — the checks a merger repeats by hand, never the merge itself:
+   ```bash
+   coord-engine review merge-ready <team> <slug> [--json] [--repo OWNER/REPO] [--notify <merger>]
+   ```
+   **rc 0 MERGE-READY** only when the register is APPROVED at an exact head (each winning approval is a
+   shard attesting that head), the PR is OPEN and not a draft, **PR head == register head == verdict head**,
+   and every reported CI check passed (no checks at all is NOT READY: nothing was proven). **rc 2 NOT
+   READY** lists every failed check. **rc 1 UNKNOWN**: the register, a verdict shard or the forge (`gh pr
+   view`) could not be read, so nothing is claimed; the prose ends in "retry" iff a retry can help. With
+   `--notify <merger>`, a READY result is delivered to that agent's queue as a directive keyed by the head,
+   so a re-run at the same head dedupes and a new head is a new report. Merge with that exact head as the
+   expected head; the verb itself never merges.
 
    **Nudge only against a live obligation.** Before nudging a reviewer about a pending review, run
    `review status <team> <slug> --json` on the *exact* slug and nudge only if `pending_required` still

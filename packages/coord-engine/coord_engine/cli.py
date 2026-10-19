@@ -5423,6 +5423,12 @@ def _payload_hash(payload: tuple[str, str, str, str]) -> str:
     return hashlib.sha256("\x00".join(payload).encode("utf-8")).hexdigest()[:8]
 
 
+def _hash_slug(base: str, payload: tuple[str, ...]) -> str:
+    """``<slugified base>-<payload hash>`` for a directive built from an explicit payload (review requests,
+    intents, merge-ready reports): the same shape ``_directive_slug`` derives for argparse-driven verbs."""
+    return f"{tasks.slugify(base)}-{_payload_hash(payload)}"
+
+
 def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
                      content: str, payload: tuple[str, str, str, str], assignee: str,
                      not_before: Optional[str]) -> int:
@@ -5718,7 +5724,7 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
         summary += f" after reviewing exact head {head}"
     next_action = f"file your verdict at {verdict_file}"
     payload = _directive_payload(title, summary, next_action, reviewer)
-    dslug = f"{tasks.slugify(title)}-{_payload_hash(payload)}"
+    dslug = _hash_slug(title, payload)
     try:
         _, content = tasks.new_task_doc(
             title, now=_iso(_now()), status="proposed", owner=sender,
@@ -6004,7 +6010,7 @@ def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
 
     # Identity: text + assignee ONLY (intent_by excluded — see docstring).
     payload = _directive_payload(text, None, None, principal)
-    slug = f"{tasks.slugify(text)}-{_payload_hash(payload)}"
+    slug = _hash_slug(text, payload)
     path = _task_path(args.team, slug)
 
     existing = transport.read(path)
@@ -11868,6 +11874,106 @@ def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
     return entries, unreadable
 
 
+_MERGE_READY_TITLE_PREFIX = "MERGE-READY: "
+
+
+def cmd_review_merge_ready(args: argparse.Namespace, transport: Any) -> int:
+    """`review merge-ready <team> <slug>` — verify a review is safe to merge; never merge (directive 082d799e).
+
+    rc 0 MERGE-READY. rc 2 NOT READY, with every failed check named. rc 1 UNKNOWN: an input could not be read
+    (the register, a verdict shard, the forge), so nothing is claimed either way; the prose ends in "retry" iff a
+    retry can help. With ``--notify <agent>`` a READY result is delivered to that agent's queue as a directive
+    whose payload carries the head, so a re-run at the same head dedupes and a new head is a new report.
+    Under ``--json`` every exit prints exactly one object with ``verdict`` = ready | not-ready | unknown."""
+    from . import merge_ready
+    team, slug = args.team, args.slug
+
+    def stop(rc: int, message: str, **extra: Any) -> int:
+        verdict = "not-ready" if rc == 2 else "unknown"
+        if args.json:
+            jsonutil.print_json({"team": team, "slug": slug, "ready": False, "verdict": verdict,
+                                 "reasons": [message], **extra})
+        else:
+            print(f"merge-ready: {'NOT READY ' + slug + ': ' if rc == 2 else ''}{message}", file=sys.stderr)
+        return rc
+
+    tally, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
+    if not doc_ok:
+        if _review_presence(transport, team, slug) == "absent":
+            return stop(2, f"no such review in team/{team}")
+        return stop(1, f"{_review_doc_path(team, slug)} unreadable — UNKNOWN, retry")
+    if not listing_ok or not vreads_ok:
+        return stop(1, f"verdicts under {_verdicts_prefix(team, slug)} not fully readable — UNKNOWN, retry")
+    repo = getattr(args, "repo", None)
+    url = forge_mod.parse_pr_url(tally.get("of"), repo=repo)
+    if not url:
+        return stop(2, f"artifact {tally.get('of')!r} is not a GitHub PR" + (f" in {repo}" if repo else ""))
+    runner = getattr(args, "runner", None)
+    if runner is None:
+        import shutil as _sh
+        if not _sh.which("gh"):
+            return stop(1, "gh CLI not found — PR head and CI are UNKNOWN on this host", pr=url)
+        runner = forge_mod.default_runner
+    pr = merge_ready.pr_view(runner, url)
+    if pr is None:
+        return stop(1, f"forge read of {url} failed — PR head and CI UNKNOWN, retry", pr=url)
+    result = merge_ready.evaluate(tally, pr)
+    result.update({"team": team, "slug": slug, "pr": url,
+                   "verdict": "ready" if result["ready"] else "not-ready"})
+    rc = 0 if result["ready"] else 2
+    notify = getattr(args, "notify", None)
+    if result["ready"] and notify:
+        report = _report_merge_ready(transport, args, team=team, slug=slug, url=url, result=result,
+                                     notify=notify)
+        if report is None:
+            result.update({"ready": False, "verdict": "unknown",
+                           "reasons": [f"MERGE-READY but the report to {notify} was NOT delivered — retry"]})
+            rc = 1
+        else:
+            result["reported"] = {"to": notify, "ptr": f"task/{report}.md"}
+    if args.json:
+        jsonutil.print_json(result)
+    elif rc == 0:
+        print(f"MERGE-READY {slug}: {url} at {result['head']} — approved by {', '.join(result['approvals'])}, "
+              f"PR head == register head == verdict head, CI green ({result['checks']} checks)")
+        if result.get("reported"):
+            print(f"  reported to {notify}: {result['reported']['ptr']}")
+    elif rc == 1:
+        print(f"merge-ready: {result['reasons'][0]}", file=sys.stderr)
+    else:
+        print(f"NOT READY {slug}: {url}")
+        for reason in result["reasons"]:
+            print(f"  - {reason}")
+    return rc
+
+
+def _report_merge_ready(transport: Any, args: argparse.Namespace, *, team: str, slug: str, url: str,
+                        result: dict[str, Any], notify: str) -> Optional[str]:
+    """Deliver the READY report to ``notify``; the directive slug, or None when delivery is unverified."""
+    sender = _identity(getattr(args, "sender", None))
+    title = f"{_MERGE_READY_TITLE_PREFIX}{slug}"
+    summary = (f"{url} verified MERGE-READY at exact head {result['head']}: approved by "
+               f"{', '.join(result['approvals'])} at that head, PR head matches, CI green "
+               f"({result['checks']} checks). Verification only — the merge is yours.")
+    next_action = f"merge {url} with expected head {result['head']}, or say why not"
+    payload = _directive_payload(title, summary, next_action, notify)
+    dslug = _hash_slug(title, payload)
+    try:
+        _, content = tasks.new_task_doc(
+            title, now=_iso(_now()), status="proposed", owner=sender, assignee=notify,
+            summary=summary, next_action=next_action, kind="directive", slug=dslug, priority="P1")
+    except tasks.TaskError as e:
+        print(f"merge-ready: report to {notify} failed: {e}", file=sys.stderr)
+        return None
+    ns = argparse.Namespace(team=team, sender=sender, priority="P1")
+    if _write_directive(transport, ns, slug=dslug, content=content, payload=payload,
+                        assignee=notify, not_before=None) != 0:
+        return None
+    if getattr(ns, "_directive_outcome", None) == "written":
+        _emit_dispatch_companion(transport, ns, slug=dslug, assignee=notify)
+    return dslug
+
+
 def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
     """Retire register entries that can never settle. DRY RUN unless --apply."""
     try:
@@ -13935,6 +14041,15 @@ def build_parser() -> argparse.ArgumentParser:
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
+    rvm = rvsub.add_parser("merge-ready",
+                           help="verify approved-at-head + PR head == register head == verdict head + CI green; "
+                                "never merges")
+    rvm.add_argument("team"); rvm.add_argument("slug"); add_json(rvm)
+    rvm.add_argument("--notify", metavar="AGENT", help="deliver a READY result to this agent's queue (the merger)")
+    rvm.add_argument("--repo", default=None, metavar="OWNER/REPO",
+                     help="only accept a PR artifact in this repository")
+    rvm.add_argument("--from", dest="sender", help="reporting agent (defaults to identity)")
+    rvm.set_defaults(func=cmd_review_merge_ready, runner=None)
     rvg = rvsub.add_parser("gc", help="retire register entries that can never settle (DRY RUN by default)")
     rvg.add_argument("team")
     rvg.add_argument("--apply", action="store_true",
@@ -14238,6 +14353,8 @@ _MIXED_MODE_ACTIVITY: dict[Any, Any] = {
     # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
     # defers to the same `_digest_persists` the command branches on.
     cmd_digest: lambda a: _digest_persists(a),
+    # `review merge-ready TEAM SLUG` verifies; `--notify AGENT` delivers the READY report as a directive.
+    cmd_review_merge_ready: lambda a: bool(getattr(a, "notify", None)),
 }
 
 
