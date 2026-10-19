@@ -65,7 +65,10 @@ coord-engine task block <team> fix-the-widget --blocked-on reviewer --unlock "re
 coord-engine task done <team> fix-the-widget --evidence "PR #42 merged"
 ```
 Each write stamps `timestamp` and appends a dated note to the task body; the Fulcra File Store versions
-every write, so the full history is preserved. After changing tasks, run
+every write, so the full history is preserved. A `task start` with an `--assignee` also opens the obligation on
+bus-v4 (when the team has a `_coord/bus-v4/records.json`), so the task shows in that assignee's fold-backed
+`needs-me`/`obligations` at once. If that open fails, the doc is still written and the verb exits 3 naming the
+`obligations --export-open --force` repair; it never fails quietly. After changing tasks, run
 `coord-engine reconcile <team>` to refresh the index and views (or let a scheduled reconcile
 do it).
 

@@ -13,7 +13,8 @@ Contract, each clause a failure it prevents:
 * The payload is the eight-field coord-fold event, written literally (v, at, from, to, kind, slug, pri, ptr).
 
 Two writes are NOT v3 events, because no v3 record exists to mirror: ``retire_archived`` (reconcile's retention
-pass, for each task it archives) and ``reopen_restored`` (``task restore``, for the task it brings back).
+pass, for each task it archives) and ``open_task_doc`` (``task restore`` for the task it brings back, ``task
+start`` for the task it creates).
 """
 from __future__ import annotations
 
@@ -127,11 +128,20 @@ def retire_archived(transport: Any, team: str, *, sender: str, slug: str, ptr: s
 
 
 def reopen_restored(transport: Any, team: str, *, actor: str, slug: str, doc: str, at: str) -> Optional[bool]:
-    """Re-open on bus-v4 a task ``task restore`` brought back from the archive (retention closed it there).
+    """Re-open on bus-v4 a task ``task restore`` brought back from the archive (retention closed it there)."""
+    return open_task_doc(transport, team, actor=actor, slug=slug, doc=doc, at=at)
+
+
+def open_task_doc(transport: Any, team: str, *, actor: str, slug: str, doc: str, at: str) -> Optional[bool]:
+    """Open on bus-v4 the obligation a task doc names, for a doc no v3 directive announced.
+
+    Two callers: ``task restore`` (retention closed the task when it archived it) and ``task start`` (the doc is
+    born here, and only ``tell`` emitted the directive the mirror turns into an open, so self-created work never
+    entered its assignee's fold; coord-boss 33073a42, measured 2026-09-08 on collect-maintainer).
 
     Same obligation rule as the directive mirror: an unassigned or terminal task opens for nobody (None). The open
     goes to the assignee, or to ``all`` for a broadcast (``*``), and carries the task's OWNER as ``from`` so a
-    broadcast still excludes its owner and not whoever ran the restore; the record's source is the actor.
+    broadcast still excludes its owner and not whoever ran the verb; the record's source is the actor.
     None = nothing to open or no bus-v4 plane; True/False = write verdict. Never raises."""
     try:
         from . import okf
