@@ -179,10 +179,12 @@ Folds the same direct tally as `review status`, then reads the PR with
 - **rc 1 UNKNOWN**: the register, a verdict shard or the forge could not be read
   (`..., retry`), or `gh` is not installed on this host. Never READY, never NOT READY.
 
-`--notify <merger>` delivers a READY result to that agent's queue as a directive whose
-payload carries the head, through the same hash-slug path `tell` uses: a re-run at the
-same head dedupes, a new head is a new report, and nothing is sent when NOT READY. A
-failed delivery is rc 1 `..., retry`. The merge stays the merger's: merge with that
+`--notify <merger>` delivers a READY result to that agent's queue as a directive, through
+the same hash-slug path `tell` uses. Its identity is the review slug, PR, head and
+recipient only, so a re-run at the same head dedupes even if approvers or CI checks
+changed, a new head is a new report, and nothing is sent when NOT READY. A failed
+delivery is rc 1 `..., retry`. Under `--json` the delivery narration goes to stderr and
+stdout stays one object, carrying `reported: {to, ptr}`. The merge stays the merger's: merge with that
 exact head as the expected head.
 
 ## Bring an archived review back

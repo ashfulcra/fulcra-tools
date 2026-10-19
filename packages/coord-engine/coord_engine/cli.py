@@ -11923,8 +11923,15 @@ def cmd_review_merge_ready(args: argparse.Namespace, transport: Any) -> int:
     rc = 0 if result["ready"] else 2
     notify = getattr(args, "notify", None)
     if result["ready"] and notify:
-        report = _report_merge_ready(transport, args, team=team, slug=slug, url=url, result=result,
-                                     notify=notify)
+        if args.json:
+            # Delivery helpers narrate on stdout; under --json stdout carries exactly one value.
+            import contextlib
+            with contextlib.redirect_stdout(sys.stderr):
+                report = _report_merge_ready(transport, args, team=team, slug=slug, url=url, result=result,
+                                             notify=notify)
+        else:
+            report = _report_merge_ready(transport, args, team=team, slug=slug, url=url, result=result,
+                                         notify=notify)
         if report is None:
             result.update({"ready": False, "verdict": "unknown",
                            "reasons": [f"MERGE-READY but the report to {notify} was NOT delivered — retry"]})
@@ -11949,12 +11956,15 @@ def cmd_review_merge_ready(args: argparse.Namespace, transport: Any) -> int:
 
 def _report_merge_ready(transport: Any, args: argparse.Namespace, *, team: str, slug: str, url: str,
                         result: dict[str, Any], notify: str) -> Optional[str]:
-    """Deliver the READY report to ``notify``; the directive slug, or None when delivery is unverified."""
+    """Deliver the READY report to ``notify``; the directive slug, or None when delivery is unverified.
+
+    The payload — and so the slug — names only the review, the PR, the head and the recipient. Approver lists
+    and check counts can change at one head without new code, and putting them in the payload minted a second
+    actionable report for the same head (codex-reviewer, PR 831 round 1)."""
     sender = _identity(getattr(args, "sender", None))
     title = f"{_MERGE_READY_TITLE_PREFIX}{slug}"
-    summary = (f"{url} verified MERGE-READY at exact head {result['head']}: approved by "
-               f"{', '.join(result['approvals'])} at that head, PR head matches, CI green "
-               f"({result['checks']} checks). Verification only — the merge is yours.")
+    summary = (f"{url} verified MERGE-READY at exact head {result['head']}: approved at that head, PR head "
+               f"matches, CI green. Verification only — the merge is yours.")
     next_action = f"merge {url} with expected head {result['head']}, or say why not"
     payload = _directive_payload(title, summary, next_action, notify)
     dslug = _hash_slug(title, payload)

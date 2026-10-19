@@ -213,3 +213,33 @@ def test_an_undelivered_report_is_unknown_and_retryable(capsys, monkeypatch):
     monkeypatch.setattr(cli, "_write_directive", lambda *a, **k: 1)
     assert _run(t, "pr-7", "--notify", "boss", runner=_forge()) == 1
     assert "NOT delivered — retry" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("runs", [1, 2])
+def test_json_notify_stdout_is_one_value_fresh_and_deduped(capsys, runs):
+    t = FakeTransport()
+    _ready(t)
+    for _ in range(runs):
+        capsys.readouterr()
+        assert _run(t, "pr-7", "--json", "--notify", "boss", "--from", "maint", runner=_forge()) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert got["verdict"] == "ready" and got["reported"]["to"] == "boss"
+
+
+def test_report_identity_is_the_head_not_the_ci_detail():
+    t = FakeTransport()
+    _ready(t)
+    third = GREEN + [{"__typename": "CheckRun", "name": "extra", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    assert _run(t, "pr-7", "--notify", "boss", "--from", "maint", runner=_forge()) == 0
+    assert _run(t, "pr-7", "--notify", "boss", "--from", "maint", runner=_forge(checks=third)) == 0
+    assert len([p for p in t.store if p.startswith("team/r/task/merge-ready-pr-7-")]) == 1
+
+
+def test_a_new_head_is_a_new_report():
+    t = FakeTransport()
+    _ready(t)
+    assert _run(t, "pr-7", "--notify", "boss", "--from", "maint", runner=_forge()) == 0
+    _review(t, head=OTHER)
+    _verdict(t, head=OTHER)
+    assert _run(t, "pr-7", "--notify", "boss", "--from", "maint", runner=_forge(head=OTHER)) == 0
+    assert len([p for p in t.store if p.startswith("team/r/task/merge-ready-pr-7-")]) == 2
