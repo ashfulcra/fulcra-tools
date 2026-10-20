@@ -1665,7 +1665,11 @@ Native action generation is not evidence of a delivered wake.
 The v5 runtime's explicit host-injected `dispatchCodexWake` supports only scope
 harness `codex` and privately bound desktop thread/host targets. Trusted native
 read/send callbacks are required; injection does not prove authority or grants.
-It requires exact idle preflight, commits a SQLite claim before sending once,
+It requires exact idle preflight by default. A host may explicitly opt into
+`allowColdWake:true` for exact native `notLoaded` evidence after verifying its
+existing sender can load the enrolled target; this is not idle or event-ingress
+proof. Busy/error/unknown evidence still holds delivery. It commits a SQLite
+claim before sending once,
 and retains claimed/uncertain attempts without automatic retry. Each callback
 has a bounded observation timeout, not cancellation. Acceptance is not receiver
 acknowledgment or work completion; synthetic tests are not live acceptance.

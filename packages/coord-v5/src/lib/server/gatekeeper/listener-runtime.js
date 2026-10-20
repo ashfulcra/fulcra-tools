@@ -344,7 +344,7 @@ export async function dispatchCodexWake(store, lease, input, options) {
   let claim;
   store.transact(lease, now(), state => {
     const attempt = check(state);
-    if (!blocked && preflight.code !== 'THREAD_IDLE')
+    if (!blocked && preflight.code !== 'THREAD_IDLE' && preflight.code !== 'THREAD_UNLOADED')
       blocked = { state: attempt.state, code: preflight.code };
     if (!blocked) {
       attempt.state = 'dispatching';
