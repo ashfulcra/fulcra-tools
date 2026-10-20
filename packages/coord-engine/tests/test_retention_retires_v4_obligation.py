@@ -366,3 +366,112 @@ def test_retries_are_capped_per_pass_and_the_rest_reported():
     attempts = [w for w in t.records_written if w["data_type"] == V4_TYPE]
     assert len(attempts) == 50
     assert any("cap reached" in w and "5 of 55" in w for w in res["warnings"]), res["warnings"]
+
+
+# --- review round 2 (codex-reviewer on PR 832) ----------------------------------
+
+ACK = "team/r/_coord/acks/quiet-ask/some-agent.md"
+RESPONSE = "team/r/_coord/responses/quiet-ask/some-agent.md"
+
+
+def test_a_task_whose_close_cannot_be_queued_keeps_its_coordination_shards_hot():
+    class NoMarker(RecordingTransport):
+        def write(self, path, content):
+            if path.startswith(PENDING):
+                return False
+            return super().write(path, content)
+
+    t = NoMarker()
+    _quiet_proposed(t, "quiet-ask")
+    t.put(ACK, "acknowledged")
+    t.put(RESPONSE, "accepted")
+    _run(t)
+    assert "team/r/task/quiet-ask.md" in t.store
+    assert ACK in t.store and RESPONSE in t.store, sorted(t.store)
+    assert not any("/_coord/archive/" in p for p in t.store), sorted(t.store)
+
+
+def test_the_close_is_queued_before_any_shard_moves():
+    t = OrderTransport()
+    _quiet_proposed(t, "quiet-ask")
+    t.put(ACK, "acknowledged")
+    _run(t)
+    marker_write = t.ops.index(("write", PENDING + "quiet-ask.json"))
+    shard_delete = t.ops.index(("delete", ACK))
+    assert marker_write < shard_delete
+
+
+def _restore_during_close(t, *, open_ok):
+    doc = t.store["team/r/task/archive/2020-01/quiet-ask.md"]
+    real_write = t.record_write
+
+    def write(data_type, api_version, note, source, recorded_at=None, tags=None):
+        ok = real_write(data_type, api_version, note, source, recorded_at=recorded_at, tags=tags)
+        kind = json.loads(note).get("kind")
+        if kind == "close":
+            t.put("team/r/task/quiet-ask.md", doc)
+            t.store.pop(PENDING + "quiet-ask.json", None)  # task restore clears the marker after its move
+        return ok if kind == "close" or open_ok() else False
+
+    t.record_write = write
+
+
+def test_a_failed_reopen_after_a_racing_restore_stays_queued_until_the_open_lands():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    t.records_written.clear()
+    t.record_ok = True
+    opens_work = [False]
+    _restore_during_close(t, open_ok=lambda: opens_work[0])
+    res = _run(t)
+    assert PENDING + "quiet-ask.json" in t.store, "a restore deleted the marker; the guard must re-write it"
+    assert any("re-open FAILED" in w and "quiet-ask" in w for w in res["warnings"]), res["warnings"]
+
+    t.records_written.clear()
+    opens_work[0] = True
+    res = _run(t)
+    kinds = [w["note"]["kind"] for w in t.records_written
+             if w["data_type"] == V4_TYPE and w["note"]["slug"] == "quiet-ask"]
+    assert kinds == ["open"], "a hot task is re-opened, never closed again"
+    assert PENDING + "quiet-ask.json" not in t.store
+
+
+def test_a_hot_task_whose_reopen_keeps_failing_keeps_its_marker():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    t.put("team/r/task/quiet-ask.md", t.store["team/r/task/archive/2020-01/quiet-ask.md"])
+    t.records_written.clear()
+    res = _run(t)  # record_ok is still False: the open fails
+    assert [w["note"]["kind"] for w in t.records_written if w["data_type"] == V4_TYPE] == ["open"]
+    assert PENDING + "quiet-ask.json" in t.store
+    assert any("re-open FAILED" in w and "quiet-ask" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_an_unknown_hot_path_right_after_the_close_stays_queued():
+    class UnknownAfterClose(RecordingTransport):
+        closed = False
+
+        def record_write(self, data_type, api_version, note, source, recorded_at=None, tags=None):
+            if json.loads(note).get("kind") == "close":
+                self.closed = True
+            return super().record_write(data_type, api_version, note, source, recorded_at=recorded_at, tags=tags)
+
+        def read_classified(self, path, *, deadline=None):
+            if path == "team/r/task/quiet-ask.md" and self.closed and not self.healed:
+                return None, "error"
+            return super().read_classified(path, deadline=deadline)
+
+    t = UnknownAfterClose()
+    t.healed = False
+    _quiet_proposed(t, "quiet-ask")
+    res = _run(t)
+    assert PENDING + "quiet-ask.json" in t.store
+    assert any("UNKNOWN" in w and "quiet-ask" in w for w in res["warnings"]), res["warnings"]
+
+    t.healed = True
+    t.records_written.clear()
+    _run(t)
+    assert PENDING + "quiet-ask.json" not in t.store
+    assert [c["slug"] for c in _v4_closes(t)] == ["quiet-ask"]
