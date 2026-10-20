@@ -303,7 +303,13 @@ under `skills/`, each package with its own README, build, and tests.
   nobody: retention writes one bus-v4 `close` to `all` for it after the source
   delete succeeds (never before — closing hot work hides it); an unreadable bus-v4
   config or failed write is a `v4 close FAILED` warning, not a rollback, and never
-  "no plane". `task restore` writes the matching v4 `open` and exits 3 if it cannot. Archives from before this rule
+  "no plane". The close is durable: retention writes a marker under
+  `_coord/retention/pending-v4-close/` BEFORE the close and clears it once the close
+  has an answer, and EVERY pass (not only the daily archive pass) retries what is
+  still queued. A failed close or a pass killed mid-way is therefore retried, never
+  lost. A retry never closes a task whose doc is hot again, and keeps the marker
+  while that path is UNKNOWN. `task restore` clears the slug's marker, then writes
+  the matching v4 `open` and exits 3 if it cannot. Archives from before this rule
   left phantom opens in the folds; those need a separate verified cleanup. Note the age thresholds
   above are necessary, not sufficient: tasks and reviews share ONE per-pass
   archive cap and tasks are swept first, so a large task backlog defers review

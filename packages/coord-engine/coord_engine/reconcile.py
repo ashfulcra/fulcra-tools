@@ -547,6 +547,77 @@ def _retention_marker_path(team: str) -> str:
     return f"team/{team}/_coord/retention/last-run.json"
 
 
+def pending_v4_close_prefix(team: str) -> str:
+    """Retention's durable record of bus-v4 closes it owes: one ``<slug>.json`` per archived task."""
+    return f"team/{team}/_coord/retention/pending-v4-close/"
+
+
+def _close_archived_on_v4(transport: Any, team: str, *, sender: str, slug: str, ptr: str,
+                          priority: str, now: str, notes: list[str]) -> None:
+    """Retire an archived task's obligation on bus-v4, durably.
+
+    The intent is written BEFORE the close and cleared only once the close has an answer, so a close
+    that fails, or a pass that dies between the source delete and the close (a laptop that sleeps
+    mid-pass), leaves a marker the next pass retries. Measured 2026-10-20 00:10Z: a pinned host archived
+    five tasks and wrote no closes, and nothing ever revisited them. Closing twice is harmless: a close
+    of a slug a fold does not hold is a no-op there."""
+    marker = f"{pending_v4_close_prefix(team)}{slug}.json"
+    queued = bool(transport.write(marker, json.dumps(
+        {"slug": slug, "ptr": ptr, "priority": priority, "archived_at": now, "host": sender},
+        sort_keys=True)))
+    if dual_emit.retire_archived(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                 priority=priority, at=now) is False:
+        notes.append(f"retention: v4 close FAILED for archived {slug}; " + (
+            "queued for retry on every pass" if queued else
+            "and its retry marker could NOT be written: the obligation stays open in the folds "
+            "that hold it"))
+        return
+    if queued and hasattr(transport, "delete"):
+        transport.delete(marker)  # a failed delete costs one harmless repeat close next pass
+
+
+def _retry_pending_v4_closes(transport: Any, team: str, *, sender: str, now: str) -> list[str]:
+    """Retry every bus-v4 close retention still owes. Runs on EVERY pass, not only the daily one.
+
+    A task that is hot again (``task restore``) is never closed: its marker is dropped. An unreadable
+    task path or marker is UNKNOWN and keeps the marker; only a settled answer clears it."""
+    notes: list[str] = []
+    prefix = pending_v4_close_prefix(team)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError:
+        return ["retention: pending v4-close listing UNKNOWN; retries skipped this pass"]
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        if entry.get("is_dir") or not name.endswith(".json"):
+            continue
+        marker = prefix + name
+        raw = transport.read(marker)
+        try:
+            pending = json.loads(raw) if raw is not None else None
+            slug, ptr = str(pending["slug"]), str(pending["ptr"])
+        except (TypeError, ValueError, KeyError):
+            notes.append(f"retention: pending v4 close {name} unreadable or malformed (UNKNOWN); kept")
+            continue
+        _, hot = transport.read_classified(f"{task_prefix(team)}{slug}.md")
+        if hot == "ok":
+            if hasattr(transport, "delete"):
+                transport.delete(marker)
+            notes.append(f"retention: pending v4 close for {slug} dropped; the task is hot again")
+            continue
+        if hot != "absent":
+            notes.append(f"retention: pending v4 close for {slug} kept; its hot path is UNKNOWN")
+            continue
+        if dual_emit.retire_archived(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                     priority=str(pending.get("priority") or ""), at=now) is False:
+            notes.append(f"retention: v4 close FAILED again for archived {slug}; still queued")
+            continue
+        if hasattr(transport, "delete"):
+            transport.delete(marker)
+        notes.append(f"retention: v4 close retried for archived {slug}")
+    return notes
+
+
 def settled_index_path(team: str) -> str:
     return f"team/{team}/_coord/retention/settled-reviews.json"
 
@@ -658,10 +729,13 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
     An archived task is owed by nobody, so each completed move also retires the
     obligation on bus-v4 (``dual_emit.retire_archived``) — only AFTER the source
     delete, because closing a task that is still hot would hide live work. A
-    failed close is a warning, never a reason to undo the archive.
+    failed close is a warning, never a reason to undo the archive; it stays queued under
+    ``pending_v4_close_prefix`` and every pass retries it, including passes the daily throttle skips.
     """
     notes: list[str] = []
     archived_map: dict = {}  # slug -> (month, title), for the log's Archived bullets
+    if sender:
+        notes.extend(_retry_pending_v4_closes(transport, team, sender=sender, now=now))
     marker = transport.read(_retention_marker_path(team))
     if marker is not None and today in marker:
         return rows, notes, archived_map  # already ran today
@@ -710,12 +784,11 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                         shards_moved = False
                 if shards_moved and hasattr(transport, "delete") and transport.delete(src):
                     notes.append(f"retention: archived {slug} -> archive/{month}/")
-                    if sender and dual_emit.retire_archived(
+                    if sender:
+                        _close_archived_on_v4(
                             transport, team, sender=sender, slug=slug,
                             ptr=f"task/archive/{month}/{slug}.md",
-                            priority=str(r.get("priority") or ""), at=now) is False:
-                        notes.append(f"retention: v4 close FAILED for archived {slug}; "
-                                     "the obligation stays open in the folds that hold it")
+                            priority=str(r.get("priority") or ""), now=now, notes=notes)
                     continue
                 archived -= 1
                 if hasattr(transport, "delete"):

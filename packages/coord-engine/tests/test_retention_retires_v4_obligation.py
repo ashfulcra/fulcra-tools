@@ -173,3 +173,108 @@ def test_a_failed_reopen_is_loud_and_nonzero_but_keeps_the_restored_doc(capsys):
     assert cli.main(["task", "restore", "r", "quiet-ask"], transport=t) == 3
     assert "team/r/task/quiet-ask.md" in t.store
     assert "bus-v4 open was NOT written" in capsys.readouterr().err
+
+
+# --- a failed close is retried on later passes, never lost ---------------------
+# Measured 2026-10-20 00:10Z: a pinned host archived five tasks and wrote no v4 closes. The close
+# failure was a one-line warning and no later pass revisited the archived docs, so the opens stayed.
+
+PENDING = "team/r/_coord/retention/pending-v4-close/"
+
+
+def test_a_failed_close_is_queued_and_the_warning_says_so():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    res = _run(t)
+    marker = json.loads(t.store[PENDING + "quiet-ask.json"])
+    assert (marker["slug"], marker["ptr"], marker["priority"]) == (
+        "quiet-ask", "task/archive/2020-01/quiet-ask.md", "P1")
+    assert any("v4 close FAILED" in w and "queued for retry" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_a_successful_close_leaves_no_marker():
+    t = RecordingTransport()
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    assert [p for p in t.store if p.startswith(PENDING)] == []
+
+
+def test_the_next_pass_retries_even_when_the_daily_throttle_skips_retention():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    t.records_written.clear()
+    t.record_ok = True
+    _run(t)  # same `today`: the archive sub-pass is throttled, the retry is not
+    closes = _v4_closes(t)
+    assert [(c["slug"], c["to"], c["ptr"]) for c in closes] == [
+        ("quiet-ask", "all", "task/archive/2020-01/quiet-ask.md")]
+    assert PENDING + "quiet-ask.json" not in t.store
+
+
+def test_a_pass_that_died_before_its_close_is_finished_by_the_next():
+    """The marker is written BEFORE the close, so a pass killed in between still leaves it."""
+    t = RecordingTransport()
+    t.put("team/r/task/archive/2020-01/slept.md", "---\nstatus: proposed\n---\nb")
+    t.put(PENDING + "slept.json", json.dumps({"slug": "slept", "ptr": "task/archive/2020-01/slept.md",
+                                              "priority": "P2"}))
+    _run(t)
+    assert [c["slug"] for c in _v4_closes(t)] == ["slept"]
+    assert PENDING + "slept.json" not in t.store
+
+
+def test_a_close_that_keeps_failing_stays_queued_and_loud():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    res = _run(t)
+    assert PENDING + "quiet-ask.json" in t.store
+    assert any("FAILED again" in w and "quiet-ask" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_a_restored_task_is_never_closed_by_a_retry():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    t.put("team/r/task/quiet-ask.md", "---\nstatus: proposed\nassignee: some-agent\n---\nback")
+    t.records_written.clear()
+    t.record_ok = True
+    _run(t)
+    assert _v4_closes(t) == []
+    assert PENDING + "quiet-ask.json" not in t.store
+
+
+def test_an_unknown_hot_path_keeps_the_marker_and_closes_nothing():
+    class HotUnknown(RecordingTransport):
+        def read_classified(self, path, *, deadline=None):
+            if path == "team/r/task/quiet-ask.md":
+                return None, "error"
+            return super().read_classified(path, deadline=deadline)
+
+    t = HotUnknown(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    t.records_written.clear()
+    t.record_ok = True
+    res = _run(t)
+    assert _v4_closes(t) == []
+    assert PENDING + "quiet-ask.json" in t.store
+    assert any("UNKNOWN" in w and "quiet-ask" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_a_malformed_marker_is_kept_and_reported():
+    t = RecordingTransport()
+    t.put(PENDING + "junk.json", "not json")
+    res = _run(t)
+    assert PENDING + "junk.json" in t.store
+    assert any("junk.json" in w and "UNKNOWN" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_restore_clears_a_pending_close_before_reopening():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    assert PENDING + "quiet-ask.json" in t.store
+    t.record_ok = True
+    assert cli.main(["task", "restore", "r", "quiet-ask"], transport=t) == 0
+    assert PENDING + "quiet-ask.json" not in t.store
