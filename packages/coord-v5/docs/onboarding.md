@@ -9,9 +9,42 @@ The agent handles setup using your existing Fulcra access and the workspace invi
 2. Install the pinned package and use the [transport enrollment](../README.md) to read and publish one test event in the authorized scope. Read it back. Retrieve the published recovery checkpoint and its event tail.
 3. Assess local tools with the [harness guide](harnesses.md). Record observed capabilities, not model self-description. Run `coord-v5 enrollment plan < assessment.json` to choose the setup path. Keep the report private; it can contain account and environment identifiers.
 4. If automatic checking was requested, reuse the exact native registration with the returned listener key. For a verified event path, configure the native event registration; scheduling is not a prerequisite. Use a verified schedule as a backstop or, without event ingress, a verified schedule/session loop as the fallback. Test actual event reception, native cross-session delivery and an idle worker's access to the workspace separately. Save registration and results with the private descriptor. A plan or registration is not successful delivery, idle wake or membership evidence.
-5. Generate the appropriate local instruction block with `coord-v5 enrollment instructions`: omit `instruction_mode` for the unchanged worker block, or choose `listener` for reporting/routing and `executor` for explicitly owned-task execution. Review and apply the returned content to the relevant local/session `AGENTS.md`, `CLAUDE.md`, or supported instructions. Apply listener/executor blocks only to their own session, not shared repository-wide worker instructions. Use the [listener job recipe](harnesses.md#codex-desktop) for exact native preparation and receipts. Keep shared repository files free of private workspace identifiers. Record the edited file and original content so setup is reversible.
+5. Generate the appropriate local instruction block with `coord-v5 enrollment instructions`: omit `instruction_mode` for the worker block, or choose `listener` for reporting/routing and `executor` for explicitly owned-task execution. Review and apply the returned content to the relevant local/session `AGENTS.md`, `CLAUDE.md`, or supported instructions. Apply listener/executor blocks only to their own session, not shared repository-wide worker instructions. Use the [listener job recipe](harnesses.md#codex-desktop) for exact native preparation and receipts. Keep shared repository files free of private workspace identifiers. Record the edited file and original content so setup is reversible.
 
 Once a worker owns active work, continue it directly; do not wait for ticks between steps. Prefer bounded subagents for scoped reasoning or implementation. A dedicated listener only receives, reports and routes attention to addressed workers. Deliberate self-ticking execution of an owned task is a separate opt-in mode, not the reporting-listener default. Workers record commitments, progress, questions and outcomes on the bus, and publish concise checkpoints at natural boundaries and during long runs.
+
+## Shared Codex listener acceptance
+
+For requested automatic checking, joining a Codex worker includes reconciling the
+one listener for its environment/harness and registering the worker's exact
+source, job and existing native session. Interactive membership and automatic
+participation are separate outcomes: a successful read/publish or enrollment
+receipt does not discharge unfinished listener setup.
+
+- Inspect existing native sessions, registrations and private listener state
+  first. Reuse the environment listener; a listener on a different machine is
+  not evidence of local coverage. Add the exact route through the supported
+  owner process, preserving existing sources, cursors, grants and pending effects.
+- If no listener exists, record that fact and configure one only within the
+  operator's existing setup authorization. Missing authorization, a source/job
+  mapping, native route or supported wake mechanism becomes a linked owned task
+  with the precise prerequisite and unblock action. Continue independent safe
+  setup; do not silently replace the shared listener with a worker heartbeat.
+- Prefer verified event ingress. If it is unavailable, use one shared scheduled
+  listener when the operator permits polling. State that polling is the fallback;
+  a local timer cannot invoke an app-only native messaging tool by itself.
+- Record registration readback, actual event or scheduled invocation, successful
+  source reads, native receipt, addressed idle worker delivery and independent
+  receiver acknowledgment separately. A manual send or ACTIVE card is not
+  scheduled proof. BUSY/UNKNOWN targets and ambiguous sends remain pending.
+- Preserve any temporary worker fallback and monitoring obligations until their
+  replacement is verified. Retire or relax it only within the approved scope;
+  centralizing bus reads must not silently drop infrastructure incident coverage.
+
+Keep this acceptance task visible at worker exit until verified or genuinely
+blocked. Report interactive enrollment as successful with automatic delivery
+pending when that is the evidence, rather than declaring the whole setup done.
+These steps grant no permissions and install no listener or schedule themselves.
 
 ## Capability assessment
 
@@ -45,7 +78,7 @@ Optional `operator_interval_minutes` preserves a faster fallback/backstop cadenc
 {"content":"Existing local rules","workspace_id":"example-workspace","remove":false,"instruction_mode":"listener"}
 ```
 
-Apply the result with your normal file-edit tool. Switching modes replaces the one managed block; set `remove:true` with any valid mode to remove it and restore the surrounding bytes. Conflicting or malformed blocks and invalid mode values/types are refused; the CLI returns sanitized `INVALID_ENROLLMENT_INPUT`, including on removal. Worker default/explicit output remains byte-identical. Role selection is only instruction generation, independent of the planner's enrollment `mode`; it grants no permissions, ownership or schedule authority and does not prove agent obedience. Listener reads retain obligations under unknown/partial coverage, and the listener never fabricates receiver acknowledgment or reports worker progress/completion. Executor work requires explicit ownership and recovery context; missing context means report the gap, not adopt work. Self-ticking requires separate authorization and is never auto-created.
+Apply the result with your normal file-edit tool. Switching modes replaces the one managed block; set `remove:true` with any valid mode to remove it and restore the surrounding bytes. Conflicting or malformed blocks and invalid mode values/types are refused; the CLI returns sanitized `INVALID_ENROLLMENT_INPUT`, including on removal. Omitted and explicit worker modes produce the same block; regenerating updates an older managed block while preserving surrounding text. Role selection is only instruction generation, independent of the planner's enrollment `mode`; it grants no permissions, ownership or schedule authority and does not prove agent obedience. Listener reads retain obligations under unknown/partial coverage, and the listener never fabricates receiver acknowledgment or reports worker progress/completion. Executor work requires explicit ownership and recovery context; missing context means report the gap, not adopt work. Self-ticking requires separate authorization and is never auto-created.
 
 ## Runtime choices
 
