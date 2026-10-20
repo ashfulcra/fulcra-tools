@@ -11928,9 +11928,10 @@ def cmd_review_merge_ready(args: argparse.Namespace, transport: Any) -> int:
         return stop(2, f"artifact {tally.get('of')!r} is not a GitHub PR" + (f" in {repo}" if repo else ""))
     runner = getattr(args, "runner", None)
     if runner is None:
-        import shutil as _sh
-        if not _sh.which("gh"):
-            return stop(1, "gh CLI not found — PR head and CI are UNKNOWN on this host", pr=url)
+        cli_state, why = forge_mod.github_cli()
+        if cli_state != "ok":
+            return stop(1, f"GitHub CLI unavailable: {why} — PR head and CI are UNKNOWN on this host"
+                        + (", retry" if cli_state == "unknown" else ""), pr=url)
         runner = forge_mod.default_runner
     pr = merge_ready.pr_view(runner, url)
     if pr is None:
@@ -13199,9 +13200,9 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
 # --- forge (fulcra-agent-forge) ---
 
 def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
-    import shutil as _sh
-    if not _sh.which("gh") and args.runner is None:
-        print("forge mirror: gh CLI not found — nothing mirrored (install GitHub CLI to enable)",
+    cli_state, why = forge_mod.github_cli() if args.runner is None else ("ok", "")
+    if cli_state in ("absent", "other"):
+        print(f"forge mirror: GitHub CLI unavailable: {why} — nothing mirrored (install GitHub CLI to enable)",
               file=sys.stderr)
         return 0  # degradation, not an error
     res = forge_mod.mirror(transport, args.team, now=_iso(_now()),
@@ -13233,9 +13234,9 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
     """Sweep-only verb: the three-surface feedback sweep, no state mirroring."""
-    import shutil as _sh
-    if not _sh.which("gh") and args.runner is None:
-        print("forge feedback: gh CLI not found — nothing swept (install GitHub CLI to enable)",
+    cli_state, why = forge_mod.github_cli() if args.runner is None else ("ok", "")
+    if cli_state in ("absent", "other"):
+        print(f"forge feedback: GitHub CLI unavailable: {why} — nothing swept (install GitHub CLI to enable)",
               file=sys.stderr)
         return 0  # degradation, not an error
     fb = forge_mod.feedback_sweep(transport, args.team,

@@ -89,6 +89,27 @@ def default_runner(args: list[str]) -> Optional[str]:
         return None
 
 
+def github_cli() -> tuple[str, str]:
+    """Is the GitHub CLI on this host? ``(state, reason)`` with state ``ok`` | ``absent`` | ``other`` | ``unknown``.
+
+    A ``gh`` on PATH is not proof. A Claude Code cloud container ships its own client under that name, which
+    answers only ``gh api`` and refuses ``gh pr view`` every time, so a forge read there can never succeed and
+    "retry" is the wrong advice. Measured 2026-10-20: its ``gh --version`` exits 1 with nothing on stdout and a
+    notice on stderr. The GitHub CLI's ``gh --version`` exits 0 and its stdout begins ``gh version``, so any run
+    that finished without that line is some other client. Only a probe that did not finish (timeout, spawn
+    failure) is ``unknown`` and retryable; ``absent`` and ``other`` are not."""
+    path = shutil.which("gh")
+    if not path:
+        return "absent", "no `gh` on PATH"
+    try:
+        rc, out, _err = _transport.run_bounded([path, "--version"], 10.0)
+    except Exception:
+        return "unknown", "`gh --version` did not finish"
+    if rc == 0 and (out or "").startswith("gh version "):
+        return "ok", ""
+    return "other", "the `gh` on PATH is not the GitHub CLI (`gh --version` does not report one)"
+
+
 def pr_state(runner: Callable[[list[str]], Optional[str]], url: str) -> Optional[dict[str, Any]]:
     raw = runner([
         "gh", "pr", "view", url, "--json",

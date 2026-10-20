@@ -882,8 +882,9 @@ it (not on PyPI).
   and gates the merge; `coord-engine review merge-ready <team> <slug>
   [--notify <merger>]` adds the forge half before the click (PR head ==
   register head == verdict head, CI green; rc 0 READY / 2 NOT READY / 1
-  UNKNOWN) and never merges. The `<artifact>` is an opaque ref, so the handshake
-  works with any forge or none — a forge-only "Approve" does NOT count
+  UNKNOWN) and never merges; a host without the GitHub CLI is UNKNOWN without "retry", and a `gh` that
+  is some other client (its `gh --version` does not begin `gh version`) counts as none. The
+  `<artifact>` is an opaque ref, so the handshake works with any forge or none — a forge-only "Approve" does NOT count
   (co-located agents often share one forge account); the bus verdict, keyed
   by agent identity, is the source of truth. **The verdict FILE discharges
   the obligation**; the ack is inbox hygiene and targets the review-request
