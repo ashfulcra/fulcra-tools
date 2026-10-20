@@ -547,6 +547,139 @@ def _retention_marker_path(team: str) -> str:
     return f"team/{team}/_coord/retention/last-run.json"
 
 
+def pending_v4_close_prefix(team: str) -> str:
+    """Retention's durable record of bus-v4 closes it owes: one ``<slug>.json`` per archived task."""
+    return f"team/{team}/_coord/retention/pending-v4-close/"
+
+
+RETENTION_RETRY_CAP_PER_PASS = 50
+
+
+def _queue_v4_close(transport: Any, team: str, *, sender: str, slug: str, ptr: str, priority: str,
+                    now: str) -> bool:
+    """Record the bus-v4 close retention owes for ``slug``. Written BEFORE the source delete, so a pass
+    that dies anywhere between the delete and the close still leaves the debt for the next pass to pay.
+    Measured 2026-10-20 00:10Z: a pinned host archived five tasks and wrote no closes, and nothing ever
+    revisited them."""
+    return bool(transport.write(f"{pending_v4_close_prefix(team)}{slug}.json", json.dumps(
+        {"slug": slug, "ptr": ptr, "priority": priority, "archived_at": now, "host": sender},
+        sort_keys=True)))
+
+
+def _reopen_hot(transport: Any, team: str, *, sender: str, slug: str, doc: str, now: str) -> bool:
+    """Re-open a task that is hot again after retention may already have closed it. False = the open failed."""
+    return dual_emit.open_task_doc(transport, team, actor=sender, slug=slug, doc=doc, at=now) is not False
+
+
+def _retire_and_guard(transport: Any, team: str, *, sender: str, slug: str, ptr: str, priority: str,
+                      now: str, notes: list[str]) -> Optional[bool]:
+    """Write the close, then make sure it did not land on a task that is hot again.
+
+    ``task restore`` can run between the decision to close and the close itself; its open would then
+    precede our close and the fold would drop live work. So after a written close the hot path is read
+    once more, and a doc found there is re-opened from that doc (the open lands after the close).
+
+    Returns the close verdict (None = no bus-v4 plane, True/False = write verdict), or ``"unresolved"``
+    when the close was written but the check after it has no settled answer: the re-open failed or the
+    hot path read UNKNOWN. An unresolved check re-writes the pending marker, because the restore that
+    raced the close may already have deleted it; the next pass then re-opens or re-closes from the
+    marker. An UNKNOWN hot path is never assumed archived."""
+    result = dual_emit.retire_archived(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                       priority=priority, at=now)
+    if result is not True:
+        return result
+    doc, hot = transport.read_classified(f"{task_prefix(team)}{slug}.md")
+    if hot == "absent":
+        return result
+    if hot == "ok" and doc is not None:
+        if _reopen_hot(transport, team, sender=sender, slug=slug, doc=doc, now=now):
+            notes.append(f"retention: {slug} was restored while its v4 close was written; "
+                         "re-opened from its doc")
+            return result
+        why = "was restored while its v4 close was written and its re-open FAILED"
+    else:
+        why = "hot path read UNKNOWN right after its v4 close"
+    queued = _queue_v4_close(transport, team, sender=sender, slug=slug, ptr=ptr, priority=priority,
+                             now=now)
+    notes.append(f"retention: {slug} {why}; " + (
+        "kept queued for the next pass" if queued else
+        "and its pending marker could not be written (UNKNOWN): run "
+        "`obligations --export-open --force` for its assignee"))
+    return "unresolved"
+
+
+def _close_archived_on_v4(transport: Any, team: str, *, sender: str, slug: str, ptr: str,
+                          priority: str, now: str, notes: list[str]) -> None:
+    """Retire an archived task's obligation on bus-v4. The marker ``_queue_v4_close`` wrote before the
+    source delete is cleared only once the close has an answer; a failed close keeps it for the next
+    pass. Closing twice is harmless: a close of a slug a fold does not hold is a no-op there."""
+    outcome = _retire_and_guard(transport, team, sender=sender, slug=slug, ptr=ptr, priority=priority,
+                                now=now, notes=notes)
+    if outcome is False:
+        notes.append(f"retention: v4 close FAILED for archived {slug}; queued for retry on every pass")
+        return
+    if outcome == "unresolved":
+        return
+    if hasattr(transport, "delete"):
+        transport.delete(f"{pending_v4_close_prefix(team)}{slug}.json")  # a failed delete costs one repeat
+
+
+def _retry_pending_v4_closes(transport: Any, team: str, *, sender: str, now: str,
+                             cap: int = RETENTION_RETRY_CAP_PER_PASS) -> list[str]:
+    """Retry the bus-v4 closes retention still owes, at most ``cap`` per pass. Runs on EVERY pass, not
+    only the daily one.
+
+    A task that is hot again (``task restore``) is never closed. Its close may already have been written
+    (a pass that died after the close, or a restore that raced it), so it is re-opened from its doc and
+    the marker is dropped only once that open has an answer. An unreadable task path or marker is
+    UNKNOWN and keeps the marker; only a settled answer clears it."""
+    notes: list[str] = []
+    prefix = pending_v4_close_prefix(team)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError:
+        return ["retention: pending v4-close listing UNKNOWN; retries skipped this pass"]
+    names = [str(e.get("name") or "") for e in entries
+             if not e.get("is_dir") and str(e.get("name") or "").endswith(".json")]
+    if len(names) > cap:
+        notes.append(f"retention: pending v4-close retry cap reached: {len(names) - cap} of "
+                     f"{len(names)} marker(s) not retried this pass")
+    for name in names[:cap]:
+        marker = prefix + name
+        raw = transport.read(marker)
+        try:
+            pending = json.loads(raw) if raw is not None else None
+            slug, ptr = str(pending["slug"]), str(pending["ptr"])
+        except (TypeError, ValueError, KeyError):
+            notes.append(f"retention: pending v4 close {name} unreadable or malformed (UNKNOWN); kept")
+            continue
+        doc, hot = transport.read_classified(f"{task_prefix(team)}{slug}.md")
+        if hot == "ok" and doc is not None:
+            if not _reopen_hot(transport, team, sender=sender, slug=slug, doc=doc, now=now):
+                notes.append(f"retention: pending v4 close for {slug}: the task is hot again and its "
+                             "re-open FAILED; kept")
+                continue
+            if hasattr(transport, "delete"):
+                transport.delete(marker)
+            notes.append(f"retention: pending v4 close for {slug} dropped; the task is hot again "
+                         "and was re-opened from its doc")
+            continue
+        if hot != "absent":
+            notes.append(f"retention: pending v4 close for {slug} kept; its hot path is UNKNOWN")
+            continue
+        outcome = _retire_and_guard(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                    priority=str(pending.get("priority") or ""), now=now, notes=notes)
+        if outcome is False:
+            notes.append(f"retention: v4 close FAILED again for archived {slug}; still queued")
+            continue
+        if outcome == "unresolved":
+            continue
+        if hasattr(transport, "delete"):
+            transport.delete(marker)
+        notes.append(f"retention: v4 close retried for archived {slug}")
+    return notes
+
+
 def settled_index_path(team: str) -> str:
     return f"team/{team}/_coord/retention/settled-reviews.json"
 
@@ -658,10 +791,13 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
     An archived task is owed by nobody, so each completed move also retires the
     obligation on bus-v4 (``dual_emit.retire_archived``) — only AFTER the source
     delete, because closing a task that is still hot would hide live work. A
-    failed close is a warning, never a reason to undo the archive.
+    failed close is a warning, never a reason to undo the archive; it stays queued under
+    ``pending_v4_close_prefix`` and every pass retries it, including passes the daily throttle skips.
     """
     notes: list[str] = []
     archived_map: dict = {}  # slug -> (month, title), for the log's Archived bullets
+    if sender:
+        notes.extend(_retry_pending_v4_closes(transport, team, sender=sender, now=now))
     marker = transport.read(_retention_marker_path(team))
     if marker is not None and today in marker:
         return rows, notes, archived_map  # already ran today
@@ -690,7 +826,19 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 continue
             src = f"{task_prefix(team)}{slug}.md"
             dst = f"{archive_prefix(team)}{month}/{slug}.md"
+            ptr = f"task/archive/{month}/{slug}.md"
+            priority = str(r.get("priority") or "")
             if _verified_copy(transport, src, dst):
+                # The close is owed from the moment the source goes, so record it before anything moves; a
+                # task whose debt cannot be recorded stays hot, with its shards untouched, rather than risk
+                # an obligation nothing will close.
+                if sender and not _queue_v4_close(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                                  priority=priority, now=now):
+                    if hasattr(transport, "delete"):
+                        transport.delete(dst)
+                    notes.append(f"retention: {slug} kept hot; its v4 close could not be queued")
+                    keep.append(r)
+                    continue
                 shards_moved = True
                 archived += 1
                 archived_map[slug] = (month, r.get("title") or slug)
@@ -710,13 +858,12 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                         shards_moved = False
                 if shards_moved and hasattr(transport, "delete") and transport.delete(src):
                     notes.append(f"retention: archived {slug} -> archive/{month}/")
-                    if sender and dual_emit.retire_archived(
-                            transport, team, sender=sender, slug=slug,
-                            ptr=f"task/archive/{month}/{slug}.md",
-                            priority=str(r.get("priority") or ""), at=now) is False:
-                        notes.append(f"retention: v4 close FAILED for archived {slug}; "
-                                     "the obligation stays open in the folds that hold it")
+                    if sender:
+                        _close_archived_on_v4(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                              priority=priority, now=now, notes=notes)
                     continue
+                if sender and hasattr(transport, "delete"):
+                    transport.delete(f"{pending_v4_close_prefix(team)}{slug}.json")
                 archived -= 1
                 if hasattr(transport, "delete"):
                     transport.delete(dst)
