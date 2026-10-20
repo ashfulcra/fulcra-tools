@@ -278,3 +278,91 @@ def test_restore_clears_a_pending_close_before_reopening():
     t.record_ok = True
     assert cli.main(["task", "restore", "r", "quiet-ask"], transport=t) == 0
     assert PENDING + "quiet-ask.json" not in t.store
+
+
+# --- review round 1 (Greptile on PR 832) ---------------------------------------
+
+class OrderTransport(RecordingTransport):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.ops = []
+
+    def write(self, path, content):
+        self.ops.append(("write", path))
+        return super().write(path, content)
+
+    def delete(self, path):
+        self.ops.append(("delete", path))
+        return super().delete(path)
+
+
+def test_the_close_is_queued_before_the_source_is_deleted():
+    """A pass killed between the source delete and the close must still leave the debt recorded."""
+    t = OrderTransport()
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    marker_write = t.ops.index(("write", PENDING + "quiet-ask.json"))
+    source_delete = t.ops.index(("delete", "team/r/task/quiet-ask.md"))
+    assert marker_write < source_delete
+
+
+def test_a_task_whose_close_cannot_be_queued_stays_hot():
+    class NoMarker(RecordingTransport):
+        def write(self, path, content):
+            if path.startswith(PENDING):
+                return False
+            return super().write(path, content)
+
+    t = NoMarker()
+    _quiet_proposed(t, "quiet-ask")
+    res = _run(t)
+    assert "team/r/task/quiet-ask.md" in t.store
+    assert "team/r/task/archive/2020-01/quiet-ask.md" not in t.store
+    assert _v4_closes(t) == []
+    assert any("quiet-ask" in w and "kept hot" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_a_failed_restore_keeps_the_queued_close():
+    class NoHotWrite(RecordingTransport):
+        def write(self, path, content):
+            if path == "team/r/task/quiet-ask.md":
+                return False
+            return super().write(path, content)
+
+    t = NoHotWrite(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    assert cli.main(["task", "restore", "r", "quiet-ask"], transport=t) == 1
+    assert PENDING + "quiet-ask.json" in t.store
+
+
+def test_a_restore_that_lands_during_a_retried_close_is_reopened_after_it():
+    t = RecordingTransport(record_ok=False)
+    _quiet_proposed(t, "quiet-ask")
+    _run(t)
+    t.records_written.clear()
+    t.record_ok = True
+    doc = t.store["team/r/task/archive/2020-01/quiet-ask.md"]
+    real_write = t.record_write
+
+    def restore_mid_close(data_type, api_version, note, source, recorded_at=None, tags=None):
+        ok = real_write(data_type, api_version, note, source, recorded_at=recorded_at, tags=tags)
+        if json.loads(note).get("kind") == "close":
+            t.put("team/r/task/quiet-ask.md", doc)  # task restore ran between our check and our close
+        return ok
+
+    t.record_write = restore_mid_close
+    _run(t)
+    kinds = [(w["note"]["kind"], w["note"]["to"]) for w in t.records_written
+             if w["data_type"] == V4_TYPE and w["note"]["slug"] == "quiet-ask"]
+    assert kinds == [("close", "all"), ("open", "some-agent")]
+
+
+def test_retries_are_capped_per_pass_and_the_rest_reported():
+    t = RecordingTransport(record_ok=False)
+    for i in range(55):
+        t.put(f"{PENDING}s{i:02d}.json", json.dumps({"slug": f"s{i:02d}", "ptr": f"task/archive/2020-01/s{i:02d}.md"}))
+    res = _run(t)
+    attempts = [w for w in t.records_written if w["data_type"] == V4_TYPE]
+    assert len(attempts) == 50
+    assert any("cap reached" in w and "5 of 55" in w for w in res["warnings"]), res["warnings"]

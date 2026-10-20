@@ -1777,12 +1777,13 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
         if existing_dst is not None:
             print(f"restore failed: {args.name} already exists in the hot path", file=sys.stderr)
             return 1
-        # A close retention still owes for this task must not land after the restore re-opens it. The retry
-        # also refuses to close a task whose doc is hot, so a failed delete here is not a hazard.
-        if hasattr(transport, "delete"):
-            transport.delete(f"{rec.pending_v4_close_prefix(args.team)}{args.name}.json")
         if rec._crash_safe_move(transport, src, dst):
             print(f"restored {args.name} from archive/{month}/ (run reconcile to reindex)")
+            # Only now that the doc is hot is a close retention still owes for it void. Cleared before the
+            # move, a failed move would leave the task archived with its owed close gone. A retry that
+            # races this sees the hot doc and drops the marker, or re-opens after its own close.
+            if hasattr(transport, "delete"):
+                transport.delete(f"{rec.pending_v4_close_prefix(args.team)}{args.name}.json")
             # Retention closed this task on bus-v4 when it archived it, so the fold-backed reads
             # (needs-me, obligations) would never show it again without a matching open.
             from . import dual_emit
