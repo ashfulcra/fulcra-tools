@@ -145,7 +145,9 @@ proceed to request a new review or advance an existing one below.
    shard attesting that head), the PR is OPEN and not a draft, **PR head == register head == verdict head**,
    and every reported CI check passed (no checks at all is NOT READY: nothing was proven). **rc 2 NOT
    READY** lists every failed check. **rc 1 UNKNOWN**: the register, a verdict shard or the forge (`gh pr
-   view`) could not be read, so nothing is claimed; the prose ends in "retry" iff a retry can help. With
+   view`) could not be read, so nothing is claimed; the prose ends in "retry" iff a retry can help. A host with
+   no GitHub CLI is UNKNOWN without "retry": that includes a `gh` that is some other client (its `gh --version`
+   does not begin `gh version`), such as a built-in client that answers only `gh api`. With
    `--notify <merger>`, a READY result is delivered to that agent's queue as a directive keyed by the head,
    so a re-run at the same head dedupes and a new head is a new report. Merge with that exact head as the
    expected head; the verb itself never merges.

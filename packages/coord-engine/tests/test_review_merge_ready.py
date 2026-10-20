@@ -243,3 +243,78 @@ def test_a_new_head_is_a_new_report():
     _verdict(t, head=OTHER)
     assert _run(t, "pr-7", "--notify", "boss", "--from", "maint", runner=_forge(head=OTHER)) == 0
     assert len([p for p in t.store if p.startswith("team/r/task/merge-ready-pr-7-")]) == 2
+
+
+# --- the GitHub CLI probe: a `gh` on PATH is not proof (docs-QA 2026-10-20) -----------------------------------
+
+from coord_engine import forge as forge_mod
+
+BUILTIN = ("gh: this gh is a built-in GitHub client, not the GitHub CLI: `gh api <REST endpoint>` works here, "
+           "and there is no other gh command.\n")
+
+
+def _host_gh(monkeypatch, *, path="/usr/bin/gh", rc=0, out="gh version 2.62.0 (2024-11-14)\n", err="",
+             raises=False):
+    """Fake the host under the probe: what `which gh` finds and what `gh --version` prints. Any other gh call
+    is recorded so a test can prove the verb never reached the forge."""
+    calls = []
+    monkeypatch.setattr(forge_mod.shutil, "which", lambda name: path if name == "gh" else None)
+
+    def run_bounded(argv, timeout):
+        calls.append(argv)
+        if raises:
+            raise OSError("probe failed")
+        if argv[1:] == ["--version"]:
+            return rc, out, err
+        return 1, "", "unexpected gh call"
+    monkeypatch.setattr(forge_mod._transport, "run_bounded", run_bounded)
+    return calls
+
+
+@pytest.mark.parametrize("host, state", [
+    (dict(), "ok"),
+    (dict(path=None), "absent"),
+    (dict(rc=1, out="", err=BUILTIN), "other"),  # the built-in client, as measured 2026-10-20
+    (dict(out=BUILTIN), "other"),
+    (dict(rc=2, out=""), "other"),
+    (dict(raises=True), "unknown"),
+])
+def test_github_cli_probe_classifies_the_host(monkeypatch, host, state):
+    _host_gh(monkeypatch, **host)
+    assert forge_mod.github_cli()[0] == state
+
+
+def test_merge_ready_on_a_gh_that_is_not_the_github_cli_is_unknown_without_retry(capsys, monkeypatch):
+    calls = _host_gh(monkeypatch, rc=1, out="", err=BUILTIN)
+    t = FakeTransport()
+    _ready(t)
+    assert _run(t, "pr-7") == 1
+    err = capsys.readouterr().err
+    assert "not the GitHub CLI" in err and "retry" not in err, err
+    assert all(argv[1:] == ["--version"] for argv in calls), "the forge was never asked"
+
+
+def test_merge_ready_when_the_probe_does_not_finish_is_unknown_and_retryable(capsys, monkeypatch):
+    _host_gh(monkeypatch, raises=True)
+    t = FakeTransport()
+    _ready(t)
+    assert _run(t, "pr-7") == 1
+    assert capsys.readouterr().err.rstrip().endswith("retry")
+
+
+def test_merge_ready_json_names_the_missing_cli(capsys, monkeypatch):
+    _host_gh(monkeypatch, path=None)
+    t = FakeTransport()
+    _ready(t)
+    assert _run(t, "pr-7", "--json") == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "unknown" and "no `gh` on PATH" in out["reasons"][0]
+
+
+@pytest.mark.parametrize("verb", ["mirror", "feedback"])
+def test_forge_sweeps_degrade_on_a_gh_that_is_not_the_github_cli(capsys, monkeypatch, verb):
+    calls = _host_gh(monkeypatch, rc=1, out="", err=BUILTIN)
+    args = cli.build_parser().parse_args(["forge", verb, "r"])
+    assert args.func(args, FakeTransport()) == 0
+    assert "not the GitHub CLI" in capsys.readouterr().err
+    assert all(argv[1:] == ["--version"] for argv in calls), "nothing was swept"
