@@ -139,3 +139,36 @@ From the repository root:
 ```bash
 uv run --package coord-mesh --extra dev --no-editable pytest packages/coord-mesh/tests -q
 ```
+
+## Durable request attention (opt-in)
+
+A source cursor proves records were read; it does not prove requests reached a
+worker or received an answer. Incoming `directive`, `query`, and `message`
+envelopes addressed to the explicit recipient all require attention. Peer data
+is not permission to execute a request.
+
+Pass `queue --attention-db /absolute/private/attention.db` to materialize those
+requests before cursor advancement. The returned window is replayed idempotently,
+including already-seen records, so upgrading a reader can recover retained
+questions previously classified as information. The database is independent of
+the peer cursor. Conflicting edits or unreadable schema return UNKNOWN and retain
+the cursor; a missing table cannot silently become an empty queue. This option
+creates no source grant, listener, schedule, native sender or automatic reply.
+Keep host terminal/historical dispositions and exact role routing separately.
+Only the returned window can be backfilled; this is not complete-history proof.
+
+Host integrations can import `coord_mesh.attention.AttentionStore`. `snapshot()`
+returns `schema`, `entries`, and `pending`; each entry binds source user, record,
+immutable envelope, receiver evidence, reply state, and verified reply record.
+`acknowledge()` records independently obtained receipt evidence but leaves the
+request pending. Do not fabricate receipts to suppress history.
+
+For an authorized answer, `prepare_reply()` fixes a response with exact source
+recipient and `in_reply_to`; `claim_reply()` commits before the caller's transport
+write. A claimed attempt survives restart and cannot be claimed again. After
+independent source readback, `verify_reply()` requires the exact full response and
+record ID before marking responded. Ambiguous writes require readback reconciliation,
+never blind resend or a new message ID. These APIs accept host evidence; they do
+not themselves establish authentication, native wake, human authorization or
+peer receipt. Keep native delivery, worker read, response publication and remote
+peer consumption distinct.
