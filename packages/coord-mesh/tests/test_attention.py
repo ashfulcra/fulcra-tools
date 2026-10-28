@@ -6,7 +6,7 @@ from coord_mesh.attention import AttentionStore
 def note(kind='message'):
     return {'v':1,'mid':'synthetic-message','to_user':'synthetic-recipient','to':'worker','kind':kind,'slug':'synthetic-question','body':'Is a directory available?'}
 
-@pytest.mark.parametrize('kind', ['message','query','directive'])
+@pytest.mark.parametrize('kind', ['message','query','directive','request'])
 def test_read_cursor_does_not_dispose_of_a_request(tmp_path, kind):
     p=tmp_path/'attention.db'
     with AttentionStore(p) as s:

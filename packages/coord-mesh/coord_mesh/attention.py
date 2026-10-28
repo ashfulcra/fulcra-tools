@@ -9,7 +9,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-REQUEST_KINDS = frozenset(('directive', 'query', 'message'))
+REQUEST_KINDS = frozenset(('directive', 'query', 'message', 'request'))
 
 
 def canonical(value):
