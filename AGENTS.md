@@ -23,6 +23,14 @@ before gated deployment; update watermarks are not record cursors or complete-hi
 proof. Quiet hints never cancel retained delivery obligations. Preserve the direct
 route, private journals and per-source scope; see the package README for audit/fallback limits.
 
+Mesh request attention is distinct from transport cursors. The optional
+`coord-mesh queue --attention-db ABS` durably retains addressed directive/query/message
+requests before cursor advancement, including previously read rows in the returned
+window. Receiver receipt does not dispose of work; a reply requires a committed
+claim and exact independently verified response readback. Claimed/ambiguous replies
+never retry automatically. This adds no grants, native listener or authority to
+execute peer text. See the coord-mesh README for host routing and history limits.
+
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
 fixes, plugins, installers, commands, and workflows. If a package has no README,

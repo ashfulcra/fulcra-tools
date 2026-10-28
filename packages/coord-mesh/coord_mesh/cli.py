@@ -16,10 +16,12 @@ rc 3 exists because `mesh queue` reporting "no messages" when it could not read
 a peer is the worst failure this package could have.
 """
 import argparse
+import sqlite3
 import sys
 from typing import Optional
 
 from . import envelope, peers, safety, transport, wire
+from .attention import AttentionStore
 
 RC_OK = 0
 RC_REFUSED = 2
@@ -290,6 +292,21 @@ def cmd_queue(args) -> int:
         ids = [wire.record_id(row) for row in ordered]
         keys = [wire.sort_key(row) for row in ordered]
 
+        # Materialize attention before the read cursor can advance. Replay the
+        # returned window into the idempotent ledger, including already-seen
+        # records: a prior cursor says read, never answered or acted on.
+        if getattr(args, 'attention_db', None):
+            try:
+                with AttentionStore(args.attention_db) as attention:
+                    for row in ordered:
+                        note = envelope.parse(wire.note_text(row))
+                        if note:
+                            attention.ingest(uid, wire.record_id(row), note, args.me)
+            except (OSError, ValueError, sqlite3.Error):
+                print('mesh attention UNKNOWN; retaining cursor and pending work', file=sys.stderr)
+                degraded.append(uid)
+                continue
+
         # A row is NEW when it is later than the watermark, or shares the
         # watermark instant and is not in the ledger of ids seen at it. This
         # never compares ids for ORDER — only for membership — because id order
@@ -372,6 +389,9 @@ def cmd_queue(args) -> int:
         print(f"mesh queue: {shown} event(s) shown, but {len(degraded)} peer(s) "
               f"UNREADABLE — this is UNKNOWN, not empty", file=sys.stderr)
         return RC_UNKNOWN
+    if getattr(args, "attention_db", None):
+        with AttentionStore(args.attention_db) as attention:
+            print(f"mesh attention: {len(attention.pending())} retained pending request(s)")
     print(f"mesh queue: {shown} event(s)")
     return RC_OK
 
@@ -449,6 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--space", default="default")
     q.add_argument("--window", default="1 day")
     q.add_argument("--no-advance", action="store_true")
+    q.add_argument("--attention-db", help="opt-in durable request/reply ledger; does not send or grant authority")
     q.set_defaults(fn=cmd_queue)
 
     d = sub.add_parser("doctor", help="per-peer health; loud on UNKNOWN")
