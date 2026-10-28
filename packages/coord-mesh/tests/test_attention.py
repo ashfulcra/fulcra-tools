@@ -104,3 +104,34 @@ def test_reply_read_check_write_holds_writer_lock(tmp_path, operation):
             s.prepare_reply('synthetic-peer','synthetic-record',reply)
         else:
             s.verify_reply('synthetic-peer','synthetic-record',reply,'synthetic-outbox')
+
+
+def test_existing_legacy_ack_reconciles_without_resend(tmp_path):
+    with AttentionStore(tmp_path/'attention.db') as s:
+        s.ingest('synthetic-peer','synthetic-record',note('request'),'synthetic-recipient')
+        actual={'v':1,'mid':'legacy-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','body':'In reply to synthetic-message: Received.'}
+        s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','independent authorized source readback')
+        s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','independent authorized source readback')
+        assert s.pending()==[]
+        assert s.snapshot()['entries'][0]['reply_record_id']=='legacy-record'
+
+
+@pytest.mark.parametrize('change',[{'to_user':'wrong-peer'},{'slug':'other-ack'},{'body':'Unrelated receipt'},{'kind':'request'}])
+def test_legacy_ack_cannot_close_an_unrelated_request(tmp_path,change):
+    with AttentionStore(tmp_path/'attention.db') as s:
+        s.ingest('synthetic-peer','synthetic-record',note('request'),'synthetic-recipient')
+        actual={'v':1,'mid':'legacy-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','body':'In reply to synthetic-message: Received.',**change}
+        with pytest.raises(ValueError):s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','source readback')
+        assert len(s.pending())==1
+
+
+def test_legacy_ack_cannot_overwrite_an_uncertain_send(tmp_path):
+    with AttentionStore(tmp_path/'attention.db') as s:
+        s.ingest('synthetic-peer','synthetic-record',note('request'),'synthetic-recipient')
+        reply={'v':1,'mid':'pending-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','in_reply_to':'synthetic-message','body':'Pending answer'}
+        s.prepare_reply('synthetic-peer','synthetic-record',reply)
+        s.claim_reply('synthetic-peer','synthetic-record')
+        actual={**reply,'mid':'legacy-mid','body':'In reply to synthetic-message: Received.'}
+        with pytest.raises(ValueError,match='uncertain'):
+            s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','source readback')
+        assert s.pending()[0]['reply_state']=='claimed'

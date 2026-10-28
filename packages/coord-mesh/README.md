@@ -172,3 +172,5 @@ never blind resend or a new message ID. These APIs accept host evidence; they do
 not themselves establish authentication, native wake, human authorization or
 peer receipt. Keep native delivery, worker read, response publication and remote
 peer consumption distinct.
+
+Legacy acknowledgments may be source-reconciled without sending again through `verify_legacy_reply`: exact source recipient, response kind, incoming slug plus `-ack`, and body prefix `In reply to <original mid>:` must all match. The caller supplies independently read original record ID and receipt evidence. No synthetic `in_reply_to` is added; uncertain reply claims cannot be overwritten.

@@ -128,6 +128,24 @@ class AttentionStore:
                 raise ValueError('conflicting reply readback')
             self.db.execute("UPDATE attention SET state='responded',reply_state='verified',reply_record_id=? WHERE source_user_id=? AND record_id=?", (reply_record_id, peer, record_id))
 
+    def verify_legacy_reply(self, peer, record_id, actual_envelope, reply_record_id, evidence):
+        """Reconcile a source-read old ACK with an exact textual message anchor.
+
+        No send or invented in_reply_to field. Never replace a pending send claim.
+        """
+        if not isinstance(actual_envelope, dict) or not reply_record_id or not isinstance(evidence, str) or not evidence:
+            raise ValueError('independent legacy reply source evidence required')
+        with self._write():
+            row = self._entry(peer, record_id)
+            incoming = json.loads(row['envelope_json'])
+            mid = incoming.get('mid')
+            if not mid or actual_envelope.get('kind') != 'response' or not actual_envelope.get('mid') or actual_envelope.get('to_user') != peer or actual_envelope.get('slug') != incoming.get('slug', '') + '-ack' or not str(actual_envelope.get('body', '')).startswith('In reply to ' + mid + ':'):
+                raise ValueError('legacy reply binding mismatch')
+            text = canonical(actual_envelope)
+            if row['reply_json'] and (row['reply_state'] != 'verified' or row['reply_json'] != text or row['reply_record_id'] != reply_record_id):
+                raise ValueError('conflicting or uncertain reply; reconciliation required')
+            self.db.execute("UPDATE attention SET state='responded',receiver_evidence=?,reply_json=?,reply_state='verified',reply_record_id=? WHERE source_user_id=? AND record_id=?", (evidence, text, reply_record_id, peer, record_id))
+
     def snapshot(self):
         entries = []
         for row in self.db.execute('SELECT * FROM attention ORDER BY source_user_id,record_id'):
