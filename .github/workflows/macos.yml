@@ -1,83 +1,516 @@
-name: macOS CI
-
-# Runs the full Python test suite on macOS so the macOS-only code paths
-# (PyObjC menubar, UserNotifications bundle guard, fulcra-CLI resolution
-# under launchd's restricted PATH) are exercised. The two regressions the
-# other-machine onboarding session hit (`bundleProxyForCurrentProcess is
-# nil` crash, sign-in path resolving `shutil.which("fulcra")` to None) both
-# merged because nothing tested those paths on a clean macOS runner.
-#
-# COST: macOS runners bill at 10x on this repo, and this job runs the
-# WHOLE workspace (incl. PyObjC, which can't even install on Linux), so it
-# cannot simply move to ubuntu. To stop draining the Actions free tier on
-# changes with no macOS-specific content, the triggers are PATH-FILTERED to
-# the files that actually carry macOS behaviour: the menubar package, coord
-# engine and automation adapters, plus this
-# workflow and the dependency manifests (a dep bump can break the macOS
-# build). A change outside this set skips this job; `workflow_dispatch`
-# reruns it on demand. If you add a new macOS-specific path, list it in BOTH
-# the push and pull_request blocks below.
-
+name: Collect app assembly QA
 on:
-  push:
-    branches: [main]
-    paths:
-      # The job runs `pytest packages/` — the WHOLE tree — so the trigger, not
-      # the run step, is what decides whether a package's tests protect a PR.
-      # Enumerating packages here is what let #523 delete a tested function with
-      # nothing red: fulcra-common's tests ran many times a day, just never on
-      # the PR that changed it. `packages/**` keeps trigger and coverage in step
-      # by construction; test_ci_trigger_coverage.py fails if they drift apart.
-      - 'packages/**'
-      - 'skills/fulcra-agent-automation/**'
-      - '.github/workflows/macos.yml'
-      - 'pyproject.toml'
-      - 'uv.lock'
-  pull_request:
-    branches: [main]
-    paths:
-      # The job runs `pytest packages/` — the WHOLE tree — so the trigger, not
-      # the run step, is what decides whether a package's tests protect a PR.
-      # Enumerating packages here is what let #523 delete a tested function with
-      # nothing red: fulcra-common's tests ran many times a day, just never on
-      # the PR that changed it. `packages/**` keeps trigger and coverage in step
-      # by construction; test_ci_trigger_coverage.py fails if they drift apart.
-      - 'packages/**'
-      - 'skills/fulcra-agent-automation/**'
-      - '.github/workflows/macos.yml'
-      - 'pyproject.toml'
-      - 'uv.lock'
   workflow_dispatch:
-
+permissions:
+  contents: read
+concurrency:
+  group: collect-app-assembly-qa-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  test:
-    runs-on: macos-latest
-    timeout-minutes: 30
-
+  assemble:
+    runs-on: macos-15
+    timeout-minutes: 55
+    env:
+      UV_PYTHON: 3.13.14
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_INPUT: '1'
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        # Pinned by series, not @latest, so a uv release can't silently
-        # break CI (or hide a real failure under a tooling change). Must be
-        # recent enough to build the workspace's git deps: fulcra-api uses the
-        # uv_build backend (uv_build>=0.11.3) and `default-groups = "all"`,
-        # neither of which the old 0.5.x pin could parse — so `uv sync` failed
-        # with a TOML error before any test ran, and EVERY push went red.
-        uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          version: "0.11.x"
-          enable-cache: true
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39
+        with:
+          version: '0.11.33'
+          enable-cache: false
+      - name: Pin actual Python and empty-state paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          uv python install 3.13.14
+          PY313="$(uv python find 3.13.14)"
+          mkdir -p "$RUNNER_TEMP/python313-bin" "$RUNNER_TEMP/assembly-evidence" "$RUNNER_TEMP/empty-collect-profile" "$RUNNER_TEMP/briefcase"
+          ln -s "$PY313" "$RUNNER_TEMP/python313-bin/python3"
+          echo "$RUNNER_TEMP/python313-bin" >> "$GITHUB_PATH"
+          echo "FULCRA_COLLECT_HOME=$RUNNER_TEMP/empty-collect-profile" >> "$GITHUB_ENV"
+          echo "BRIEFCASE_HOME=$RUNNER_TEMP/briefcase" >> "$GITHUB_ENV"
+          echo "PIP_CONSTRAINT=$RUNNER_TEMP/assembly-evidence/runtime-constraints.txt" >> "$GITHUB_ENV"
+          echo "UV_BUILD_CONSTRAINT=$RUNNER_TEMP/assembly-evidence/build-constraints.txt" >> "$GITHUB_ENV"
+          "$PY313" -c 'import sys; assert sys.version_info[:3] == (3,13,14)'
+          uv --version > "$RUNNER_TEMP/assembly-evidence/uv-version.txt"
+          sw_vers > "$RUNNER_TEMP/assembly-evidence/macos-version.txt"
+          xcodebuild -version > "$RUNNER_TEMP/assembly-evidence/xcode-version.txt"
+      - name: Materialize QA-only checks and literal adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info[:3] == (3,13,14)'
+          cat > "$RUNNER_TEMP/assembly-qa.py" <<'PY'
+          """CI-only evidence checks. Source preparation: never executed locally."""
+          from pathlib import Path
+          import difflib, hashlib, importlib.metadata as md, json, os, re, subprocess, sys, tomllib, zipfile
+          Q2 = 'b42470cc4eb67d438d3ea858e26ef9421f7b1c47'
+          ROOT = Path.cwd()
+          OUT = Path(os.environ['RUNNER_TEMP']) / 'assembly-evidence'
+          APP = ROOT / 'packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app'
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def save(name, data):
+              OUT.mkdir(exist_ok=True)
+              (OUT/name).write_text(json.dumps(data, indent=2, sort_keys=True)+'\n')
+          def git(*args): return subprocess.check_output(['git', *args])
+          def norm(s): return re.sub(r'[-_.]+', '-', s).lower()
+          def manifest(base):
+              result = []
+              for p in sorted(base.rglob('*')):
+                  if p.is_symlink(): result.append([str(p.relative_to(base)), 'symlink', str(p.readlink())])
+                  elif p.is_file(): result.append([str(p.relative_to(base)), oct(p.stat().st_mode & 0o777), p.stat().st_size, sha(p.read_bytes())])
+              return result
+          def declared_local_version(package):
+              import ast
+              source=package.get('source',{})
+              assert set(source)=={'editable'} and isinstance(source['editable'],str), ('MISSING_NONEDITABLE_VERSION',package['name'])
+              def local_path(base, relative):
+                  assert isinstance(relative,str) and relative
+                  rel=Path(relative)
+                  assert not rel.is_absolute() and '..' not in rel.parts, ('VERSION_PATH_ESCAPE',relative)
+                  target=base/rel
+                  assert target.resolve().is_relative_to(base.resolve()), ('VERSION_PATH_ESCAPE',relative)
+                  current=base
+                  for part in rel.parts:
+                      current=current/part
+                      assert not current.is_symlink(), ('VERSION_SYMLINK',relative)
+                  return target
+              project_root=local_path(ROOT,source['editable'])
+              metadata=tomllib.loads(local_path(project_root,'pyproject.toml').read_text())
+              project=metadata['project']
+              assert norm(project['name'])==norm(package['name']) and project.get('dynamic')==['version'] and 'version' not in project, 'Unexpected version declaration'
+              assert metadata['build-system']['build-backend']=='hatchling.build'
+              declaration=metadata['tool']['hatch']['version']
+              assert set(declaration)=={'path'}, 'Unsupported Hatch version source'
+              version_file=local_path(project_root,declaration['path'])
+              assert version_file.stat().st_size<=65536, 'Unexpected version source size'
+              tree=ast.parse(version_file.read_text())
+              stores=[node for node in ast.walk(tree)if isinstance(node,ast.Name)and node.id=='__version__' and isinstance(node.ctx,ast.Store)]
+              assignments=[node for node in tree.body if isinstance(node,ast.Assign)and len(node.targets)==1 and isinstance(node.targets[0],ast.Name)and node.targets[0].id=='__version__']
+              assert len(stores)==len(assignments)==1, 'Version must have one top-level assignment'
+              value=assignments[0].value
+              assert isinstance(value,ast.Constant) and isinstance(value.value,str) and re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',value.value), 'Version must be a plain numeric string literal'
+              return value.value
 
-      - name: Set up Python (matches .python-version)
-        run: uv python install
+          def locked():
+              result = {}
+              for original in tomllib.loads(Path('uv.lock').read_text())['package']:
+                  p=dict(original)
+                  n = norm(p['name'])
+                  if n in result: raise RuntimeError('Ambiguous lock version: '+n)
+                  if 'version' not in p:p['version']=declared_local_version(p)
+                  result[n] = p
+              return result
+          def constraint_text(lock):
+              return '\n'.join(f"{p['name']}=={p['version']}" for p in lock.values())+'\n'
+          def arm64_slice(data):
+              import struct
+              if data[:4] == b'\xca\xfe\xba\xbe':
+                  count=struct.unpack_from('>I',data,4)[0]; assert 0<count<=16
+                  choices=[]
+                  for i in range(count):
+                      cpu,sub,offset,size,align=struct.unpack_from('>5I',data,8+20*i)
+                      assert offset+size<=len(data)
+                      if cpu==0x100000c: choices.append(data[offset:offset+size])
+                  assert len(choices)==1
+                  return choices[0]
+              return data
 
-      - name: Install workspace with all extras (dev + macos)
-        # Bare `uv sync` is NOT enough — pytest is in each package's `dev`
-        # extra and PyObjC/rumps is in `macos`. AGENTS.md documents this.
-        run: uv sync --all-packages --all-extras
+          def signing_form(data):
+              """Ignore only signature command/blob and LINKEDIT signature-sized bounds."""
+              import struct
+              if data[:4]==b'\xca\xfe\xba\xbe':
+                  count=struct.unpack_from('>I',data,4)[0];assert 0<count<=16
+                  parts=[];seen=set()
+                  for i in range(count):
+                      cpu,sub,offset,length,align=struct.unpack_from('>5I',data,8+20*i)
+                      assert offset+length<=len(data) and (cpu,sub) not in seen
+                      seen.add((cpu,sub));part=signing_form(data[offset:offset+length])
+                      parts.append(struct.pack('>3I',cpu,sub,len(part))+part)
+                  return b'FAT-SIGNED-FORMS'+b''.join(parts)
+              assert data[:4]==b'\xcf\xfa\xed\xfe', 'Unsupported Mach-O form; fail closed'
+              header=list(struct.unpack_from('<8I',data)); assert header[1] in (0x100000c,0x1000007)
+              count,size=header[4:6];assert count<=512 and 32+size<=len(data)
+              pos=32; commands=[];signature=None;first_section=len(data)
+              for _ in range(count):
+                  cmd,n=struct.unpack_from('<2I',data,pos);assert n>=8 and pos+n<=32+size
+                  item=bytearray(data[pos:pos+n])
+                  if cmd==0x1d:
+                      assert n==16 and signature is None
+                      off,length=struct.unpack_from('<2I',item,8)
+                      assert off+length==len(data) and off>=32+size
+                      signature=(off,length)
+                  else:
+                      if cmd==0x19:
+                          assert n>=72
+                          sections=struct.unpack_from('<I',item,64)[0];assert n==72+80*sections
+                          for k in range(sections):
+                              offset=struct.unpack_from('<I',item,72+80*k+48)[0]
+                              if offset: first_section=min(first_section,offset)
+                          if bytes(item[8:24]).rstrip(b'\0')==b'__LINKEDIT':
+                              # Only these two size fields cover signature growth.
+                              item[32:40]=b'\0'*8;item[48:56]=b'\0'*8
+                      commands.append(bytes(item))
+                  pos+=n
+              assert pos==32+size and 32+size<=first_section<=len(data)
+              assert not any(data[pos:first_section]), 'Nonzero header padding'
+              end=signature[0] if signature else len(data)
+              assert first_section<=end
+              header[4]=len(commands);header[5]=sum(map(len,commands))
+              return struct.pack('<8I',*header)+b''.join(commands)+data[first_section:end]
 
-      - name: Run the full test suite
-        # Must NOT hit the network. ~1500 tests, ~20s on a clean runner.
-        # Collect the complete migration QA failure inventory in one run.
-        run: uv run --all-packages --all-extras --no-editable pytest packages/ -q
+          def payload_equal(before, after, phase):
+              if before==after:return True
+              if phase=='raw':return arm64_slice(before)==after
+              if phase=='signed':
+                  try:return signing_form(before)==signing_form(after)
+                  except (AssertionError,ValueError,IndexError):return False
+              return False
+
+          def required_inputs(archives, selected, consumed):
+              assert set(selected)=={'support','stub'} and set(consumed)==set(selected)
+              for role,name in selected.items():
+                  assert name in archives and archives[name]==consumed[role], ('MISSING_OR_UNBOUND_INPUT',role,name)
+
+          def verify_inventory(expected, actual):
+              assert set(expected)==set(actual), ('INVENTORY_SET_DRIFT',sorted(set(expected)^set(actual)))
+              for name,value in expected.items():assert actual[name]==value, ('PAYLOAD_DRIFT',name)
+
+          def wheel_target(member):
+              parts=member.split('/');assert parts and '..' not in parts and not member.startswith('/')
+              if parts[0].endswith('.data'):
+                  assert len(parts)>=3 and parts[1] in ('purelib','platlib','data','scripts','headers'), ('UNKNOWN_WHEEL_SCHEME',member)
+                  assert parts[1] in ('purelib','platlib','data','scripts'), 'Header relocation unsupported; fail closed'
+                  return '/'.join((['bin'] if parts[1]=='scripts' else [])+parts[2:])
+              return member
+
+          def require_metadata(expected, actual):
+              assert set(expected)==set(actual), 'Missing or unexpected distribution metadata'
+              for name,(version,files) in expected.items():
+                  assert actual[name][0]==version
+                  verify_inventory(files,actual[name][1])
+
+          def deleted_by_sanitizer(name):
+              p=Path(name)
+              return 'tests' in p.parts or '__pycache__' in p.parts or p.suffix in ('.pyc','.pyo') or p.parts[0] in ('bin','PyObjCTest','pytest','_pytest','.pytest_cache') or name.startswith('pyarrow/_pyarrow_cpp_tests.') or p.parts[0].startswith(('pytest-','pytest_mock-')) and p.parts[0].endswith('.dist-info')
+
+          def check_raw_bundle():
+              pkgs=APP/'Contents/Resources/app_packages';expected={};expected_meta={}
+              for w in sorted(Path('wheelhouse').glob('*.whl')):
+                  with zipfile.ZipFile(w) as z:
+                      metadata=next(n for n in z.namelist()if n.endswith('.dist-info/METADATA'))
+                      text=z.read(metadata).decode();name=norm(re.search(r'^Name: (.+)$',text,re.M)[1]);version=re.search(r'^Version: (.+)$',text,re.M)[1]
+                      assert name in locked() and locked()[name]['version']==version
+                      meta={}
+                      for member in z.namelist():
+                          if member.endswith('/'):continue
+                          dest=wheel_target(member)
+                          if deleted_by_sanitizer(dest):continue
+                          if '.dist-info/' in dest:
+                              leaf=dest.split('/',1)[1]
+                              if leaf in ('RECORD','INSTALLER'):continue
+                              meta[leaf]=z.read(member)
+                          assert dest not in expected or expected[dest]==z.read(member), ('WHEEL_COLLISION',dest)
+                          expected[dest]=z.read(member)
+                      if not deleted_by_sanitizer(metadata):expected_meta[name]=(version,meta)
+              for name,data in expected.items():
+                  if name.endswith(('.dist-info/RECORD','.dist-info/INSTALLER')):continue
+                  target=pkgs/name;assert target.is_file() and not target.is_symlink(), ('MISSING_WHEEL_PAYLOAD',name)
+                  assert payload_equal(data,target.read_bytes(),'raw'), ('RAW_WHEEL_DRIFT',name)
+              actual_files={str(p.relative_to(pkgs))for p in pkgs.rglob('*')if p.is_file()}
+              generated={n for n in actual_files if '.dist-info/' in n and n.split('/',1)[1] in ('RECORD','INSTALLER','REQUESTED','direct_url.json')}
+              assert actual_files-generated==set(expected), ('UNEXPECTED_OR_MISSING_WHEEL_FILES',sorted((actual_files-generated)^set(expected)))
+              actual_meta={}
+              for d in md.distributions(path=[str(pkgs)]):
+                  base=Path(d._path);files={str(p.relative_to(base)):p.read_bytes()for p in base.rglob('*')if p.is_file() and str(p.relative_to(base)) not in ('RECORD','INSTALLER','REQUESTED','direct_url.json')}
+                  # pip-generated metadata are explicit, validated separately rather than exempting directory.
+                  assert (base/'RECORD').is_file() and (base/'INSTALLER').read_text().strip()=='pip'
+                  if (base/'REQUESTED').exists():assert (base/'REQUESTED').read_bytes()==b''
+                  if (base/'direct_url.json').exists():
+                      direct=json.loads((base/'direct_url.json').read_text());assert direct.get('url','').startswith('file:')
+                  actual_meta[norm(d.metadata['Name'])]=(d.version,files)
+              require_metadata(expected_meta,actual_meta)
+              prefix='packages/menubar/fulcra_menubar/'
+              names=git('ls-tree','-r','--name-only',Q2,'--',prefix).decode().splitlines()
+              source={n[len(prefix):]:git('show',Q2+':'+n)for n in names}
+              app_source=APP/'Contents/Resources/app/fulcra_menubar'
+              actual={str(p.relative_to(app_source)):p.read_bytes()for p in app_source.rglob('*')if p.is_file()}
+              verify_inventory(source,actual)
+              save('raw-wheel-source-verification.json',{'expected_files':sorted(expected),'source_assets':sorted(source),'distributions':sorted(expected_meta),'allowed_transform':'create: fat universal Mach-O => exact arm64 slice only'})
+
+          def snapshot_signing():
+              state={}
+              for p in APP.rglob('*'):
+                  rel=str(p.relative_to(APP))
+                  if p.is_symlink():state[rel]={'link':str(p.readlink())};continue
+                  if not p.is_file():continue
+                  data=p.read_bytes();entry={'sha256':sha(data),'mode':p.stat().st_mode&0o777}
+                  if arm64_slice(data)[:4]==b'\xcf\xfa\xed\xfe':
+                      selected=json.loads((OUT/'selected-inputs.json').read_text())
+                      signing_data=arm64_slice(data) if rel==selected['stub_installed'] else data
+                      entry['signing_form']=sha(signing_form(signing_data))
+                  state[rel]=entry
+              return state
+
+          def check_signed_bundle():
+              before=json.loads((OUT/'presign-manifest.json').read_text());after=snapshot_signing()
+              stub=json.loads((OUT/'selected-inputs.json').read_text())['stub_installed']
+              renamed='Contents/MacOS/Fulcra Collect'
+              if stub!=renamed:assert renamed not in before;before[renamed]=before.pop(stub)
+              for name,entry in before.items():
+                  if name.endswith('/_CodeSignature/CodeResources'):continue
+                  assert name in after, ('SIGNED_MISSING',name)
+                  if entry==after[name]:continue
+                  assert 'signing_form' in entry and entry.get('signing_form')==after[name].get('signing_form') and entry.get('mode')==after[name].get('mode'), ('UNACCOUNTED_SIGNING_CHANGE',name)
+              for name in set(after)-set(before):assert name.endswith('/_CodeSignature/CodeResources'), ('SIGNED_EXTRA',name)
+              save('signing-transformations.json',{'changed':[n for n in before if before[n]!=after.get(n)],'added':sorted(set(after)-set(before)),'stub_rename':[stub,renamed],'rule':'arm64 slice plus only LC_CODE_SIGNATURE/signature blob and __LINKEDIT size fields; unchanged bytes exact'})
+              save('bundle-manifest.json',manifest(APP))
+
+          def verify_template_identity(record, expected_path):
+              assert record['path']==expected_path and record['regular_checkout'] is True, 'TEMPLATE_PATH_UNBOUND'
+              assert record['origin']=='https://github.com/beeware/briefcase-macOS-app-template.git', 'TEMPLATE_ORIGIN_DRIFT'
+              assert record['status']=='', 'TEMPLATE_CHECKOUT_DIRTY'
+              assert record['head']=='10d36c8512e92d3ee4b3be2579a47300ac8f844d', 'TEMPLATE_HEAD_DRIFT'
+              assert record['briefcase_toml_sha256']=='bc848e807e203269e22d6c4616344f2a0bf3433b195114206b087d393221dc61', 'TEMPLATE_SOURCE_DRIFT'
+
+          def verify_selected_template():
+              folder=Path(os.environ['BRIEFCASE_HOME'])/'qa-template-10d36c8512e92d3ee4b3be2579a47300ac8f844d'
+              assert folder.is_absolute() and folder.resolve()==folder and folder.is_dir(), 'TEMPLATE_PATH_INVALID'
+              assert (folder/'.git').is_dir() and not any(p.is_symlink()for p in folder.rglob('*')), 'TEMPLATE_SYMLINK_OR_NONCHECKOUT'
+              def query(*args):
+                  return subprocess.check_output(['git','-c','core.hooksPath=/dev/null','-C',str(folder),*args]).decode().strip()
+              template=folder/'{{ cookiecutter.format }}'/'briefcase.toml'
+              assert template.is_file() and (folder/'cookiecutter.json').is_file(), 'TEMPLATE_SOURCE_MISSING'
+              record={'path':str(folder),'origin':query('remote','get-url','origin'),'head':query('rev-parse','HEAD'),'briefcase_toml_sha256':sha(template.read_bytes()),'status':query('status','--porcelain=v1','--untracked-files=all'),'regular_checkout':True}
+              verify_template_identity(record,str(folder))
+              return record
+
+          def bind_selected_inputs():
+              import tarfile
+              selected={'support':'Python-3.13-macOS-support.b10.tar.gz','stub':'GUI-Stub-3.13-b12.zip'}
+              root=APP.parent;config=tomllib.loads((root/'briefcase.toml').read_text())['paths']
+              assert config['support_revision']==10 and config['stub_binary_revision']==12 and config['runtime_path']=='Python.xcframework/macos-arm64_x86_64/Python.framework'
+              caches=[Path(os.environ['BRIEFCASE_HOME']),Path.home()/'Library/Caches/org.beeware.briefcase',Path.home()/'.cache/briefcase']
+              save('template-source-provenance.json',verify_selected_template())
+              archives={};paths={}
+              for role,name in selected.items():
+                  matches=[p for c in caches if c.exists()for p in c.rglob(name)if p.is_file()]
+                  assert len(matches)==1, ('SELECTED_INPUT_MISSING_OR_AMBIGUOUS',role,name)
+                  paths[role]=matches[0];archives[name]=matches[0].read_bytes()
+              # Bind stub bytes to its exact unpacked pre-build location, no arbitrary cache match.
+              with zipfile.ZipFile(paths['stub'])as z:
+                  members=[m for m in z.namelist()if not m.endswith('/')];assert len(members)==1
+                  m=members[0];assert Path(m).name==m
+                  installed=APP/'Contents/MacOS'/m
+                  assert installed.is_file() and installed.read_bytes()==z.read(m)
+              # Bind selected support framework regular-file bytes to the extracted build input.
+              support_root=root/'support';runtime=config['runtime_path'];checked=[]
+              with tarfile.open(paths['support'],'r:gz')as tar:
+                  for member in tar:
+                      if not member.isfile() or not member.name.startswith(runtime+'/'):continue
+                      rel=member.name
+                      if any(part in ('Headers','include','pkgconfig')or part.startswith('config-')for part in Path(rel).parts):continue
+                      f=support_root/rel;assert f.is_file() and f.read_bytes()==tar.extractfile(member).read(), ('SUPPORT_NOT_CONSUMED',rel)
+                      checked.append(rel)
+              assert checked
+              required_inputs(archives,selected,{role:paths[role].read_bytes()for role in selected})
+              save('selected-inputs.json',{'support':{'name':selected['support'],'sha256':sha(archives[selected['support']]),'consumed_files':checked},'stub':{'name':selected['stub'],'sha256':sha(archives[selected['stub']]),'member':m,'member_sha256':sha(installed.read_bytes()),'form':'downloaded ZIP precompiled GUI stub; not locally compiled'},'stub_installed':str(installed.relative_to(APP)),'template':'10d36c8512e92d3ee4b3be2579a47300ac8f844d','build_tool':'briefcase==0.3.25'})
+
+          def main():
+              if sys.argv[1] == 'prepare':
+                  assert git('rev-parse','HEAD^').decode().strip() == Q2, 'Require one new QA commit on public Q2'
+                  assert git('diff','--name-only',Q2,'HEAD').decode().splitlines() == ['.github/workflows/macos.yml']
+                  save('source-tree.json', {'baseline':Q2, 'qa_head':git('rev-parse','HEAD').decode().strip(), 'tree':git('ls-tree','-r',Q2).decode()})
+                  lock = locked()
+                  assert lock['fulcra-api']['version'] == '0.1.56'
+                  constraints = constraint_text(lock)
+                  (OUT/'runtime-constraints.txt').write_text(constraints)
+                  (OUT/'build-constraints.txt').write_text('hatchling==1.33.0\n')
+                  p = Path('packages/menubar/scripts/build_macos_app.sh')
+                  old = p.read_text()
+                  assert sha(p.read_bytes()) == '4620eceaa52ddbeb944357aa195bcdb78abc6b4480bdbd7a9ebea4a6adc685e7'
+                  replacements = {
+                      'cd "$REPO/packages/menubar"': 'python3 "$RUNNER_TEMP/assembly-qa.py" prefetch\ncd "$REPO/packages/menubar"',
+                      'uvx pip wheel "rumps>=0.4" sgmllib3k': 'uvx --from pip==26.2.2 pip wheel "rumps==0.4.0" "sgmllib3k==1.0.0"',
+                      'uvx briefcase create macOS': 'PIP_NO_INDEX=1 uvx --with pip==26.2.2 --from briefcase==0.3.25 briefcase create macOS --no-input --config \'template_branch="10d36c8512e92d3ee4b3be2579a47300ac8f844d"\' --config "template=\\"${BRIEFCASE_HOME}/qa-template-10d36c8512e92d3ee4b3be2579a47300ac8f844d\\""',
+                      'PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase build macOS': '( cd "$REPO" && python3 "$RUNNER_TEMP/assembly-qa.py" presign )\nPIP_FIND_LINKS="$WHEELHOUSE" uvx --with pip==26.2.2 --from briefcase==0.3.25 briefcase build macOS --no-input',
+                  }
+                  new = old
+                  for a,b in replacements.items():
+                      assert new.count(a) == 1, a
+                      new = new.replace(a,b)
+                  (OUT/'build-adapter.diff').write_text(''.join(difflib.unified_diff(old.splitlines(True),new.splitlines(True),fromfile=str(p),tofile=str(p))))
+                  p.write_text(new)
+                  save('recipe.json', {'original_sha256':sha(old.encode()),'adapted_sha256':sha(new.encode()),'replacements':replacements})
+                  save('host.json', {'python':sys.version,'executable':sys.executable,'uname':os.uname()})
+              elif sys.argv[1] == 'template-check':
+                  save('template-checkout-provenance.json',verify_selected_template())
+              elif sys.argv[1] == 'prefetch':
+                  lock = locked()
+                  before = {p.name:sha(p.read_bytes()) for p in Path('wheelhouse').glob('*.whl')}
+                  save('locally-built-wheel-hashes.json', before)
+                  requirements = tomllib.loads(Path('packages/menubar/pyproject.toml').read_text())['tool']['briefcase']['app']['fulcra-menubar']['requires']
+                  subprocess.run(['uvx','--from','pip==26.2.2','pip','download','--only-binary=:all:','--find-links',str(ROOT/'wheelhouse'),'--dest',str(ROOT/'wheelhouse'),*requirements],check=True)
+                  for name,digest in before.items(): assert sha((Path('wheelhouse')/name).read_bytes())==digest, ('LOCAL_WHEEL_REPLACED',name)
+                  approved = {a['hash'].split(':',1)[1] for p in lock.values() for a in p.get('wheels',[])}
+                  fetched=[]
+                  for wheel in Path('wheelhouse').glob('*.whl'):
+                      if wheel.name not in before:
+                          digest=sha(wheel.read_bytes())
+                          assert digest in approved, ('UNTESTED_REGISTRY_WHEEL',wheel.name)
+                          fetched.append({'filename':wheel.name,'sha256':digest})
+                  save('registry-wheel-lock-hashes.json',fetched)
+                  save('template-precreate-provenance.json',verify_selected_template())
+              elif sys.argv[1] == 'wheels':
+                  lock = locked()
+                  found = []
+                  for w in sorted(Path('wheelhouse').glob('*.whl')):
+                      with zipfile.ZipFile(w) as z:
+                          name = next(n for n in z.namelist() if n.endswith('.dist-info/METADATA'))
+                          text = z.read(name).decode()
+                          dist = re.search(r'^Name: (.+)$',text,re.M)[1]
+                          version = re.search(r'^Version: (.+)$',text,re.M)[1]
+                          assert norm(dist) in lock and lock[norm(dist)]['version'] == version, (dist,version)
+                          found.append({'wheel':w.name,'sha256':sha(w.read_bytes()),'name':dist,'version':version})
+                  assert found, 'No built wheels'
+                  save('workspace-and-sdist-wheels.json',found)
+              elif sys.argv[1] == 'presign':
+                  check_raw_bundle()
+                  bind_selected_inputs()
+                  save('presign-manifest.json',snapshot_signing())
+              elif sys.argv[1] == 'bundle':
+                  check_signed_bundle()
+              elif sys.argv[1] == 'privacy':
+                  # The canonical sanitizer checks builder home. Also fail for ephemeral build
+                  # roots in any file or link. This is a byte-pattern check, not a secret scanner.
+                  markers=[str(Path.home()),str(ROOT),os.environ['RUNNER_TEMP']]
+                  findings=0
+                  for p in APP.rglob('*'):
+                      b = str(p.readlink()).encode() if p.is_symlink() else p.read_bytes() if p.is_file() else b''
+                      if any(m.encode(enc) in b for m in markers for enc in ('utf-8','utf-16-le','utf-16-be')): findings+=1
+                  save('privacy.json',{'builder_path_findings':findings,'scope':'fresh public checkout; no operator inputs; not zero-HTTP proof'})
+                  assert findings==0, 'Build path leak: diagnostic only'
+              else: raise SystemExit('Unknown task')
+
+          if __name__ == '__main__':
+              main()
+          PY
+          python3 "$RUNNER_TEMP/assembly-qa.py" prepare
+      - name: Sync tested lock and record build tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'failure=("$?" "${PIPESTATUS[@]}"); printf "POST_SYNC_FAIL rc=%s command=%s pipeline_rcs=%s\n" "${failure[0]}" "$BASH_COMMAND" "${failure[*]:1}" >&2; exit "${failure[0]}"' ERR
+          uv sync --frozen --all-packages --all-extras --no-editable 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/sync.log"
+          printf '%s\n' 'POST_SYNC_START tool metadata'
+          uvx --with pip==26.2.2 --from briefcase==0.3.25 python -c 'import importlib.metadata as m,json; print(json.dumps(sorted((d.metadata["Name"],d.version) for d in m.distributions())))' | tee "$RUNNER_TEMP/assembly-evidence/briefcase-tool-distributions.json"
+          printf '%s\n' 'POST_SYNC_OK tool metadata rc=0' 'POST_SYNC_START create help'
+          uvx --with pip==26.2.2 --from briefcase==0.3.25 briefcase create macOS --help 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/briefcase-create-help.txt"
+          printf '%s\n' 'POST_SYNC_OK create help rc=0' 'POST_SYNC_START config option gate'
+          grep -q -- --config "$RUNNER_TEMP/assembly-evidence/briefcase-create-help.txt"
+          printf '%s\n' 'POST_SYNC_OK config option gate rc=0'
+      - name: Materialize immutable official template
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          TEMPLATE_COMMIT=10d36c8512e92d3ee4b3be2579a47300ac8f844d
+          TEMPLATE_DIR="$BRIEFCASE_HOME/qa-template-$TEMPLATE_COMMIT"
+          test ! -e "$TEMPLATE_DIR" && test ! -L "$TEMPLATE_DIR"
+          mkdir "$TEMPLATE_DIR"
+          {
+            git -c init.templateDir= -c core.hooksPath=/dev/null init "$TEMPLATE_DIR"
+            git -C "$TEMPLATE_DIR" remote add origin https://github.com/beeware/briefcase-macOS-app-template.git
+            git -c credential.helper= -c core.hooksPath=/dev/null -C "$TEMPLATE_DIR" fetch --depth=1 --no-tags origin "$TEMPLATE_COMMIT"
+            git -c core.hooksPath=/dev/null -c core.autocrlf=false -C "$TEMPLATE_DIR" checkout --detach "$TEMPLATE_COMMIT"
+            git -C "$TEMPLATE_DIR" rev-parse HEAD
+            python3 "$RUNNER_TEMP/assembly-qa.py" template-check
+            cat "$RUNNER_TEMP/assembly-evidence/template-checkout-provenance.json"
+          } 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/template-materialization.log"
+      - name: Canonical build with recorded CI-only tool substitutions
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash packages/menubar/scripts/build_macos_app.sh 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/build.log"
+          python3 "$RUNNER_TEMP/assembly-qa.py" wheels
+      - name: Verify self-contained bundle and exact plugin inventory
+        shell: bash
+        env:
+          UV_NO_SYNC: '1'
+        run: |
+          set -euo pipefail
+          bash packages/menubar/scripts/verify_bundle.sh 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/verify.log"
+          export APP="$PWD/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
+          export PYTHONPATH="$APP/Contents/Resources/app_packages"
+          python3 -B -S - <<'PY' | tee "$RUNNER_TEMP/assembly-evidence/plugin-resource-probe.json"
+          import json
+          from fulcra_collect import registry, _resources
+          assert 'app_packages' in registry.__file__
+          result=registry.discover()
+          assert len(result.plugins)==26 and not result.errors, (len(result.plugins),result.errors)
+          assert _resources.is_frozen()
+          assert (_resources.frontend_dir()/'index.html').is_file()
+          assert (_resources.docs_dir()/'how-do-i-get-my-data.md').is_file()
+          print(json.dumps({'plugins':sorted(result.plugins),'load_errors':result.errors,'resources':'PASS'}))
+          PY
+          unset PYTHONPATH
+          python3 packages/menubar/scripts/sanitize_bundle.py "$APP"
+          python3 packages/menubar/scripts/sanitize_bundle.py --check-only "$APP"
+          python3 "$RUNNER_TEMP/assembly-qa.py" bundle
+          python3 "$RUNNER_TEMP/assembly-qa.py" privacy
+      - name: Ad-hoc QA signature and bundled launcher help only
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$PWD/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
+          # Ephemeral ad-hoc signature; no identity, keychain or notarization.
+          codesign --force --deep --sign - "$APP" 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/adhoc-sign.log"
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/assembly-evidence/adhoc-verify.log"
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/assembly-evidence/entitlements.plist" 2> "$RUNNER_TEMP/assembly-evidence/signature.txt"
+          python3 - <<'PY'
+          import os,pathlib,subprocess
+          app=pathlib.Path('packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app').resolve()
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'assembly-evidence'
+          for name in ('fulcra-collect','fulcra','fulcra-api'):
+              result=subprocess.run([str(app/'Contents/MacOS'/name),'--help'],capture_output=True,timeout=45)
+              (out/(name+'-help.txt')).write_bytes(result.stdout+result.stderr)
+              assert result.returncode==0 and b'Usage:' in result.stdout, (name,result.returncode)
+          PY
+          python3 packages/menubar/scripts/sanitize_bundle.py "$APP"
+          python3 packages/menubar/scripts/sanitize_bundle.py --check-only "$APP"
+          # Sanitization after help can invalidate signatures: re-sign and recheck.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          python3 "$RUNNER_TEMP/assembly-qa.py" bundle
+          python3 "$RUNNER_TEMP/assembly-qa.py" privacy
+      - name: Stage bounded nondistributable output
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$PWD/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
+          E="$RUNNER_TEMP/assembly-evidence"
+          cp "$RUNNER_TEMP/assembly-qa.py" "$E/assembly-qa.py"
+          cp .github/workflows/macos.yml "$E/workflow.yml"
+          printf '%s\n' 'ADHOC QA ONLY. NOT NOTARIZED. NOT FOR DISTRIBUTION. No native/provider/history/install acceptance.' > "$E/ADHOC-QA-NOT-NOTARIZED.txt"
+          # Metadata outside the app records source/tool/recipe and final signed bytes.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$E/ADHOC-QA-NOT-NOTARIZED.zip"
+          shasum -a 256 "$E/ADHOC-QA-NOT-NOTARIZED.zip" > "$E/ZIP-SHA256.txt"
+          python3 - <<'PY'
+          import os,pathlib
+          e=pathlib.Path(os.environ['RUNNER_TEMP'])/'assembly-evidence'
+          assert sum(p.stat().st_size for p in e.rglob('*') if p.is_file()) <= 1024**3, 'Artifact exceeds 1 GiB; no upload'
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ADHOC-QA-NOT-NOTARIZED-${{ github.sha }}
+          path: ${{ runner.temp }}/assembly-evidence/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
