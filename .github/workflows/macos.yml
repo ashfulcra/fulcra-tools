@@ -1,83 +1,897 @@
-name: macOS CI
-
-# Runs the full Python test suite on macOS so the macOS-only code paths
-# (PyObjC menubar, UserNotifications bundle guard, fulcra-CLI resolution
-# under launchd's restricted PATH) are exercised. The two regressions the
-# other-machine onboarding session hit (`bundleProxyForCurrentProcess is
-# nil` crash, sign-in path resolving `shutil.which("fulcra")` to None) both
-# merged because nothing tested those paths on a clean macOS runner.
-#
-# COST: macOS runners bill at 10x on this repo, and this job runs the
-# WHOLE workspace (incl. PyObjC, which can't even install on Linux), so it
-# cannot simply move to ubuntu. To stop draining the Actions free tier on
-# changes with no macOS-specific content, the triggers are PATH-FILTERED to
-# the files that actually carry macOS behaviour: the menubar package, coord
-# engine and automation adapters, plus this
-# workflow and the dependency manifests (a dep bump can break the macOS
-# build). A change outside this set skips this job; `workflow_dispatch`
-# reruns it on demand. If you add a new macOS-specific path, list it in BOTH
-# the push and pull_request blocks below.
-
+name: Collect compiler fact capture (non-admitting)
 on:
-  push:
-    branches: [main]
-    paths:
-      # The job runs `pytest packages/` — the WHOLE tree — so the trigger, not
-      # the run step, is what decides whether a package's tests protect a PR.
-      # Enumerating packages here is what let #523 delete a tested function with
-      # nothing red: fulcra-common's tests ran many times a day, just never on
-      # the PR that changed it. `packages/**` keeps trigger and coverage in step
-      # by construction; test_ci_trigger_coverage.py fails if they drift apart.
-      - 'packages/**'
-      - 'skills/fulcra-agent-automation/**'
-      - '.github/workflows/macos.yml'
-      - 'pyproject.toml'
-      - 'uv.lock'
-  pull_request:
-    branches: [main]
-    paths:
-      # The job runs `pytest packages/` — the WHOLE tree — so the trigger, not
-      # the run step, is what decides whether a package's tests protect a PR.
-      # Enumerating packages here is what let #523 delete a tested function with
-      # nothing red: fulcra-common's tests ran many times a day, just never on
-      # the PR that changed it. `packages/**` keeps trigger and coverage in step
-      # by construction; test_ci_trigger_coverage.py fails if they drift apart.
-      - 'packages/**'
-      - 'skills/fulcra-agent-automation/**'
-      - '.github/workflows/macos.yml'
-      - 'pyproject.toml'
-      - 'uv.lock'
   workflow_dispatch:
-
+permissions:
+  contents: read
+concurrency:
+  group: collect-compiler-facts-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  test:
-    runs-on: macos-latest
-    timeout-minutes: 30
-
+  capture:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        # Pinned by series, not @latest, so a uv release can't silently
-        # break CI (or hide a real failure under a tooling change). Must be
-        # recent enough to build the workspace's git deps: fulcra-api uses the
-        # uv_build backend (uv_build>=0.11.3) and `default-groups = "all"`,
-        # neither of which the old 0.5.x pin could parse — so `uv sync` failed
-        # with a TOML error before any test ran, and EVERY push went red.
-        uses: astral-sh/setup-uv@v3
+      # Fixed Q7 bootstrap is outside the collector's 64-command/300s ledger.
+      # This does not claim to count commands inside GitHub actions.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
         with:
-          version: "0.11.x"
-          enable-cache: true
-
-      - name: Set up Python (matches .python-version)
-        run: uv python install
-
-      - name: Install workspace with all extras (dev + macos)
-        # Bare `uv sync` is NOT enough — pytest is in each package's `dev`
-        # extra and PyObjC/rumps is in `macos`. AGENTS.md documents this.
-        run: uv sync --all-packages --all-extras
-
-      - name: Run the full test suite
-        # Must NOT hit the network. ~1500 tests, ~20s on a clean runner.
-        # Collect the complete migration QA failure inventory in one run.
-        run: uv run --all-packages --all-extras --no-editable pytest packages/ -q
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39
+        timeout-minutes: 5
+        with:
+          version: '0.11.33'
+          enable-cache: false
+      - name: Provision only stdlib Python
+        id: python
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install 3.13.14
+          python_path="$(uv python find 3.13.14)"
+          printf 'python=%s\n' "$python_path" >> "$GITHUB_OUTPUT"
+      - name: Capture compiler facts without app admission
+        id: capture
+        timeout-minutes: 7
+        shell: bash
+        env:
+          CAPTURE_PYTHON: ${{ steps.python.outputs.python }}
+        run: |
+          set -euo pipefail
+          umask 022
+          test ! -e "$RUNNER_TEMP/capture.py" && test ! -L "$RUNNER_TEMP/capture.py"
+          set -o noclobber
+          cat > "$RUNNER_TEMP/capture.py" <<'CAPTURE_PY'
+          """Non-admitting, cloud-only compiler fact capture. No product modules imported.
+          
+          The fixed GitHub bootstrap precedes the collector's 64-command/300s ledger.
+          This code never signs, sanitizes, executes a produced file, or accepts a profile.
+          """
+          from pathlib import Path
+          from dataclasses import dataclass
+          from datetime import datetime, timezone
+          import argparse
+          import ast
+          import hashlib
+          import json
+          import os
+          import plistlib
+          import re
+          import selectors
+          import shutil
+          import signal
+          import stat
+          import subprocess
+          import sys
+          import time
+          import xml.etree.ElementTree as ET
+          try:
+              import resource
+          except ImportError:
+              resource = None
+          
+          TREE_SHA = 'bbfcd22320d6536459ec7da17bcb0e9dabc363c6defde593c97b1fe44d57f7ec'
+          C_SHA = '9df6e0d1e35d56e0daaacca800f3cb6ed449eb3d1942f3bca2c92c681909d0e5'
+          INSTALL_SHA = '867421abe8b0fc87a0863d10421df62c5b2164d15d750c4b0d7c6151a262269c'
+          MiB = 1024 * 1024
+          NAMES = ('fulcra-collect', 'fulcra', 'fulcra-api')
+          WRAPPERS = ('/usr/bin/git', '/usr/bin/clang', '/usr/bin/codesign', '/usr/bin/xcrun')
+          SYSTEM_PREFIXES = tuple(Path(p) for p in ('/Applications', '/Library/Developer', '/usr', '/System/Library'))
+          PRESERVED_ENV = ('HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'DEVELOPER_DIR', 'SDKROOT', 'TOOLCHAINS',
+              'MACOSX_DEPLOYMENT_TARGET', 'CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH',
+              'OBJC_INCLUDE_PATH', 'LIBRARY_PATH', 'COMPILER_PATH', 'GCC_EXEC_PREFIX',
+              'CCC_OVERRIDE_OPTIONS', 'ZERO_AR_DATE')
+          FORBIDDEN_ENV = ('DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH',
+              'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_FALLBACK_FRAMEWORK_PATH', 'LD_PRELOAD',
+              'CCC_OVERRIDE_OPTIONS', 'COMPILER_PATH', 'GCC_EXEC_PREFIX')
+          
+          
+          class Unknown(RuntimeError):
+              """Registered fail-closed reason, never a candidate acceptance result."""
+          
+          
+          def require(value, reason):
+              if not value:
+                  raise Unknown(reason)
+          
+          
+          def sha(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          
+          def encoded(value):
+              return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(',', ':')) + '\n').encode()
+          
+          
+          def unique_json(raw):
+              require(len(raw) <= MiB, 'metadata-byte-cap')
+              def pairs(items):
+                  result = {}
+                  for key, value in items:
+                      require(key not in result, 'duplicate-json-key')
+                      result[key] = value
+                  return result
+              try:
+                  return json.loads(raw, object_pairs_hook=pairs)
+              except (ValueError, UnicodeError) as exc:
+                  raise Unknown('malformed-json') from exc
+          
+          
+          def safe_path(path):
+              path = Path(path)
+              require(path.is_absolute() and len(str(path).encode()) <= 4096 and
+                      not any(c in str(path) for c in '\r\n\0') and '..' not in path.parts, 'invalid-path')
+              return path
+          
+          
+          def no_links(path):
+              path = safe_path(path)
+              current = Path(path.anchor)
+              for part in path.parts[1:]:
+                  current = current / part
+                  info = current.lstat()
+                  require(not stat.S_ISLNK(info.st_mode), 'symlink-path')
+              return path
+          
+          
+          def identity(info):
+              return {'dev': info.st_dev, 'ino': info.st_ino, 'mode': stat.S_IMODE(info.st_mode),
+                      'uid': info.st_uid, 'gid': info.st_gid, 'links': info.st_nlink,
+                      'bytes': info.st_size, 'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
+          
+          
+          class Reads:
+              def __init__(self, deadline=float('inf')):
+                  self.bytes = 0
+                  self.seconds = 0.0
+                  self.deadline = deadline
+          
+          
+          def stable_file(path, limit, *, owned=False, reads=None, retain=True):
+              path = no_links(path)
+              started = time.monotonic()
+              info = path.lstat()
+              require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= limit,
+                      'unsupported-file-or-size')
+              require(not owned or info.st_uid == os.getuid(), 'unowned-file')
+              require(info.st_uid in (0, os.getuid()), 'foreign-file-owner')
+              if reads:
+                  require(reads.bytes + info.st_size <= 512 * MiB, 'hash-total-cap')
+              parts = []
+              digest = hashlib.sha256()
+              count = 0
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+              try:
+                  require(identity(os.fstat(fd)) == identity(info), 'file-changed')
+                  while True:
+                      now = time.monotonic()
+                      require(not reads or (now < reads.deadline and reads.seconds + now - started < 60),
+                              'read-time-budget')
+                      block = os.read(fd, min(MiB, limit + 1 - count))
+                      if not block:
+                          break
+                      count += len(block)
+                      require(count <= limit, 'file-byte-cap')
+                      digest.update(block)
+                      if retain:
+                          parts.append(block)
+                  require(count == info.st_size and identity(os.fstat(fd)) == identity(info) and
+                          identity(path.lstat()) == identity(info), 'file-changed')
+              finally:
+                  os.close(fd)
+                  if reads:
+                      reads.bytes += count
+                      reads.seconds += time.monotonic() - started
+              fact = dict(identity(info), path=str(path), sha256=digest.hexdigest())
+              return b''.join(parts), fact
+          
+          
+          @dataclass(frozen=True)
+          class Result:
+              returncode: int | None
+              stdout: bytes
+              stderr: bytes
+              eof: bool
+              reaped: bool
+              reason: str | None = None
+          
+          
+          def producer_file_limit(limit):
+              """Single-threaded collector child: install/read back an inherited hard cap before exec."""
+              require(resource is not None and hasattr(resource, 'RLIMIT_FSIZE') and
+                      type(limit) is int and limit == 2 * MiB and os.geteuid() != 0, 'file-limit-setup-unavailable')
+              previous = resource.getrlimit(resource.RLIMIT_FSIZE)
+              require(all(value == resource.RLIM_INFINITY or value >= limit for value in previous),
+                      'file-limit-existing-stricter')
+              resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+              require(resource.getrlimit(resource.RLIMIT_FSIZE) == (limit, limit), 'file-limit-readback-failed')
+          
+          
+          def transport(argv, *, cwd, env, timeout, cap, file_limit=None):
+              """One process group, concurrently drained pipes, absolute deadline, bounded reap."""
+              require(0 < timeout <= 30 and 0 < cap <= MiB, 'invalid-command-bounds')
+              require(sum(len(s.encode()) + 1 for s in argv) <= 16384, 'argv-cap')
+              require(file_limit is None or type(file_limit) is int and file_limit == 2 * MiB, 'invalid-producer-file-limit')
+              if file_limit is not None and (resource is None or not hasattr(resource, 'RLIMIT_FSIZE') or os.geteuid() == 0):
+                  return Result(None, b'', b'', False, False, 'file-limit-setup-unavailable')
+              # Popen's exec-error pipe reports preexec failure to the parent; the tool
+              # never executes until setrlimit AND exact readback succeed. The parent
+              # limit is untouched; compiler descendants inherit the finite hard limit.
+              before_exec = (lambda: producer_file_limit(file_limit)) if file_limit is not None else None
+              try:
+                  process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                                             preexec_fn=before_exec)
+              except (OSError, subprocess.SubprocessError):
+                  return Result(None, b'', b'', False, False, 'spawn-or-file-limit-setup-fault')
+              output = [bytearray(), bytearray()]
+              selector = selectors.DefaultSelector()
+              deadline = time.monotonic() + timeout
+              reason = None
+              eof = False
+              reaped = False
+              try:
+                  for index, stream in enumerate((process.stdout, process.stderr)):
+                      os.set_blocking(stream.fileno(), False)
+                      selector.register(stream, selectors.EVENT_READ, index)
+                  while selector.get_map():
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          reason = 'timeout'
+                          break
+                      for key, _ in selector.select(min(remaining, .05)):
+                          block = os.read(key.fileobj.fileno(), 65536)
+                          if not block:
+                              selector.unregister(key.fileobj)
+                              continue
+                          available = cap - len(output[0]) - len(output[1])
+                          output[key.data].extend(block[:available])
+                          if len(block) > available:
+                              reason = 'output-cap'
+                              break
+                      if reason:
+                          break
+                  eof = not selector.get_map()
+                  if not reason:
+                      try:
+                          process.wait(timeout=max(.001, deadline - time.monotonic()))
+                          if process.returncode:
+                              reason = 'nonzero-exit'
+                      except subprocess.TimeoutExpired:
+                          reason = 'timeout'
+                  if reason:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                  try:
+                      process.wait(timeout=1)
+                      reaped = True
+                  except subprocess.TimeoutExpired:
+                      reason = 'leader-not-reaped'
+              except OSError:
+                  reason = 'transport-io-fault'
+              finally:
+                  selector.close()
+                  process.stdout.close()
+                  process.stderr.close()
+                  if not reaped:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                          process.wait(timeout=1)
+                          reaped = True
+                      except (ProcessLookupError, subprocess.TimeoutExpired):
+                          reason = 'leader-not-reaped'
+              return Result(process.returncode, bytes(output[0]), bytes(output[1]), eof, reaped, reason)
+          
+          
+          def controlled_environment(inherited):
+              require(all(not inherited.get(k) for k in FORBIDDEN_ENV), 'tool-injection-environment')
+              require(all(not value for key, value in inherited.items() if key.startswith('DYLD_')),
+                      'tool-injection-environment')
+              require(isinstance(inherited.get('HOME'), str) and inherited['HOME'].startswith('/'), 'missing-actual-home')
+              env = {key: inherited[key] for key in PRESERVED_ENV if key in inherited}
+              env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin'
+              require(all(isinstance(v, str) and '\0' not in v and len(v.encode()) <= 65536 for v in env.values()), 'environment-cap')
+              record = {'policy': 'fixed-system-PATH; preserve-listed-actual-values; exclude-all-other-values',
+                        'home': env['HOME'], 'preserved_keys': list(PRESERVED_ENV),
+                        'rejected_injection_keys': list(FORBIDDEN_ENV), 'value_identities': {
+                            k: {'bytes': len(v.encode()), 'sha256': sha(v.encode())} for k, v in env.items()},
+                        'sha256': sha(encoded(env)), 'installation_environment_equivalence': 'NOT_ESTABLISHED'}
+              return env, record
+          
+          
+          class Gate:
+              def __init__(self, workspace, source, targets, env, *, transport=transport, clock=time.monotonic):
+                  self.workspace, self.source = Path(workspace), Path(source)
+                  self.targets = tuple(Path(p) for p in targets)
+                  self.env, self.transport, self.clock = env, transport, clock
+                  self.deadline = clock() + 300
+                  self.commands = []
+                  self.bytes = self.compiles = self.observations = 0
+          
+              def allowed(self, argv):
+                  git = ['/usr/bin/git', '-C', str(self.workspace)]
+                  fixed = [git + ['rev-parse', 'HEAD'], git + ['diff', '--quiet', '--no-ext-diff', '--exit-code', 'HEAD', '--'],
+                           git + ['diff', '--quiet', '--no-ext-diff', '--cached', '--exit-code', 'HEAD', '--'],
+                           git + ['ls-tree', '-r', '-z', 'HEAD'], ['/usr/bin/clang', '--version'],
+                           ['/usr/bin/xcrun', '--find', 'clang'], ['/usr/bin/xcrun', '--find', 'ld'],
+                           ['/usr/bin/xcrun', '--show-sdk-path']]
+                  if argv in fixed:
+                      return 'metadata'
+                  for target in self.targets:
+                      if argv == ['/usr/bin/clang', '-Os', '-mmacosx-version-min=12.0', str(self.source), '-o', str(target)]:
+                          return 'compile'
+                      for name in NAMES:
+                          file = str(target.parent / name)
+                          if argv in (['/usr/bin/codesign', '--verify', '--strict', file],
+                                      ['/usr/bin/codesign', '-dvvv', file],
+                                      ['/usr/bin/codesign', '-d', '--entitlements', ':-', file]):
+                              return 'codesign'
+                  raise Unknown('command-not-allowlisted')
+          
+              def run(self, argv):
+                  argv = list(argv)
+                  kind = self.allowed(argv)
+                  require(len(self.commands) < 64, 'command-count-cap')
+                  require(kind != 'compile' or self.compiles < 4, 'compile-count-cap')
+                  require(kind != 'codesign' or self.observations < 36, 'observation-count-cap')
+                  remaining = self.deadline - self.clock()
+                  require(remaining > 0, 'whole-capture-timeout')
+                  self.compiles += kind == 'compile'
+                  self.observations += kind == 'codesign'
+                  producer_options = {'file_limit': 2 * MiB} if kind == 'compile' else {}
+                  try:
+                      result = self.transport(argv, cwd=self.workspace / 'packages/menubar', env=self.env,
+                                              timeout=min(30, remaining), cap=MiB, **producer_options)
+                  except OSError:
+                      result = Result(None, b'', b'', False, False, 'spawn-or-transport-fault')
+                  available = max(0, 8 * MiB - self.bytes)
+                  out = result.stdout[:available]
+                  err = result.stderr[:max(0, available - len(out))]
+                  retained = Result(result.returncode, out, err, result.eof, result.reaped, result.reason)
+                  self.bytes += len(out) + len(err)
+                  self.commands.append({'index': len(self.commands) + 1, 'argv': argv,
+                      'cwd': str(self.workspace / 'packages/menubar'), 'kind': kind, 'result': retained,
+                      'producer_file_limit_bytes': producer_options.get('file_limit'),
+                      'actual_stdout_bytes': len(result.stdout), 'actual_stderr_bytes': len(result.stderr)})
+                  require(len(result.stdout) + len(result.stderr) <= MiB and
+                          len(out) + len(err) == len(result.stdout) + len(result.stderr), 'retained-output-cap')
+                  require(result.returncode == 0 and result.eof and result.reaped and result.reason is None,
+                          'command-' + (result.reason or 'incomplete-or-nonzero'))
+                  require(self.clock() < self.deadline, 'whole-capture-timeout')
+                  return result
+          
+          
+          def verify_product(raw, expected=TREE_SHA):
+              require(len(raw) <= MiB and raw.endswith(b'\0'), 'tree-wire-bounds')
+              rows, seen = [], set()
+              try:
+                  for item in raw[:-1].split(b'\0'):
+                      metadata, name = item.split(b'\t', 1)
+                      mode, kind, oid = metadata.decode('ascii').split()
+                      path = name.decode('utf-8')
+                      require(path not in seen and path and not path.startswith('/') and
+                              '..' not in path.split('/') and '\\' not in path and '\n' not in path,
+                              'tree-path')
+                      seen.add(path)
+                      require(kind == 'blob' and mode in ('100644', '100755', '120000') and
+                              re.fullmatch('[0-9a-f]{40}', oid), 'tree-object')
+                      if path != '.github/workflows/macos.yml':
+                          rows.append([path, mode, oid])
+                      require(len(seen) <= 20000, 'tree-count-cap')
+                  rows.sort()
+                  digest = sha((json.dumps(rows, ensure_ascii=True, separators=(',', ':')) + '\n').encode())
+                  require(digest == expected, 'product-tree-mismatch')
+                  return {'paths': len(rows), 'sha256': digest}
+              except (ValueError, UnicodeError) as exc:
+                  raise Unknown('malformed-tree') from exc
+          
+          
+          def verify_checkout(gate, expected_head):
+              require(re.fullmatch('[0-9a-f]{40}', expected_head or ''), 'trusted-head-format')
+              git = ['/usr/bin/git', '-C', str(gate.workspace)] if hasattr(gate, 'workspace') else ['/usr/bin/git']
+              head = gate.run(git + ['rev-parse', 'HEAD']).stdout
+              require(head == (expected_head + '\n').encode(), 'trusted-head-mismatch')
+              gate.run(git + ['diff', '--quiet', '--no-ext-diff', '--exit-code', 'HEAD', '--'])
+              gate.run(git + ['diff', '--quiet', '--no-ext-diff', '--cached', '--exit-code', 'HEAD', '--'])
+              return verify_product(gate.run(git + ['ls-tree', '-r', '-z', 'HEAD']).stdout)
+          
+          
+          def verify_installer(raw):
+              require(len(raw) <= MiB and sha(raw) == INSTALL_SHA, 'installer-source-pin')
+              tree = ast.parse(raw)
+              calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+              compiler = [node for node in calls if isinstance(node.func, ast.Attribute) and
+                          isinstance(node.func.value, ast.Name) and node.func.value.id == 'subprocess' and node.func.attr == 'run']
+              copies = [node for node in calls if isinstance(node.func, ast.Attribute) and
+                        isinstance(node.func.value, ast.Name) and node.func.value.id == 'shutil' and node.func.attr == 'copy2']
+              require(len(compiler) == len(copies) == 1, 'installer-recipe-ast')
+              command = compiler[0]
+              require(isinstance(command.args[0], ast.List) and len(command.args[0].elts) == 6,
+                      'installer-compiler-argv')
+              require([ast.literal_eval(v) for v in command.args[0].elts[:3]] ==
+                      ['/usr/bin/clang', '-Os', '-mmacosx-version-min=12.0'], 'installer-compiler-flags')
+              require(ast.literal_eval(command.args[0].elts[4]) == '-o' and
+                      ast.dump(copies[0].args[0]) == "Name(id='target', ctx=Load())", 'installer-copy-source')
+              return {'sha256': INSTALL_SHA, 'equivalence': 'pinned unchanged compiler+copy2 recipe; direct fixed operation only, not installer/app execution'}
+          
+          
+          def host_facts():
+              uname = os.uname()
+              return {k: getattr(uname, k) for k in ('sysname', 'release', 'version', 'machine')}
+          
+          
+          def tool_facts(reads):
+              result = {}
+              for path in WRAPPERS:
+                  _, fact = stable_file(path, 256 * MiB, reads=reads, retain=False)
+                  require(fact['mode'] & 0o111, 'nonexecutable-wrapper')
+                  result[path] = fact
+              return result
+          
+          
+          def resolve_system_path(path):
+              """Bounded recorded OS-tool links, never arbitrary resolved-path execution."""
+              path, links, seen = safe_path(path), [], set()
+              while True:
+                  require(any(path.is_relative_to(root) for root in SYSTEM_PREFIXES) and len(path.parts) <= 64,
+                          'effective-path-outside-system-roots')
+                  current = Path(path.anchor)
+                  changed = False
+                  for index, part in enumerate(path.parts[1:], 1):
+                      current = current / part
+                      info = current.lstat()
+                      require(info.st_uid in (0, os.getuid()), 'effective-path-foreign-owner')
+                      if stat.S_ISLNK(info.st_mode):
+                          require(len(links) < 8 and current not in seen, 'effective-link-bound-or-cycle')
+                          seen.add(current)
+                          target = os.readlink(current)
+                          require(len(target.encode()) <= 4096 and '\n' not in target and '\r' not in target and
+                                  identity(current.lstat()) == identity(info), 'unstable-effective-link')
+                          links.append({'path': str(current), 'target': target, 'identity': identity(info)})
+                          replacement = Path(target) if target.startswith('/') else current.parent / target
+                          path = safe_path(os.path.normpath(str(replacement.joinpath(*path.parts[index + 1:]))))
+                          changed = True
+                          break
+                  if not changed:
+                      return path, links
+          
+          
+          def resolved_facts(metadata, reads):
+              result = {}
+              for name in ('clang', 'ld', 'sdk'):
+                  raw = metadata[name].stdout
+                  require(raw.endswith(b'\n') and raw.count(b'\n') == 1, 'unrecognized-toolchain-path')
+                  requested = safe_path(raw[:-1].decode('utf-8'))
+                  path, links = resolve_system_path(requested)
+                  if name == 'sdk':
+                      info = path.lstat()
+                      require(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()), 'unsupported-sdk-directory')
+                      result[name] = {'path': str(path), 'requested_path': str(requested), 'links': links, 'directory_identity': identity(info),
+                                      'scope': 'directory identity only; not SDK contents qualification'}
+                  else:
+                      _, result[name] = stable_file(path, 256 * MiB, reads=reads, retain=False)
+                      result[name].update(requested_path=str(requested), links=links)
+              return result
+          
+          
+          def parse_policy(target, display, entitlement):
+              for result in (display, entitlement):
+                  require(result.returncode == 0 and result.eof and result.reaped and not result.reason,
+                          'incomplete-native-facts')
+              require(display.stdout == b'', 'unrecognized-display-stdout')
+              try:
+                  lines = display.stderr.decode('utf-8').splitlines()
+                  fields = {}
+                  known = ('Executable=', 'Identifier=', 'Format=', 'CodeDirectory ', 'Signature=', 'TeamIdentifier=',
+                           'Info.plist=', 'Sealed Resources=', 'Internal requirements ', 'Hash type=', 'Hash choices=',
+                           'CandidateCDHash ', 'CandidateCDHashFull ', 'Hash algorithm=', 'CDHash=', 'Platform identifier=',
+                           'VersionPlatform=', 'VersionMin=', 'VersionSDK=', 'Page size=', 'Runtime Version=',
+                           'CMSDigest=', 'CMSDigestType=', 'Executable Segment ', 'Internal requirements=')
+                  for line in lines:
+                      require(line.startswith(known), 'unrecognized-display-line')
+                      for key in ('Executable', 'Identifier', 'Format', 'Signature', 'TeamIdentifier'):
+                          if line.startswith(key + '='):
+                              require(key not in fields, 'duplicate-display-field')
+                              fields[key] = line.split('=', 1)[1]
+                      if line.startswith('CodeDirectory '):
+                          require('flags' not in fields, 'duplicate-code-directory')
+                          match = re.search(r'\bflags=(0x[0-9a-fA-F]+)\(([^\r\n]*)\)', line)
+                          require(match is not None, 'unknown-code-directory-flags')
+                          fields['flags'] = int(match[1], 16)
+                          fields['flag_names'] = match[2]
+                  require(all(key in fields and fields[key] != '' for key in
+                              ('Executable', 'Identifier', 'Format', 'Signature', 'TeamIdentifier', 'flags')) and
+                          fields['Executable'] == target, 'missing-or-unbound-display-facts')
+                  warning = (f'Executable={target}\nwarning: Specifying \':\' in the path is deprecated and will not work in a future release\n').encode()
+                  if not entitlement.stdout:
+                      require(entitlement.stderr == warning, 'unrecognized-entitlement-absence')
+                      entitlements = {'state': 'ABSENT_OBSERVED'}
+                  else:
+                      require(entitlement.stderr in (b'', warning) and b'<!ENTITY' not in entitlement.stdout.upper(),
+                              'unrecognized-entitlement-stream')
+                      root = ET.fromstring(entitlement.stdout)
+                      require(root.tag == 'plist', 'entitlement-not-plist')
+                      for dictionary in root.iter('dict'):
+                          children = list(dictionary)
+                          require(len(children) % 2 == 0, 'malformed-entitlement-dict')
+                          keys = [children[i].text for i in range(0, len(children), 2)]
+                          require(all(children[i].tag == 'key' for i in range(0, len(children), 2)) and
+                                  len(keys) == len(set(keys)), 'duplicate-entitlement-key')
+                      value = plistlib.loads(entitlement.stdout)
+                      require(isinstance(value, dict), 'entitlement-not-map')
+                      def typed(v):
+                          if isinstance(v, dict): return {'type': 'dict', 'value': {k: typed(x) for k, x in v.items()}}
+                          if isinstance(v, list): return {'type': 'array', 'value': [typed(x) for x in v]}
+                          if type(v) is bool: return {'type': 'bool', 'value': v}
+                          if type(v) is int: return {'type': 'integer', 'value': v}
+                          if type(v) is float: return {'type': 'real', 'value': str(v)}
+                          if isinstance(v, bytes): return {'type': 'data', 'hex': v.hex()}
+                          if isinstance(v, str): return {'type': 'string', 'value': v}
+                          raise Unknown('unsupported-entitlement-type')
+                      entitlements = {'state': 'PRESENT_OBSERVED', 'map': typed(value)}
+                  return {'display': fields, 'entitlements': entitlements,
+                          'authority': 'fresh observations only; no expected policy/adoption/app acceptance'}
+              except (ValueError, UnicodeError, ET.ParseError, plistlib.InvalidFileException) as exc:
+                  raise Unknown('malformed-native-facts') from exc
+          
+          
+          def write_json(root, name, value):
+              require(re.fullmatch(r'[a-z0-9][a-z0-9.-]*\.json', name), 'artifact-name')
+              raw = encoded(value)
+              require(len(raw) <= MiB, 'selected-artifact-byte-cap')
+              path = root / name
+              fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+              with os.fdopen(fd, 'wb') as stream:
+                  stream.write(raw)
+                  stream.flush()
+                  os.fsync(stream.fileno())
+              return path
+          
+          
+          def reserve_native(retained, additional):
+              require(type(retained) is int and type(additional) is int and retained >= 0 and additional >= 0 and
+                      retained + additional <= 16 * MiB, 'retained-native-cap')
+          
+          
+          def reserve_compile_native(backups, active, parent):
+              saved = sum(f['bytes'] for f in backups.values())
+              current = sum(f['bytes'] for f in active.values())
+              other = sum(f['bytes'] for path, f in active.items() if path.parent != parent)
+              # Keep all old active objects in the peak estimate while the bounded
+              # producer creates/replaces its output; final copy2 writes occupy three
+              # bounded slots rather than assuming the old target is already gone.
+              reserve_native(saved + current, 2 * MiB)
+              reserve_native(saved + other, 6 * MiB)
+              return {'retained_before_bytes': saved + current, 'producer_slot_bytes': 2 * MiB,
+                      'final_parent_slots_bytes': 6 * MiB, 'retained_other_parents_and_backups_bytes': saved + other}
+          
+          
+          def select_artifacts(root, paths):
+              root = no_links(root)
+              require(len(paths) <= 1024 and len(set(paths)) == len(paths), 'artifact-count')
+              selected = []
+              def no_accept(value):
+                  if isinstance(value, dict):
+                      require('acceptance' not in value or value['acceptance'] is False, 'acceptance-forbidden')
+                      require(not set(value) & {'nonce', 'receipt', 'invocation', 'context', 'environment_values'}, 'private-artifact-schema')
+                      for item in value.values(): no_accept(item)
+                  elif isinstance(value, list):
+                      for item in value: no_accept(item)
+              for path in paths:
+                  path = safe_path(path)
+                  require(path.parent == root and (path.name in ('summary.json', 'commands.json') or
+                          re.fullmatch(r'command-\d{3}(?:-(?:stdout|stderr)-\d{3})?\.json', path.name)), 'unselected-or-private-artifact')
+                  raw, _ = stable_file(path, MiB, owned=True)
+                  value = unique_json(raw)
+                  require(isinstance(value, dict) and value.get('schema') in
+                          ('collect-compiler-facts-v1', 'collect-command-facts-v1', 'collect-command-stream-v1', 'collect-command-fact-v1') and
+                          value.get('acceptance') is False, 'artifact-schema')
+                  no_accept(value)
+                  selected.append(str(path))
+              return selected
+          
+          
+          def emit_evidence(output, gate, result):
+              paths, commands = [], []
+              for item in gate.commands if gate else []:
+                  native = item['result']
+                  record = {key: value for key, value in item.items() if key != 'result'}
+                  record.update(returncode=native.returncode, eof=native.eof, reaped=native.reaped, reason=native.reason)
+                  for stream_name in ('stdout', 'stderr'):
+                      raw = getattr(native, stream_name)
+                      record[stream_name] = {'bytes': len(raw), 'sha256': sha(raw), 'chunks': []}
+                      if stream_name == 'stdout' and item['argv'][-4:] == ['ls-tree', '-r', '-z', 'HEAD']:
+                          record[stream_name]['selection'] = 'NUL-framed Git tree metadata retained as exact parsed product digest; raw wire not selected'
+                          continue
+                      try:
+                          text = raw.decode('utf-8')
+                          require('\0' not in text, 'binary-command-output')
+                          for index, offset in enumerate(range(0, len(text), 32768)):
+                              name = f'command-{item["index"]:03}-{stream_name}-{index:03}.json'
+                              paths.append(write_json(output, name, {'schema': 'collect-command-stream-v1',
+                                  'acceptance': False, 'command': item['index'], 'stream': stream_name,
+                                  'chunk': index, 'text': text[offset:offset + 32768]}))
+                              record[stream_name]['chunks'].append(name)
+                      except (UnicodeError, Unknown):
+                          result['status'] = 'UNKNOWN'
+                          result['reasons'].append('nontext-command-output-not-selected')
+                          # Never turn binary output into an uploaded binary/base64 artifact.
+                          private = output / 'private-command-streams'
+                          if not private.exists():
+                              private.mkdir(mode=0o700)
+                          fd = os.open(private / f'{item["index"]:03}-{stream_name}.raw',
+                                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                          with os.fdopen(fd, 'wb') as stream:
+                              stream.write(raw)
+                          record[stream_name]['selection'] = 'UNKNOWN binary stream retained privately; never selected'
+                  command_path = write_json(output, f'command-{item["index"]:03}.json',
+                      {'schema': 'collect-command-fact-v1', 'acceptance': False, 'command': record})
+                  paths.append(command_path)
+                  command_raw = command_path.read_bytes()
+                  commands.append({'index': item['index'], 'file': command_path.name,
+                                   'bytes': len(command_raw), 'sha256': sha(command_raw)})
+              paths.append(write_json(output, 'commands.json', {'schema': 'collect-command-facts-v1',
+                  'acceptance': False, 'commands': commands, 'retained_stream_bytes': gate.bytes if gate else 0}))
+              summary = dict(result)
+              summary['artifacts'] = [str(p) for p in paths] + [str(output / 'summary.json')]
+              summary_raw = encoded(summary)
+              if len(summary_raw) > MiB:
+                  result['status'] = 'UNKNOWN'
+                  result['reasons'].append('summary-byte-cap')
+                  summary = {'schema': 'collect-compiler-facts-v1', 'acceptance': False,
+                      'status': 'UNKNOWN', 'N1': 'UNKNOWN_NOT_ESTABLISHED', 'app_acceptance': 'UNKNOWN_NOT_ESTABLISHED',
+                      'profile_acceptance': 'UNKNOWN_NOT_ESTABLISHED', 'reasons': result['reasons'],
+                      'sample_count': len(result.get('samples', [])), 'external_commands': len(gate.commands) if gate else 0,
+                      'oversized_summary': {'bytes': len(summary_raw), 'sha256': sha(summary_raw)},
+                      'partial_facts': 'exact command streams/records retained in selected metadata; oversized aggregate not selected'}
+              if gate and gate.clock() >= gate.deadline:
+                  result['status'] = summary['status'] = 'UNKNOWN'
+                  result['reasons'].append('whole-capture-timeout')
+              paths.append(write_json(output, 'summary.json', summary))
+              return select_artifacts(output, paths)
+          
+          
+          def run_capture(workspace, output, native, expected_head, *, transport_fn=transport, inherited=None):
+              """Fixed capture graph. Injection is a Python test boundary, never a CLI bypass."""
+              capture_started = time.monotonic()
+              workspace, output, native = map(safe_path, (workspace, output, native))
+              result = {'schema': 'collect-compiler-facts-v1', 'acceptance': False, 'status': 'UNKNOWN',
+                  'N1': 'UNKNOWN_NOT_ESTABLISHED', 'app_acceptance': 'UNKNOWN_NOT_ESTABLISHED',
+                  'profile_acceptance': 'UNKNOWN_NOT_ESTABLISHED', 'samples': [], 'reasons': [], 'artifacts': [],
+                  'scope': 'compiler+copy operation facts only; bare B scaffold is not an app',
+                  'started_at': datetime.now(timezone.utc).isoformat(),
+                  'python': {'version': list(sys.version_info[:3]), 'executable': sys.executable},
+                  'operation_umask': 'workflow explicitly sets 022; collector preserves inherited umask',
+                  'budget_scope': 'collector after fixed bootstrap; excludes GitHub action internals',
+                  'limits': {'commands': 64, 'seconds': 300, 'per_command_seconds': 30,
+                             'per_command_bytes': MiB, 'retained_command_bytes': 8 * MiB,
+                             'preserved_files': 12, 'native_file_bytes': 2 * MiB, 'retained_native_bytes': 16 * MiB}}
+              gate = None
+              # A separate metadata-only sink permits a failed preflight report. Native A/B
+              # scaffolding is forbidden until trusted HEAD, tree, source and recipe pass.
+              no_links(output.parent)
+              require(not output.exists() and not output.is_symlink(), 'metadata-namespace-exists')
+              output.mkdir(mode=0o700)
+              try:
+                  no_links(workspace)
+                  require(not output.is_relative_to(workspace) and not native.is_relative_to(workspace) and
+                          not output.is_relative_to(native) and not native.is_relative_to(output), 'capture-scope')
+                  source = workspace / 'packages/menubar/scripts/cli_launcher.c'
+                  b_root = workspace / 'packages/menubar/build'
+                  target_a = native / 'A/MacOS/fulcra-collect'
+                  target_b = b_root / 'fulcra-menubar/macos/app/Fulcra Collect.app/Contents/MacOS/fulcra-collect'
+                  env, result['environment'] = controlled_environment(os.environ if inherited is None else inherited)
+                  requested = os.environ if inherited is None else inherited
+                  result['request_identity'] = {key: requested.get(key) for key in
+                      ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_EVENT_NAME')}
+                  gate = Gate(workspace, source, (target_a, target_b), env, transport=transport_fn)
+                  gate.deadline = capture_started + 300
+                  reads = Reads(gate.deadline)
+                  result['host'] = host_facts()
+                  require(result['host']['sysname'] == 'Darwin' and result['host']['machine'] == 'arm64', 'unsupported-host')
+                  result['product_tree'] = verify_checkout(gate, expected_head)
+                  result['trusted_head'] = expected_head
+                  source_bytes, result['source'] = stable_file(source, MiB, owned=True, reads=reads)
+                  require(sha(source_bytes) == C_SHA, 'compiler-source-pin')
+                  raw, result['installer_source'] = stable_file(source.with_name('install_bundle_launchers.py'), MiB, owned=True, reads=reads)
+                  result['recipe'] = verify_installer(raw)
+                  _, result['workflow'] = stable_file(workspace / '.github/workflows/macos.yml', MiB, owned=True, reads=reads)
+                  result['workflow_authority'] = 'root independently binds expected workflow to remote/run/checkout; this observed hash is not authority'
+                  if Path(__file__).is_file():
+                      _, result['collector_source'] = stable_file(Path(__file__).absolute(), MiB, owned=True, reads=reads)
+                  result['wrappers_before'] = tool_facts(reads)
+                  metadata = {'version': gate.run(['/usr/bin/clang', '--version']),
+                      'clang': gate.run(['/usr/bin/xcrun', '--find', 'clang']),
+                      'ld': gate.run(['/usr/bin/xcrun', '--find', 'ld']),
+                      'sdk': gate.run(['/usr/bin/xcrun', '--show-sdk-path'])}
+                  result['effective_before'] = resolved_facts(metadata, reads)
+                  no_links(native.parent)
+                  require(not native.exists() and not native.is_symlink() and not b_root.exists() and not b_root.is_symlink(), 'native-scaffold-exists')
+                  native.mkdir(mode=0o700)
+                  (native / 'preserved').mkdir(mode=0o700)
+                  target_a.parent.mkdir(parents=True, mode=0o700)
+                  target_b.parent.mkdir(parents=True, mode=0o700)
+                  active, backups = {}, {}
+                  def check_backups():
+                      for path, expected in backups.items():
+                          _, actual = stable_file(path, 2 * MiB, owned=True)
+                          require(actual == expected, 'preserved-sample-changed')
+                  for name, target in (('A1', target_a), ('A2', target_a), ('B1', target_b), ('B2', target_b)):
+                      require(time.monotonic() < gate.deadline, 'whole-capture-timeout')
+                      check_backups()
+                      for file in (target.parent / n for n in NAMES):
+                          if file in active:
+                              require(stable_file(file, 2 * MiB, owned=True)[1] == active[file], 'active-output-changed')
+                          else:
+                              require(not file.exists() and not file.is_symlink(), 'foreign-output-exists')
+                      reservation = reserve_compile_native(backups, active, target.parent)
+                      # Same absolute source, cwd, controlled environment and basename at
+                      # both output parents; only the independently declared -o path varies.
+                      argv = ['/usr/bin/clang', '-Os', '-mmacosx-version-min=12.0', str(source), '-o', str(target)]
+                      sample = {'name': name, 'target': str(target), 'argv': argv, 'outputs': [], 'observations': [], 'backups': [],
+                                'storage_reservation': reservation, 'producer_file_limit_bytes': 2 * MiB}
+                      result['samples'].append(sample)
+                      try:
+                          gate.run(argv)
+                      except Unknown:
+                          try:
+                              try:
+                                  target.lstat()
+                              except FileNotFoundError:
+                                  sample['partial_output'] = {'state': 'ABSENT'}
+                              else:
+                                  sample['partial_output'] = stable_file(target, 2 * MiB, owned=True)[1]
+                          except (Unknown, OSError):
+                              sample['partial_output'] = {'state': 'UNKNOWN', 'reason': 'bounded-partial-output-unreadable'}
+                          raise
+                      compiled, initial = stable_file(target, 2 * MiB, owned=True)
+                      require(initial['mode'] & 0o111 and not initial['mode'] & 0o6000, 'unsupported-output-mode')
+                      for sibling in NAMES[1:]:
+                          shutil.copy2(target, target.parent / sibling)
+                          require(stable_file(target, 2 * MiB, owned=True)[1] == initial, 'copy-source-changed')
+                      for file in (target.parent / n for n in NAMES):
+                          _, fact = stable_file(file, 2 * MiB, owned=True)
+                          sample['outputs'].append(fact)
+                          active[file] = fact
+                          observations = []
+                          for args in (['--verify', '--strict'], ['-dvvv'], ['-d', '--entitlements', ':-']):
+                              before = stable_file(file, 2 * MiB, owned=True)[1]
+                              prior_count, fault = len(gate.commands), None
+                              try:
+                                  command_result = gate.run(['/usr/bin/codesign', *args, str(file)])
+                              except Unknown as exc:
+                                  fault = exc
+                                  command_result = (gate.commands[-1]['result'] if len(gate.commands) > prior_count else
+                                                    Result(None, b'', b'', False, False, str(exc)))
+                              try:
+                                  after = stable_file(file, 2 * MiB, owned=True)[1]
+                              except Exception:
+                                  after = {'status': 'UNKNOWN', 'reason': 'post-observation-file-unreadable'}
+                                  fault = fault or Unknown('post-observation-file-unreadable')
+                              sample['observations'].append({'target': str(file), 'command': len(gate.commands),
+                                  'before': before, 'after': after, 'returncode': command_result.returncode,
+                                  'eof': command_result.eof, 'reaped': command_result.reaped,
+                                  'attempted': len(gate.commands) > prior_count})
+                              if fault:
+                                  raise fault
+                              require(before == after == fact, 'native-observation-mutated-output')
+                              observations.append(command_result)
+                          require(observations[0].stdout == observations[0].stderr == b'', 'unrecognized-strict-verification-output')
+                          fact['policy_facts'] = parse_policy(str(file), observations[1], observations[2])
+                          # Identity maps used for future comparisons exclude added facts.
+                          active[file] = {k: v for k, v in fact.items() if k != 'policy_facts'}
+                      sample['copies_equal'] = len({(f['sha256'], f['bytes'], f['mode']) for f in sample['outputs']}) == 1
+                      require(sample['copies_equal'], 'compiler-copies-differ')
+                      sample_dir = native / 'preserved' / name
+                      sample_dir.mkdir(mode=0o700)
+                      for file in (target.parent / n for n in NAMES):
+                          destination = sample_dir / file.name
+                          require(not destination.exists(), 'sample-backup-exists')
+                          reserve_native(sum(f['bytes'] for f in backups.values()) +
+                                         sum(f['bytes'] for f in active.values()), active[file]['bytes'])
+                          shutil.copy2(file, destination)
+                          _, fact = stable_file(destination, 2 * MiB, owned=True)
+                          require((fact['sha256'], fact['bytes'], fact['mode']) ==
+                                  (active[file]['sha256'], active[file]['bytes'], active[file]['mode']), 'backup-copy-drift')
+                          backups[destination] = fact
+                          sample['backups'].append(fact)
+                      require(len(backups) <= 12 and sum(f['bytes'] for f in backups.values()) +
+                              sum(f['bytes'] for f in active.values()) <= 16 * MiB, 'retained-native-cap')
+                      require(stable_file(source, MiB, owned=True)[1] == result['source'], 'source-changed')
+                  check_backups()
+                  result['wrappers_after'] = tool_facts(reads)
+                  result['effective_after'] = resolved_facts(metadata, reads)
+                  require(result['wrappers_before'] == result['wrappers_after'] and
+                          result['effective_before'] == result['effective_after'], 'tool-identity-changed')
+                  require(stable_file(source.with_name('install_bundle_launchers.py'), MiB, owned=True)[1] ==
+                          result['installer_source'] and stable_file(workspace / '.github/workflows/macos.yml', MiB, owned=True)[1] ==
+                          result['workflow'], 'source-input-changed')
+                  fingerprints = {s['name']: [f['sha256'] for f in s['outputs']] for s in result['samples']}
+                  keys = tuple(fingerprints)
+                  result['comparisons'] = {'A1_A2_equal': fingerprints['A1'] == fingerprints['A2'],
+                      'B1_B2_equal': fingerprints['B1'] == fingerprints['B2'],
+                      'A1_B1_equal': fingerprints['A1'] == fingerprints['B1'],
+                      'all_four_equal': len({tuple(v) for v in fingerprints.values()}) == 1,
+                      'all_pairs': {left + '_' + right: fingerprints[left] == fingerprints[right]
+                                    for i, left in enumerate(keys) for right in keys[i + 1:]},
+                      'meaning': 'measured byte equality only; neither universal reproducibility nor native-policy/app acceptance'}
+                  require(time.monotonic() < gate.deadline, 'whole-capture-timeout')
+                  result['read_budget'] = {'bytes': reads.bytes, 'seconds': reads.seconds}
+                  result['status'] = 'COMPLETE_FACTS_ONLY'
+              except Exception as exc:
+                  result['reasons'].append(str(exc) if isinstance(exc, Unknown) else 'capture-fault-' + type(exc).__name__)
+              result['external_commands'] = len(gate.commands) if gate else 0
+              result['finished_at'] = datetime.now(timezone.utc).isoformat()
+              result['operation_seconds'] = time.monotonic() - capture_started
+              result['acceptance'] = False
+              result['artifacts'] = emit_evidence(output, gate, result)
+              return result
+          
+          
+          def github_outputs(path, artifacts):
+              path = no_links(path)
+              info = path.lstat()
+              require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size <= MiB, 'github-output-file')
+              text = 'artifact_paths<<COLLECT_CAPTURE_METADATA_ONLY\n' + '\n'.join(artifacts) + '\nCOLLECT_CAPTURE_METADATA_ONLY\n'
+              require(len(text.encode()) <= MiB, 'github-output-cap')
+              fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+              with os.fdopen(fd, 'w') as stream:
+                  require(identity(os.fstat(stream.fileno())) == identity(info), 'github-output-changed')
+                  stream.write(text)
+          
+          
+          def cloud_context(env):
+              require(all(env.get(k) == value for k, value in {
+                  'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
+                  'GITHUB_EVENT_NAME': 'workflow_dispatch', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'ARM64'}.items()),
+                  'cloud-manual-hosted-context-required')
+              require(re.fullmatch('[0-9]{1,20}', env.get('GITHUB_RUN_ID', '')) and
+                      re.fullmatch('[0-9]{1,6}', env.get('GITHUB_RUN_ATTEMPT', '')) and
+                      re.fullmatch('[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', env.get('GITHUB_REPOSITORY', '')) and
+                      re.fullmatch('[0-9a-f]{40}', env.get('GITHUB_SHA', '')), 'cloud-context-format')
+              return {'run_id': env['GITHUB_RUN_ID'], 'attempt': env['GITHUB_RUN_ATTEMPT'],
+                      'repository': env['GITHUB_REPOSITORY'], 'head': env['GITHUB_SHA'],
+                      'authority': 'observed workflow environment only; root independently verifies actual remote/run/checkout'}
+          
+          
+          def main(argv=None):
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument('--workspace', type=Path, required=True)
+              parser.add_argument('--output', type=Path, required=True)
+              parser.add_argument('--native', type=Path, required=True)
+              args = parser.parse_args(argv)
+              try:
+                  require(sys.version_info[:3] == (3, 13, 14), 'python-bootstrap-version-mismatch')
+                  cloud_context(os.environ)
+                  result = run_capture(args.workspace, args.output, args.native, os.environ.get('GITHUB_SHA'))
+                  if os.environ.get('GITHUB_OUTPUT'):
+                      github_outputs(Path(os.environ['GITHUB_OUTPUT']), result['artifacts'])
+                  print(json.dumps({'status': result['status'], 'acceptance': False,
+                                    'external_commands': result['external_commands'], 'selected_artifacts': len(result['artifacts'])}))
+                  return 0 if result['status'] == 'COMPLETE_FACTS_ONLY' else 1
+              except Exception as exc:
+                  print(json.dumps({'status': 'UNKNOWN', 'acceptance': False, 'reason':
+                        str(exc) if isinstance(exc, Unknown) else 'capture-fault-' + type(exc).__name__}))
+                  return 1
+          
+          
+          if __name__ == '__main__':
+              raise SystemExit(main())
+          CAPTURE_PY
+          "$CAPTURE_PYTHON" -B "$RUNNER_TEMP/capture.py" --workspace "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/collect-capture-metadata-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --native "$RUNNER_TEMP/collect-capture-native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - name: Retain selected bounded metadata even for UNKNOWN
+        if: always() && steps.capture.outputs.artifact_paths != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
+        with:
+          name: COMPILER-FACTS-NON-ADMITTING-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ steps.capture.outputs.artifact_paths }}
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6

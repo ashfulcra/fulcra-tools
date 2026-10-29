@@ -2977,6 +2977,35 @@ release QA.
   roots; urllib/Auth0 needs this explicit default. Preserve operator trust
   overrides and TLS/hostname verification; never work around this with disabled
   verification. Missing roots fail before auth. Source/venv trust is unchanged.
+- **Public-input bundle QA:** follow the [invocation-bound stages](packages/menubar/README.md#invocation-bound-public-input-qa)
+  and [stage helper](packages/menubar/scripts/bundle_provenance_stages.py), with
+  [canonical sanitizer](packages/menubar/scripts/sanitize_bundle.py) at the existing
+  raw/postbuild/check-only positions. Prepare BEFORE CREATE; install launchers,
+  bind BEFORE raw sanitize; only the controlled BUILD/sign wrappers can mint a
+  signed generation. Current I/H live in trusted entry/completion plumbing
+  (`COLLECT_PROVENANCE_CONTEXT`), never candidate receipts or saved old contexts.
+  Its schema2 envelope is capped at 32 KiB and independently binds immutable
+  metadata (0600/write-once/8 MiB/no head); remaining head growth through gen64
+  and current environment/argv capacity are checked before receipt publication.
+  The build uses a fresh external private run directory and parent-owned private
+  completion FD (`COLLECT_PROVENANCE_RUN_DIR`, `COLLECT_PROVENANCE_COMPLETION_FD`)
+  when `COLLECT_PROVENANCE_REQUEST` selects the constrained path. It must be a
+  writable pipe, concurrently drained through bounded length framing and EOF;
+  regular files/partial frames fail, and old full contexts require fresh entry.
+  Lost authority restarts fresh; no receipt adoption or scope-lock stealing. Preserve strict
+  no-provenance fallback, source/wheel/support/inventory gates, and independent
+  review. Exact current app inventories precede broader transform comparisons;
+  only whole unchanged public intervals receive marker permission. Source-derived
+  ad-hoc per-target policy and fresh absolute codesign observations are required.
+  Bind framework/nested-app executable aliases to pinned origin Info.plist and
+  exact scoped paths/version links; all final alias policy fields agree in both
+  BUILD/sign sets. Unknown geometry stops before mutation; unknown compiler/tool/
+  entitlement forms stop UNKNOWN. Runtime/help/cache
+  boundaries mark mutations DIRTY and require controlled re-sign/fresh final
+  signed checks. Receipts/inventories are 0600 write-once, capped at 256 KiB/8 MiB;
+  native verification 30s/command,300s total,1 MiB/command; BUILD900s/16 MiB;
+  timeout/cap kills and reaps the whole group. Actual cloud N1 remains UNKNOWN:
+  pure/fake-tool GREEN is neither native qualification nor release permission.
 - **AppleScript writeback is experimental:** it additionally requires explicit
   writeback_enabled = true and refuses all attachment types. Do not enable it
   as part of ordinary Notes setup.
