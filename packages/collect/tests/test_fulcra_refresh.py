@@ -375,9 +375,9 @@ def test_auth_status_reports_refresh_failed_false_initially(
 
 
 def test_auth_status_reports_refresh_failed_true_after_failed_refresh(
-    collect_home, _in_memory_keyring, monkeypatch,
+    _established_refresh_account, collect_home, _in_memory_keyring, monkeypatch,
 ):
-    # Drive `_refresh_failed=True` by running a failing refresh.
+    # Drive `_refresh_failed=True` for an established, locally readable account.
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: None)
     assert _creds_mod.refresh_fulcra_access_token() is None
     assert _creds_mod.is_refresh_failed() is True
@@ -386,20 +386,31 @@ def test_auth_status_reports_refresh_failed_true_after_failed_refresh(
     client = _client(daemon)
     r = client.get("/api/fulcra/auth/status")
     assert r.status_code == 200
-    assert r.json()["refresh_failed"] is True
+    body = r.json()
+    assert body["availability"] == "present"
+    assert body["refresh_failed"] is True
 
 
 def test_auth_status_reports_refresh_failed_false_after_clear(
-    collect_home, _in_memory_keyring, monkeypatch,
+    _established_refresh_account, collect_home, _in_memory_keyring, monkeypatch,
 ):
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: None)
-    _creds_mod.refresh_fulcra_access_token()
-    _creds_mod.clear_refresh_failed()
+    assert _creds_mod.refresh_fulcra_access_token() is None
+    assert _creds_mod.is_refresh_failed() is True
 
     daemon = _build_daemon(collect_home)
     client = _client(daemon)
+    before_clear = client.get("/api/fulcra/auth/status")
+    assert before_clear.status_code == 200
+    assert before_clear.json()["availability"] == "present"
+    assert before_clear.json()["refresh_failed"] is True
+
+    _creds_mod.clear_refresh_failed()
     r = client.get("/api/fulcra/auth/status")
-    assert r.json()["refresh_failed"] is False
+    assert r.status_code == 200
+    body = r.json()
+    assert body["availability"] == "present"
+    assert body["refresh_failed"] is False
 
 
 # ---------------------------------------------------------------------------
