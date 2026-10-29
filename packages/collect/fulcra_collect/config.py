@@ -7,24 +7,54 @@ live in the keychain (see credentials.py).
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import json
+import math
 import os
 import tempfile
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
 from types import MappingProxyType
 
 import tomlkit
 
 
+_pinned_profile: ContextVar[Path | None] = ContextVar("collect_pinned_profile", default=None)
+
+
+def profile_path() -> Path:
+    """Resolve profile selection without touching disk."""
+    override = os.environ.get("FULCRA_COLLECT_HOME")
+    return (Path(override) if override else Path.home() / ".config" / "fulcra-collect").resolve()
+
+
+@contextmanager
+def pinned_profile(root: Path):
+    """Bind inherited config/lease paths before any filesystem access."""
+    root = root.resolve()
+    if profile_path() != root:
+        raise RuntimeError("Standalone profile changed; retain pending work")
+    token = _pinned_profile.set(root)
+    try:
+        yield
+    finally:
+        _pinned_profile.reset(token)
+
+
 def config_dir() -> Path:
     """The hub config directory. `FULCRA_COLLECT_HOME` overrides the
     default `~/.config/fulcra-collect` (used by tests and power users)."""
+    pinned = _pinned_profile.get()
+    if pinned is not None and profile_path() != pinned:
+        raise RuntimeError("Standalone profile changed; retain pending work")
     override = os.environ.get("FULCRA_COLLECT_HOME")
-    base = Path(override) if override else Path.home() / ".config" / "fulcra-collect"
+    base = pinned if pinned is not None else (Path(override) if override else Path.home() / ".config" / "fulcra-collect")
     base.mkdir(parents=True, exist_ok=True)
     # It holds the control socket and per-plugin state files — restrict to
     # the owner. Done unconditionally (like state._state_dir) so a
@@ -35,6 +65,41 @@ def config_dir() -> Path:
 
 def _config_path() -> Path:
     return config_dir() / "config.toml"
+
+
+def _settings_snapshot(value):
+    """Canonical typed TOML values, without conflating False and numeric zero."""
+    if hasattr(value, "unwrap"):
+        value = value.unwrap()
+    if isinstance(value, Mapping):
+        return ["map", sorted((key, _settings_snapshot(item)) for key, item in value.items())]
+    if isinstance(value, (list, tuple)):
+        return ["array", [_settings_snapshot(item) for item in value]]
+    if isinstance(value, bool):
+        return ["bool", value]
+    if isinstance(value, (int, float)):
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("settings numbers must be finite")
+            if value.is_integer():
+                value = int(value)
+        return ["number", value]
+    if isinstance(value, str):
+        return ["string", value]
+    if value is None:
+        return ["null"]
+    if isinstance(value, (datetime, date, time)):
+        return [type(value).__name__, value.isoformat()]
+    raise ValueError("settings contain an unsupported value")
+
+
+def settings_match(left, right) -> bool:
+    return _settings_snapshot(left) == _settings_snapshot(right)
+
+
+def settings_fingerprint(values) -> str:
+    payload = json.dumps(_settings_snapshot(values), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # Default TCP port the daemon's HTTP server binds to. Chosen far from
@@ -239,6 +304,25 @@ def save(cfg: Config) -> None:
         _save_locked(cfg, path)
 
 
+def update_plugin_settings_if_current(plugin_id: str, *, expected_epoch: str,
+                                     expected_settings: dict, values: dict, validate) -> Config:
+    """Commit a proved selection while holding account/config mutation fences.
+
+    ``validate`` checks the captured account and pending-data disposition under
+    these locks. A stale selection cannot overwrite newer source consent.
+    """
+    from .config_leases import settings_update_scope
+    with settings_update_scope():
+        cfg = load()
+        if (cfg.account_transition or cfg.plugin_epochs.get(plugin_id, "") != expected_epoch
+                or not settings_match(cfg.plugin_settings.get(plugin_id, {}), expected_settings)):
+            raise ConfigConflictError("Source configuration changed; reload and retry.")
+        validate()
+        cfg.update_plugin_settings(plugin_id, values)
+        _save_locked(cfg, _config_path())
+        return cfg
+
+
 def _save_locked(cfg: Config, path: Path, *, account_transition: bool | None = None) -> None:
     # Read the existing document to preserve any comments and custom
     # sections the user may have added. If the file doesn't exist yet,
@@ -267,7 +351,7 @@ def _save_locked(cfg: Config, path: Path, *, account_transition: bool | None = N
         epochs[plugin_id] = cfg.plugin_epochs[plugin_id]
     for plugin_id in old_enabled | merged['enabled'] | set(old_settings) | set(merged['plugin_settings']):
         if ((plugin_id in old_enabled) != (plugin_id in merged['enabled'])
-                or old_settings.get(plugin_id) != merged['plugin_settings'].get(plugin_id)):
+                or not settings_match(old_settings.get(plugin_id), merged['plugin_settings'].get(plugin_id))):
             epochs[plugin_id] = uuid.uuid4().hex
     doc["plugin_epochs"] = epochs
     doc["enabled"] = sorted(merged['enabled'])

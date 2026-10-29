@@ -13,7 +13,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fulcra_common.data_types import DataTypeSpec
 
 from .freshness import FreshnessExpectation
 
@@ -283,6 +286,9 @@ class SetupStep:
     both the Next and Back directions. If a key hasn't been filled yet
     (inputValues[key] is undefined), the condition is NOT satisfied — the
     step is skipped. Unconditional steps (condition=None) are always shown."""
+    record_slot: str = ""
+    """V1 destination key for a multi-track source's definition_picker step.
+    Empty selects the source's only declared slot; legacy pickers ignore it."""
 
 
 @dataclass
@@ -407,6 +413,14 @@ class Plugin:
     Allow access action. Returns {granted: bool, hint?: str | None}. Never
     invoke it from permission_check, discovery, or setup navigation.
     """
+    record_data_types: Callable[[dict], dict[str, DataTypeSpec]] | None = None
+    """Pure v1 destination specs keyed by stable slot, from saved settings.
+    Set only when the plugin's writer, readback and setup switch together.
+    File-only plugins and legacy record writers leave this unset."""
+    record_pending: Callable[["RunContext"], bool] | None = None
+    """Optional read-only pending check for a producer-specific outbox.
+    None uses the shared v1_pending_records store. Unknown state must raise,
+    never return a clean False that permits destination reassignment."""
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -505,6 +519,28 @@ class RunContext:
     plugin's namespace.  They are intentionally absent on lightweight
     health/permission contexts, where attempting durable state access fails
     loudly rather than pretending a write persisted."""
+    _persisted_config: dict | None = field(default=None, repr=False)
+    """Raw saved settings captured with the epoch; normalized runtime values
+    can differ from legacy stored strings. V1 sessions compare this independent
+    worker snapshot when checking source consent."""
+    _record_outbox_get: Callable[[str, object], object] | None = field(default=None, repr=False)
+    _record_outbox_set: Callable[[str, object], None] | None = field(default=None, repr=False)
+    """Worker-bound pending-record storage, separate from small cursor KV.
+    Plugin identity is bound by the worker; health contexts have no backend."""
+
+    _trakt_source_profile: str | None = field(default=None, repr=False)
+    _trakt_source_owner: object | None = field(default=None, repr=False)
+    """Strict Trakt-only backend; absent contexts cannot acquire source authority."""
+
+    def outbox_get(self, key: str, default: object = None) -> object:
+        if self._record_outbox_get is None:
+            raise RuntimeError("RunContext has no record outbox backend")
+        return self._record_outbox_get(key, default)
+
+    def outbox_set(self, key: str, value: object) -> None:
+        if self._record_outbox_set is None:
+            raise RuntimeError("RunContext has no record outbox backend")
+        self._record_outbox_set(key, value)
 
     def claim_dedup_keys(self, keys: set[str]) -> bool:
         """Atomically claim a set of dedup keys for one event, returning
@@ -625,62 +661,24 @@ class RunContext:
         self._emit(event)
 
     def collect_token(self) -> str | None:
-        """Use only Collect's sign-in; never refresh through another account.
+        """Use only Collect's sign-in and principal-checked silent renewal.
 
-        Selected-source uploads fail closed if this token is missing or expired.
-        Reconnect in Collect until refresh can verify the same principal.
+        Missing credentials or a failed identity check require reconnecting in
+        Collect. Environment/CLI credentials cannot establish a new sign-in.
         """
         from . import credentials
-        token = credentials.get_user_secret_fresh("bearer-token")
-        return token if token and not _jwt_expired(token) else None
+        try:
+            token = credentials.get_user_secret_fresh("bearer-token")
+        except (credentials.keyring.errors.KeyringError, TimeoutError) as exc:
+            raise credentials.CredentialReadError(exc, stage="collect_account",
+                scope="user", key="bearer-token") from exc
+        if token and _jwt_expired(token):
+            return credentials.refresh_fulcra_access_token(expected_token=token)
+        return token
 
     def fulcra_token(self) -> str | None:
-        """Return the Fulcra access token.
-
-        Resolution order:
-        1. The user-level keychain entry written by the web UI's onboarding
-           wizard (credentials.get_user_secret("bearer-token")).  This is
-           the preferred path once the user has signed in via the daemon.
-        2. The FULCRA_ACCESS_TOKEN environment variable (useful for CI and
-           CLI invocations where a keychain is not available).
-        3. The `fulcra auth print-access-token` CLI subprocess — the
-           original path that reads from the fulcra CLI's credential store.
-
-        Returns None if no token is found via any path (first-launch state
-        before the user has signed in via the web UI's onboarding wizard).
-        """
-        from . import credentials
-        token = credentials.get_user_secret("bearer-token")
-        if token and not _jwt_expired(token):
-            return token
-        if token:
-            # Stored token is expired (or unreadably close to it). The routes
-            # side has refreshed on 401 since SP5; workers never did — so an
-            # expired stored token made EVERY plugin upload 401, the per-rule
-            # fail-soft swallowed it, and runs reported "no new data" while
-            # dropping every match (live incident 2026-07-16: 21 matched
-            # emails silently dropped). Refresh through the same helper the
-            # routes use; it re-stores the fresh token as a side effect.
-            fresh = credentials.refresh_fulcra_access_token()
-            if fresh:
-                return fresh
-            self.log.warning(
-                "fulcra_token: stored token expired and refresh failed — "
-                "falling back to env/CLI")
-        # Fall back to the fulcra-common path (env var + CLI subprocess).
-        # BaseFulcraClient.get_token() raises RuntimeError when the CLI is
-        # missing or fails; catch that so callers can treat it the same as
-        # "no token configured yet."
-        try:
-            from fulcra_common import BaseFulcraClient
-            return BaseFulcraClient().get_token()
-        except (RuntimeError, OSError) as exc:
-            # Deliberate swallow (callers treat this as "not signed in yet"),
-            # but LOG it: the 2026-06-10 launchd CLI-resolution failure was
-            # invisible precisely because this catch turned "CLI not found"
-            # into a silent None that surfaced only as "not authenticated".
-            self.log.warning("fulcra_token fallback failed: %s", exc)
-            return None
+        """Compatibility alias for Collect-only auth, including file producers."""
+        return self.collect_token()
 
     def _definition_validation_fresh(self, cached: str) -> bool:
         """True iff the validated-at watermark covers exactly `cached` and

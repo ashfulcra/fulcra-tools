@@ -92,11 +92,8 @@ class PopoverRoot:
         self._model = model
         self._client = client
         self._status_item = status_item
-        # In-memory state shared across popover open/close cycles:
-        # active Duration timers keyed by definition_id, and the
-        # "Recently recorded" list. Doesn't survive a menubar restart —
-        # that's OK because timers are short-lived and recent entries
-        # are recent enough that losing them is acceptable.
+        # Display snapshots only. Authoritative timers/recent records hydrate
+        # from protocol2 state; client requests are private and durable.
         self._active_timers: dict[str, dict] = {}
         self._recent: list[dict] = []
         self._popover = NSPopover.alloc().init()
@@ -349,6 +346,8 @@ class PopoverRoot:
             # Reset to quick-record view on each open so the popover
             # always starts on the primary surface after closing.
             self._show_quick_record()
+            # Reload account-scoped choices, recent actions and durable timers.
+            self._quick_record_view.refresh()
             # Refresh daemon-controls state so the user always sees the
             # current PID / Running-or-Stopped pill the moment the
             # popover opens (the lifecycle layer is gesture-driven, not

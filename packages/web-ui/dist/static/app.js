@@ -78,13 +78,15 @@ function app() {
       try {
         const [status, authStatus] = await Promise.all([
           api("/api/status"),
-          api("/api/fulcra/auth/status").catch(() => ({ authenticated: false })),
+          api("/api/fulcra/auth/status").catch(() => ({ authenticated: null, code: "keychain_unavailable" })),
         ]);
 
         const anyEnabled = (status.plugins ?? []).some(p => p.enabled);
         const signedIn = authStatus.authenticated === true;
 
-        if (signedIn && anyEnabled) {
+        if (authStatus.authenticated === null) {
+          this.route = "settings"; // Recover preserved Keychain access before sign-in.
+        } else if (signedIn && anyEnabled) {
           this.route = "dashboard";
         } else {
           this.route = "onboarding";

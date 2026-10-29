@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "key": "collect.attention.v1",
+  "name": "Attention",
+  "description": "Foreground browser attention from Fulcra Attention.",
+  "base_type": "Event",
+  "fields": {
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "category": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "og_description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "favicon_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "parent_source_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "note": {
+      "type": "string"
+    },
+    "service": {
+      "const": "web"
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "external_ids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chrome_identity",
+        "client",
+        "device",
+        "device_label",
+        "host",
+        "lang",
+        "og_type"
+      ],
+      "properties": {
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chrome_identity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "og_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lang": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "required_fields": [
+    "category",
+    "duration_seconds",
+    "external_ids",
+    "favicon_url",
+    "note",
+    "og_description",
+    "parent_source_id",
+    "service",
+    "title",
+    "url"
+  ]
+}

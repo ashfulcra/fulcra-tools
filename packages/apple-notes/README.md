@@ -45,6 +45,36 @@ Only the explicit enable action starts the chosen sync or preview mode.
   the same. An upgrade from the earlier prototype may upload attachments once
   to establish these fingerprints.
 
+## Account and consent (development branch)
+
+The [migration branch](../../docs/collect-v1.md) now uses
+[`CollectNotesFiles`](fulcra_apple_notes/collect_io.py) with Collect's captured
+account, source epoch and raw settings. It does not inherit the default CLI
+account or change process-wide credentials. API requests recheck the current
+Collect principal; same-account silent refresh is allowed. Signed storage URLs
+use a separate client without Fulcra credentials. Unknown/partial Files listings
+are errors, never evidence of missing state.
+
+Sync, reconciliation and experimental writeback pass this adapter explicitly.
+Source guards run around snapshots, between Notes/attachment reads, per note,
+and during attachment hashing. Remote effects and native writeback hold the
+account/configuration lease through a final consent check and the operation.
+Disabling the source or changing its account/settings prevents further effects;
+an already-entered leased operation finishes before a supported transition.
+Revoking writeback opt-in is checked again at the actual AppleScript mutation.
+Attachments are hashed and uploaded from the same private temporary snapshot;
+a changed live file cannot be uploaded under a stale content hash. MIME detection
+continues to use file contents, including when its extension is misleading.
+
+Local-only sync preview needs no Fulcra auth and contacts no cloud service, but
+still honors source revocation. Reconciliation/writeback read cloud state even
+in preview, so they require Collect sign-in. Reconciliation checkpoint scope
+includes the destination account, source container and exact sync baseline.
+Files paths, ownership fences, attachment limits and additive deletion behavior
+are unchanged. This remains a Files-only plugin; it creates no Event/Metric
+destination. These changes have not shipped in the released 0.1.4 app; live
+library, cutover and packaged-app checks remain migration gates.
+
 ## Troubleshooting
 
 **Access is not verified:** open Notes first, confirm Full Disk Access for

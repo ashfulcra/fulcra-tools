@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .config import config_dir
 
-LATEST_VERSION = 7
+LATEST_VERSION = 9
 
 # Plugin KV is deliberately small state, not a document store.  The limits
 # keep a misbehaving long-lived plugin from turning state.db into an unbounded
@@ -32,6 +32,7 @@ LATEST_VERSION = 7
 PLUGIN_KV_MAX_KEY_BYTES = 256
 PLUGIN_KV_MAX_VALUE_BYTES = 64 * 1024
 PLUGIN_KV_MAX_DEPTH = 32
+RECORD_OUTBOX_MAX_VALUE_BYTES = 16 * 1024 * 1024
 
 _LOG = logging.getLogger("fulcra_collect.db")
 
@@ -190,6 +191,15 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < 7:
         _migration_007_freshness(conn)
         _record_version(conn, 7)
+    if current < 8:
+        _migration_008_record_outboxes(conn)
+        _record_version(conn, 8)
+    if current < 9:
+        # Protocol-only migration: pre-v9 source writers do not understand the
+        # durable dispatch checkpoint and could replay an issued pending batch.
+        # Their existing future-schema startup guard must reject this database.
+        # Preserve all original pending JSON; legacy evidence stays UNKNOWN.
+        _record_version(conn, 9)
 
 
 def _migration_001_initial(conn: sqlite3.Connection) -> None:
@@ -414,6 +424,21 @@ def _migration_007_freshness(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE plugin_state ADD COLUMN newest_item_at TEXT")
 
 
+def _migration_008_record_outboxes(conn: sqlite3.Connection) -> None:
+    """Keep pending record payloads separate from small cursor/config KV.
+
+    No foreign key to run history: clearing a plugin's status or changing an
+    account must never discard an uncertain upload. Preserve original small
+    KV batches when importing any pre-release v1 state.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS record_outboxes (
+        plugin_id TEXT NOT NULL, key TEXT NOT NULL, value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL, PRIMARY KEY(plugin_id,key))""")
+    conn.execute("""INSERT OR IGNORE INTO record_outboxes
+        SELECT plugin_id,key,value_json,updated_at FROM plugin_kv
+        WHERE key IN ('v1_media_pending','v1_pending_records')""")
+
+
 # ---- low-level CRUD used by state.py --------------------------------
 
 
@@ -423,6 +448,26 @@ def fetch_plugin_state(conn: sqlite3.Connection,
         "SELECT * FROM plugin_state WHERE plugin_id = ?",
         (plugin_id,),
     ).fetchone()
+
+
+def record_service_failure(conn: sqlite3.Connection, *, plugin_id: str,
+                           when: str, error: str) -> None:
+    """One atomic status-only upsert, preserving every unrelated column."""
+    conn.execute(
+        """
+        INSERT INTO plugin_state (
+            plugin_id, last_run, last_outcome, last_error,
+            consecutive_failures, updated_at
+        ) VALUES (?, ?, 'error', ?, 1, ?)
+        ON CONFLICT(plugin_id) DO UPDATE SET
+            last_run = excluded.last_run,
+            last_outcome = excluded.last_outcome,
+            last_error = excluded.last_error,
+            consecutive_failures = plugin_state.consecutive_failures + 1,
+            updated_at = excluded.updated_at
+        """,
+        (plugin_id, when, error, datetime.now(timezone.utc).isoformat()),
+    )
 
 
 def upsert_plugin_state(conn: sqlite3.Connection, *, plugin_id: str,
@@ -560,7 +605,7 @@ def _validate_plugin_kv_key(key: str) -> None:
         )
 
 
-def _validate_plugin_kv_value(value: object, *, depth: int = 0) -> None:
+def _validate_plugin_kv_value(value: object, *, depth: int = 0, label: str = "plugin KV") -> None:
     """Accept only losslessly JSON-compatible values.
 
     Python's encoder silently coerces non-string dictionary keys, accepts
@@ -570,32 +615,36 @@ def _validate_plugin_kv_value(value: object, *, depth: int = 0) -> None:
     """
     if depth > PLUGIN_KV_MAX_DEPTH:
         raise ValueError(
-            f"plugin KV value exceeds maximum depth {PLUGIN_KV_MAX_DEPTH}",
+            f"{label} value exceeds maximum depth {PLUGIN_KV_MAX_DEPTH}",
         )
     if value is None or isinstance(value, (str, bool, int)):
         return
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError("plugin KV floats must be finite")
+            raise ValueError(f"{label} floats must be finite")
         return
     if isinstance(value, list):
         for item in value:
-            _validate_plugin_kv_value(item, depth=depth + 1)
+            _validate_plugin_kv_value(item, depth=depth + 1, label=label)
         return
     if isinstance(value, dict):
         for item_key, item_value in value.items():
             if not isinstance(item_key, str):
-                raise TypeError("plugin KV object keys must be strings")
-            _validate_plugin_kv_value(item_value, depth=depth + 1)
+                raise TypeError(f"{label} object keys must be strings")
+            _validate_plugin_kv_value(item_value, depth=depth + 1, label=label)
         return
     raise TypeError(
-        "plugin KV value must contain only JSON types "
+        f"{label} value must contain only JSON types "
         "(null, bool, number, string, list, object)",
     )
 
 
 def _encode_plugin_kv_value(value: object) -> str:
-    _validate_plugin_kv_value(value)
+    return _encode_json_state(value, label="plugin KV", max_bytes=PLUGIN_KV_MAX_VALUE_BYTES)
+
+
+def _encode_json_state(value: object, *, label: str, max_bytes: int) -> str:
+    _validate_plugin_kv_value(value, label=label)
     encoded = json.dumps(
         value,
         ensure_ascii=False,
@@ -603,11 +652,28 @@ def _encode_plugin_kv_value(value: object) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    if len(encoded.encode("utf-8")) > PLUGIN_KV_MAX_VALUE_BYTES:
+    if len(encoded.encode("utf-8")) > max_bytes:
         raise ValueError(
-            f"plugin KV value exceeds {PLUGIN_KV_MAX_VALUE_BYTES} UTF-8 bytes",
+            f"{label} value exceeds {max_bytes} UTF-8 bytes",
         )
     return encoded
+
+
+def get_record_outbox(conn: sqlite3.Connection, plugin_id: str, key: str,
+                      default: object = None) -> object:
+    _validate_plugin_kv_key(key)
+    row = conn.execute("SELECT value_json FROM record_outboxes WHERE plugin_id=? AND key=?",
+                       (plugin_id, key)).fetchone()
+    return default if row is None else json.loads(row["value_json"])
+
+
+def set_record_outbox(conn: sqlite3.Connection, plugin_id: str, key: str, value: object) -> None:
+    """Atomically retain a bounded pending batch in its plugin's namespace."""
+    _validate_plugin_kv_key(key)
+    encoded = _encode_json_state(value, label="record outbox", max_bytes=RECORD_OUTBOX_MAX_VALUE_BYTES)
+    conn.execute("""INSERT INTO record_outboxes VALUES (?,?,?,?)
+        ON CONFLICT(plugin_id,key) DO UPDATE SET value_json=excluded.value_json,
+        updated_at=excluded.updated_at""", (plugin_id, key, encoded, datetime.now(timezone.utc).isoformat()))
 
 
 def get_plugin_kv(conn: sqlite3.Connection, plugin_id: str, key: str,

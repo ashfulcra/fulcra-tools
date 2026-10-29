@@ -1,3 +1,4 @@
+import {v1HeldMode,v1Display,v1Command} from "../relayless/v1AuthClient";
 import { useEffect, useMemo, useState } from "react";
 import "./wizard.css";
 import markUrl from "../assets/fulcra-mark.png";
@@ -33,6 +34,8 @@ function FulcrumMark() {
 
 export function Wizard() {
   const [step, setStep] = useState<Step>("welcome");
+  const [captureHeld,setCaptureHeld]=useState<boolean|null>(null);
+  const [retainedCount,setRetainedCount]=useState<number|null>(null);
 
   // ---- scan step state ----
   const [daysBack, setDaysBack] = useState(30);
@@ -60,6 +63,7 @@ export function Wizard() {
   // Pre-populate manuallyExcluded with anything already on the Tier 3 list
   // so the wizard starts from "here's what you already excluded".
   useEffect(() => {
+    void v1HeldMode().then(setCaptureHeld).catch(()=>setCaptureHeld(null));
     void (async () => {
       const existing = await loadIgnoreList();
       setExistingPatterns(existing.map((e) => e.pattern));
@@ -150,7 +154,8 @@ export function Wizard() {
       });
       // Record the run so other machines on this Chrome profile warn
       // before backfilling the same synced history again.
-      await recordBackfillRun(await getMachineId());
+      if(await v1HeldMode()){setCaptureHeld(true);setRetainedCount(count);}
+      else await recordBackfillRun(await getMachineId());
       await markOnboarded();
       setIngestComplete(true);
       setIngestProgress({ done: count, total: count });
@@ -261,6 +266,7 @@ export function Wizard() {
           running={ingestRunning}
           error={ingestError}
           priorBackfill={priorBackfill}
+          held={captureHeld===true}
           onStart={() => void runIngest()}
           onBack={() => setStep("filter")}
           onSkip={async () => { await markOnboarded(); setStep("done"); }}
@@ -268,7 +274,7 @@ export function Wizard() {
       )}
 
       {step === "done" && (
-        <DoneStep ingestComplete={ingestComplete} />
+        <DoneStep ingestComplete={ingestComplete} held={captureHeld} retainedCount={retainedCount} />
       )}
     </div>
   );
@@ -382,6 +388,9 @@ function ChooseDestinationStep(props: {
     console.info("[wizard:destination] load start");
     void (async () => {
       try {
+        if(await v1HeldMode()){
+          const result=await v1Command('destination-list');if(result.status==='held')throw new Error(result.code);return;
+        }
         const rows = await list(ensureOpts);
         if (cancelled) return;
         setDestinations(rows);
@@ -412,6 +421,9 @@ function ChooseDestinationStep(props: {
     let cancelled = false;
     void (async () => {
       try {
+        if(await v1HeldMode()){
+          const display=await v1Display();const label=display.label;if(!cancelled&&label&&isHumanLabel(label))setIdentityLabel(cur=>cur===''?`${label} browser`:cur);return;
+        }
         const idToken = await tokenStore.getIdToken();
         const accessToken = await tokenStore.getValidAccessToken();
         const token = idToken ?? accessToken;
@@ -435,6 +447,9 @@ function ChooseDestinationStep(props: {
     setError(null);
     const label = identityLabel.trim();
     try {
+      if(await v1HeldMode()){
+        await v1Command(selected===CREATE?'destination-create':'destination-choose',{selection:selected,name:newName.trim(),identityLabel:label});return;
+      }
       // Persist the identity label first so capture (and a re-run of the
       // wizard) sees it even if the destination call fails partway.
       const cur = await loadSettings();
@@ -874,6 +889,7 @@ function IngestStep(props: {
   running: boolean;
   error: string | null;
   priorBackfill: BackfillRun | null;
+  held: boolean;
   onStart: () => void;
   onBack: () => void;
   onSkip: () => void;
@@ -932,7 +948,7 @@ function IngestStep(props: {
           onChange={(e) => props.setIngestEnabled(e.target.checked)}
           disabled={inProgress}
         />
-        Send the {kept.toLocaleString()} kept visits to Fulcra
+        {props.held?"Retain locally":"Send"} the {kept.toLocaleString()} kept visits {props.held?"with upload held":"to Fulcra"}
       </label>
 
       {props.progress !== null && (
@@ -941,7 +957,7 @@ function IngestStep(props: {
             <div className="progress-fill" style={{ width: `${pct}%` }} />
           </div>
           <div className="progress-label">
-            {props.progress.done.toLocaleString()} / {props.progress.total.toLocaleString()} queued ({pct}%)
+            {props.progress.done.toLocaleString()} / {props.progress.total.toLocaleString()} {props.held?"retained locally":"queued"} ({pct}%)
           </div>
         </>
       )}
@@ -985,7 +1001,10 @@ function IngestStep(props: {
   );
 }
 
-function DoneStep({ ingestComplete }: { ingestComplete: boolean }) {
+function DoneStep({ ingestComplete,held,retainedCount }: { ingestComplete: boolean;held:boolean|null;retainedCount:number|null }) {
+  if(held===null)return <p>Capture status is loading or unknown. Upload is not confirmed.</p>;
+  if(held)return <><h2>Capture held locally</h2><div className="done-card"><p>Both drains are disabled. Captures remain held locally; no upload is confirmed.</p>{retainedCount!==null&&<p>{retainedCount.toLocaleString()} history rows durably retained locally.</p>}</div></>;
+
   return (
     <>
       <h2>You're set up</h2>

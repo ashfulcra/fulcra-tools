@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import logging
+import base64
+import json
+from contextlib import nullcontext
 from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
 
 
 from fulcra_collect.plugin import RunContext
@@ -13,10 +19,36 @@ from fulcra_gmail.collect_plugin import PLUGIN
 from fulcra_gmail.relay import RelayResult
 
 
+@pytest.fixture(autouse=True)
+def collect_sign_in(tmp_path, monkeypatch):
+    from fulcra_collect import credentials
+    monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path))
+    claims = base64.urlsafe_b64encode(json.dumps({"fulcradynamics.com/userid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "exp": 4102444800}).encode()).decode().rstrip("=")
+    monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda _: "synthetic." + claims + ".signature")
+
+
+def test_gmail_run_requires_collect_sign_in_before_provider_or_cli_fallback(monkeypatch):
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda _: None)
+    account = SimpleNamespace(account_id="synthetic", email="synthetic@example.com", status="active")
+    monkeypatch.setattr(collect_plugin, "_registry", lambda: SimpleNamespace(list_accounts=lambda: [account]))
+    monkeypatch.setattr(collect_plugin, "FilesWriter", lambda *_: pytest.fail("writer cannot use default CLI auth"))
+    monkeypatch.setattr(collect_plugin, "GmailClient", lambda *_: pytest.fail("source read before Collect sign-in"))
+    with pytest.raises(ValueError, match="Reconnect to Fulcra in Collect"):
+        PLUGIN.run(_ctx({"rules": [{"id": "synthetic", "version": 1, "name": "Synthetic",
+            "match": "subject:synthetic", "actions": ["file"]}]}))
+
+
 def _ctx(config: dict, emit=None, kv: dict | None = None) -> RunContext:
+    from fulcra_collect import config as cfg_mod
+    cfg = cfg_mod.load()
+    cfg.enable("gmail")
+    cfg.update_plugin_settings("gmail", config)
+    cfg_mod.save(cfg)
+    cfg = cfg_mod.load()
     kv_store = {} if kv is None else kv
     return RunContext(
-        plugin_id="gmail", config=config, credentials={},
+        plugin_id="gmail", config=config, config_epoch=cfg.plugin_epochs["gmail"], credentials={},
         state=PluginState("gmail"), log=logging.getLogger("t"),
         _emit=emit or (lambda e: None),
         _plugin_kv_get=lambda key, default: kv_store.get(key, default),
@@ -66,6 +98,11 @@ def test_run_no_rules_is_noop():
 # --- poll wiring -----------------------------------------------------------
 
 
+class RegistryStub:
+    def delivery_scope(self, *args):
+        return nullcontext()
+
+
 class FakeAccount:
     def __init__(self, account_id, email, status="active"):
         self.account_id = account_id
@@ -86,7 +123,7 @@ def test_run_polls_each_account_and_skips_auth_failed(tmp_path, monkeypatch):
         FakeAccount("acct-bad", "b@example.com", "auth_failed"),
     ]
 
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def list_accounts(self):
             return accounts
 
@@ -100,11 +137,11 @@ def test_run_polls_each_account_and_skips_auth_failed(tmp_path, monkeypatch):
                           effective=1, processed=1, blocked=False, cursor=123)
 
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
-    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "FilesWriter", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
-    monkeypatch.setattr(collect_plugin, "CoordEngineRelayEmitter", lambda team: object())
+    monkeypatch.setattr(collect_plugin, "CoordEngineRelayEmitter", lambda team, **kw: object())
     monkeypatch.setattr(collect_plugin, "poll_account_rule", fake_poll)
 
     config = {
@@ -128,7 +165,7 @@ def test_run_shares_one_effect_budget_across_all_accounts_and_rules(monkeypatch)
         FakeAccount("acct-2", "b@example.com"),
     ]
 
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def list_accounts(self):
             return accounts
 
@@ -149,7 +186,7 @@ def test_run_shares_one_effect_budget_across_all_accounts_and_rules(monkeypatch)
         )
 
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
-    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "FilesWriter", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
@@ -172,7 +209,7 @@ def test_run_rotates_first_pair_so_a_permanent_backlog_cannot_starve_accounts(
         FakeAccount("acct-2", "b@example.com"),
     ]
 
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def list_accounts(self):
             return accounts
 
@@ -193,7 +230,7 @@ def test_run_rotates_first_pair_so_a_permanent_backlog_cannot_starve_accounts(
         )
 
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
-    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "FilesWriter", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
@@ -212,7 +249,7 @@ def test_run_rotates_first_pair_so_a_permanent_backlog_cannot_starve_accounts(
 
 
 def test_health_check_no_accounts(monkeypatch):
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def list_accounts(self):
             return []
 
@@ -225,7 +262,7 @@ def test_health_check_no_accounts(monkeypatch):
 def test_add_account_bridge_delegates(monkeypatch):
     calls = {}
 
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def begin_add_account(self, redirect_uri):
             calls["begin"] = redirect_uri
             return "session"
@@ -247,7 +284,7 @@ def test_run_raises_when_all_rule_polls_fail(monkeypatch):
     and 21 matched emails dropped silently behind a green run)."""
     import pytest
 
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def list_accounts(self):
             return [FakeAccount("acct-ok", "a@example.com", "active")]
 
@@ -255,7 +292,7 @@ def test_run_raises_when_all_rule_polls_fail(monkeypatch):
         raise RuntimeError("upload 401: Jwt is expired")
 
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
-    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "FilesWriter", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())
@@ -271,7 +308,7 @@ def test_run_raises_when_all_rule_polls_fail(monkeypatch):
 
 def test_run_partial_poll_failure_stays_soft(monkeypatch):
     """One rule failing while another succeeds keeps the fail-soft behavior."""
-    class FakeRegistry:
+    class FakeRegistry(RegistryStub):
         def list_accounts(self):
             return [FakeAccount("acct-ok", "a@example.com", "active")]
 
@@ -287,7 +324,7 @@ def test_run_partial_poll_failure_stays_soft(monkeypatch):
                           effective=1, processed=1, blocked=False, cursor=1)
 
     monkeypatch.setattr(collect_plugin, "_registry", lambda transport=None: FakeRegistry())
-    monkeypatch.setattr(collect_plugin, "build_files_writer", lambda token: object())
+    monkeypatch.setattr(collect_plugin, "FilesWriter", lambda token: object())
     monkeypatch.setattr(collect_plugin, "GmailClient", lambda *a, **k: object())
     monkeypatch.setattr(collect_plugin, "Ledger", lambda *a, **k: FakeLedger())
     monkeypatch.setattr(collect_plugin, "CursorStore", lambda *a, **k: object())

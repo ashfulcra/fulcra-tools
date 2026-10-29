@@ -1,96 +1,228 @@
 ---
 name: fulcra-media
-description: Import media history (Watched / Listened / Read) into a Fulcra account via the `fulcra-media` CLI. Use when the user wants to track Netflix, Trakt, Spotify, Last.fm, Apple Podcasts, Letterboxd, Goodreads, YouTube, Plex/Jellyfin, or any other media source listed in `fulcra-media import --help`.
+description: Use when the user wants to import or inspect media history from Netflix, Trakt, Spotify, Last.fm, Apple Podcasts, Letterboxd, Goodreads, YouTube, Plex/Jellyfin, or another supported media source.
 ---
 
-# fulcra-media — Import a user's media history into Fulcra
+# Fulcra media reference
 
-`fulcra-media` is a Python CLI that imports media events (watches, listens, books read) into Fulcra as DurationAnnotations. Each import is idempotent (re-runs are safe), and every command supports a `--json` flag for machine-readable output and a `--check-only` dry-run.
+October 24, 2026, development source branch: Collect media plugins and fourteen
+standalone imports use guarded v1 Events: `netflix`, `spotify-extended`,
+`spotify-ifttt`, `apple-podcasts`, `apple-podcasts-timemachine`, `apple-takeout`,
+`youtube`, `generic-csv`, `lastfm`, `deezer`, `letterboxd`, `goodreads`,
+`generic-rss` and `trakt`. The standalone `webhook` server also uses guarded v1 Events. The released app
+has not switched. This intermediate branch is not rollout. Read the [boundary and authority contracts](../../README.md#standalone-v1-adapter-development-branch)
+and [coverage matrix](../../../../docs/collect-v1.md).
 
-This skill helps you (the AI agent) run imports on the user's behalf, schedule periodic syncs, and interpret the results.
+## Where to start
 
-**Runtime-agnostic.** Everything below is shell I/O. This skill works the same in Claude Code, OpenCode, Codex, Gemini CLI, Copilot CLI, or any agent runtime that can execute a subprocess. No Claude-Code-specific tools are required — the only contract is `fulcra-media` on PATH and the JSON envelope schema.
+Use these observations for the user's selected source; they are not an all-clear test.
 
----
+| Observation | Command | Interpretation |
+|---|---|---|
+| Cached authority | `fulcra-media status` | Inspect `v1`, `retained_legacy`, `pending`; UNKNOWN requires investigation. No live proof. |
+| CLI auth availability | `fulcra auth print-access-token >/dev/null` | Exit status only; never print the token. `FULCRA_ACCESS_TOKEN` can supply explicit auth instead. |
+| Fresh profile setup | `fulcra-media bootstrap` | Resolve owned v1 targets and atomically save configuration; retained selections need explicit mappings below. |
+| Selected source preview | `fulcra-media import netflix <selected.csv> --check-only --json` | `would_post` compares selected rows only; it neither recovers pending writes nor proves caught up. |
 
-## Where to start — the re-entrancy probes
+`fulcra auth login` belongs to the separate Fulcra CLI. Media has no auth
+subcommand. CLI/env credentials stay separate from Collect sign-in with no
+Collect fallback. Never print credential files or token values.
 
-Before running an import, probe how far this user already got. The states are a prefix of the flow —
-**authed? → defs bootstrapped? → nothing pending? → already synced?** — so enter at the **first
-probe that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`). Every
-state is safely re-enterable: `bootstrap` is idempotent, and each import is idempotent (deterministic
-source_ids + the watermark layer), so re-probing or re-importing never double-counts. The rows below
-consolidate the probe *concepts* used later in this skill (the `--check-only`/`would_post` probe in
-"Is there anything new to post?" and the heartbeat contract's "Inspect first / Probe before paying"
-steps) into one ordered entry point — see those sections for the fuller treatment.
+## Quick orientation
 
-| Probe (run in order) | Command | Passes when | If it fails, enter at |
-|---|---|---|---|
-| Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
-| Defs bootstrapped? | `fulcra-media status` | the JSON's `watched_definition_id` / `listened_definition_id` / `read_definition_id` are non-null for the category you're importing (Watched for netflix/trakt/youtube/…, Listened for lastfm/deezer/spotify/…, Read for goodreads) | **BOOTSTRAP** — run `fulcra-media bootstrap` (idempotent; no-op once defs exist) |
-| Nothing pending? | `fulcra-media import <name> --check-only --json` then read `would_post` (file-based importers also take their `<path>`/URL argument — e.g. `netflix`, `youtube`, `spotify-extended`, `spotify-ifttt`, `apple-takeout`, `generic-csv` take a file path; `generic-rss` takes a feed URL — so `--check-only` still needs it) | `would_post: 0` (`--check-only` skips the POST; costs an API readback but no ingest) | **IMPORT** — `would_post` > 0 means there is new media; run `fulcra-media import <name> --json` for real |
-| Already synced? | `fulcra-media status` and read `watermarks["<name>"]` | the pass-criterion depends on the importer's watermark class (only ISO watermarks are ever WRITTEN — `watermarks.py` also defines a snapshot shape, but no importer currently calls it): **API-poll importers** (`lastfm`, `deezer`, `letterboxd`, `goodreads`, `generic-rss`) store an **ISO 8601 timestamp** — pass when it's present and recent (note `goodreads` and `generic-rss` key theirs as `watermarks["goodreads:<user_id>"]` / `watermarks["generic-rss:<feed_url>"]`, not the bare name). **Everything else** — `apple-podcasts`, the one-shot GDPR/export uploads (`spotify-extended`, `spotify-ifttt`, `youtube`, `apple-takeout`, `netflix`), `trakt`, and `generic-csv` — **never advances a watermark**, so this probe is N/A for them: fall back to the `would_post` probe above | **IMPORT** — ISO watermark cold-start or stale; run the real import to advance it. For the no-watermark importers, re-check via `would_post`; for the export uploads specifically, re-run only when the user hands you a fresh export |
+`fulcra-media status` reads existing local files/SQLite without authentication,
+initialization, migration or live verification. Output keys are `verification`
+(`cached only; not live verified`), `profile`, `v1`, `retained_legacy`, `pending`.
+`v1` is null when absent, otherwise contains `version`, `account_id`,
+`v1_destination_ids` and `legacy_selection`. Category keys are `watched`,
+`listened`, `read`; v1 pins are full Event/UUID IDs. `retained_legacy` contains
+old category IDs or nulls. Unreadable sections have `state: UNKNOWN`.
+`pending.state` is `absent` or `UNKNOWN`; a retained payload reports `retained`,
+`bytes`, `sha256` and a note, never row contents. UNKNOWN is never all clear.
+Status does not expose a scheduler's configured-source list or watermark map.
 
-All probes pass with `would_post: 0` and a fresh watermark → this importer is already synced; move on
-to the next source or tell the user they're up to date. A brand-new user fails the first probe.
-The `fulcra …` (not `fulcra-media …`) auth probe belongs to the separate
-[fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) CLI; `fulcra-media` has no auth
-subcommand of its own.
+Bootstrap saves private versioned `cli-media-v1.json` under the selected Collect
+[profile](../../../collect/README.md#state-and-storage) using a bounded settings lock and atomic replacement. Existing legacy
+state (`~/.config/fulcra-media/state.json`, overridden by `FULCRA_MEDIA_STATE`)
+is selection evidence, never v1 authority. For every retained selected category,
+supply its explicit new mapping with `--watched Event/UUID`,
+`--listened Event/UUID`, and/or `--read Event/UUID`. All three categories are
+checked before metadata creation. Bare legacy IDs are not mappings.
 
----
+Saved account validation precedes automatic original pending recovery. Recovery
+precedes configuration changes and migrated source resolution, downloads,
+database/backup discovery and parsing,
+even when the source is empty. Missing configuration with retained pending work
+holds. Keep the original profile selection during recovery; switching profiles
+cannot settle original pending work. Keep the original profile/configuration, creation receipts, legacy state
+and pending evidence intact on any hold; investigate the reported authority or
+receipt mismatch before another write. `reset` is retired for every flag
+combination and fails before effects; it is not a recovery or cursor-reset tool.
 
-## Quick orientation — what's already set up?
+Migrated-route preview uses detached read-only authority, skips pending recovery and
+never drains/adopts pending work. It may initialize private runtime infrastructure.
+A zero preview is only a comparison for the selected source, never caught-up proof.
+The standalone webhook uses this saved authority too. `fulcra-media setup` is a TTY-only wizard picker, not a substitute
+for configured v1 authority. Use `fulcra-media wizard <name>` for source instructions.
 
-Always start with:
+## Import envelope
 
-```bash
-fulcra-media status
+Each `fulcra-media import <name> --json` emits one JSON line containing
+`importer`, `ok`, `total`, `skipped_existing`, `posted`, `verified`,
+`since_watermark`, `new_watermark`, `would_post`, `errors`, `cursor`.
+Exit 0 means `ok: true`; exit 2 means `ok: false`. Inspect
+`errors[].stage` (one of `setup`, `auth`, `args`, `fetch`, `snapshot`, `import`).
+Setup/auth errors require correcting configuration or credentials; args errors
+require corrected input; fetch/snapshot errors require source availability;
+import errors can include guarded authority/pending holds. Preserve evidence and
+report the specific error; do not reset or blindly retry uncertain effects.
+Exception URL credential parameters are scrubbed, but source exports remain private.
+
+`--check-only` reports `would_post` with no ingest. It still reads the source
+and remote readback, so it is not offline. On migrated routes, error counts are
+observed current-invocation lower bounds; earlier verified chunks survive later
+errors, while original pending recovery is never counted as current input.
+Parse JSON together with the process exit status; missing/malformed output is failure. Incomplete verification is not
+proof of delivery. The long-running `webhook` uses the separate lifecycle stream below.
+
+## Standalone Plex/Jellyfin receiver
+
+After profile bootstrap, launch the actual server command (no `serve` subcommand):
+
+```sh
+fulcra-media webhook --port 8766 --json
 ```
 
-The output (JSON) tells you:
-- Which annotation definitions exist (`watched_definition_id`, `listened_definition_id`, `read_definition_id`) — if `null`, run `fulcra-media bootstrap` to create them
-- Per-importer watermarks (`watermarks["lastfm"]`, `watermarks["deezer"]`, ...) — empty means cold-start, ISO timestamp means incremental
-- Service-tag UUIDs the user has already created
+Default binding is `127.0.0.1:8765`. `--port` selects the requested port; 0
+requests an ephemeral port reported by ready. An occupied port fails without
+fallback. `--host` selects the bind address. `--bearer-token` is optional for
+`127.0.0.1`/`localhost`, required for every other host. Clients use the Bearer
+authorization header, or Plex's existing `?token=<token>` fallback. Keep tokens
+private. Receiver token configuration is captured for its lifetime.
 
-If the user is brand new, walk them through `fulcra-media setup` (interactive picker) — but **don't run setup non-interactively**, it expects stdin input from a TTY.
+Saved-account validation, original pending recovery and all three category
+preparations finish before bind. The private owner thread opens/uses/closes the
+runtime, including SQLite; HTTP handlers submit defensive event snapshots and
+get their own settled result/error. Settings/invocation/task-account leases last
+through cleanup, so competing CLI work on that authority can fail while the
+server runs. Stop it and await cleanup before reconfiguration. Same-account
+token refresh requires fresh principal proof; changed account/origin/profile/
+saved configuration/journal holds subsequent writes.
 
----
+JSON emits separate `ready` and `shutdown` lifecycle lines. Ready follows recovery,
+signal installation and the running loop's local `/health` handshake. After ready,
+SIGINT/SIGTERM stops admission, drains accepted jobs and joins runtime cleanup
+before successful shutdown. A disconnected accepted caller still completes;
+a stalled pre-admission parser may later receive 502 without touching released
+authority. Accepted jobs have no timeout/cancel/redispatch. Preserve uncertain
+original uploads for reconciliation. Failure exits 2 with sanitized stage
+`args`, `setup`, `bind`, `ready` or `shutdown`; broken stdout allows only best-effort
+stderr diagnostics. Missing output is failure, not readiness.
 
-## The import envelope — the only output you need to parse
+`/health` reports cached `data_type_id`, `api_version: "v1"` and counters.
+Health/ready prove liveness only; they do not prove fresh ownership or coverage.
+Writes still check authority. Request `posted` counts verified current records,
+`skipped` counts duplicates; recovered old work is not a new request count.
+Incomplete/malformed v1 results yield 502. Shutdown counters are a synchronized
+snapshot, not proof all response-only peers finished. See the canonical
+[webhook contract](../../README.md#standalone-webhook-development-branch).
+This branch's synthetic tests do not prove installed readiness or real sender delivery.
 
-Every `fulcra-media import <importer> --json` writes exactly one line of JSON to stdout. Schema is **stable and append-only**:
+## Standalone v1 poll progress
 
-```json
-{
-  "importer": "lastfm",
-  "ok": true,
-  "total": 248,
-  "skipped_existing": 0,
-  "posted": 248,
-  "verified": 248,
-  "since_watermark": "2026-05-16T22:00:00+00:00",
-  "new_watermark": "2026-05-17T08:42:00+00:00",
-  "would_post": null,
-  "errors": []
-}
-```
+The five poll commands (`lastfm`, `deezer`, `letterboxd`, `goodreads` and
+`generic-rss`) expose `cursor: {state, reason}`; other import commands return
+`cursor: null`. States/reasons are `advanced/complete`,
+`unchanged/no-events`, `unchanged/no-increase`, or `withheld` with `preview`,
+`source-changed`, `page-cap`, `entry-cap` or `normalization-skips`.
+`advanced` means an actual verified current batch committed an increase.
+`new_watermark` is non-null only for that committed increase. A later cleanup
+failure can report `ok:false` while retaining a committed decision. Unknown
+storage acknowledgement cannot claim advancement.
 
-- `ok: true` + `exit code 0` → success
-- `ok: false` + `exit code 2` → failure. Inspect `errors[].stage` (one of `setup`, `auth`, `args`, `fetch`, `snapshot`):
-  - `setup` → run `fulcra-media bootstrap` first
-  - `auth` → creds file missing or invalid; direct the user to the wizard
-  - `args` → flag parse error (bad timezone, missing path)
-  - `fetch` → upstream API failed; the `message` is scrubbed of credential params
-  - `snapshot` → a snapshot-source importer (e.g. `apple-podcasts`) couldn't read the on-device DB (stalled/inaccessible); check the file path and permissions
-  - (the long-running `webhook` server emits its own `bind` / `ready` / `shutdown` stages on its status lines — those are not import-envelope error stages)
+`ok:true` with a withheld cursor exits 0 and can include verified records; it
+never proves caught up. A configured `--max-pages` or `--max-entries` cap withholds
+progress even if the source naturally ends before reaching it. Preserve the
+result and investigate the reason before choosing further authorized work;
+reset and blind retries do not establish coverage.
 
-`--check-only` adds a non-null `would_post` integer (how many events *would* post) and skips the actual POST. Use this for cheap "is there anything to import?" probes.
+Private cursor data lives in plugin KV under the selected Collect profile,
+bound to saved media authority, account, owned destination and source selection.
+Legacy state-file watermarks never seed it. Explicit `--since` selects a window
+without overlap. Otherwise, Last.fm and Deezer rewind the saved v1 cursor by
+`--watermark-overlap-hours` (nonnegative; default one hour); the three RSS commands
+(`letterboxd`, `goodreads`, `generic-rss`) use a fixed one-hour overlap. A malformed
+existing cursor still fails with explicit `--since`; an older selection cannot
+regress it. RSS filters timestamps before taking the provider-order entry prefix.
+Strict resource limits and redirect refusals can stop a scan. A finite available
+feed or selected API window does not certify older history. Daemon polling has
+a separate contract below. See the canonical [polling contract](../../README.md#standalone-v1-polling-development-branch)
+for exact scope, credential sampling, scan limits and parser boundaries.
 
-`since_watermark` / `new_watermark` describe the incremental cursor. On the first run both are `null`. On subsequent runs `since_watermark` reflects what was passed (watermark - overlap_hours for services with reorder hazard); `new_watermark` is the high-water mark from the just-completed run, written back to state.
+## Collect daemon poll progress
 
-**Never parse stdout in human mode** — only the `--json` envelope is a stable contract.
+On this source branch the actual `lastfm`, `deezer`, `generic-rss`, `letterboxd`
+and `goodreads` daemon routes now select strict scans through captured Collect
+authority. This does not establish installed-app or real-provider acceptance.
+Their separate `v2_daemon_media_poll_cursor:` scope binds account, consent epoch,
+raw saved settings, owned target, importer/category and source/secret digests.
+Annotation and pre-strict v1 cursor keys stay intact and never seed this scope;
+a fresh source selection starts with `since=None`. Saved API cursors rewind
+24 hours; RSS uses its saved boundary and sorts ascending before entry caps.
+Standalone overlap options above do not set daemon behavior.
 
----
+Non-preview runs recover original pending work before entering source functions;
+worker credential hydration occurs earlier. Preview does not drain pending work.
+Every exit restores the original legacy worker watermark and removes temporary
+adapter/writer attributes. Current strict fetch and normalization finish before
+delivery; only that immediate actual writer result can justify progress.
+Recovered receipts cannot substitute. Any configured page/entry cap, malformed
+row or enrichment failure withholds progress even with verified delivery.
+Valid saved TOML integer caps work; bools, strings, zero and negatives fail.
+Strict resource limits can leave an initial full scan UNKNOWN without a partial
+seed or invented cutoff. Returned finite feeds do not certify all history.
+
+Before an increase, the adapter rereads the prior cursor and quietly rereads only
+the consumed canonical Last.fm `api-key` or Deezer `access-token`; feeds perform
+no credential sweep. Changed/missing/unreadable secrets withhold progress. A second
+session authority guard follows the possibly slow read, before KV mutation.
+These sampled checks do not prove provider account identity or atomic revocation.
+Exact authoritative envelope readback is required; acknowledgement alone cannot
+claim advancement. Existing progress events expose `stage=cursor`, `cursor_state`
+and `cursor_reason` (advanced/unchanged/withheld/unknown), not a new UI promise.
+Preserve genuine delivery counts, receipts and pending evidence on later holds;
+withheld successful delivery is not caught-up proof. See the canonical
+[daemon contract](../../README.md#daemon-v1-polling-development-branch).
+
+## Standalone Trakt choices
+
+Trakt now shares migrated-route recovery/preview authority. Original pending
+work recovers before Trakt credential loading/refresh/fetch, even for empty or
+all-cluster-dropped history. Entry/recovery holds use `setup`; preserve evidence.
+Trakt cursor and watermarks are null.
+
+Explicit `--twin-policy ask` or `--clusters ask` requires a TTY without JSON;
+otherwise it fails at `args` before credentials/source, even with no candidates.
+JSON is always noninteractive. Omitted twin policy keeps and warns on stderr
+only when candidates exist in JSON/non-TTY; TTY asks. Omitted cluster policy
+needs a choice only when actual clusters exist; noninteractive clustered input
+requires an explicit policy. No candidates means no twin warning or prompt.
+
+Twin hints need fresh owned-record readback, matching high confidence/fingerprint
+and exclusions. Current-input highs are also candidates, labeled honestly;
+excluded highs never justify a skip. The legacy JSON cache is not evidence.
+Every offered pair is displayed. Yes authorizes only those immutable exact pairs
+that remain freshly proven during import; new pairs cannot inherit that answer.
+No/keep bypasses loose twins only, retaining strong identity/alias/exclusion rules
+and replay identities. Options/answers do not change saved authority or pending
+payloads. Prompt inspection and preview are read-only.
+
+`total` counts selected writer input after cluster preprocessing, including
+loose-policy skips; `skipped_existing` includes those and other writer skips.
+Cluster drops are outside that total. Known error counters stay lower bounds;
+recovery is excluded. Preview planned rows use `posted`/`would_post`, with zero
+`verified`. See the canonical [Trakt policy contract](../../README.md#standalone-trakt-policy-development-branch)
+for fresh-proof races and unchanged Collect policy precedence.
 
 ## Importer roster (what works today)
 
@@ -99,252 +231,61 @@ Run `fulcra-media import --help` for the live list. As of this skill version:
 | Command | Category | Auth | Notes |
 |---|---|---|---|
 | `lastfm` | listened | API key + username | **Universal music sidecar** — covers Tidal/Apple Music/Amazon Music/SoundCloud/Pandora/YouTube Music via in-app or Web Scrobbler. Public scrobbles only. |
-| `deezer` | listened | OAuth access token | Direct API, no per-call cap. Cleaner than Spotify. Manual token mint. |
+| `deezer` | listened | OAuth access token | Direct API with strict bounded scanning and optional page cap. Manual token mint. |
 | `spotify-extended` | listened | GDPR zip | Full history; one-shot, slow to arrive. |
 | `spotify-ifttt` | listened | Legacy GDrive zip | Pre-Extended-API backfill; cross-applet dedup native. |
 | `trakt` | watched | OAuth | Covers Apple TV+ via Universal Trakt Scrobbler. Cluster handling: `--clusters drop|sentinel:YYYY|keep|ask`. Twin-dedup: `--twin-policy ask|auto-discard|keep`. |
 | `netflix` | watched | GDPR CSV | Slim (in-app) or rich (full GDPR) — auto-detected. |
-| `apple-podcasts` | listened | Local SQLite | macOS only. Use `apple-podcasts-timemachine` for snapshot recovery. |
+| `apple-podcasts` | listened | Local SQLite | macOS local SQLite library. |
+| `apple-podcasts-timemachine` | listened | Time Machine backups | macOS Time Machine snapshot recovery. |
 | `apple-takeout` | watched | privacy.apple.com CSV | Apple TV Playback Activity. |
 | `letterboxd` | watched | Username | Public RSS. |
 | `goodreads` | read | User ID | Public RSS of the 'read' shelf. |
-| `youtube` | watched | Google Takeout zip | watch-history.json. Recurring exports every 2 months. |
+| `youtube` | watched | Takeout JSON | Extract and pass `watch-history.json` from the export. |
 | `generic-csv` | watched/listened | n/a | Any column-mapped CSV. |
 | `generic-rss` | watched/listened | n/a | Any RSS/Atom feed. |
 | (server) `webhook` | watched | bearer token | Long-running HTTP receiver for Plex/Jellyfin push. Not an `import` subcommand. |
 
 ---
 
+For `generic-csv`, accepted fingerprint modes include `auto`, `none`,
+`music`, `movie`, `tv` and `podcast`; consult its help for column mappings.
+`none` omits `content_fingerprint` only; deterministic IDs and category-based
+cross-source aliases remain. The accepted `tv` and `podcast` modes do not
+currently generate `content_fingerprint` in this parser.
+
 ## Recipes
 
-### Daily cron / agent-driven incremental sync
-
-Per-importer pattern:
+For a user-selected Netflix export after configuration:
 
 ```bash
-RES=$(fulcra-media import lastfm --json)
-echo "$RES" | jq -r '
-  if .ok then "lastfm: +\(.posted) (watermark→\(.new_watermark // "n/a"))"
-  else "lastfm FAILED: \(.errors[0].stage): \(.errors[0].message)" end
-'
+fulcra-media import netflix /path/to/selected.csv --check-only --json
+fulcra-media import netflix /path/to/selected.csv --json
 ```
 
-For multi-service runs, iterate over the user's configured importers (anything in `state.watermarks` is fair game):
-
-```bash
-fulcra-media status | jq -r '.watermarks | keys[]' | while read importer; do
-  fulcra-media import "$importer" --json
-done
-```
-
-The watermark layer makes each run cheap when nothing's new (`skipped_existing` will trend up, `posted` will be 0).
-
-### "Is there anything new to post?" — without paying ingest cost
-
-```bash
-fulcra-media import lastfm --check-only --json | jq '.would_post'
-# > 14 means 14 events would land; 0 means nothing new
-```
-
-Useful for high-frequency polling (every minute) without ingest churn — only run the real import when `would_post > 0`.
-
-### Bootstrap a fresh user
-
-```bash
-fulcra-media bootstrap  # creates Watched, Listened, Read defs
-```
-
-Idempotent — subsequent calls are no-ops once defs exist.
-
-### Reset everything (rare)
-
-```bash
-fulcra-media reset --confirm  # soft-deletes all three defs, clears watermarks + twin cache
-```
-
-⚠️ Fulcra has **no per-event delete**. Events under reset-soft-deleted defs stay visible in queries forever (Fulcra limitation). The next `bootstrap` creates fresh defs with new UUIDs, so future imports namespace cleanly. Use this only after a meaningful pipeline change you want to re-run against (e.g. a cluster-policy change).
-
----
-
-## Picking an importer — decision tree
-
-User says they want to track X →
-
-| User mentions | Run |
-|---|---|
-| Spotify (recent) | `lastfm` (if scrobbling) else `spotify-extended` (one-shot full history) |
-| Apple Music / Tidal / SoundCloud / Pandora / YouTube Music / Amazon Music | `lastfm` (with Web Scrobbler browser extension if needed) |
-| Netflix | `netflix` (slim CSV from privacy settings, or full GDPR export) |
-| Hulu / Disney+ / Max / Prime Video / Peacock | No direct path — use `trakt` for ongoing, GDPR-export-and-`generic-csv` for backfill |
-| Apple TV+ | `trakt` (with Universal Trakt Scrobbler browser ext) for ongoing; `apple-takeout` for backfill |
-| YouTube (videos) | `youtube` against the Takeout watch-history.json (recurring 2-month exports) |
-| Apple Podcasts | `apple-podcasts` (macOS only); add `apple-podcasts-timemachine` for replay recovery |
-| Letterboxd | `letterboxd --username <user>` |
-| Goodreads | `goodreads --user-id <id>` |
-| Workouts (Strava etc.) | Not currently wired — workouts will land in Fulcra's native workout data type in a future revision. The `strava` importer module is still in the repo (frozen for rewrite); don't suggest it yet. |
-| Plex | `webhook` (run the receiver, point Plex webhooks at it) |
-| Jellyfin | `webhook` (run the receiver, point jellyfin-plugin-webhook at it) |
-| **Anything else with a CSV they got somewhere** | `generic-csv` with column flags |
-| **Anything else with an RSS feed** | `generic-rss` |
-| Pocket | Service is dead (shut down 2025-07). Redirect to whatever the user migrated to (Readwise Reader / Instapaper / Raindrop.io). |
-
----
-
-## Wizards — when to invoke them
-
-`fulcra-media wizard <name>` prints onboarding instructions for the given service. **The output is plain text for the user, not for you.** Don't try to parse it. If the user asks "how do I set up X," just call `fulcra-media wizard X` and show them the output.
-
-Available wizards: `netflix trakt apple-podcasts spotify spotify-ifttt apple-takeout ifttt pipedream lastfm deezer letterboxd goodreads youtube plex jellyfin`.
-
-The interactive `fulcra-media setup` walks the user through category-picking and then drops them into the right wizard. **Only invoke setup from a TTY** — it expects keyboard input.
-
----
-
-## Credential file locations
-
-All creds live under `~/.config/fulcra-media/` with mode 0600:
-
-| File | For | Shape |
-|---|---|---|
-| `state.json` | All importers | `{watched_definition_id, listened_definition_id, read_definition_id, tag_ids, watermarks}` |
-| `lastfm.json` | Last.fm | `{username, api_key}` |
-| `deezer.json` | Deezer | `{access_token}` |
-| `trakt.json` | Trakt | OAuth blob managed by the importer |
-| `twin_cache.json` | All | `{<content_fingerprint>: {source_id, importer, start_time, confidence}}` for cross-batch dedup |
-
-Don't echo these files' contents to stdout — especially in `--json` mode where logs may be captured. The CLI scrubs auth-bearing URL params from exception messages via `safe_exc_message`, but the raw creds files are sensitive.
-
----
-
-## Periodic invocation for agentic workers
-
-Recommended cadence:
-
-| Importer | Cadence |
-|---|---|
-| `lastfm`, `deezer`, `trakt` | hourly (API + watermark) |
-| `letterboxd`, `goodreads`, `generic-rss` | daily (RSS feeds change slowly) |
-| `apple-podcasts` | hourly (cheap — local SQLite snapshot) |
-| `netflix`, `spotify-extended`, `apple-takeout`, `spotify-ifttt`, `youtube` | on-demand (user-uploaded zips / recurring Takeouts) |
-| `webhook` (Plex/Jellyfin) | persistent service (`launchd` / `systemd`) |
-
-A simple agent driver:
-
-```python
-import json, subprocess
-for importer in ("lastfm", "deezer", "trakt"):
-    res = subprocess.run(
-        ["fulcra-media", "import", importer, "--json"],
-        capture_output=True, text=True,
-    )
-    env = json.loads(res.stdout) if res.stdout.strip() else {"ok": False}
-    if not env.get("ok"):
-        notify_user(f"{importer} failed at {env.get('errors', [{}])[0].get('stage')}")
-    elif env.get("posted"):
-        log(f"{importer}: +{env['posted']} (now at {env['new_watermark']})")
-```
-
-The `webhook` receiver is a long-running process — don't poll it; start it once and supervise it (`launchctl`, `systemd`, `pm2`, whatever).
-
----
-
-## Running on a heartbeat (Hermes, openclaw, OpenHands, and friends)
-
-Several agent runtimes natively support recurring/scheduled wake-ups:
-
-| Runtime | Mechanism | Notes |
-|---|---|---|
-| **Hermes Agent** (NousResearch) | First-class `heartbeat` primitive — recurring wake-ups that fire a bounded micro-action and report back. Also has built-in cron. | The phrase "heartbeat" in NousResearch's sense means **scheduled wake-up** with fresh agent context. |
-| **openclaw** | First-class **Cron jobs** tool (alongside bash/process/read/write/edit). Skills live at `~/.openclaw/workspace/skills/<skill>/SKILL.md`. | Drop this SKILL.md into that path verbatim. |
-| **OpenHands** (formerly OpenDevin) | Sandboxed automations — scheduled tasks. Loader auto-picks up `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`. | Bash sandboxing is built-in. |
-| **Claude Code / Aider / Cursor / Continue.dev** | No native heartbeat — use host `cron` / `launchd` / `systemd-timer`. | These read `AGENTS.md` / `CLAUDE.md` from the repo root. A copy of this skill lives at `AGENTS.md` for that reason. |
-| **Letta / MemGPT** | **Different meaning** — `request_heartbeat: bool` is an intra-turn flag that keeps the tool loop going within a single user turn, not a scheduler. Still needs an external scheduler to run `fulcra-media` periodically. | Don't conflate. |
-| **SmolAgents / AutoGen / CrewAI / LangGraph** | Function-calling orchestration; no native scheduler. | Run from host cron, or wrap calls in a single `execute_code` tool. |
-
-### The recurring-task contract
-
-When running this skill on a heartbeat (any runtime), the action you fire each tick should be **bounded, idempotent, and stateful** in this exact shape:
-
-1. **Inspect first.** `fulcra-media status` (cheap, local, no API) tells you which importers have watermarks and how stale each one is. Skip importers whose `watermarks[<name>]` is fresher than their recommended cadence.
-2. **Probe before paying.** For each candidate importer, fire `fulcra-media import <name> --check-only --json` and read `would_post`. If 0, skip. This costs an API readback but no ingest.
-3. **Import when warranted.** `fulcra-media import <name> --json`. Parse the envelope. On `ok: false`, surface `errors[0].stage` to the user via whatever channel the runtime provides — don't retry mechanically from inside the heartbeat tick.
-4. **Cap per-tick wallclock.** A single heartbeat should not import every source on every tick. Round-robin or pick whichever importer is most stale; ingestion of a large historical zip (`spotify-extended`, `netflix` full GDPR) is a one-shot, not a heartbeat job — surface those as "user-uploaded" and run them ad-hoc.
-5. **Lock if your runtime can re-enter.** If the runtime can fire two heartbeats concurrently (it generally shouldn't), put a flock around the import:
-
-   ```bash
-   flock -n /tmp/fulcra-media.lock fulcra-media import lastfm --json
-   ```
-
-6. **Report status to wherever your runtime expects it.** Hermes has a default "consolidate memory / write status file" maintenance heartbeat — write the last-tick envelope summary there. openclaw cron jobs can pipe to its sessions log. For host cron, route stdout/stderr to a logfile the next tick can read.
-
-### A heartbeat-tick template
-
-The CLI already manages its own per-importer watermarks, so a heartbeat tick can be small:
-
-```bash
-#!/usr/bin/env bash
-# Single heartbeat tick. Idempotent; safe to fire as often as your runtime allows.
-# The CLI's watermark layer guarantees no double-imports — re-runs are cheap.
-set -euo pipefail
-LOG=/var/log/fulcra-media-heartbeat.log
-
-for importer in lastfm deezer trakt apple-podcasts letterboxd goodreads; do
-  # Cheap probe — no ingest cost, just an API readback.
-  pending=$(fulcra-media import "$importer" --check-only --json | jq '.would_post')
-  [ "$pending" = "0" ] && continue
-  fulcra-media import "$importer" --json >> "$LOG" 2>&1
-done
-```
-
-Drop that in a `cron job` (openclaw), `heartbeat` (Hermes), `automation` (OpenHands), or host `cron`/`launchd` — same script, same result. Portable across BSD (macOS) and GNU (Linux) because it leans on the CLI for all timestamp arithmetic.
-
----
-
-## Common failure patterns
-
-### `ok: false`, `errors[0].stage = "auth"`
-
-Creds file missing or expired. Tell the user to run `fulcra-media wizard <importer>`. For OAuth-based importers (Trakt, Deezer), the wizard explains the manual token mint flow.
-
-### `ok: true`, `verified: 0`, `posted > 0`
-
-Fulcra's ingest-to-query indexing lag (seconds to minutes for bulk imports). This is **not a failure** — events are accepted, just not yet visible in readback. The next `--check-only` will report 0 to post.
-
-### `posted > 0` but events don't appear in `fulcra get-records DurationAnnotation`
-
-Three possible causes:
-1. Indexing lag (wait 1-5 min)
-2. You're querying a different annotation def — check `fulcra-media status` to confirm the active def UUID matches what your query expects
-3. Source-id collision with an older soft-deleted def — events still exist but their source_id points at a deleted def. Either filter client-side or `fulcra-media reset --confirm` + `bootstrap` + re-import.
-
-### Trakt import shows thousands of events on the same 1-2 days
-
-Trakt stamps historical backfill with the user's signup date when the source service didn't provide a real timestamp. The importer detects clusters (default `--cluster-threshold 5`) and offers handling: `--clusters drop` (discard), `--clusters sentinel:2015` (shift to Jan 1 2015 so they don't pollute current data), `--clusters keep` (leave at signup-day, low confidence). On a TTY the default is interactive `ask`.
-
----
-
-## Fulcra Life API auth
-
-The CLI shells out to `fulcra auth print-access-token` (from the [fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) package) to mint tokens. If a user has never logged in, that command will fail with "credentials not found" — tell them to run `fulcra auth login` (interactive browser flow).
-
-Token override: `FULCRA_ACCESS_TOKEN=...` skips the shell-out. Useful for non-interactive agents that have a long-lived token via another route.
-
----
-
-## Architectural references (for the curious agent)
-
-- `~/Developer/FulcraMediaHelpers/docs/superpowers/research/2026-05-17-media-service-pathways.md` — full landscape of media services and the recommended pathway per service
-- `~/Developer/FulcraMediaHelpers/docs/superpowers/specs/2026-05-16-fulcra-media-helpers-design.md` — original design doc
-- `~/Developer/FulcraMediaHelpers/docs/superpowers/plans/2026-05-17-lastfm-and-periodic-architecture.md` — the periodic-update + watermark architecture
-- Sibling project `fulcra-csv-importer` (`/<repo>/skills/fulcra-csv/SKILL.md`) — general CSV → any Fulcra annotation, used internally by `generic-csv`
-
----
-
-## Don't
-
-- **Don't run `setup` non-interactively** — it expects TTY input
-- **Don't re-implement watermark logic in the agent** — let the CLI manage `state.json`
-- **Don't parse human-mode stdout** — only `--json` is a stable contract
-- **Don't print creds files to stdout** — they're 0600 for a reason
-- **Don't soft-delete the user's annotation defs without explicit confirmation** — events under deleted defs stay visible (Fulcra has no per-event delete)
-- **Don't assume an importer maps to a single category** — `generic-csv` and `generic-rss` are caller-specified; check `--help`
+Run the write only within the user's authorization; preview does not settle an
+original pending batch. No separate pending-clear command exists.
+
+For Trakt developer portals, PKCE, Development callbacks and existing CLI
+credentials, see [Trakt connection notes](../../README.md#trakt-connections-and-api-apps).
+Credential files such as `lastfm.json`, `deezer.json`, and `trakt.json` remain
+under `~/.config/fulcra-media/`, separately from Collect keychain credentials.
+Consult `fulcra-media import <name> --help` for flags, source inputs and category
+choices. Apple Music takeout and on-device Apple TV are Collect-only plugins.
+Workouts are not wired into this CLI.
+
+## Periodic invocation
+
+Use the scheduler available on the user's host only when recurring work is
+requested. Persist an explicit list of user-authorized, configured sources and
+complete arguments, plus cadence and last successful envelope. Do not discover
+sources from cached status, legacy watermarks or source names in this roster.
+Export imports run when the user selects a new export; generic feeds need their
+configured URL. A preview-only tick cannot settle pending work or establish full
+coverage. Parse return code and JSON on each authorized invocation, retain error
+evidence, and report actionable failures rather than mechanically resetting or
+retrying. Bound work and prevent scheduler overlap. Skill installation alone does
+not create recurring jobs. Supervise a configured webhook as a persistent service.
+
+Use the [package guide](../../README.md) for category semantics, source limitations,
+security and development tests. Keep personal exports out of version control.

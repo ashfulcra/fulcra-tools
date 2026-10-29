@@ -52,12 +52,89 @@ rumps menu, then "Open Fulcra Collect" for the popover.
 
 ## Tests
 
-    uv run --package fulcra-menubar --extra dev pytest packages/menubar/tests/ -q
+    uv run --all-packages --all-extras pytest packages/menubar/tests/ -q
 
 The pure-model layer (daemon_client, model, polling, notifications)
 runs everywhere — Linux CI included. The view layer (status_item,
 popover, preferences) is exercised by manual smoke; see the checklist
 below.
+
+## Quick-record client (development)
+
+The portable [request journal](fulcra_menubar/quick_record_requests.py) and
+[client workflow](fulcra_menubar/quick_record_client.py) implement development
+[protocol 2](../collect/README.md#quick-record-protocol-2-development).
+They have no GUI, credential or network dependencies beyond the injected daemon
+transport. Capture the full operation, globally unique request ID, account,
+consent epoch, choice digest, time and note synchronously before acknowledging a
+click or dispatching a worker. Use a **separate** private
+`quick-record-client.sqlite`, never the server's action database.
+
+A failed connection or lost response leaves that same request pending. Retrying
+sends the saved body; a changed live account/epoch or replacement body fails
+before socket IO. There is no automatic retry or implicit old-epoch consent.
+The original note remains private in the saved request. Account-bound pending
+pages include old-epoch items for explicit recovery and never return another
+account's requests. Completed requests do not consume pending page limits.
+
+Only a consistent protocol/account/epoch/action proof settles a record request.
+Timer starts must prove the original timer/track/start; stop replies must prove
+the original end time, consistent state and a stable server-assigned action ID.
+A timer can have only one locally captured stop, even across separate request
+IDs or app restarts. Recover it with `ClientRequestJournal.timer_stop` instead
+of capturing a second stop. Once observed, the record ID and full datatype
+remain fixed through pending-to-terminal response updates.
+A submitted action remains pending. Verified, excluded and started outcomes are
+distinct; a started timer is not a landed record. Terminal proofs are immutable.
+Receipts retain bounded display metadata, including a nested timer allowlist,
+without exception bodies or extra fields. Requests cap at 32 KiB, receipts at
+4 KiB and pending pages at 100 rows (under 4 MiB of stored JSON).
+
+The versioned daemon client explicitly bounds complete-choice responses at
+8 MiB while requests and legacy replies remain at 64 KiB. Unknown, oversized or
+unbound responses preserve the original pending request and fail visibly.
+The development popover now uses this workflow by default. Socket work runs on
+a background thread; a click captures its full request before starting that
+worker. The view reloads account-scoped recent records and saved timers from the
+daemon. Each timer is rendered by its own UUID and original start, including
+unpinned/renamed tracks; failed stops stay visible with their first saved note
+and window. Local pending requests have bounded cursor pages; **Find** separately
+discovers saved server records and Undo beyond the recent-20 display.
+
+Record checks use the same response-proof validation as initial requests. A
+local saved intent is retried through its journal; other server reconciliation
+uses the already observed action/timer target and window without fabricating a
+new record body. Only a verified original offers Undo, and only verified native
+deletion marks it undone. Submitted and excluded remain distinct.
+
+Unsubmitted note/duration drafts are preserved by account/epoch/choice/timer
+through rerenders; only a durably captured row clears its draft. Reopening or
+refreshing while busy invalidates queued old-account results and schedules a new
+handshake. The [view host](fulcra_menubar/_refresh_view.py) lazily loads its AppKit
+subclass; plain `NSView` instances cannot hold the refresh callback. Dynamic rows
+call [detach_view](fulcra_menubar/_objc_targets.py) before removal so old callback
+targets and captured snapshots do not accumulate; foreign native targets remain
+untouched.
+
+Preferences and web settings use one complete scoped handshake and additive
+revision-checked pin changes. Logical failures or changed-scope responses cannot
+acknowledge a checkbox. Hidden pins survive; definition management is separate
+and never treats a v1 Event UUID as an annotation-definition target. The web
+client discards old pin responses after a newer account handshake. Reopening
+cached Preferences or selecting its Annotations tab refreshes choices; a busy
+load is invalidated and followed by a fresh handshake instead of dropped.
+
+The client database has its own schema version 1. Missing tables, unversioned
+development databases or future versions fail visibly without recreating empty
+state; preserve the original file for explicit recovery. This does not migrate
+or adopt the released app's unscoped favorites.
+
+**Released 0.1.4 remains legacy until a reviewed packaged release. Explicit
+old-epoch action/timer reauthorization, packaged interactive QA, and host cutover
+remain release gates.** Current old-epoch pending work is visible for recovery
+and cannot silently send under fresh consent. The actual AppKit popover and
+preferences have rendered successfully against synthetic daemon responses;
+that render does not prove signed-app permissions, real sources or cutover.
 
 ## Task plugins
 
@@ -79,7 +156,13 @@ bash packages/menubar/scripts/verify_bundle.sh
 ```
 
 The Briefcase build includes workspace wheels, Python, native command launchers,
-and the web setup interface. It writes the app under
+and the web setup interface. Before bundled CLI, worker or GUI dispatch, the
+entry point supplies its included `certifi` roots to OpenSSL when neither
+`SSL_CERT_FILE` nor `SSL_CERT_DIR` is set. This lets the SDK's urllib-based
+Auth0 flow verify HTTPS in the embedded runtime; certificate and hostname
+verification stay enabled. An explicit operator trust store remains authoritative.
+A missing bundled roots file fails before authentication. Source/venv launches
+keep their existing Python trust configuration. It writes the app under
 `packages/menubar/build/fulcra-menubar/macos/app/`. The build rejects embedded
 builder-home paths and removes nonportable pip scripts before signing. It also
 removes generated Python bytecode after build and bundle verification because

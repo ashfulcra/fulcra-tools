@@ -4,30 +4,20 @@ from __future__ import annotations
 from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 
 from .. import library
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import netflix as netflix_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ..takeout_health import netflix_health_check
-from ._common import DURATION_SPEC, ensure_media_def, run_file_import
+from ._common import DURATION_SPEC, run_file_import
 
 
-# Mirrors wire.duration_definition_payload defaults and LASTFM_LISTENED_SPEC —
-# same structure, different canonical name.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 NETFLIX_WATCHED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_netflix(ctx: RunContext) -> None:
-    # Ensure the "Watched" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # watched_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Watched" definition
-    # rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="watched_definition_id",
-                     spec=NETFLIX_WATCHED_SPEC, canonical_name="Watched",
-                     state_save=_state_save)
 
     run_file_import(
         ctx,
@@ -49,10 +39,12 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_netflix,
+    record_data_types=media_destinations("watched"),
+    record_pending=media_pending,
     description=(
         "Imports a Netflix viewing-history CSV. Manual — download "
         "ViewingActivity.csv from netflix.com/Activity, then point this "
-        "plugin at the file. Each watch becomes a 'Watched' annotation."
+        "plugin at the file. Each watch becomes a 'Watched' data type."
     ),
     default_interval=None,
     category="video",
@@ -74,7 +66,7 @@ PLUGIN = Plugin(
             body_md=(
                 "Netflix exports your full viewing history as a CSV. "
                 "Upload it here and we'll record each watch as a "
-                "'Watched' annotation in Fulcra."
+                "'Watched' data type in Fulcra."
             ),
         ),
         SetupStep(
@@ -111,7 +103,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Netflix watches?",
             body_md=(
-                "We can write to your existing 'Watched' annotation or "
+                "We can write to your existing 'Watched' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

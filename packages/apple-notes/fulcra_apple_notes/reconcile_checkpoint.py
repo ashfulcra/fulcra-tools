@@ -16,12 +16,14 @@ from .reconcile import VaultObservation
 VERSION = 1
 
 
-def scope_key(container: Path, state: dict) -> str:
+def scope_key(container: Path, state: dict, *, namespace=None) -> str:
     """Bind cached reads to one container and the exact sync content baseline."""
     source = {"container": str(container.resolve()),
               "version": state.get("version"),
               "notes": state.get("notes", {}),
               "attachments": state.get("attachments", {})}
+    if namespace is not None:
+        source["destination_account"] = namespace
     return hashlib.sha256(json.dumps(source, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
 

@@ -1,5 +1,5 @@
 """Daemon UDS command ``delete_definition`` — mirrors the HTTP route
-behaviour (clears plugin state, prunes favorites) but is reachable
+behaviour (clears legacy plugin state, preserves favorites) but is reachable
 via the local UDS socket so the menubar can call it.
 
 Why this test exists: the menubar's preferences/annotations_tab.py
@@ -223,7 +223,7 @@ def test_delete_definition_refresh_on_401(
     # Stub the CLI-refresh helper: pretend the CLI minted a fresh token.
     refresh_calls = {"n": 0}
 
-    def _fake_refresh() -> str:
+    def _fake_refresh(**kwargs) -> str:
         refresh_calls["n"] += 1
         _creds_mod.set_user_secret("bearer-token", "fresh-token")
         return "fresh-token"

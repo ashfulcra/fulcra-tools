@@ -316,3 +316,10 @@ describe("IdentityLabel — this browser", () => {
     expect(update).toHaveBeenCalledWith(expect.anything(), "Spare Browser");
   });
 });
+
+test('held popup uses separate durable retention status and hides legacy delivery promises',async()=>{
+ await chrome.storage.local.set({attentionAuthMode:'v1-held',counts:{date:new Date().toISOString().slice(0,10),logged:99,categorized:0,ignored:0},outbox:[{id:'legacy'}]});
+ vi.mocked(chrome.runtime.sendMessage).mockImplementation(async(message:any)=>({version:1,ok:true,result:message.type==='attention-capture-v1'?{status:'held',drains:'disabled',retained:3,held:2,active:1,prepared:0,enqueued:0,legacyOriginals:0,verifiedUploaded:0,serializedBytes:100,budgetBytes:67108864,legacyObservation:'complete'}:message.command==='settings-read'?{...DEFAULT_SETTINGS,onboarded:true}:{status:'held',code:'SETUP_HELD',mode:'v1-held',drains:'disabled'}}));
+ const {container,root}=await mount(<App/>);
+ try{expect(container.textContent).toContain('3 locally retained');expect(container.textContent).toContain('Both drains are disabled');expect(container.textContent).not.toContain('waiting to ship');expect(container.textContent).not.toContain('Logged');}finally{await act(async()=>root.unmount());}
+});

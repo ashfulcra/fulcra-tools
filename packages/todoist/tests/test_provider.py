@@ -610,3 +610,29 @@ def test_state_failure_is_sanitized_and_prevents_completion_authority():
         with pytest.raises(TodoistError):
             provider.complete("task-a", "revision", "project-a")
     assert not api.commands
+
+
+def test_read_consent_is_checked_after_response_before_another_page():
+    allowed = [True]
+    calls = []
+    def guard():
+        if not allowed[0]:
+            raise RuntimeError("synthetic selection revoked")
+    def handler(request):
+        calls.append(request)
+        allowed[0] = False
+        return httpx.Response(200, json={"results": [], "next_cursor": "synthetic-next"})
+    with TodoistProvider("synthetic", transport=httpx.MockTransport(handler), still_allowed=guard) as provider:
+        with pytest.raises(RuntimeError, match="revoked"):
+            provider._pages("projects", "results")
+    assert len(calls) == 1
+
+
+def test_cached_source_namespace_does_not_repeat_consent_reads_per_task():
+    from unittest.mock import Mock
+    api, guard = API(), Mock()
+    api.active = [task(id=f'synthetic-task-{i}') for i in range(500)]
+    with api.provider(still_allowed=guard, load_state=lambda _:None, dry_run=True) as provider:
+        assert len(provider.tasks({'project-a'})) == 500
+    assert len(api.requests) == 3
+    assert guard.call_count <= 30

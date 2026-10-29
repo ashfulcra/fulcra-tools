@@ -39,6 +39,7 @@ class _PendingState:
     code_verifier: str
     redirect_uri: str
     created_at: float
+    trakt_attempt: object | None = None
 
 
 def _gc():
@@ -85,3 +86,11 @@ def complete_flow(state: str) -> _PendingState | None:
     _gc()
     with _state_lock:
         return _inflight.pop(state, None)
+
+
+def _bind_trakt_flow(state, attempt):
+    with _state_lock:
+        pending = _inflight.get(state)
+        if pending is None or pending.plugin_id != 'trakt' or pending.trakt_attempt is not None:
+            raise RuntimeError('Trakt authorization state unavailable')
+        pending.trakt_attempt = attempt

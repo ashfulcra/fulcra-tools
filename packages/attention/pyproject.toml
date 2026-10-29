@@ -43,6 +43,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["fulcra_attention*"]
 
+[tool.setuptools.package-data]
+fulcra_attention = ["v1_contract.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"

@@ -35,6 +35,28 @@ def test_request_response_round_trip(tmp_path: Path):
         t.join(timeout=2.0)
 
 
+def test_versioned_client_can_opt_into_larger_but_bounded_responses(tmp_path):
+    sock = tmp_path / 'control.sock'
+    payload = {'ok': True, 'synthetic_choices': ['x' * 1000] * 100}
+    server = ControlServer(sock, lambda _: payload)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        server.wait_ready(timeout=2)
+        assert send_request(sock, {'cmd': 'quick_record_v2'}, max_response_bytes=8 * 1024 * 1024) == payload
+        with pytest.raises(ValueError, match='response too large'):
+            send_request(sock, {'cmd': 'quick_record_v2'}, max_response_bytes=32768)
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('limit', [True, 0, -1, 8 * 1024 * 1024 + 1, None])
+def test_response_bound_is_validated_before_connecting(tmp_path, limit):
+    with pytest.raises(ValueError, match='response'):
+        send_request(tmp_path / 'absent.sock', {'cmd': 'status'}, max_response_bytes=limit)
+
+
 def test_handler_exception_becomes_an_error_reply(tmp_path: Path):
     sock = tmp_path / "control.sock"
 

@@ -4,32 +4,21 @@ from __future__ import annotations
 from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 
 from .. import library
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import apple_takeout as apple_takeout_importer
 from ..since_filter import parse_window
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ..takeout_health import apple_takeout_health_check
-from ._common import DURATION_SPEC, ensure_media_def, import_events, resolve_path
+from ._common import DURATION_SPEC, import_events, resolve_path
 
 
-# Same structure as NETFLIX_WATCHED_SPEC — all Watched plugins share the same
-# definition.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 APPLE_TAKEOUT_WATCHED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_apple_takeout(ctx: RunContext) -> None:
-    # Ensure the "Watched" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # watched_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Watched" definition
-    # rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="watched_definition_id",
-                     spec=APPLE_TAKEOUT_WATCHED_SPEC,
-                     canonical_name="Watched",
-                     state_save=_state_save)
 
     # `since` defaults to "1y" — a real Apple takeout can be a decade
     # deep; importing the whole thing on first run would dump tens of
@@ -79,6 +68,8 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_apple_takeout,
+    record_data_types=media_destinations("watched"),
+    record_pending=media_pending,
     health_check=apple_takeout_health_check,
     description=(
         "Imports your Apple TV watch history from an Apple Data & "
@@ -137,7 +128,7 @@ PLUGIN = Plugin(
                 "log (`Video Play Activity.csv`) and the sparse summary "
                 "(`Playback Activity.csv`) automatically — give us the "
                 "file or folder you got from privacy.apple.com and "
-                "we'll record each watch as a 'Watched' annotation."
+                "we'll record each watch as a 'Watched' data type."
             ),
         ),
         SetupStep(
@@ -213,7 +204,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Apple TV watches?",
             body_md=(
-                "We can write to your existing 'Watched' annotation or "
+                "We can write to your existing 'Watched' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

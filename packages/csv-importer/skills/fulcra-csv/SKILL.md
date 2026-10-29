@@ -1,375 +1,126 @@
 ---
 name: fulcra-csv
-description: Import any CSV stream into a Fulcra account as annotations — body weight, mood scores, expenses, sleep, media plays, anything timestamped. Use when the user wants to ingest a CSV they got from somewhere (a wearable, a Pipedream/IFTTT workflow, a hand-rolled spreadsheet) into Fulcra.
+description: Use when a user wants to import timestamped CSV data into Fulcra, map columns or units, recover a CSV import, or audit legacy annotation exports.
 ---
 
-# fulcra-csv — Import any CSV into Fulcra
+# fulcra-csv
 
-`fulcra-csv` is a small CLI that maps CSV columns onto Fulcra annotation events. It's the foundation `fulcra-media-helpers` uses for its `generic-csv` importer, but it works standalone for **any** kind of data: weights, moods, expenses, water intake, custom logs.
+Standalone CSV imports use owned v1 Event/Metric targets on this development
+branch. This is separate from installed-app/provider acceptance. Collect's
+Generic media CSV plugin shares the pure parser and keeps its own media writer.
 
-This skill teaches you (the AI agent) how to import a CSV into the right Fulcra annotation type for a given user data shape.
+## Where to start
 
----
-
-## Where to start — the re-entrancy probes
-
-Before running an import, probe how far this user already got. The states are a prefix of
-the import flow — **authed? → target def exists? → anything-to-import? → already landed?** — so
-enter at the **first probe that fails** (per the repo's skill-quality pattern,
-`docs/skill-quality-pattern.md`). Every state is safely re-enterable: re-running an import produces
-the same deterministic source_ids, and the importer dedups against a readback of existing source_ids
-before posting (client-side, in `run_import`; see "Critical invariant" below), so there is never a
-penalty for re-probing or re-importing.
-
-| Probe (run in order) | Command | Passes when | If it fails, enter at |
-|---|---|---|---|
-| Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
-| Target picked + def exists? | for a user-defined/generic annotation, list the account's live annotation definitions and confirm the intended UUID is present: `curl --oauth2-bearer "$(fulcra auth print-access-token)" https://api.fulcradynamics.com/user/v1alpha1/annotation` (this is the GET `annotations_catalog()` reads; `fulcra catalog` lists *data types*, not user-defined annotation defs, so don't use it here). For a built-in type (`--data-type BodyMass`, etc.), no def is needed — this probe is N/A | the intended `--definition-id` UUID appears in the JSON with `deleted_at` null, OR the user is targeting a built-in type | **BOOTSTRAP** — mint a def with `fulcra-csv bootstrap …` (prints the UUID), then import against it. Do NOT bootstrap if the UUID is already present — that mints a duplicate def and splits the data |
-| Anything to import? | `fulcra-csv import <csv-path> --dry-run` **with a target flag** — `--definition-id <uuid>` (user-defined) or `--data-type <Name>` (built-in), plus the same column flags you'll use for the real run. `--dry-run` skips auth/ingest but the CLI still rejects the run with a UsageError if neither `--definition-id` nor `--data-type` is present (there'd be no target), so pass one even in dry-run | prints `parsed N events …` with N > 0 and the sampled rows look right (pure parse — no auth or ingest) | **EXPORT/COLLECT** — the file is empty or the column mapping is wrong; fix the flags or get a better file before importing |
-| Already landed? | `fulcra-csv export --definition-id <uuid> --start "30 days ago" --columns start_time,source_id` (built-in target: pass `--data-type <Name>` instead) | rows come back that match the CSV you're about to import (compare `source_id` hashes or timestamps) | **IMPORT** — nothing landed yet; run `fulcra-csv import … ` for real (drop `--dry-run`) |
-
-All probes pass → the data is already imported; tell the user and point them at
-[Context Web](https://context.fulcradynamics.com) to browse it. A brand-new user fails the first
-probe. Note the `fulcra auth print-access-token` command (probe 1, and reused inside the probe-2
-curl) belongs to the separate [fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) CLI;
-`fulcra-csv` has no auth subcommand of its own. Probe 2 hits the Fulcra Life API annotation endpoint
-(`GET /user/v1alpha1/annotation` on `https://api.fulcradynamics.com`, the host the fulcra-api client
-is what this repo's fulcra-common client resolves from `FULCRA_API_BASE`; the fulcra-api lib derives the same host from its OIDC audience) directly with `curl` — the same GET the CLI's
-`annotations_catalog()` performs — because neither `fulcra` nor `fulcra-csv` exposes a subcommand
-that lists user-defined annotation definitions.
-
----
-
-## Three target modes — pick first
-
-Every import targets ONE of three places. Decide first which you're using:
-
-### 1. User-defined annotation (most common)
-
-You have (or will create) a custom Fulcra annotation definition. The CLI writes events under it. Pass `--definition-id <uuid>`.
-
-```bash
-fulcra-csv bootstrap --name "Mood" --description "Mood self-reports" \
-  --annotation-type instant --value-type int --tag mood
-# → prints the new UUID; save it
-fulcra-csv import mood.csv --definition-id <uuid> \
-  --annotation-type instant --ts-col timestamp --value-col score \
-  --value-type int --note-col context
-```
-
-### 2. Built-in Fulcra type (BodyMass, HeartRate, etc.) — no definition-id
-
-When the user wants the data to land in Fulcra's *native* time series (the same place HealthKit imports go), pass `--data-type <Name>` and SKIP `--definition-id`. The CLI doesn't append an annotation-def source to the record, so dedup is purely source-id-based and CSV imports can coexist with HealthKit imports of the same kind without duplicating.
-
-```bash
-fulcra-csv import weights.csv --data-type BodyMass \
-  --annotation-type instant --ts-col date --value-col kg --unit kg \
-  --tag manual-scale
-```
-
-⚠️ Built-in-type writes assume the receiving schema matches. Check `fulcra catalog` for known data types. As of this skill's writing, the data-type write API is forthcoming — when shipped, BodyMass/HeartRate/StepCount/etc. are first-class targets.
-
-### 3. Generic DurationAnnotation / InstantAnnotation — custom definition
-
-Create a simple annotation definition with `bootstrap`, then import against it with `--definition-id`. The CLI writes plain DurationAnnotation events (or InstantAnnotation with `--annotation-type instant`). Useful for "throw a CSV in and forget" cases where the data does not belong to a built-in Fulcra type.
-
-```bash
-fulcra-csv bootstrap --name "Imported CSV"
-# -> save UUID as $CSV_UUID
-fulcra-csv import random.csv --definition-id $CSV_UUID
-```
-
----
-
-## Annotation type — duration vs instant
-
-`--annotation-type duration` (default) — events have `start_time` and `end_time`. For watches, listens, workouts (anything with a span). The CLI uses `--end-col` or `--duration-col`; falls back to a 1-second sentinel when neither is given (Fulcra silently drops zero-duration events).
-
-`--annotation-type instant` — point-in-time. For weights, moods, single readings. `recorded_at` only has `start_time`. The `--end-col` / `--duration-col` flags error out if you pass them with `--annotation-type instant`.
-
----
-
-## Value column — for measurements
-
-If the row has a numeric reading (weight, score, count), use `--value-col <name>` to lift it into `data.value`. Coerce with `--value-type {float,int,str,bool}` (default float). Pair with `--unit <string>` to add a constant `data.unit`.
-
-```bash
-# Body weight in kg
-fulcra-csv import weights.csv \
-  --data-type BodyMass --annotation-type instant \
-  --ts-col date --value-col kg --value-type float --unit kg \
-  --tag manual-scale
-```
-
-Empty value cells become `None` (not zero, not the string `""`).
-
----
-
-## Column mapping cheatsheet
-
-| Flag | Purpose | Required? |
+| Probe | Command or evidence | Next step |
 |---|---|---|
-| `--ts-col` | Timestamp column header | Yes (default `timestamp`) |
-| `--title-col` | Title column header | No (default `title`); used for both `note` and `title` |
-| `--subtitle-col` | Subtitle (e.g. artist for music) | No; if set, `note` becomes `subtitle – title` |
-| `--note-col` | Override note column | No |
-| `--value-col` | Measurement value column | Only for value-bearing rows |
-| `--value-type` | float/int/str/bool | Default `float`; only matters with `--value-col` |
-| `--unit` | Constant unit string | Optional |
-| `--end-col` | Explicit end-time column | Optional (duration only) |
-| `--duration-col` | Duration-in-seconds column | Optional (duration only) |
-| `--source-id-col` | Per-content id column (mixed into source-id hash) | Optional |
-| `--tag-col` | Per-row tag column | Optional |
-| `--tag` | Default tag for all rows | Optional |
-| `--data-field COL=KEY` | Lift CSV column into `data.<key>` | Repeatable |
-| `--extra COL=KEY` | Lift CSV column into `data.external_ids[<key>]` | Repeatable |
-| `--tz` | IANA tz for naive timestamps | Default `UTC` |
-| `--source-id-prefix` | Override deterministic id prefix | Default `com.fulcradynamics.csv.v1` |
-| `--dry-run` | Parse + print first 5 rows; don't ingest | Optional |
+| Installed? | `fulcra-csv import --help` | Use the repository checkout and `uv sync --all-packages --all-extras` if missing. |
+| Full target selected? | Recorded `Event/<canonical UUID>` or `Metric/<canonical UUID>` for `--data-type` | Choose an existing compatible owned target, or explicitly run `fulcra-csv bootstrap --base-type Event --name "Imported CSV"`. Import proves ownership/schema afresh. |
+| Local rows valid? | `fulcra-csv import input.csv --data-type "$CSV_TARGET" --dry-run` with intended mappings | Fix diagnosed rows/mappings. Preview checks no account, server schema or new-row count. |
+| Original work unresolved? | Retained failure/pending evidence from the authorized import | Repeat the original authority to reconcile before new source intake. UNKNOWN is not clear; preserve pending work and original errors. |
 
----
+Real imports/bootstrap use CLI/environment auth, separate from Collect sign-in.
+Use `fulcra auth login` when sign-in is required; do not print access tokens.
+An authorized live import recovers original work before opening the selected
+file, including missing/newly empty files. Do not replace authority to escape
+a hold. There is no standalone CSV status/reset command or cursor.
 
-## Bootstrap a new annotation definition
+## Choose a v1 target
 
-If the user wants a custom def, mint it first:
+`--data-type` is required even for `--dry-run`: full Event/UUID or Metric/UUID.
+Bare/annotation/native names such as BodyMass are refused locally.
+`--definition-id` is only an opaque retained historical selection paired with
+that full target, never target proof or a new annotation marker.
 
-```bash
-fulcra-csv bootstrap \
-  --name "Concerts attended" \
-  --description "Live music I went to" \
-  --tag music --tag tickets
-# → prints UUID
-```
+Event supports spans and scalar/string/bool/null values; Metric needs a finite
+actual numeric nonbool value. Bootstrap requires `--base-type Event|Metric` and
+`--name`, accepts `--description`, and prints the full target. Metric uses exact
+`--unit` (omitted means unitless) and `--aggregation discrete|cumulative`
+(default discrete); import must supply matching metadata. Event bootstrap
+rejects explicitly supplied Metric metadata. Old bootstrap annotation/value/tag
+options are removed.
 
-For measurement-bearing annotations, set `--annotation-type` and `--value-type`:
+Retry uncertain bootstrap with original name/description/base/metadata. Changed
+same-name setup holds; distinct names are distinct intentional tracks. Explicit
+pinned import accepts compatible custom names and renames without name-based
+ownership assumptions.
 
-```bash
-fulcra-csv bootstrap \
-  --name "Resting Heart Rate (manual)" --description "Daily morning RHR" \
-  --annotation-type instant --value-type int --unit bpm
-```
-
-Tags are auto-created if they don't exist.
-
----
-
-## Soft-delete a definition
+## Import and preview
 
 ```bash
-fulcra-csv soft-delete <uuid> --confirm
+fulcra-csv bootstrap --base-type Metric --name "Manual weight" --unit kg
+# Save the printed full target as CSV_TARGET.
+fulcra-csv import weights.csv --data-type "$CSV_TARGET" \
+  --annotation-type instant --ts-col date --value-col kg --unit kg --dry-run
+# After checking local rows, the authorized real import omits --dry-run.
 ```
 
-⚠️ **Fulcra has no per-event delete.** Soft-deleting a definition removes the def from the user's account but its events stay visible in queries with their `source_id` pointing at the deleted def. For a true "reset," soft-delete + create a new def with a different `source_id_prefix` so future imports namespace cleanly. The `fulcra-media` sibling has a `reset` command that wraps this for the four media defs (Watched/Listened/Activity/Read).
+Preview is local strict parsing/codec/label/conflict validation and first-five
+sampling only: no runtime/profile/DB/auth/metadata/pending lookup, recovery or
+writes. It cannot prove destination compatibility or count new records.
 
----
+The CLI materializes strict input and validates existing primary/enrichment
+compatibility before current metadata/record writes. Finalized tag unions are
+proved before effects; unknown new-tag UUID constraints hold rather than create
+metadata first. Known tag identities retain guarded rename bindings after proof.
+Malformed CSV, missing
+requested headers/rows, conflicting identities, nonfinite values and backwards
+times fail with diagnostics. Pure parser consumers retain default skip behavior.
 
-## Critical invariant: source_ids always include the timestamp
-
-When `--source-id-col` is set, the column value is mixed into the hash **with** the timestamp, not used verbatim. Two plays of the same Spotify track at different times produce distinct events. Don't try to "preserve" content IDs in source_ids — they're hashed, idempotency is per-row, not per-content. (Content-level identity belongs in `--extra content_fingerprint=fp`.)
-
-This is why **re-running the same import is always safe** — same input rows produce the same source_ids, and before posting each chunk `run_import` reads back the existing source_ids in that time window and skips the ones already present (client-side dedup, not a server-side guarantee). You don't need to track "have I imported this yet?"
-
----
-
-## Recipes — common shapes
-
-### Body weight (HealthKit-compatible)
-
-```csv
-date,kg
-2026-05-01,82.4
-2026-05-02,82.1
-```
-
-```bash
-fulcra-csv import weights.csv \
-  --data-type BodyMass --annotation-type instant \
-  --ts-col date --value-col kg --value-type float --unit kg \
-  --tag manual-scale
-```
-
-### Mood entries
-
-```csv
-timestamp,score,note
-2026-05-01T09:00:00Z,7,morning coffee good
-2026-05-01T22:00:00Z,5,long day
-```
-
-```bash
-fulcra-csv bootstrap --name "Mood" --annotation-type instant \
-  --value-type int --tag mood
-# → save UUID as $MOOD_UUID
-
-fulcra-csv import mood.csv --definition-id $MOOD_UUID \
-  --annotation-type instant --ts-col timestamp \
-  --value-col score --value-type int --note-col note
-```
-
-### Expenses with category tags
-
-```csv
-date,amount,merchant,category
-2026-05-01,12.50,Blue Bottle,coffee
-2026-05-01,38.00,Whole Foods,groceries
-```
-
-```bash
-fulcra-csv bootstrap --name "Expenses" --annotation-type instant \
-  --value-type float --unit usd --tag finance
-# → save UUID
-
-fulcra-csv import expenses.csv --definition-id $UUID \
-  --annotation-type instant --ts-col date --value-col amount \
-  --value-type float --unit usd \
-  --title-col merchant --tag-col category
-```
-
-### Pipedream / IFTTT play log (music)
-
-```csv
-ts,track,artist,track_id,url
-2026-05-01T09:00:00Z,Reelin' In The Years,Steely Dan,1I7zHEdDx8Ny5RxzYPqsU2,https://...
-```
-
-```bash
-fulcra-csv import plays.csv --definition-id $LISTENED_UUID \
-  --ts-col ts --title-col track --subtitle-col artist \
-  --source-id-col track_id --tag spotify --extra url=spotify_url
-```
-
-### Sleep durations
-
-```csv
-start,end,quality
-2026-05-01T23:00:00Z,2026-05-02T07:30:00Z,8
-```
-
-```bash
-fulcra-csv bootstrap --name "Sleep" --tag sleep
-fulcra-csv import sleep.csv --definition-id $UUID \
-  --ts-col start --end-col end --value-col quality --value-type int
-```
-
----
-
-## Export — round-tripping annotations back to CSV
-
-`fulcra-csv export` is the inverse of `import`. Reach for it when the user wants to:
-
-- **Round-trip a CSV** — re-export what an import landed to verify columns/values look right, or to hand the data to another tool that expects CSV.
-- **Audit a recent import** — pull the last day/week of a definition and eyeball it instead of running ad-hoc API queries.
-- **Slice for a downstream tool** — pull a configurable subset of fields (well-known + `data.<key>` + `external_ids.<key>`) into a tidy CSV, optionally with epoch timestamps.
-
-It is NOT a sync/backfill mechanism — it's a one-shot read. If the user wants ongoing sync, point them at a scheduled job that runs export on a window.
-
-### Target — same model as import
-
-Pass ONE of:
-
-- `--definition-id <uuid>` — scope to a user-defined annotation. The CLI fetches the underlying data type (default `DurationAnnotation`) and filters records whose `sources` array references the target def. This mirrors the importer's dedup-readback, so what you see in export is what import would dedup against.
-- `--data-type <Name>` — pull a built-in time series (`BodyMass`, `HeartRate`, `DurationAnnotation`, etc.).
-
-`--start` is required (ISO-8601 or relative — `"1 week ago"`, `"yesterday"`). `--end` defaults to `now`.
-
-### Column model — `--columns col1,col2,...`
-
-Default: `start_time,end_time,tag,note,value`. Each entry resolves against the record in one of three ways:
-
-| Form | Source |
+| Import options | Purpose |
 |---|---|
-| Well-known field (`start_time`, `end_time`, `note`, `title`, `value`, `unit`, `tag`, `tags`, `category`, `source_id`, `definition_id`, ...) | Top-level on the record, or normalised from `recorded_at` (timestamps), `tag_names` (tags), `sources` (source_id / definition_id). |
-| `data.<key>` | The (possibly JSON-encoded) `data` payload — the place `--data-field COL=KEY` lifts to on import. |
-| `external_ids.<key>` | `data.external_ids[<key>]` — symmetric to import's `--extra COL=KEY`. |
+| `--annotation-type duration\|instant` | Duration default, explicit `--end-col`/`--duration-col` or existing one-second fallback; instant has equal start/end. |
+| `--ts-col`, `--tz` | Timestamp header (default timestamp), timezone (default UTC). |
+| `--title-col`, `--subtitle-col`, `--note-col` | Title/default-note mapping or explicit note. |
+| `--value-col`, `--value-type float\|int\|str\|bool` | Existing parser coercion; empty becomes null. Metric refuses null/string/bool. |
+| `--unit`, `--aggregation` | Metric metadata; mapped source unit wins over constant fallback and must equal declared unit without conversion. |
+| `--tag-col`, `--tag` | Per-row/default labels; extra labels also retain their order. |
+| `--data-field COL=KEY`, `--extra COL=KEY` | Nested `csv_data_fields` and `external_ids`, repeatable. |
+| `--source-id-col`, `--source-id-prefix` | Hashed source component, never direct ID; CLI default `com.fulcradynamics.csv.v1`. |
 
-`source_id` is special: it returns the first non-definition source (the per-row dedup key), so you can round-trip dedup hashes back through.
+Canonical Metric unit is destination metadata. No record-level unit/csv_unit is
+submitted; original nested source units remain. Event unit is only nested source
+data. Values, notes/titles, original labels, finite nested data and raw timestamp
+identity are preserved by the [canonical payload contract](../../README.md#native-payload-and-identity).
 
-### Other knobs
+## Recovery, corrections and counts
 
-- `--date-format iso|epoch|local` (default `iso`, always UTC with `Z` suffix). `epoch` writes integer seconds. `local` honors `--tz`.
-- `--tz <iana>` — used for parsing relative `--start`/`--end` and for `--date-format local`.
-- `--out <path>` — file output. Omit for stdout.
+Stable `cli-csv` authority binds account, full target, spec/unit/aggregation and
+explicit legacy selection. File/mappings/prefix/timezone do not rebind original
+pending rows. Source IDs keep the existing raw timestamp/note/tag/explicit-ID
+hash; changed timestamp spelling can change identity. Native UUIDs qualify the
+primary source by destination.
 
-### CSV-injection guard
+Existing UUIDs need the exact incoming primary source first. Wrong/alias-only
+primary or malformed enrichment holds. Compatible user tags/provenance and
+declared enrichment survive. Map objects overlay recursively; absent keys remain,
+explicit null/scalar/list replaces. These are corrections at the same UUID,
+not a deletion interface. Frozen pending rows recover without reparsing a new
+source or recomputing its merge.
 
-By default, cells starting with `= + - @ \t \r` are prefixed with a single quote (`'`) so Excel/Sheets/Numbers don't interpret them as formulas. This is OWASP-grade defense-in-depth and on by default. The library exposes `ExportOptions.guard_formulas=False` for callers feeding CSV into a downstream parser that doesn't need it; the CLI does NOT expose a flag — keep it on for spreadsheets. Booleans render as lowercase `"true"`/`"false"` so they round-trip through `coerce_value`.
+Exact native readback and exclusions govern completion. Unknown issued uploads
+are reconciled, never blindly resent. Retain errors and original pending state;
+legacy export or a successful preview cannot prove delivery.
 
-### Worked example — audit yesterday's mood imports
+Success reports total/skipped_existing/posted/verified plus separate recovered.
+Posted means known delivered current candidates, not HTTP attempts. Failure
+counts are complete-group lower bounds; partial group visibility can exceed
+those counts. Known counts survive later receipt/clear/tag/chunk/close failures,
+and recovery never inflates current counts. There is no caught-up/history claim.
 
-The user just ran `fulcra-csv import mood.csv --definition-id $MOOD_UUID ...` and wants to see what landed:
+## Legacy audit and administration
 
-```bash
-fulcra-csv export \
-  --definition-id $MOOD_UUID \
-  --start yesterday \
-  --columns start_time,value,note,tag,source_id \
-  --date-format local --tz America/New_York
-```
+`fulcra-csv export` is retained legacy audit, not native v1 export or new-import
+verification. Use `--definition-id` and/or legacy `--data-type` with `--start`,
+optional `--end`, `--columns`, `--date-format iso|epoch|local`, `--tz` and `--out`.
+Existing decoder/filter/formula safeguards remain; it is not a byte-identical
+round-trip format.
 
-Stdout is a CSV with five columns, timestamps in the user's wall-clock TZ, plus `source_id` so they can match rows against the importer's deterministic hashes.
+`fulcra-csv soft-delete <legacy-definition-uuid> --confirm` is explicit legacy
+administration; full Event/Metric targets refuse before auth. It is not a native
+delete, migration or recovery reset. Retired client record methods fail rather
+than fall back to annotation writing.
 
-### Pitfalls
-
-- **Export does NOT trigger a re-fetch from the source.** It reads what Fulcra has. If a recent import is still propagating through ingest, you may see fewer rows than you posted — wait a minute and re-run.
-- **`--definition-id` requires the underlying `data_type` to match.** The export defaults to `DurationAnnotation`; if the user bootstrapped an instant annotation, pass `--data-type InstantAnnotation` alongside `--definition-id`.
-- **Don't promise byte-identical round-trips.** Booleans go to lowercase, lists/dicts JSON-encode to single-line, and the formula-guard `'` prefix is a real cell value. The data round-trips through `coerce_value`, but the CSV bytes differ from the original import file.
-
----
-
-## Periodic ingestion
-
-CSV imports are inherently one-shot ("import this file"), not incremental. There's no watermark layer (that lives in `fulcra-media` for its API-poll importers).
-
-For agent-driven recurring sync of a CSV that grows over time (e.g. a Pipedream workflow appending rows to a Drive sheet):
-
-1. Download the latest CSV to a temp file.
-2. Run `fulcra-csv import <tempfile> ...` — re-imports are idempotent.
-3. Skipped rows are silent (the importer's client-side source-id readback dedup). Posted rows are the delta.
-
-The `--dry-run` flag is useful for a cheap "any new rows?" check (it parses and prints the first 5, doesn't ingest).
-
----
-
-## Fulcra Life API auth
-
-Same as fulcra-media: shells out to `fulcra auth print-access-token` from the [fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) package, or honors `FULCRA_ACCESS_TOKEN=...` for non-interactive contexts.
-
----
-
-## Common failure patterns
-
-### "No definition_id found" exit
-
-You forgot `--definition-id <uuid>` AND didn't set `--data-type` AND `--annotation-type` is duration. Either bootstrap a def, or pass `--data-type DurationAnnotation` explicitly.
-
-### Events post but don't appear in `fulcra get-records`
-
-Fulcra's ingest-to-query indexing lag (seconds to minutes for bulk imports). Re-run shouldn't help — wait a few minutes and re-query.
-
-### Same content keeps producing duplicate events on each import
-
-You're probably using `--source-id-col` for a per-row id (database row uuid) and expecting per-row uniqueness. The CLI ALWAYS mixes timestamp into the hash. For truly stable per-row identity, ensure the (timestamp, id) pair is stable across imports. If the row's timestamp changes between exports, you'll get distinct source_ids — that's intentional but maybe not what you want.
-
-### "ValueError: unparseable timestamp"
-
-dateparser can't parse the timestamp column. Try `--tz America/New_York` if rows are local-time-no-tz. Worst case, pre-process the CSV to ISO 8601.
-
----
-
-## Architectural references (for the curious agent)
-
-- `fulcra_csv.events` — `GenericEvent`, `ColumnMap`, `coerce_value`
-- `fulcra_csv.parser` — `parse_csv(path, column_map, tz, annotation_type)`
-- `fulcra_csv.fulcra` — `FulcraClient` (auth, ingest, dedup readback, per-chunk verification)
-- `fulcra_csv.confidence` — `apply_cluster_policy`, `find_low_conf_twins`, `apply_twin_decisions` (used by fulcra-media's Trakt importer, but available standalone)
-- `fulcra_csv.cli` — click-based CLI entry
-
----
-
-## Don't
-
-- **Don't bake `--definition-id` into a script as a constant** — the user might soft-delete + re-bootstrap, changing the UUID. Always read it from a fresh `fulcra-csv bootstrap` or from the user's state.
-- **Don't try to dedup at the agent layer** — the importer's `run_import` already reads back existing source_ids per window and skips duplicates before posting. Just re-run the import; already-landed rows are skipped silently.
-- **Don't write `data.note` from a column the user didn't intend to expose** — `--note-col` is opt-in.
-- **Don't pass `--value-type bool` for "0/1" rows unless that's truly the schema** — bool collapses any non-truthy string to false; for diary-style yes/no events use int (0/1).
-- **Don't print the user's access token to stdout** — neither in error envelopes nor in success messages. The CLI scrubs URL params in exception messages, but raw token blobs are sensitive.
+Read the [package guide](../../README.md) for full schemas, identity/merge rules,
+authority, output limits and development checks. Repeated/scheduled ingestion
+requires the user's authorization; deterministic IDs alone do not establish
+delivery or authorize changing an unresolved import's account/target.

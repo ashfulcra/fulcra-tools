@@ -49,6 +49,8 @@ class _FakeResult:
 
 
 class _FakeClient:
+    def __init__(self, **_kwargs):
+        pass
     def ensure_tag(self, name, state):
         pass
 
@@ -64,6 +66,10 @@ def _pipeline(monkeypatch):
     event log that fetch/refresh stubs also append to, for ordering
     assertions."""
     calls: list[tuple] = []
+    from fulcra_collect import trakt_identity
+    monkeypatch.setattr(trakt_identity, 'probe_identity', lambda subject, bounds, **kw:
+        trakt_identity.Observation(subject, 'Synthetic opaque identity', trakt_identity.ENDPOINT, 1.0))
+
     monkeypatch.setattr(
         "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: ["ev-trakt"],
@@ -73,15 +79,15 @@ def _pipeline(monkeypatch):
         lambda events, policy: events,
     )
     monkeypatch.setattr(
-        "fulcra_media.plugins.trakt.find_low_conf_twins",
+        "fulcra_media.plugins._common.find_low_conf_twins",
         lambda events, extra_pool=None: [],
     )
     monkeypatch.setattr(
         "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
-        lambda: [],
+        lambda **_kwargs: [],
     )
     monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient",
-                        lambda: _FakeClient())
+                        lambda **_kwargs: _FakeClient())
     monkeypatch.setattr("fulcra_media.plugins.trakt.newest_event_iso",
                         lambda events: "2026-06-09T00:00:00Z")
     # Pre-bootstrapped media state: cached def id, no resolver round trip.
@@ -89,8 +95,6 @@ def _pipeline(monkeypatch):
         "fulcra_media.plugins.trakt._state_load",
         lambda path: MediaState(watched_definition_id="def-watched-123"),
     )
-    monkeypatch.setattr("fulcra_media.plugins.trakt._state_save",
-                        lambda state: None)
     return calls
 
 
@@ -106,6 +110,26 @@ def _make_ctx(calls: list[tuple]) -> tuple[RunContext, PluginState]:
         _set_credential=lambda key, value: calls.append(
             ("set_credential", key, value)),
     )
+    from fulcra_collect.trakt_source import Owner
+    class Store:
+        key = 'synthetic-keychain'
+        file = False
+        receipts = {}
+        def snapshot(self):
+            return {key: ctx.credentials.get(key) for key in
+                ('client_id', 'access_token', 'refresh_token', 'client_secret', 'redirect_uri', 'created_at', 'expires_in')}
+        def publish(self, values):
+            for key in ('access_token', 'refresh_token'):
+                calls.append(('set_credential', key, values[key]))
+            ctx.credentials.update(values)
+        def save_receipt(self, attempt, value):
+            self.receipts[attempt] = value
+        def receipt(self, attempt):
+            return self.receipts[attempt]
+    ctx._trakt_source_owner = Owner(Store())
+    ctx._register_current_work_guard = lambda check: None
+    ctx._trakt_authority = lambda: None
+    ctx._trakt_local = lambda: None
     return ctx, st
 
 
@@ -113,7 +137,9 @@ def test_happy_path_no_refresh_attempted(monkeypatch, _pipeline):
     """A 200 fetch never touches the refresh endpoint or the keychain."""
     calls = _pipeline
 
-    def fake_fetch(headers, per_page=1000):
+    def fake_fetch(headers, per_page=1000, *, strict_scan, _bounds, _before_request):
+        assert strict_scan is True
+        assert _bounds is not None
         calls.append(("fetch", headers["Authorization"]))
         yield from HISTORY_ITEMS
 
@@ -127,13 +153,20 @@ def test_happy_path_no_refresh_attempted(monkeypatch, _pipeline):
     )
 
     ctx, st = _make_ctx(calls)
-    _run_trakt(ctx)
+    _run_trakt.__wrapped__(ctx)
 
     assert calls == [("fetch", "Bearer OLD-ACCESS")]
     assert st.watermark == "2026-06-09T00:00:00Z"
 
 
-def test_401_refreshes_persists_both_tokens_then_retries(monkeypatch, _pipeline):
+@pytest.mark.parametrize("legacy_secret,callback", [
+    (True, None),
+    (True, "http://127.0.0.1:9292/api/oauth/trakt/callback"),
+    (False, "http://127.0.0.1:9292/api/oauth/trakt/callback"),
+])
+def test_401_refreshes_persists_both_tokens_then_retries(
+    monkeypatch, _pipeline, legacy_secret, callback,
+):
     """The live bug: 401 on the keychain path. Expected recovery — POST the
     refresh grant with the stored creds, persist BOTH rotated tokens via
     ctx.set_credential BEFORE the retry fetch (Trakt refresh tokens are
@@ -142,7 +175,9 @@ def test_401_refreshes_persists_both_tokens_then_retries(monkeypatch, _pipeline)
     calls = _pipeline
     fetch_count = {"n": 0}
 
-    def fake_fetch(headers, per_page=1000):
+    def fake_fetch(headers, per_page=1000, *, strict_scan, _bounds, _before_request):
+        assert strict_scan is True
+        assert _bounds is not None
         fetch_count["n"] += 1
         calls.append(("fetch", headers["Authorization"]))
         if fetch_count["n"] == 1:
@@ -168,23 +203,27 @@ def test_401_refreshes_persists_both_tokens_then_retries(monkeypatch, _pipeline)
     monkeypatch.setattr("fulcra_media.plugins.trakt.httpx.post", fake_post)
 
     ctx, st = _make_ctx(calls)
-    _run_trakt(ctx)
+    if not legacy_secret:
+        ctx.credentials.pop("client_secret")
+    if callback:
+        ctx.credentials["redirect_uri"] = callback
+    _run_trakt.__wrapped__(ctx)
 
     # Refresh POST carried the stored refresh creds in TraktAuth._refresh's shape.
     assert posted == [{
-        "url": "https://api.trakt.tv/oauth/token",
+        "url": "https://auth.trakt.tv/oauth/token",
         "json": {
             "refresh_token": "OLD-REFRESH",
             "client_id": "the-client-id",
-            "client_secret": "the-client-secret",
-            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            **({"client_secret": "the-client-secret"} if legacy_secret else {}),
+            "redirect_uri": callback or "urn:ietf:wg:oauth:2.0:oob",
             "grant_type": "refresh_token",
         },
     }]
     # Full ordering: failed fetch → refresh → persist BOTH tokens → retry.
     assert calls == [
         ("fetch", "Bearer OLD-ACCESS"),
-        ("refresh_post", "https://api.trakt.tv/oauth/token"),
+        ("refresh_post", "https://auth.trakt.tv/oauth/token"),
         ("set_credential", "access_token", "NEW-ACCESS"),
         ("set_credential", "refresh_token", "NEW-REFRESH"),
         ("fetch", "Bearer NEW-ACCESS"),
@@ -193,13 +232,26 @@ def test_401_refreshes_persists_both_tokens_then_retries(monkeypatch, _pipeline)
     assert st.watermark == "2026-06-09T00:00:00Z"
 
 
+def test_setup_needs_only_client_id_and_retains_legacy_secret_contract():
+    from fulcra_media.plugins.trakt import PLUGIN
+
+    fields = {credential.key: credential for credential in PLUGIN.required_credentials}
+    assert fields["client_id"].required is True
+    assert fields["client_secret"].required is False
+    assert fields["redirect_uri"].required is False
+    inputs = [step.settings_keys for step in PLUGIN.setup_steps if step.kind == "input"]
+    assert inputs == [("client_id",)]
+
+
 def test_401_then_refresh_failure_raises_actionable_error(monkeypatch, _pipeline):
     """When the refresh grant itself is rejected (refresh token expired or
     revoked), the plugin must raise a RuntimeError pointing at the web UI
     wizard — and must NOT write partial junk to the keychain."""
     calls = _pipeline
 
-    def fake_fetch(headers, per_page=1000):
+    def fake_fetch(headers, per_page=1000, *, strict_scan, _bounds, _before_request):
+        assert strict_scan is True
+        assert _bounds is not None
         raise _http_401()
         yield  # pragma: no cover — make it a generator like the real one
 
@@ -217,7 +269,7 @@ def test_401_then_refresh_failure_raises_actionable_error(monkeypatch, _pipeline
     with pytest.raises(RuntimeError, match=(
             r"access token expired and refresh failed — re-connect Trakt "
             r"in the Fulcra Collect web UI wizard")):
-        _run_trakt(ctx)
+        _run_trakt.__wrapped__(ctx)
     assert not [c for c in calls if c[0] == "set_credential"], \
         "no credentials may be persisted when the refresh failed"
 
@@ -227,7 +279,9 @@ def test_401_without_refresh_creds_raises_actionable_error(monkeypatch, _pipelin
     in-process — fail with the re-connect instruction, not a bare 401."""
     calls = _pipeline
 
-    def fake_fetch(headers, per_page=1000):
+    def fake_fetch(headers, per_page=1000, *, strict_scan, _bounds, _before_request):
+        assert strict_scan is True
+        assert _bounds is not None
         raise _http_401()
         yield  # pragma: no cover
 
@@ -243,8 +297,8 @@ def test_401_without_refresh_creds_raises_actionable_error(monkeypatch, _pipelin
     ctx, _ = _make_ctx(calls)
     ctx.credentials.pop("refresh_token")
     ctx.credentials.pop("client_secret")
-    with pytest.raises(RuntimeError, match="re-connect Trakt"):
-        _run_trakt(ctx)
+    with pytest.raises(RuntimeError, match="Trakt source authority"):
+        _run_trakt.__wrapped__(ctx)
     assert not [c for c in calls if c[0] == "set_credential"]
 
 
@@ -253,7 +307,9 @@ def test_non_401_error_propagates_unchanged(monkeypatch, _pipeline):
     error) propagates as-is so the runner reports the real failure."""
     calls = _pipeline
 
-    def fake_fetch(headers, per_page=1000):
+    def fake_fetch(headers, per_page=1000, *, strict_scan, _bounds, _before_request):
+        assert strict_scan is True
+        assert _bounds is not None
         raise _http_500()
         yield  # pragma: no cover
 
@@ -268,5 +324,5 @@ def test_non_401_error_propagates_unchanged(monkeypatch, _pipeline):
 
     ctx, _ = _make_ctx(calls)
     with pytest.raises(httpx.HTTPStatusError, match="500"):
-        _run_trakt(ctx)
+        _run_trakt.__wrapped__(ctx)
     assert not [c for c in calls if c[0] == "set_credential"]

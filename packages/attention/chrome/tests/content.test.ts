@@ -105,3 +105,8 @@ describe("extractPageMeta (the function injected by executeScript)", () => {
     });
   });
 });
+
+test('guarded metadata capture refuses a replaced document before reading its fields',()=>{
+ setDoc('<html><head><title>Replacement private title</title><meta property="og:description" content="private replacement" /></head></html>');
+ expect((extractPageMeta as (url:string,expected:string)=>unknown)('https://original.invalid/','https://original.invalid/')).toEqual({title:null,og_description:null,og_type:null,favicon_url:null,lang:null});
+});

@@ -1,9 +1,7 @@
-"""Load the vendored PEP 723 script as an importable module for tests.
+"""Load the one canonical Netflix script for tests and the installed console.
 
-The shippable artifact is skills/fulcra-netflix/scripts/netflix_import.py —
-a single self-contained file end users run with `uv run`. Tests must cover
-THAT file (not a copy), so we import it by path. The PEP 723 header is
-comments, so a normal importlib load works.
+Pure check-only needs only the script; native upload uses the installed adapter
+and matching sibling runtime. Console and direct script execution share main.
 
 In a dev/editable checkout the script lives in the source tree next to this
 package. In a non-editable install (CI runs pytest with --no-editable) only
@@ -33,3 +31,8 @@ def load():
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def main():
+    """Installed fulcra-netflix console, delegating to the exact bundled source."""
+    return load().main()

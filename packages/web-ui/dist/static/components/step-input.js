@@ -114,6 +114,15 @@ class FulcraStepInput extends FulcraStepBase {
                @input=${(e) => c.updateField(field.key, e.target.value)}
                placeholder=${placeholder}
                class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+        ${["access_required", "unavailable"].includes(c?._credStatus?.[field.key]) ? html`
+          <p role="status" class="text-sm text-amber-700 mt-2">Saved key access is unverified. Your key has been kept.</p>
+          <button type="button" @click=${() => c.authorizeCredential(field.key)}
+                  ?disabled=${c._credAccessBusy} class="text-sm text-violet-700 underline disabled:opacity-50">
+            Allow Keychain access
+          </button>
+          <p class="text-xs text-slate-500">Choose Always Allow to remember access for this app.</p>
+          ${c._credAccessError ? html`<p role="alert" class="text-sm text-red-700">${c._credAccessError}</p>` : nothing}
+        ` : nothing}
       `;
     }
 

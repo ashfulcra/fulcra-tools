@@ -23,7 +23,8 @@ export interface AttentionEvent {
   client: string;      // CLIENT constant
 }
 
-/** Persistent settings in chrome.storage.local. */
+/** Legacy settings live in chrome.storage.local. Opted-in v1 settings are
+ * authoritative in the worker broker IDB; pages read its committed projection. */
 export interface Settings {
   enabled: boolean;        // master kill switch
   identityLabel: string | null;  // user override; null means use chrome.identity.getProfileUserInfo
@@ -96,6 +97,15 @@ export interface OutboxEntry {
  * keyed by tabId. A non-existent entry means "no visit on this tab".
  */
 export interface Visit {
+  /** Held ingress identity; pre-scrub URL remains session-only. */
+  captureId?: string;
+  captureDescriptor?: import("./relayless/v1CaptureIngress").CaptureDescriptor | null;
+  captureIdentity?: string | null;
+  captureWorker?: string | null;
+  captureConsentEpoch?: string;
+  captureIntervals?: [number, number][];
+  captureObservedFocusMs?: number;
+  captureContinuityUnknown?: boolean;
   tabId: number;
   windowId: number;
   url: string;             // pre-scrub (used for ignore re-check on resume)

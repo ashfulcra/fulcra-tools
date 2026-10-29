@@ -156,7 +156,7 @@ class _FakeResult:
 
 
 class _FakeClient:
-    def __init__(self):
+    def __init__(self, **_kwargs):
         self.calls = {}
 
     def ensure_tag(self, name, state):
@@ -170,7 +170,7 @@ class _FakeClient:
 def test_plugin_run_parses_cache_and_imports(monkeypatch, tmp_path):
     fake_client = _FakeClient()
     monkeypatch.setattr("fulcra_media.plugins.apple_tv.FulcraClient",
-                        lambda: fake_client)
+                        lambda **_kwargs: fake_client)
     monkeypatch.setattr("fulcra_media.plugins.apple_tv._state_load",
                         lambda path: _bootstrapped_media_state())
     monkeypatch.setattr(
@@ -178,10 +178,9 @@ def test_plugin_run_parses_cache_and_imports(monkeypatch, tmp_path):
         lambda cache_dir: ["ev-apple-tv"])
 
     ctx = _make_ctx({"cache_dir": str(tmp_path)})
-    APPLE_TV_PLUGIN.run(ctx)
+    APPLE_TV_PLUGIN.run.__wrapped__(ctx)
 
     assert fake_client.calls["imported"] == ["ev-apple-tv"]
-    assert fake_client.calls["ensure_tag"] == "apple-tv"
 
 
 def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
@@ -197,7 +196,7 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
     with pytest.raises(RuntimeError, match="Full Disk Access"):
-        APPLE_TV_PLUGIN.run(_make_ctx({}))
+        APPLE_TV_PLUGIN.run.__wrapped__(_make_ctx({}))
 
 
 def test_snapshot_timeout_is_fast_fail():

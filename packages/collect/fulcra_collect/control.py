@@ -44,7 +44,7 @@ def _short_bind_path(long_path: Path) -> Path:
     return user_dir / f"fc_{digest}.sock"
 
 
-def _read_line(conn: socket.socket, max_bytes: int = 65536) -> bytes:
+def _read_line(conn: socket.socket, max_bytes: int = 65536, *, direction: str = "request") -> bytes:
     """Read a single newline-delimited message. Bounded by `max_bytes`
     (control messages are tiny JSON objects — 64 KiB is huge headroom)
     so a peer that streams bytes without a newline can't grow the buffer
@@ -58,7 +58,7 @@ def _read_line(conn: socket.socket, max_bytes: int = 65536) -> bytes:
         chunks.append(b)
         total += len(b)
         if total > max_bytes:
-            raise ValueError("control request too large")
+            raise ValueError(f"control {direction} too large")
         if b.endswith(b"\n"):
             break
     return b"".join(chunks)
@@ -156,8 +156,15 @@ class ControlServer:
         self._stop.set()
 
 
-def send_request(socket_path: Path, request: dict, *, timeout: float = 5.0) -> dict:
-    """Connect to a ControlServer, send one request, return its reply."""
+def send_request(socket_path: Path, request: dict, *, timeout: float = 5.0,
+                 max_response_bytes: int = 65536) -> dict:
+    """Connect and read one bounded reply; request limits remain 64 KiB.
+
+    Protocol2 clients opt into larger choice/recovery responses. The bound is
+    validated before connecting and cannot exceed 8 MiB; no transport retries.
+    """
+    if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 8 * 1024 * 1024:
+        raise ValueError("control response bound must be between 1 byte and 8 MiB")
     # Resolve symlinks so the connect path is always within the AF_UNIX limit.
     resolved = Path(os.path.realpath(socket_path))
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -168,6 +175,6 @@ def send_request(socket_path: Path, request: dict, *, timeout: float = 5.0) -> d
         raise ConnectionError(f"fulcra-collect daemon not reachable at {socket_path}") from exc
     try:
         conn.sendall(json.dumps(request).encode() + b"\n")
-        return json.loads(_read_line(conn).decode())
+        return json.loads(_read_line(conn, max_bytes=max_response_bytes, direction="response").decode())
     finally:
         conn.close()

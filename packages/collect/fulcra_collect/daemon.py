@@ -13,11 +13,9 @@ import os
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
-
-import httpx
-
-from fulcra_common import BaseFulcraClient
 
 from . import activity as _activity
 from . import config as config_mod
@@ -25,8 +23,20 @@ from . import db as _db
 from . import runner, state
 from .config import Config
 from .control import ControlServer
+from .daemon_lease import DaemonLeaseUnavailable, acquire_daemon_lease
 from .registry import RegistryResult, discover
 from .scheduler import due_plugins
+
+
+@dataclass(frozen=True)
+class ServiceFailureStatus:
+    """Volatile, scope-proved status only; never account-specific row data."""
+
+    revision: str
+    when: datetime
+    error: str
+    failures: int
+    unknown: bool = False
 
 
 def _control_socket_path():
@@ -53,63 +63,6 @@ def _distribution_for_plugin(plugin_id: str) -> str | None:
         if getattr(candidate, "id", None) == plugin_id:
             return ep.dist.name if ep.dist else None
     return None
-
-
-def _parse_iso8601(s: str) -> datetime:
-    """Parse an ISO-8601 timestamp into a timezone-aware datetime.
-
-    Accepts both the trailing 'Z' shorthand (which datetime.fromisoformat
-    in 3.10 doesn't accept) and the explicit '+00:00' offset form. Raises
-    ValueError on garbage so callers can return a clean error.
-
-    Used by ``_record_annotation`` when the menubar sends start_time /
-    end_time strings for Duration records.
-    """
-    if not isinstance(s, str) or not s:
-        raise ValueError("empty timestamp")
-    normalised = s.replace("Z", "+00:00") if s.endswith("Z") else s
-    dt = datetime.fromisoformat(normalised)
-    if dt.tzinfo is None:
-        # Naive datetimes are ambiguous; refuse rather than guess UTC.
-        raise ValueError(f"timestamp {s!r} has no timezone")
-    return dt
-
-
-class _QuickRecordClient(BaseFulcraClient):
-    """BaseFulcraClient subclass for the daemon's quick-record + tombstone
-    POSTs. Preserves the legacy site's 10s timeout (vs BaseFulcraClient's
-    default 30s) and short-circuits the `fulcra` CLI shell-out — the
-    daemon already manages the user's bearer token via the user-level
-    keychain, so we override get_token() to return it directly.
-
-    Introduced in refactor #69 so that `_record_annotation` and
-    `_delete_annotation` can share a single ingest path
-    (IngestPipeline.ingest_one) instead of each maintaining its own
-    inline httpx.Client + wire.build_record + wire.encode_batch block.
-    """
-    USER_AGENT = "fulcra-collect/0.1"
-    FOLLOW_REDIRECTS = True
-
-    def __init__(self, token: str) -> None:
-        super().__init__()
-        self._token = token
-
-    def get_token(self) -> str:
-        return self._token
-
-    def _client(self) -> httpx.Client:
-        # Override BaseFulcraClient._client to use the 10s timeout the
-        # legacy menubar POST site has always used. Slow Fulcra responses
-        # would otherwise block the menubar UI for 30s.
-        if self._http is None:
-            self._http = httpx.Client(
-                base_url=self.base_url,
-                transport=self._transport,
-                timeout=10.0,
-                headers={"User-Agent": self.USER_AGENT},
-                follow_redirects=self.FOLLOW_REDIRECTS,
-            )
-        return self._http
 
 
 def is_online(*, timeout: float = 2.0) -> bool:
@@ -148,6 +101,11 @@ class Daemon:
                  config: Config | None = None) -> None:
         self.registry = registry if registry is not None else discover()
         self.config = config if config is not None else config_mod.load()
+        self._service_profile = config_mod.profile_path()
+        self._service_supervisor = None
+        self._service_failure_status: dict[str, ServiceFailureStatus] = {}
+        self._service_masked: set[str] = set()
+        self._worker_credential_status: dict[str, tuple[object, dict | None]] = {}
         # In-flight guard: a scheduled plugin must run at most once at a
         # time. `_inflight` holds the ids currently running; `_inflight_procs`
         # maps those ids to their live worker Popen so shutdown can stop
@@ -344,6 +302,8 @@ class Daemon:
             return {"ok": True, **self._version_snapshot}
         if cmd == "credential_status":
             return self._credential_status(request.get("plugin", ""))
+        if cmd == "authorize_credential":
+            return self._authorize_credential(request.get("plugin", ""), request.get("key", ""))
         if cmd == "set_credential":
             return self._set_credential(
                 request.get("plugin", ""), request.get("key", ""),
@@ -353,23 +313,15 @@ class Daemon:
             return self._delete_credential(
                 request.get("plugin", ""), request.get("key", ""),
             )
-        if cmd == "quick_record_list":
-            return self._quick_record_list()
-        if cmd == "record_annotation":
-            return self._record_annotation(
-                request.get("definition_id", ""),
-                request.get("comment", None),
-                start_time=request.get("start_time"),
-                end_time=request.get("end_time"),
-            )
-        if cmd == "delete_annotation":
-            return self._delete_annotation(request.get("source_id", ""))
-        if cmd == "get_quick_record_favorites":
-            return self._get_quick_record_favorites()
-        if cmd == "set_quick_record_favorites":
-            return self._set_quick_record_favorites(
-                request.get("favorites", []),
-            )
+        if cmd == "quick_record_v2":
+            from .quick_record_protocol import handle_quick_record
+            return handle_quick_record(request)
+        if cmd in {"quick_record_list", "record_annotation", "delete_annotation",
+                   "get_quick_record_favorites", "set_quick_record_favorites"}:
+            # Obsolete unscoped clients cannot write records, sentinels or pins.
+            # Refuse before auth, source/state reads or metadata effects.
+            return {"ok": False, "code": "refresh_required",
+                    "error": "Quick record requires the current Collect app. Refresh or update it."}
         if cmd == "delete_definition":
             return self._delete_definition(request.get("def_id", ""))
         if cmd == "restore_definition":
@@ -383,8 +335,28 @@ class Daemon:
 
     def _status(self) -> dict:
         plugins = []
+        pending_exits = (dict(self._service_supervisor.unknown_exits)
+                         if self._service_supervisor is not None else {})
+        cached_failures = dict(self._service_failure_status)
+        has_pending = bool(pending_exits) or any(
+            observation.unknown for observation in cached_failures.values())
         for pid, plugin in sorted(self.registry.plugins.items()):
-            st = state.load(pid)
+            pending = pending_exits.get(pid)
+            cached = cached_failures.get(pid)
+            unknown = False
+            if pending is not None or pid in self._service_masked or (cached is not None and cached.unknown):
+                st, unknown = self._service_failure_state(pid, pending)
+            else:
+                try:
+                    st = state.load(pid)
+                except Exception:  # noqa: BLE001 — keep the pending UNKNOWN row visible
+                    if not has_pending:
+                        raise
+                    st = state.PluginState(pid)
+                    unknown = True
+                    st.last_outcome = "error"
+                    st.last_error = "Cached status UNKNOWN; local state could not be read."
+            credential_error = self._current_worker_credential_error(pid)
             plugins.append({
                 "id": pid,
                 "name": plugin.name,
@@ -402,6 +374,9 @@ class Daemon:
                 "last_outcome": st.last_outcome,
                 "last_error": st.last_error,
                 "consecutive_failures": st.consecutive_failures,
+                "credential_error": credential_error,
+                "credential_error_status": "observed" if credential_error is not None else "unknown",
+                **({"service_status": "unknown"} if unknown else {}),
                 # Surface the currently-bound Fulcra annotation definition id
                 # so the wizard's "View on Fulcra timeline" deep-link can
                 # filter to events of this plugin's track. Null until the
@@ -454,27 +429,46 @@ class Daemon:
         from . import credentials  # deferred so daemon stays importable
                                    # without a live keychain; tests
                                    # monkeypatch has_secret on this module
-        try:
-            out: dict[str, str] = {}
-            for cred in plugin.required_credentials:
-                # Probe the SAME keychain scope the plugin actually reads:
-                # user-level ("fulcra-collect:user") for user_level creds,
-                # plugin-level otherwise. Reading the wrong scope was the
-                # historical attention-relay false-"missing" bug (a
-                # user-store secret probed plugin-level reported "missing").
-                present = (
-                    credentials.has_user_secret(cred.key)
-                    if getattr(cred, "user_level", False)
-                    else credentials.has_secret(plugin_id, cred.key)
-                )
+        out: dict[str, str] = {}
+        for cred in plugin.required_credentials:
+            try:
+                present = (credentials.has_user_secret(cred.key)
+                           if getattr(cred, "user_level", False)
+                           else credentials.has_secret(plugin_id, cred.key))
                 out[cred.key] = "set" if present else "missing"
-            return {"ok": True, "credentials": out}
+            except credentials.KeychainAccessRequired:
+                out[cred.key] = "access_required"
+            except Exception:
+                out[cred.key] = "unavailable"
+        if "access_required" in out.values():
+            return {"ok": False, "credentials": out, "code": "keychain_access_required",
+                    "error": "Open Configure and choose Allow Keychain access."}
+        if "unavailable" in out.values():
+            return {"ok": False, "credentials": out, "code": "keychain_unavailable",
+                    "error": "Keychain read is unavailable. A saved credential may still exist."}
+        return {"ok": True, "credentials": out}
+
+    def _authorize_credential(self, plugin_id: str, key: str) -> dict:
+        err = self._check_credential_key(plugin_id, key)
+        if err is not None:
+            return err
+        from . import credentials
+        from .config_leases import task_mutation_scope
+        try:
+            with config_mod.pinned_profile(self._service_profile), task_mutation_scope(timeout_s=.2):
+                if config_mod.load().account_transition:
+                    raise credentials.CredentialStateChanged('Account transition in progress.')
+                present = (credentials.authorize_user_secret(key)
+                           if self._credential_is_user_level(plugin_id, key)
+                           else credentials.authorize_secret(plugin_id, key))
+                return {"ok": bool(present), "status": "set" if present else "missing"}
+        except (credentials.KeychainAccessRequired, TimeoutError):
+            return {"ok": False, "code": "keychain_access_required",
+                    "error": "Finish the Keychain access request, then check again. "
+                             "Always Allow remembers access for this app."}
         except Exception:
-            import logging
-            logging.getLogger("fulcra_collect.daemon").exception(
-                "credential_status failed for %s", plugin_id,
-            )
-            return {"ok": False, "error": "keychain read failed"}
+            return {"ok": False, "code": "keychain_unavailable",
+                    "error": "Keychain access could not be verified. Your saved credential was kept."}
 
     def _check_credential_key(self, plugin_id: str, key: str) -> dict | None:
         """Return an error reply if (plugin_id, key) doesn't name a
@@ -523,6 +517,9 @@ class Daemon:
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
         try:
+            if plugin_id == "trakt":
+                from .trakt_source import Owner, KeychainStore
+                return Owner(KeychainStore()).edit(key, secret)
             from .config import invalidate_plugin_work
             invalidate_plugin_work(plugin_id)
             if self._credential_is_user_level(plugin_id, key):
@@ -548,6 +545,9 @@ class Daemon:
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
         try:
+            if plugin_id == "trakt":
+                from .trakt_source import Owner, KeychainStore
+                return Owner(KeychainStore()).edit(key, None)
             from .config import invalidate_plugin_work
             invalidate_plugin_work(plugin_id)
             if self._credential_is_user_level(plugin_id, key):
@@ -562,386 +562,10 @@ class Daemon:
             )
             return {"ok": False, "error": "keychain delete failed"}
 
-    def _quick_record_list(self) -> dict:
-        """List non-deleted annotation definitions for the menubar
-        popover's quick-record surface. Calls Fulcra's annotation-defs
-        endpoint; excludes soft-deleted; sorts by (pinned-first,
-        annotation_type, created_at desc). Caches for 60s in-memory.
-
-        Sprint B (2026-05-26) widened this from Moment-only to moment +
-        duration so users can record finished movies / listening /
-        reading sessions from the menubar too. Only those two types are
-        offered because they're the only ones ``_record_annotation`` can
-        write (P3 #15) — any other annotation_type would produce a
-        value-less record.
-
-        Task #64 (2026-05-26) added a ``pinned`` field per def and made
-        favorites sort to the top of each annotation_type group. When
-        the user has any favorites set, the legacy 40-entry cap is
-        relaxed to ``all pinned + up to 20 unpinned`` so the popover's
-        "show all" disclosure always has at least a useful unpinned
-        slice to display. When NO favorites are set (first-launch
-        state), the previous 40-cap behavior is preserved so existing
-        users see no regression.
-
-        The shape stays a flat array — the menubar groups client-side
-        by ``annotation_type`` for the section headers.
-        """
-        from . import credentials as _creds
-        from . import quick_record_favorites as _favs
-        cache_ttl = 60.0
-        now = time.monotonic()
-        cached = getattr(self, "_quick_record_cache", None)
-        if cached and (now - cached["at"]) < cache_ttl:
-            return {"ok": True, "definitions": cached["defs"]}
-        token = _creds.get_user_secret("bearer-token")
-        if not token:
-            return {"ok": False, "error": "Fulcra not authenticated", "definitions": []}
-        # Use the SP5 refresh-aware wrapper, exactly like _delete_definition.
-        # This was the ONE Fulcra-touching path still on a raw httpx client
-        # with no refresh-on-401 — and it's typically the FIRST thing to hit
-        # an expired token (the menubar polls status, then the user opens
-        # "what to log", before any refresh-capable path has run). So when
-        # the access token had expired it 401'd and surfaced "Fulcra didn't
-        # respond" instead of minting a fresh token via the `fulcra` CLI and
-        # retrying — even though /api/definitions etc. recovered fine. Late
-        # import so tests that monkeypatch ``fulcra_collect.web.httpx`` still
-        # intercept the inner client (same reason as _delete_definition).
-        from . import web as _web
-        try:
-            with _web._RetryingClient(
-                token, user_agent="fulcra-collect/daemon",
-            ) as client:
-                r = client.get("/user/v1alpha1/annotation")
-                r.raise_for_status()
-                all_defs = r.json()
-        except Exception:
-            logging.getLogger("fulcra_collect.daemon").exception(
-                "_quick_record_list: Fulcra API request failed"
-            )
-            return {
-                "ok": False,
-                "error": "Fulcra didn't respond. Check your internet, then try again.",
-                "definitions": [],
-            }
-        # Drop soft-deleted defs, and keep only the annotation types the
-        # quick-record write path can actually record: _record_annotation
-        # writes MomentEvent / DurationEvent carrying just a comment, so a
-        # def of any other annotation_type (scale, numeric, ...) recorded
-        # from the popover would produce a VALUE-LESS record (P3 #15).
-        _RECORDABLE_TYPES = ("moment", "duration")
-        live = [
-            d for d in all_defs
-            if not d.get("deleted_at")
-            and d.get("annotation_type") in _RECORDABLE_TYPES
-        ]
-        # Group ordering: moments first, then durations; groupby below
-        # needs the list pre-sorted by the same key. This mirrors how the
-        # popover lays out section headers so the daemon's order is
-        # already correct without re-sorting client-side.
-        _GROUP_ORDER = {"moment": 0, "duration": 1}
-
-        def _group_key(d: dict) -> tuple:
-            return (_GROUP_ORDER.get(d.get("annotation_type", ""), 2),
-                    d.get("annotation_type", ""))
-
-        live.sort(key=_group_key)
-        # Within each group: pinned defs first, and each pinned/unpinned
-        # bucket ordered by created_at desc. Annotate each def with a
-        # ``pinned`` boolean so the menubar can render the star state
-        # without re-consulting the favorites file.
-        favorites = _favs.load()
-        from itertools import groupby
-        flattened: list[dict] = []
-        for _, group in groupby(live, key=_group_key):
-            group_list = list(group)
-            for entry in group_list:
-                entry["pinned"] = entry.get("id") in favorites
-            pinned_part = [d for d in group_list if d.get("pinned")]
-            unpinned_part = [d for d in group_list if not d.get("pinned")]
-            pinned_part.sort(key=lambda d: d.get("created_at", ""),
-                              reverse=True)
-            unpinned_part.sort(key=lambda d: d.get("created_at", ""),
-                                reverse=True)
-            flattened.extend(pinned_part + unpinned_part)
-        # Cap behavior:
-        #   - No favorites set → 40-entry cap (legacy first-launch shape).
-        #   - Favorites set → keep ALL pinned + at most 20 unpinned so
-        #     the "show all" disclosure has something meaningful to
-        #     surface but the popover doesn't grow unbounded on accounts
-        #     with hundreds of defs. Preserve the existing flattened
-        #     order (which already has pinned-first WITHIN each group)
-        #     by walking the list once and dropping unpinned entries
-        #     past index 20.
-        if favorites:
-            kept: list[dict] = []
-            unpinned_kept = 0
-            for d in flattened:
-                if d.get("pinned"):
-                    kept.append(d)
-                elif unpinned_kept < 20:
-                    kept.append(d)
-                    unpinned_kept += 1
-            flattened = kept
-        else:
-            flattened = flattened[:40]
-        self._quick_record_cache = {"at": now, "defs": flattened}
-        return {"ok": True, "definitions": flattened}
-
-    # ---- favorites dispatch -------------------------------------------
-
-    def _get_quick_record_favorites(self) -> dict:
-        """Return the user's saved favorite def_ids. Always succeeds —
-        absence is just an empty list."""
-        from . import quick_record_favorites as _favs
-        return {"ok": True, "favorites": sorted(_favs.load())}
-
-    def _set_quick_record_favorites(self, favorites) -> dict:
-        """Replace the favorites list and invalidate the quick-record
-        cache so the very next list call surfaces the new ordering.
-
-        Defensive on the input shape — anything non-stringy in the
-        list is dropped silently so a malformed client doesn't poison
-        the file.
-        """
-        from . import quick_record_favorites as _favs
-        if not isinstance(favorites, list):
-            return {"ok": False, "error": "favorites must be a list of def ids"}
-        cleaned = {x for x in favorites if isinstance(x, str) and x}
-        try:
-            _favs.save(cleaned)
-        except OSError as exc:
-            logging.getLogger("fulcra_collect.daemon").exception(
-                "set_quick_record_favorites: save failed",
-            )
-            return {"ok": False, "error": f"could not persist favorites: {exc}"}
-        # Bust the cached list so the next _quick_record_list re-sorts
-        # against the freshly-written favorites. Without this, the
-        # menubar would keep showing the old order for up to 60s.
-        self._quick_record_cache = None
-        return {"ok": True}
-
-    def _record_annotation(self, definition_id: str, comment: str | None,
-                           start_time: str | None = None,
-                           end_time: str | None = None) -> dict:
-        """Write one annotation immediately to Fulcra. Used by the
-        menubar's quick-record buttons and the web UI's /api/annotations
-        endpoint.
-
-        Modes:
-
-        - Moment (default): pass neither ``start_time`` nor ``end_time``;
-          the daemon writes a MomentAnnotation at now.
-
-        - Duration: pass BOTH ``start_time`` and ``end_time`` as
-          ISO-8601 UTC strings; the daemon writes a DurationAnnotation
-          with ``recorded_at = {start_time, end_time}`` and a
-          ``duration_seconds`` field in the data payload. Sprint B
-          (2026-05-26) added this so the menubar can record finished
-          movies / listening sessions / reading sessions inline.
-
-        Writes through the typed endpoint POST /ingest/v1/record/{base_type}
-        (unwrapped record, one per call) — the quick-record ``comment``
-        moves to the typed schema's ``note`` slot, which is the only
-        free-form field the typed schema offers (the wrapped ``data``
-        payload has no typed equivalent; live-verified 2026-07-08).
-        Per-call source_id (uuid) — duplicate clicks intentionally produce
-        duplicate events (the typed endpoint has no server-side source-id
-        dedup, so this is inherent, not a regression); that's the menubar
-        button's whole job.
-        """
-        import uuid
-        from fulcra_common import wire
-        from fulcra_common.ingest import IngestPipeline
-        from . import credentials as _creds
-        if not definition_id:
-            return {"ok": False, "error": "definition_id required"}
-        # Partial duration spec is a caller bug — surface clearly rather
-        # than silently fall back to Moment.
-        if (start_time is None) != (end_time is None):
-            return {
-                "ok": False,
-                "error": "start_time and end_time must both be set or both be omitted",
-            }
-        # Validate the duration range upfront — surface clear errors
-        # before we waste a network round-trip on the def lookup.
-        parsed_start: datetime | None = None
-        parsed_end: datetime | None = None
-        if start_time is not None and end_time is not None:
-            try:
-                parsed_start = _parse_iso8601(start_time)
-                parsed_end = _parse_iso8601(end_time)
-            except ValueError as exc:
-                return {"ok": False, "error": f"invalid timestamp: {exc}"}
-            if parsed_end <= parsed_start:
-                return {"ok": False, "error": "end_time must be after start_time"}
-        token = _creds.get_user_secret("bearer-token")
-        if not token:
-            return {"ok": False, "error": "Fulcra not authenticated"}
-
-        # We need the def's tags to attach to the event so Fulcra associates
-        # the moment with the same tag membership the def declares. Cheapest
-        # path: the _quick_record_list cache already has the full def dict.
-        # If the cache is cold or stale (the user posts before opening the
-        # popover), warm it on demand — same source of truth, no second URL.
-        cached = getattr(self, "_quick_record_cache", None)
-        def_dict: dict | None = None
-        if cached:
-            def_dict = next((d for d in cached["defs"]
-                             if d.get("id") == definition_id), None)
-        if def_dict is None:
-            warm = self._quick_record_list()
-            if not warm.get("ok"):
-                return {"ok": False,
-                        "error": warm.get("error",
-                                          "Could not look up the annotation "
-                                          "definition.")}
-            def_dict = next((d for d in warm.get("definitions", [])
-                             if d.get("id") == definition_id), None)
-        if def_dict is None:
-            return {"ok": False,
-                    "error": f"unknown definition id {definition_id!r}"}
-
-        now = datetime.now(timezone.utc)
-        source_id = (
-            f"com.fulcradynamics.fulcra-collect.quick-record.{uuid.uuid4()}"
-        )
-        tags = tuple(def_dict.get("tags") or [])
-        # The quick-record comment moves to the typed schema's `note` slot
-        # (the typed endpoint has no wrapped `data` payload). An empty /
-        # absent comment omits `note` entirely rather than writing "".
-        note = comment or None
-        if parsed_start is not None and parsed_end is not None:
-            # Duration record. ISO strings were already validated above.
-            # duration_seconds (the #30 defensive field the legacy wrapped
-            # `data` carried) has no typed slot and is dropped — the
-            # {start_time, end_time} recorded_at makes it derivable.
-            base_type = wire.DURATION_ANNOTATION
-            record = wire.build_typed_record(
-                base_type=base_type,
-                start_time=parsed_start,
-                end_time=parsed_end,
-                note=note,
-                source_id=source_id,
-                definition_id=definition_id,
-                tags=tags,
-            )
-        else:
-            base_type = wire.MOMENT_ANNOTATION
-            record = wire.build_typed_record(
-                base_type=base_type,
-                start_time=now,
-                note=note,
-                source_id=source_id,
-                definition_id=definition_id,
-                tags=tags,
-            )
-        try:
-            IngestPipeline(
-                client=_QuickRecordClient(token=token),
-            ).ingest_typed(base_type, [record])
-        except Exception as exc:
-            logging.getLogger("fulcra_collect.daemon").exception(
-                "_record_annotation(%s): Fulcra API request failed",
-                definition_id,
-            )
-            # Record the failed attempt in the activity buffer so the user
-            # sees something happened
-            self.activity.add(plugin_id="quick-record",
-                              summary=f"failed: {exc}", ok=False)
-            return {
-                "ok": False,
-                "error": "Fulcra didn't accept that request. Check your internet, then try again.",
-            }
-        # Surface in the activity buffer with the def name (the id prefix
-        # was opaque to the user).
-        name = def_dict.get("name") or definition_id[:8] + "…"
-        self.activity.add(plugin_id="quick-record",
-                          summary=f"Recorded \"{name}\"",
-                          ok=True)
-        # Return the source_id so the caller (menubar) can stash it in
-        # the "Recently recorded" list and reference it later if the
-        # user clicks Undo. We don't return a fabricated event_id because
-        # Fulcra's ingest endpoint doesn't echo one — source_id is the
-        # only handle the user side has for this event.
-        return {"ok": True, "source_id": source_id, "name": name}
-
-    def _delete_annotation(self, source_id: str) -> dict:
-        """Write a "deleted" sentinel annotation referencing ``source_id``.
-
-        IMPORTANT: this is a SOFT marker, not a hard delete. Fulcra's
-        backend offers no per-event delete primitive (verified
-        2026-05-26 by a probe matrix showing 405 / 404 across every
-        {GET, POST, PUT, PATCH, DELETE} attempt on
-        /data/v1alpha1/event/...; the probe script itself is not in the
-        tree — see repo history around the #439-era cleanup). The
-        original record stays in the user's timeline indefinitely.
-
-        What we DO write is a separate annotation tagged with the
-        original source_id in its data payload — a "tombstone" that the
-        Fulcra UI may or may not surface as a strikethrough on the
-        original. The menubar uses this purely as a paper trail so the
-        user can see (in the activity buffer) that an undo happened. The
-        menubar ALSO greys out the row in its in-memory "Recently
-        recorded" list so the user doesn't keep clicking Undo.
-
-        If the user is paying attention to their Fulcra timeline, they
-        will still see the original event. The menubar's UI calls this
-        out in the Undo button's tooltip.
-        """
-        import uuid
-        from fulcra_common.ingest import IngestPipeline, MomentEvent
-        from . import credentials as _creds
-        if not source_id:
-            return {"ok": False, "error": "source_id required"}
-        token = _creds.get_user_secret("bearer-token")
-        if not token:
-            return {"ok": False, "error": "Fulcra not authenticated"}
-
-        now = datetime.now(timezone.utc)
-        tombstone_source_id = (
-            f"com.fulcradynamics.fulcra-collect.quick-record.undo."
-            f"{uuid.uuid4()}"
-        )
-        # Tombstone has no annotation definition attached — Fulcra
-        # accepts the event and the tombstone is identifiable purely via
-        # its source_id prefix + the supersedes_source_id pointer.
-        # Tombstones stay on legacy /ingest/v1/record: their supersedes_source_id payload has no slot in the typed schema (note is user-visible text, not machine state). Revisit when the API grows a data/extensions field.
-        tombstone = MomentEvent(
-            definition_id=None,
-            source_id=tombstone_source_id,
-            tags=(),
-            comment="[deleted via Fulcra Collect menubar undo]",
-            superseded_by="deleted",
-            supersedes_source_id=source_id,
-            ts=now,
-        )
-        try:
-            IngestPipeline(
-                client=_QuickRecordClient(token=token),
-            ).ingest_one(tombstone)
-        except Exception as exc:
-            logging.getLogger("fulcra_collect.daemon").exception(
-                "_delete_annotation(%s): Fulcra API request failed",
-                source_id,
-            )
-            self.activity.add(plugin_id="quick-record",
-                              summary=f"undo failed: {exc}", ok=False)
-            return {
-                "ok": False,
-                "error": "Fulcra didn't accept the undo request. Check your internet, then try again.",
-            }
-        self.activity.add(
-            plugin_id="quick-record",
-            summary=f"Undid recording (tombstone for {source_id[:12]}…)",
-            ok=True,
-        )
-        return {"ok": True, "tombstone_source_id": tombstone_source_id}
-
     def _delete_definition(self, def_id: str) -> dict:
-        """Soft-delete an annotation definition via Fulcra, then clean up
-        locally — clear any plugin state bound to it, prune from favorites,
-        bust the quick-record cache.
+        """Soft-delete legacy definition metadata and clear matching legacy state.
+
+        Preserve unscoped favorites, account-scoped pins and v1 destinations.
 
         Single business-logic site shared by the HTTP route
         (``routes/definitions.py:delete_definition_route`` — now a thin
@@ -959,9 +583,9 @@ class Daemon:
           ``definition_id`` on any that pointed at the deleted def. Without
           this the next run of those plugins would either silently fail or
           re-create a side-def on Fulcra.
-        - Also prune the def from quick-record favorites if it was pinned,
-          and bust the in-memory quick-record cache so the next
-          ``_quick_record_list`` call doesn't briefly resurrect it.
+        - Leave legacy favorites untouched until account/mapping proof
+          authorizes migration. Scoped pins may retain a hidden choice;
+          fresh protocol2 catalogs omit the deleted definition.
         - Failure modes that the HTTP route used to raise ``HTTPException``
           for (404, 401, 5xx, network, timeout) are translated to
           ``{"ok": False, "error": "..."}`` returns with the SAME
@@ -1085,30 +709,6 @@ class Daemon:
                 "delete_definition(%s): cleared cached definition_id on %d plugin(s): %s",
                 def_id, len(cleared), ", ".join(cleared),
             )
-        # Also drop this def from quick-record favorites if it was pinned.
-        # Without this the favorites file would accumulate orphan UUIDs
-        # the menubar would keep trying to surface but Fulcra would no
-        # longer return. Best-effort: a favorites I/O failure shouldn't
-        # roll back the (successful) Fulcra-side delete.
-        try:
-            from . import quick_record_favorites as _favs
-            current = _favs.load()
-            if def_id in current:
-                current.discard(def_id)
-                _favs.save(current)
-                # Bust the daemon's quick-record cache so the next list
-                # call doesn't briefly resurrect the deleted def with a
-                # stale ``pinned`` flag.
-                self._quick_record_cache = None
-                _log.info(
-                    "delete_definition(%s): removed from quick-record favorites",
-                    def_id,
-                )
-        except Exception:
-            _log.exception(
-                "delete_definition(%s): could not prune favorites; non-fatal",
-                def_id,
-            )
         return {"ok": True, "cleared_plugins": cleared}
 
     def _restore_definition(self, def_id: str) -> dict:
@@ -1126,8 +726,8 @@ class Daemon:
 
         - plugin ``definition_id`` bindings cleared by the delete are NOT
           re-bound (we can't know which plugins *should* point at the def
-          again — a plugin may have re-resolved a fresh def since);
-        - quick-record favorites pruned by the delete are NOT re-pinned.
+          again — a plugin may have re-resolved a fresh def since).
+        Favorites were preserved by the delete and remain unchanged.
 
         The success payload carries ``rebound: False`` plus a human-readable
         ``note`` so callers/UI surface the caveat. The quick-record cache IS
@@ -1221,16 +821,16 @@ class Daemon:
         # the restored def instead of a stale tombstone-filtered snapshot.
         self._quick_record_cache = None
         _log.info(
-            "restore_definition(%s): restored on Fulcra; plugin bindings and "
-            "favorites intentionally not re-established",
+            "restore_definition(%s): restored on Fulcra; plugin bindings not "
+            "re-established, favorites preserved",
             def_id,
         )
         return {
             "ok": True,
             "rebound": False,
             "note": (
-                "plugin bindings and favorites are not restored — "
-                "re-bind in plugin settings"
+                "plugin bindings are not restored — re-bind in plugin settings; "
+                "favorites were kept"
             ),
         }
 
@@ -1442,6 +1042,61 @@ class Daemon:
         with self._inflight_lock:
             self._inflight_procs[plugin_id] = proc
 
+    def _worker_authority(self, current: Config, plugin_id: str):
+        from .owned_auth import attempts
+        if current.account_transition or plugin_id not in self.registry.plugins:
+            return None
+        return (self._service_revision(current, plugin_id),
+                plugin_id in current.enabled, attempts().read_committed())
+
+    def _capture_worker_scope(self, plugin_id: str):
+        from .config_leases import task_mutation_scope
+        try:
+            with config_mod.pinned_profile(self._service_profile), task_mutation_scope(timeout_s=.2):
+                return self._worker_authority(config_mod.load(), plugin_id)
+        except Exception:
+            return None
+
+    @contextmanager
+    def _worker_result_scope(self, plugin_id: str, captured, detail):
+        """Fence terminal state and volatile recovery against the original job authority."""
+        from .config_leases import task_mutation_scope
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(config_mod.pinned_profile(self._service_profile))
+                stack.enter_context(task_mutation_scope(timeout_s=.2))
+                current = self._worker_authority(config_mod.load(), plugin_id)
+                valid = captured is not None and captured == current
+            except Exception:
+                valid = False
+            if not valid:
+                yield False
+                return
+            yield True
+            self._worker_credential_status[plugin_id] = (captured, self._validated_credential_error(plugin_id, detail))
+
+    def _validated_credential_error(self, plugin_id: str, detail):
+        if not isinstance(detail, dict) or set(detail) != {'stage', 'scope', 'key', 'availability'}:
+            return None
+        if not all(isinstance(value, str) and len(value) <= 256 for value in detail.values()):
+            return None
+        if detail['availability'] not in {'access_required', 'pending', 'changed', 'unavailable', 'missing'}:
+            return None
+        if detail['stage'] == 'collect_account' and detail['scope'] == 'user' and detail['key'] == 'bearer-token':
+            return {**detail, 'recovery': 'settings'}
+        if detail['stage'] == 'credential_hydration':
+            for cred in self.registry.plugins[plugin_id].required_credentials:
+                scope = 'user' if getattr(cred, 'user_level', False) else 'plugin'
+                if detail['key'] == cred.key and detail['scope'] == scope:
+                    return {**detail, 'recovery': 'configure'}
+        return None
+
+    def _current_worker_credential_error(self, plugin_id: str):
+        cached = self._worker_credential_status.get(plugin_id)
+        if cached is not None and cached[0] == self._capture_worker_scope(plugin_id):
+            return cached[1]
+        return None
+
     def _spawn_service(self, plugin_id: str):
         """Spawn a service plugin's worker subprocess (kept alive by the
         ServiceSupervisor)."""
@@ -1450,18 +1105,111 @@ class Daemon:
             start_new_session=(os.name == "posix"),
         )
 
-    def _record_service_launch_failure(
-        self, plugin_id: str, exc: OSError, *, when: datetime,
-    ) -> None:
-        """Persist a service spawn failure without taking down the daemon."""
-        from .worker import _scrub_secrets
+    def _service_revision(self, current: Config, plugin_id: str) -> str:
+        return config_mod.settings_fingerprint({
+            "profile": str(self._service_profile),
+            "epoch": current.plugin_epochs.get(plugin_id, ""),
+            "settings": current.plugin_settings.get(plugin_id, {}),
+        })
 
-        error = _scrub_secrets(
-            f"service worker launch failed: {type(exc).__name__}: {exc}"
-        )
-        plugin_state = state.load(plugin_id)
-        plugin_state.record_finish(outcome="error", when=when, error=error)
-        state.save(plugin_state)
+    def _service_failure_state(self, plugin_id: str, pending):
+        """Never release an old unscoped row after uncertainty/account change.
+
+        Only a locally confirmed current failure can replace its stale mask.
+        A launch alone proves nothing. Counts here include only confirmed
+        observations of this revision in this daemon, not old account rows.
+        """
+        from .config_leases import task_mutation_scope
+
+        try:
+            with config_mod.pinned_profile(self._service_profile), task_mutation_scope(timeout_s=1):
+                current = config_mod.load()
+                cached = self._service_failure_status.get(plugin_id)
+                pending_current = (pending is not None and self._service_revision_matches(
+                    current, plugin_id, pending.revision))
+                cached_current = (cached is not None and self._service_revision_matches(
+                    current, plugin_id, cached.revision))
+                if cached_current and not cached.unknown and not pending_current:
+                    return state.PluginState(plugin_id, last_run=cached.when,
+                        last_outcome="error", last_error=cached.error,
+                        consecutive_failures=cached.failures), False
+                if not pending_current and not cached_current:
+                    return state.PluginState(plugin_id), False
+        except Exception:  # noqa: BLE001 — static UNKNOWN, never parser/lease text
+            pass
+        st = state.PluginState(plugin_id, last_outcome="error", last_error=(
+            "Service failure status UNKNOWN; the worker failed but its cached status could not be confirmed."))
+        return st, True
+
+    def _service_revision_matches(self, current: Config, plugin_id: str, revision) -> bool:
+        return (not current.account_transition and plugin_id in current.enabled
+                and plugin_id in self.registry.plugins
+                and self.registry.plugins[plugin_id].kind == "service"
+                and revision == self._service_revision(current, plugin_id))
+
+    def _remember_service_failure(self, plugin_id, revision, when, error, *, prior):
+        same_scope = prior is not None and prior.revision == revision
+        self._service_failure_status[plugin_id] = ServiceFailureStatus(
+            revision, when, error, prior.failures + 1 if same_scope else 1,
+            unknown=bool(same_scope and prior.unknown))
+
+    def _record_service_exit(self, observation) -> None:
+        """Record only a current owned process failure, without reading auth.
+
+        Hold the existing local configuration/account fences through the atomic
+        status-only write. A stale observation is discarded; an unknown check
+        or write propagates to the supervisor's static UNKNOWN cache.
+        """
+        from .config_leases import task_mutation_scope
+
+        # A different profile cannot authorize touching either profile's state.
+        if config_mod.profile_path() != self._service_profile:
+            return
+        with config_mod.pinned_profile(self._service_profile), task_mutation_scope(timeout_s=1):
+            current = config_mod.load()
+            if not self._service_revision_matches(current, observation.plugin_id, observation.revision):
+                return
+            error = f"Service worker exited with exit status {observation.returncode}; cause unavailable."
+            state.record_service_failure(
+                observation.plugin_id, when=observation.observed_at,
+                error=error,
+            )
+            self._remember_service_failure(observation.plugin_id, observation.revision,
+                observation.observed_at, error,
+                prior=self._service_failure_status.get(observation.plugin_id))
+
+    def _observe_service_launch_failure(self, plugin_id, exc, *, when, revision):
+        """Pre-arm UNKNOWN so even an unexpected observer fault stays visible."""
+        prior = self._service_failure_status.get(plugin_id)
+        self._service_failure_status[plugin_id] = ServiceFailureStatus(
+            revision, when, "", prior.failures if prior and prior.revision == revision else 0,
+            unknown=True)
+        try:
+            if self._record_service_launch_failure(plugin_id, exc, when=when, revision=revision):
+                self._remember_service_failure(plugin_id, revision, when,
+                    "service worker launch failed (OS error); cause unavailable.", prior=prior)
+            elif prior is not None:
+                self._service_failure_status[plugin_id] = prior
+            else:
+                self._service_failure_status.pop(plugin_id, None)
+        except Exception:
+            self._service_masked.add(plugin_id)
+            raise
+
+    def _record_service_launch_failure(
+        self, plugin_id: str, exc: OSError, *, when: datetime, revision: str,
+    ) -> bool:
+        """Persist only a spawn failure proved to belong to its original scope."""
+        from .config_leases import task_mutation_scope
+
+        if config_mod.profile_path() != self._service_profile:
+            return False
+        error = "service worker launch failed (OS error); cause unavailable."
+        with config_mod.pinned_profile(self._service_profile), task_mutation_scope(timeout_s=1):
+            current = config_mod.load()
+            if not self._service_revision_matches(current, plugin_id, revision):
+                return False
+            state.record_service_failure(plugin_id, when=when, error=error)
 
         first_line = error.splitlines()[0]
         if len(first_line) > 200:
@@ -1477,6 +1225,52 @@ class Daemon:
             plugin_id,
             error,
         )
+        return True
+
+    def _runtime_configuration(self):
+        """Read authoritative consent each tick, including direct TOML edits.
+
+        Unknown configuration or an in-progress account transition pauses new
+        source dispatch and retires services. No raw config/parser text is
+        logged because it can include user paths or credentials.
+        """
+        try:
+            with config_mod.pinned_profile(self._service_profile):
+                current = config_mod.load()
+            services = set() if current.account_transition else {
+                pid for pid in current.enabled if pid in self.registry.plugins
+                and self.registry.plugins[pid].kind == "service"}
+            revisions = {pid: self._service_revision(current, pid) for pid in services}
+        except Exception as exc:  # noqa: BLE001 — fail closed at the dispatch boundary
+            logging.getLogger("fulcra_collect").error(
+                "configuration unavailable; source dispatch paused (%s)", type(exc).__name__)
+            return False, set(), {}
+        self.config = current
+        return not current.account_transition, services, revisions
+
+    def _dispatch_tick(self, supervisor, *, now):
+        self._service_supervisor = supervisor
+        self._service_masked.update(getattr(supervisor, "unknown_exits", {}))
+        ready, service_ids, revisions = self._runtime_configuration()
+        supervisor.tick(
+            now=now, enabled_ids=service_ids, revisions=revisions,
+            spawn=self._spawn_service,
+            on_spawn_error=lambda plugin_id, exc: self._observe_service_launch_failure(
+                plugin_id, exc, when=now, revision=revisions[plugin_id]),
+            on_exit=self._record_service_exit,
+        )
+        self._service_masked.update(getattr(supervisor, "unknown_exits", {}))
+        if not ready:
+            return
+        try:
+            states = {pid: state.load(pid) for pid in self.registry.plugins}
+        except Exception:  # noqa: BLE001 — DB outage must not stop service supervision
+            logging.getLogger("fulcra_collect").error(
+                "cached state unavailable; scheduled dispatch paused")
+            return
+        online = is_online()
+        for pid in due_plugins(self.registry.plugins, self.config, states, now, online=online):
+            self._trigger(pid)
 
     # ---- the run loop --------------------------------------------------
 
@@ -1492,6 +1286,13 @@ class Daemon:
         skipped (deferred), not run into a failure. Scheduled runs are
         dispatched on background threads so a long run never blocks the
         tick loop or the control socket."""
+        # Own the captured effective profile before migration, socket unlinking,
+        # credential work or any startup/dispatch effects. Retain this raw-fd
+        # lease through all unwind paths until actual process exit.
+        if config_mod.profile_path() != self._service_profile:
+            raise DaemonLeaseUnavailable("daemon startup refused: profile lease unavailable")
+        self._daemon_lease = acquire_daemon_lease(self._service_profile)
+
         from .supervisor import ServiceSupervisor
 
         # Open the unified state db before anything else touches state —
@@ -1556,26 +1357,7 @@ class Daemon:
         try:
             while True:
                 now = datetime.now(timezone.utc)
-                service_ids = {
-                    pid for pid in self.config.enabled
-                    if pid in self.registry.plugins
-                    and self.registry.plugins[pid].kind == "service"
-                }
-                supervisor.tick(
-                    now=now,
-                    enabled_ids=service_ids,
-                    spawn=self._spawn_service,
-                    on_spawn_error=lambda plugin_id, exc: (
-                        self._record_service_launch_failure(
-                            plugin_id, exc, when=now,
-                        )
-                    ),
-                )
-                states = {pid: state.load(pid) for pid in self.registry.plugins}
-                online = is_online()
-                for pid in due_plugins(self.registry.plugins, self.config,
-                                       states, now, online=online):
-                    self._trigger(pid)
+                self._dispatch_tick(supervisor, now=now)
                 time.sleep(tick_seconds)
         finally:
             server.shutdown()

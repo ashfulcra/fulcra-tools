@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fulcra-collect",
     "tomlkit>=0.12",
+    "certifi>=2024.2.2",
 ]
 
 [project.optional-dependencies]
@@ -79,10 +80,12 @@ requires = [
     "fulcra-attention",
     "fulcra-csv-importer",
     "fulcra-gmail",
+    "coord-engine>=2.0.6",  # Gmail embeds the engine with Collect-bound auth.
     "fulcra-local-sources",
     "fulcra-notion",
     "fulcra-purpleair",
     "tomlkit>=0.12",
+    "certifi>=2024.2.2",
     # macOS GUI stack.
     "rumps>=0.4",
     "pyobjc-core>=10",

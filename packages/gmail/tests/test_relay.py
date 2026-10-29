@@ -7,23 +7,15 @@ outbox_key + rule id only).
 """
 from __future__ import annotations
 
-import os
 import pytest
 
 from fulcra_gmail import ledger as ledger_mod
 from fulcra_gmail.relay import (
-    DEFAULT_COORD_BINARY,
     CoordEngineRelayEmitter,
     RelayDirective,
-    _subprocess_env,
     build_directive,
-    resolve_coord_binary,
 )
 from fulcra_gmail.rules import parse_rules
-
-#: The PATH launchd actually hands the collect daemon — no ~/.local/bin.
-_LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-
 
 def _rule(**over):
     raw = {
@@ -41,70 +33,6 @@ def _rule(**over):
 
 def _outbox():
     return ledger_mod.outbox_key("acct-1", "m1", "receipts", 3)
-
-
-def test_resolves_from_install_dir_under_the_daemons_minimal_path(tmp_path, monkeypatch):
-    """The regression: under launchd's PATH the bare name is unresolvable.
-
-    coord-engine installs to ~/.local/bin, which is NOT on the PATH launchd
-    gives the daemon — so exec'ing the bare name raised FileNotFoundError, every
-    relay poll failed, and the all-polls-failed guard took the whole gmail
-    plugin down (68 consecutive failures, nothing filed). Resolution must fall
-    back to the real install dir rather than trusting PATH.
-    """
-    fake_bin = tmp_path / ".local" / "bin"
-    fake_bin.mkdir(parents=True)
-    shim = fake_bin / DEFAULT_COORD_BINARY
-    shim.write_text("#!/bin/sh\nexit 0\n")
-    shim.chmod(0o755)
-
-    monkeypatch.setenv("PATH", _LAUNCHD_PATH)          # what the daemon gets
-    monkeypatch.delenv("FULCRA_COORD_ENGINE_BIN", raising=False)
-    monkeypatch.setattr("fulcra_gmail.relay._FALLBACK_BIN_DIRS", (str(fake_bin),))
-
-    assert resolve_coord_binary() == str(shim)
-
-
-def test_subprocess_env_puts_fulcra_api_on_path_under_launchd(monkeypatch):
-    """The 07-16→07-21 relay silence: coord-engine resolves, but it shells out
-    to fulcra-api by bare name, and the daemon's launchd PATH excludes
-    ~/.local/bin. The subprocess env must prepend the install dirs so
-    coord-engine's own child processes (fulcra-api) resolve.
-    """
-    monkeypatch.setenv("PATH", _LAUNCHD_PATH)  # what the daemon gets
-    env = _subprocess_env("/Users/example/.local/bin/coord-engine")
-    parts = env["PATH"].split(":")
-    # The resolved binary's own dir is present (fulcra-api installs beside it).
-    assert "/Users/example/.local/bin" in parts
-    # The known install dirs are present.
-    assert os.path.expanduser("~/.local/bin") in parts
-    # The daemon's original PATH is preserved (system tools still resolve).
-    assert "/usr/bin" in parts
-    # No empty or duplicate entries.
-    assert "" not in parts
-    assert len(parts) == len(set(parts))
-
-
-def test_env_override_wins(monkeypatch):
-    monkeypatch.setenv("FULCRA_COORD_ENGINE_BIN", "/custom/coord-engine")
-    assert resolve_coord_binary() == "/custom/coord-engine"
-
-
-def test_absolute_binary_passes_through(monkeypatch):
-    monkeypatch.delenv("FULCRA_COORD_ENGINE_BIN", raising=False)
-    assert resolve_coord_binary("/opt/x/coord-engine") == "/opt/x/coord-engine"
-
-
-def test_missing_binary_raises_actionable_error(tmp_path, monkeypatch):
-    """A genuinely absent coord-engine must say what to do — not a bare ENOENT."""
-    monkeypatch.setenv("PATH", _LAUNCHD_PATH)
-    monkeypatch.delenv("FULCRA_COORD_ENGINE_BIN", raising=False)
-    monkeypatch.setattr("fulcra_gmail.relay._FALLBACK_BIN_DIRS", (str(tmp_path / "nope"),))
-    with pytest.raises(FileNotFoundError) as exc:
-        resolve_coord_binary()
-    msg = str(exc.value)
-    assert "FULCRA_COORD_ENGINE_BIN" in msg
-    assert "launchd" in msg
 
 
 def test_directive_is_byte_stable_function_of_outbox_key():
@@ -236,3 +164,35 @@ def test_directive_dataclass_shape():
         assignee="agent:x", priority="P2",
     )
     assert d.assignee == "agent:x"
+
+
+@pytest.mark.parametrize("body", [
+    {"contract": 2, "health": "CLEAR", "rows": [], "degraded": []},
+    {"contract": 2, "health": "UNKNOWN", "rows": [{"title": "unrelated"}]},
+    [{"type": "read-degraded", "reason": "unknown"}],
+    [{"title": "unrelated", "assignee": "agent:claude", "name": "other"}],
+    {"contract": 999, "health": "DATA", "rows": []},
+    True,
+])
+def test_exists_refuses_empty_unknown_and_unrelated_rows(body):
+    import json
+    emitter = CoordEngineRelayEmitter("team-x", run=lambda argv: (0, json.dumps(body)))
+    assert not emitter.exists(build_directive(_outbox(), _rule()))
+
+
+def test_exists_accepts_only_the_emitted_slug_in_a_healthy_envelope():
+    import json
+    directive = build_directive(_outbox(), _rule())
+    row = {"name": "canonical-123", "title": directive.title,
+           "assignee": directive.assignee, "summary": directive.summary}
+    body = {"contract": 2, "health": "DATA", "degraded": [], "rows": [row]}
+    def run(argv):
+        return (0, "directive canonical-123 already delivered") if argv[0] == "tell" else (0, json.dumps(body))
+    emitter = CoordEngineRelayEmitter("team-x", run=run)
+    assert emitter.emit(directive).ok
+    assert emitter.exists(directive)
+    row["name"] = "foreign-123"
+    assert not emitter.exists(directive)
+    row["name"] = "canonical-123"
+    body["degraded"] = [{"type": "read-degraded"}]
+    assert not emitter.exists(directive)

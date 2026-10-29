@@ -162,6 +162,11 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         require_plugin(plugin_id)
         return daemon.handle_request({"cmd": "credential_status", "plugin": plugin_id})
 
+    @app.post("/api/plugin/{plugin_id}/credential/{key}/authorize", dependencies=[Depends(require_token)])
+    def plugin_authorize_credential(plugin_id: str, key: str):
+        require_plugin(plugin_id)
+        return daemon.handle_request({"cmd": "authorize_credential", "plugin": plugin_id, "key": key})
+
     @app.put("/api/plugin/{plugin_id}/credential/{key}", dependencies=[Depends(require_token)])
     def plugin_set_credential(plugin_id: str, key: str, body: SecretBody):
         require_plugin(plugin_id)
@@ -495,6 +500,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             "kind": plugin.kind,
             "category": plugin.category,
             "description": plugin.description,
+            "record_api_version": "v1" if plugin.record_data_types is not None else None,
             # Surface the canonical definition name so the wizard's
             # definition_picker can show "Create a new 'Journal' annotation
             # instead" instead of the generic "Create a new annotation".
@@ -535,6 +541,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                     "settings_keys": list(s.settings_keys),
                     "external_link": s.external_link,
                     "annotation_type": s.annotation_type,
+                    "record_slot": s.record_slot,
                     "condition": (
                         {k: list(v) for k, v in s.condition.items()}
                         if s.condition else None
@@ -603,21 +610,19 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         from .. import credentials as _creds
         from .. import state as _state_mod
         from ..plugin import RunContext
-        ctx_credentials = {}
-        for c in plugin.required_credentials:
-            # Read each credential from the SAME scope the plugin actually
-            # uses: user-level ("fulcra-collect:user") for user_level creds,
-            # plugin-level otherwise. Mirrors _credential_status / the
-            # set/delete routes so a health_check that reads a user_level
-            # credential (e.g. a shared account token) sees the real value
-            # instead of an always-empty plugin-scoped read.
-            val = (
-                _creds.get_user_secret(c.key)
-                if getattr(c, "user_level", False)
-                else _creds.get_secret(plugin_id, c.key)
-            )
-            if val is not None:
-                ctx_credentials[c.key] = val
+        try:
+            ctx_credentials = _creds.get_plugin_credentials(plugin)
+        except _creds.CredentialReadError as exc:
+            return {"available": True, "ok": False,
+                    "code": "keychain_unavailable" if exc.detail['availability'] == 'unavailable' else "keychain_access_required",
+                    "credential_error": exc.detail,
+                    "summary": "Saved credential access is unverified. Your credential was kept.", "preview": []}
+        except (_creds.KeychainAccessRequired, TimeoutError):
+            return {"available": True, "ok": False, "code": "keychain_access_required",
+                    "summary": "Open Configure and choose Allow Keychain access.", "preview": []}
+        except _creds.keyring.errors.KeyringError:
+            return {"available": True, "ok": False, "code": "keychain_unavailable",
+                    "summary": "Keychain access is unavailable. Your saved credential was kept.", "preview": []}
         ctx_config = dict(_config.load().plugin_settings.get(plugin_id, {}))
         run_ctx = RunContext(
             plugin_id=plugin_id,

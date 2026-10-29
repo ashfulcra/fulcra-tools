@@ -337,3 +337,10 @@ describe("Wizard destination step — relayless", () => {
     expect(container.textContent).not.toContain("Scan your history");
   });
 });
+
+test('held-mode wizard completion says local retention and both drains disabled',async()=>{
+ await chrome.storage.local.set({attentionAuthMode:'v1-held'});
+ vi.mocked(chrome.runtime.sendMessage).mockImplementation(async(message:any)=>({version:1,ok:true,result:message.command==='settings-read'?DEFAULT_SETTINGS:{status:'committed'}}));
+ const {container,root}=await mount(<Wizard/>);
+ try{await clickButton(container,'Skip wizard');await act(async()=>{await Promise.resolve();await Promise.resolve();});expect(container.textContent).toContain('Both drains are disabled');expect(container.textContent).not.toContain('showing up in Fulcra immediately');}finally{await act(async()=>root.unmount());}
+});

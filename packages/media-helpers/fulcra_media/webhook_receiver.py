@@ -339,9 +339,13 @@ class ReceiverContext:
 
     def health(self) -> dict:
         with self._lock:
+            destinations = getattr(self.client, "record_destination_ids", None)
+            destination = ({"data_type_id": destinations.get("watched"), "api_version": "v1"}
+                           if isinstance(destinations, dict)
+                           else {"definition_id": self.state.watched_definition_id})
             return {
                 "ok": True,
-                "definition_id": self.state.watched_definition_id,
+                **destination,
                 "received": self.received,
                 "posted": self.posted,
                 "skipped": self.skipped,
@@ -452,7 +456,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            ctx.client.ingest_batch([event], ctx.state)
+            result = ctx.client.ingest_batch([event], ctx.state)
+            posted, skipped, extra = 1, 0, {}
+            if result is None and isinstance(getattr(ctx.client, "record_destination_ids", None), dict):
+                raise RuntimeError("Missing v1 ingest result; retry")
+            if result is not None:
+                from fulcra_common import ImportResult
+                if (not isinstance(result, ImportResult)
+                        or any(type(value) is not int or value < 0 for value in
+                               (result.total, result.posted, result.verified, result.skipped_existing))
+                        or result.total != 1 or result.posted + result.skipped_existing != 1
+                        or result.verified > result.posted):
+                    raise RuntimeError("Unexpected ingest result; retry")
+                preview = getattr(ctx.client, "record_preview_mode", False) is True
+                if not preview and (result.posted != result.verified or result.verified + result.skipped_existing != 1):
+                    raise RuntimeError("Ingest visibility is incomplete; retry")
+                posted, skipped = result.verified, result.skipped_existing
+                if preview:
+                    extra = {"preview": True, "would_post": result.posted}
         except Exception as exc:
             self._send_json(
                 502,
@@ -460,8 +481,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                  "message": safe_exc_message(exc)},
             )
             return
-        ctx.add_outcome(posted=1, skipped=0)
-        self._send_json(200, {"posted": 1, "skipped": 0})
+        ctx.add_outcome(posted=posted, skipped=skipped)
+        self._send_json(200, {"posted": posted, "skipped": skipped, **extra})
 
     # ---- helpers ----
 

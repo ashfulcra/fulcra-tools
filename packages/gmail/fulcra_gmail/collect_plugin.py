@@ -32,6 +32,7 @@ clean-room rebuild on current main.
 from __future__ import annotations
 
 import logging
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 
 from fulcra_collect.plugin import (
@@ -43,10 +44,16 @@ from fulcra_collect.plugin import (
     SetupStep,
 )
 
-from .accounts import STATUS_AUTH_FAILED, AccountRegistry
+from .accounts import STATUS_ACTIVE, STATUS_AUTH_FAILED, AccountRegistry
 from .client import GmailClient
 from .cursors import CursorStore
-from .files_writer import build_files_writer
+from fulcra_collect.config_leases import task_mutation_scope
+from fulcra_collect.files_io import CollectFiles
+from fulcra_collect.v1_session import CollectRecordSession
+
+from .collect_relay import CollectCoordTransport
+from .delivery_scope import delivery_root
+from .files_writer import FilesWriter
 from .ledger import Ledger
 from .pipeline import EffectBudget, poll_account_rule
 from .relay import CoordEngineRelayEmitter
@@ -106,9 +113,9 @@ def _pair_identity(account, rule) -> list[object]:
     return [account.account_id, rule.id, rule.version]
 
 
-def _rotate_pairs(ctx: RunContext, pairs: list[tuple]) -> list[tuple]:
+def _rotate_pairs(ctx: RunContext, pairs: list[tuple], key: str = _NEXT_PAIR_KEY) -> list[tuple]:
     """Start at the pair saved by the prior run, if it still exists."""
-    wanted = ctx.kv_get(_NEXT_PAIR_KEY, None)
+    wanted = ctx.kv_get(key, None)
     for index, (account, rule) in enumerate(pairs):
         if _pair_identity(account, rule) == wanted:
             return pairs[index:] + pairs[:index]
@@ -121,21 +128,41 @@ def run(ctx: RunContext) -> None:
     if not rules:
         ctx.log.info("gmail: no rules configured — nothing to poll")
         return
+    with CollectRecordSession(ctx) as session, ExitStack() as stack:
+        session.guard(mutating=True)
+        registry = _registry()
+        accounts = registry.list_accounts()
+        session.guard(mutating=True)
+        if not accounts:
+            ctx.log.info("gmail: no authorized accounts — run the add-account wizard")
+            return
+        team = ctx.config.get("relay_team")
+        relay = None
+        lifecycle_guard = session.guard
+        if team and any("relay" in rule.actions for rule in rules):
+            transport = stack.enter_context(CollectCoordTransport(session, team))
+            relay = CoordEngineRelayEmitter(team, run=transport.run, readback=transport.verify_directive)
+            files, lifecycle_guard = transport.files, transport.guard
+        else:
+            files = stack.enter_context(CollectFiles(session))
+        writer = FilesWriter(files)
+        _run_captured(ctx, session, registry, accounts, rules, writer, relay, lifecycle_guard)
+        lifecycle_guard(mutating=True)
+
+
+def _source_guard(lifecycle_guard, registry, account):
+    def guard():
+        lifecycle_guard(mutating=True)
+        current = next((row for row in registry.list_accounts() if row.account_id == account.account_id), None)
+        if (current is None or current.status != STATUS_ACTIVE
+                or current.email != account.email
+                or getattr(current, "added_at", "") != getattr(account, "added_at", "")):
+            raise RuntimeError("Gmail source authorization changed; retry the selected account")
+    return guard
+
+
+def _run_captured(ctx, session, registry, accounts, rules, files_writer, relay_emitter, lifecycle_guard):
     relay_team = ctx.config.get("relay_team")
-    if not relay_team:
-        ctx.log.warning("gmail: no relay_team configured — relay actions cannot emit")
-
-    registry = _registry()
-    accounts = registry.list_accounts()
-    if not accounts:
-        ctx.log.info("gmail: no authorized accounts — run the add-account wizard")
-        return
-
-    files_writer = build_files_writer(ctx.fulcra_token())
-    relay_emitter = (
-        CoordEngineRelayEmitter(relay_team) if relay_team else None
-    )
-
     pairs = []
     for account in accounts:
         if account.status == STATUS_AUTH_FAILED:
@@ -156,7 +183,8 @@ def run(ctx: RunContext) -> None:
     if not pairs:
         return
 
-    ordered_pairs = _rotate_pairs(ctx, pairs)
+    rotation_key = f"{_NEXT_PAIR_KEY}:{session.account_id}:{session.settings_fingerprint}"
+    ordered_pairs = _rotate_pairs(ctx, pairs, rotation_key)
     resources = {}
     attempted = 0
     failed = 0
@@ -170,36 +198,48 @@ def run(ctx: RunContext) -> None:
         # next scheduled run still starts at a different pair rather than
         # letting one permanent backlog monopolize every run.
         next_account, next_rule = ordered_pairs[(index + 1) % len(ordered_pairs)]
-        ctx.kv_set(_NEXT_PAIR_KEY, _pair_identity(next_account, next_rule))
-
-        if account.account_id not in resources:
-            client = GmailClient(account.account_id, registry=registry)
-            ledger = Ledger(account.account_id)
-            if ledger.compact_if_needed():
-                ctx.log.info("gmail: compacted duplicate retry metadata")
-            resources[account.account_id] = (
-                client, ledger, CursorStore(account.account_id),
-            )
-        client, ledger, cursors = resources[account.account_id]
-
+        guard = _source_guard(lifecycle_guard, registry, account)
+        @contextmanager
+        def mutation_scope():
+            with task_mutation_scope(), registry.delivery_scope(account.account_id, getattr(account, "added_at", "")):
+                guard()
+                yield
+                guard()
         attempted += 1
         try:
+            with mutation_scope():
+                ctx.kv_set(rotation_key, _pair_identity(next_account, next_rule))
+
+            root = delivery_root(session.account_id, rule, relay_team)
+            resource_key = account.account_id, root
+            if resource_key not in resources:
+                client = GmailClient(account.account_id, registry=registry, still_allowed=guard)
+                ledger = Ledger(account.account_id, root=root)
+                with mutation_scope():
+                    if ledger.compact_if_needed():
+                        ctx.log.info("gmail: compacted duplicate retry metadata")
+                resources[resource_key] = (client, ledger, CursorStore(account.account_id, root=root), guard)
+            client, ledger, cursors, guard = resources[resource_key]
+
             result = poll_account_rule(
                 client=client, rule=rule, account_id=account.account_id,
                 ledger=ledger, cursors=cursors, files_writer=files_writer,
                 relay_emitter=relay_emitter, effect_budget=effect_budget,
+                still_allowed=guard, mutation_scope=mutation_scope,
+            )
+            guard()
+            ctx.progress(
+                account=account.account_id, rule=rule.id,
+                candidates=result.candidates, effective=result.effective,
+                processed=result.processed, blocked=result.blocked,
             )
         except Exception as exc:  # noqa: BLE001 — one rule's failure is soft
+            lifecycle_guard(mutating=True)
             failed += 1
-            last_error = f"{type(exc).__name__}: {exc}"
+            last_error = type(exc).__name__
             ctx.log.warning("gmail: poll failed account=%s rule=%s: %s",
                             account.account_id, rule.id, type(exc).__name__)
             continue
-        ctx.progress(
-            account=account.account_id, rule=rule.id,
-            candidates=result.candidates, effective=result.effective,
-            processed=result.processed, blocked=result.blocked,
-        )
     if attempted and failed == attempted:
         # Fail-soft is for ONE rule having a bad day while others proceed.
         # When EVERY poll failed, "Ran successfully — no new data" is a lie
@@ -234,6 +274,11 @@ def health_check(ctx: RunContext) -> HealthResult:
         return HealthResult(ok=False, summary="No Gmail accounts authorized yet.")
 
     rules = _load_rules(ctx)
+    try:
+        with CollectRecordSession(ctx, require_enabled=False) as session:
+            destination_account = session.account_id
+    except Exception:
+        return HealthResult(ok=False, summary="Reconnect to Fulcra in Collect to inspect this destination's Gmail delivery state.")
     now = datetime.now(timezone.utc)
     preview: list[dict] = []
     failed = 0
@@ -241,19 +286,23 @@ def health_check(ctx: RunContext) -> HealthResult:
         auth_ok = account.status != STATUS_AUTH_FAILED
         if not auth_ok:
             failed += 1
-        cursors = CursorStore(account.account_id)
-        ledger = Ledger(account.account_id)
         oldest_age = None
+        entries = []
+        inspected_roots = set()
         for rule in rules:
             if not rule.applies_to_account(account.account_id, account.email):
                 continue
             if not getattr(rule, "enabled", True):
                 continue
+            root = delivery_root(destination_account, rule, ctx.config.get("relay_team"))
+            cursors = CursorStore(account.account_id, root=root)
+            if root not in inspected_roots:
+                entries.extend(Ledger(account.account_id, root=root).entries())
+                inspected_roots.add(root)
             age = _cursor_age_hours(cursors.get(rule.id, rule.version), now=now)
             if age is not None and (oldest_age is None or age > oldest_age):
                 oldest_age = age
-        entries = ledger.entries()
-        tail_ts = entries[-1].get("ts") if entries else None
+        tail_ts = max((entry.get("ts", "") for entry in entries), default=None)
         preview.append({
             "account_id": account.account_id,
             "auth": "ok" if auth_ok else "auth_failed",
@@ -261,6 +310,10 @@ def health_check(ctx: RunContext) -> HealthResult:
             "ledger_entries": len(entries),
             "ledger_tail": tail_ts,
         })
+    try:
+        session.guard()
+    except RuntimeError:
+        return HealthResult(ok=False, summary="Collect account or settings changed; refresh Gmail health.")
     ok = failed == 0
     if failed:
         summary = f"{failed}/{len(accounts)} account(s) need re-authorization."

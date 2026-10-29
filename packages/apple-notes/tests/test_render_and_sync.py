@@ -98,6 +98,29 @@ def test_dry_run_sync_decodes_everything_and_writes_nothing(notes_db, monkeypatc
     assert stats.attachments_no_file == 1  # the inline-table attachment
 
 
+def test_attachment_upload_uses_the_same_private_snapshot_as_its_saved_hash(notes_db):
+    import hashlib
+    from types import SimpleNamespace
+    from fulcra_apple_notes import notestore
+    with notestore.NoteStore(notes_db / "NoteStore.sqlite") as store:
+        attachments = [a for a in store.attachments() if a.has_file]
+    assert len(attachments) == 1
+    att = attachments[0]
+    original = notestore.media_file(notes_db, att.media_uuid, att.filename)
+    before = original.read_bytes()
+    uploaded = []
+    def upload(local_path, remote):
+        original.write_bytes(b"changed after hashing")
+        uploaded.append(Path(local_path).read_bytes())
+    state = {"attachments": {}}
+    stats = sync.SyncStats()
+    sync._sync_attachments(attachments, notes_db, state, stats,
+        max_bytes=25 * 1024 * 1024, dry_run=False, log=LOG,
+        files=SimpleNamespace(upload_file=upload))
+    assert uploaded == [before]
+    assert state["attachments"][att.media_uuid]["sha256"] == hashlib.sha256(uploaded[0]).hexdigest()
+
+
 def test_corrupt_state_aborts_rather_than_re_uploading_everything(monkeypatch):
     monkeypatch.setattr(vaultio, "read_text", lambda *a, **k: "{not json")
     with pytest.raises(RuntimeError, match="corrupt"):
@@ -258,7 +281,7 @@ def test_live_uuid_set_covers_every_note_in_the_store_not_just_processed_ones(
 
 
 def test_checkpoint_saves_state_during_a_long_run(notes_db, monkeypatch):
-    vault = FakeVault().install(monkeypatch)
+    FakeVault().install(monkeypatch)
     saves = []
     real_save = sync.save_state
     monkeypatch.setattr(sync, "save_state",
@@ -433,7 +456,7 @@ def test_attachment_link_resolves_from_note_directory():
 
 
 def test_unreadable_attachment_does_not_stop_later_notes(notes_db, monkeypatch):
-    vault = FakeVault().install(monkeypatch)
+    FakeVault().install(monkeypatch)
     sync.run_sync(container=notes_db, log=LOG)
     photo = next(notes_db.rglob('photo.png'))
     original_open = Path.open
@@ -552,7 +575,7 @@ def isolated_reconcile_checkpoint(tmp_path, monkeypatch):
 
 
 def test_reconcile_deadline_counts_state_and_snapshot_and_caps_reads(notes_db, monkeypatch):
-    vault = FakeVault().install(monkeypatch)
+    FakeVault().install(monkeypatch)
     sync.run_sync(container=notes_db, log=LOG)
     clock = [0.0]
     monkeypatch.setattr(sync.time, "monotonic", lambda: clock[0])

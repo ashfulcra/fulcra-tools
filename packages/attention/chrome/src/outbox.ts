@@ -5,6 +5,7 @@
 // we drop it (permanent failure — usually a bug or stale state). Cap at
 // OUTBOX_CAP entries, dropping the oldest at overflow.
 
+import {legacyDrainAllowed} from "./relayless/v1AuthWorker";
 import { loadOutbox, saveOutbox, loadSettings } from "./storage";
 import type { AttentionEvent, OutboxEntry } from "./types";
 import { sendBatch } from "./relayless/relaylessSender";
@@ -106,6 +107,7 @@ export function flushOutbox(): Promise<void> {
 // message handler), so that one guard can't be bypassed across contexts and two
 // drains can't run at once.
 async function doFlushOutbox(): Promise<void> {
+  if(!await legacyDrainAllowed())return;
   const entries = await loadOutbox();
 
   // A token store + a getToken adapter the core sender/ensure use. getToken
@@ -181,6 +183,7 @@ async function doFlushOutbox(): Promise<void> {
   // ids sent after a 2xx, so on failure nothing is lost.
   const sentSet = new SentSet();
   const events = entries.map((e) => e.payload);
+  if(!await legacyDrainAllowed())return;
   const result = await sendBatch(events, {
     getToken,
     context: {

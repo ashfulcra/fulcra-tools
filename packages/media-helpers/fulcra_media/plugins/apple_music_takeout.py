@@ -4,30 +4,21 @@ from __future__ import annotations
 from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 
 from .. import library
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import apple_music_takeout as apple_music_takeout_importer
 from ..since_filter import parse_window
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ..takeout_health import apple_music_takeout_health_check
-from ._common import DURATION_SPEC, ensure_media_def, import_events, resolve_path
+from ._common import DURATION_SPEC, import_events, resolve_path
 
 
-# Same structure as LASTFM_LISTENED_SPEC and the other "Listened" plugins.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 APPLE_MUSIC_TAKEOUT_LISTENED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_apple_music_takeout(ctx: RunContext) -> None:
-    # Ensure the "Listened" annotation definition is known before importing.
-    # All audio plugins (Last.fm, Deezer, Spotify Extended, Apple Music)
-    # share the listened_definition_id field — whichever plugin first runs
-    # on this machine populates it; this one will find it already set.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="listened_definition_id",
-                     spec=APPLE_MUSIC_TAKEOUT_LISTENED_SPEC,
-                     canonical_name="Listened",
-                     state_save=_state_save)
 
     # `since` defaults to "1y". Apple Music Play Activity can be hundreds
     # of thousands of rows for long-term subscribers; gate behind a
@@ -68,6 +59,8 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_apple_music_takeout,
+    record_data_types=media_destinations("listened"),
+    record_pending=media_pending,
     health_check=apple_music_takeout_health_check,
     description=(
         "Imports your Apple Music play history from an Apple Data & "
@@ -125,7 +118,7 @@ PLUGIN = Plugin(
                 "Play Activity.csv` listing every track you've listened "
                 "to via Apple Music — across every device tied to your "
                 "Apple Account. Give us the file or folder and we'll "
-                "record each listen as a 'Listened' annotation."
+                "record each listen as a 'Listened' data type."
             ),
         ),
         SetupStep(
@@ -203,7 +196,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Apple Music listens?",
             body_md=(
-                "We can write to your existing 'Listened' annotation or "
+                "We can write to your existing 'Listened' data type or "
                 "create a new one."
             ),
             annotation_type="duration",
