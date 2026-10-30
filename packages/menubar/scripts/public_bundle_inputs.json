@@ -1,0 +1,227 @@
+{
+  "schema": 1,
+  "architecture": "arm64",
+  "archives": [
+    {
+      "name": "httptools-0.7.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/0a/1a/22887f53602feaa066354867bc49a68fc295c2293433177ee90870a7d517/httptools-0.7.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 108180,
+      "sha256": "601b7628de7504077dd3dcb3791c6b8694bbd967148a6d1f01806509254fb1ca",
+      "kind": "wheel",
+      "package": "httptools",
+      "version": "0.7.1",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "pydantic_core-2.46.4-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/c1/81/4fa520eaffa8bd7d1525e644cd6d39e7d60b1592bc5b516693c7340b50f1/pydantic_core-2.46.4-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 1951906,
+      "sha256": "c94f0688e7b8d0a67abf40e57a7eaaecd17cc9586706a31b76c031f63df052b4",
+      "kind": "wheel",
+      "package": "pydantic-core",
+      "version": "2.46.4",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "pyyaml-6.0.3-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/b1/16/95309993f1d3748cd644e02e38b75d50cbc0d9561d21f390a76242ce073f/pyyaml-6.0.3-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 173252,
+      "sha256": "2283a07e2c21a2aa78d9c4442724ec1eb15f5e42a723b99cb3d822d48f5f7ad1",
+      "kind": "wheel",
+      "package": "pyyaml",
+      "version": "6.0.3",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "regex-2026.5.9-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/2d/e7/d0eaf5713828417b9e5648cf81fa9bacd4961f6ab98c380c2034f8716e35/regex-2026.5.9-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 289468,
+      "sha256": "a8820737949116ffff55fe18f9fc644530063ba6ebfcb8314239416e78f1347c",
+      "kind": "wheel",
+      "package": "regex",
+      "version": "2026.5.9",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "rpds_py-2026.9.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/57/71/a097d6552f837500fc36e6b23d09cfb9890c3cc47531f9ca64e149799615/rpds_py-2026.9.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 340514,
+      "sha256": "eba5d173f7d5708b22a93815017a4611873ed54db9f268077c0dd1ed99cfc858",
+      "kind": "wheel",
+      "package": "rpds-py",
+      "version": "2026.9.1",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "uvloop-0.22.1-cp313-cp313-macosx_10_13_universal2.whl",
+      "url": "https://files.pythonhosted.org/packages/89/8c/182a2a593195bfd39842ea68ebc084e20c850806117213f5a299dfc513d9/uvloop-0.22.1-cp313-cp313-macosx_10_13_universal2.whl",
+      "bytes": 1358611,
+      "sha256": "561577354eb94200d75aca23fbde86ee11be36b00e52a4eaf8f50fb0c86b7705",
+      "kind": "wheel",
+      "package": "uvloop",
+      "version": "0.22.1",
+      "tag": "cp313-cp313-macosx_10_13_universal2"
+    },
+    {
+      "name": "watchfiles-1.2.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/31/3a/0da302f2307aee316922806ebd5726c542cbd787c938271cf14a074c7daf/watchfiles-1.2.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 392842,
+      "sha256": "7ba0480b9a74af058f43b337e937a451e109295c420916d68ad24e3dc02f5e44",
+      "kind": "wheel",
+      "package": "watchfiles",
+      "version": "1.2.0",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "websockets-16.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/aa/82/39a5f910cb99ec0b59e482971238c845af9220d3ab9fa76dd9162cda9d62/websockets-16.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "bytes": 175323,
+      "sha256": "e6578ed5b6981005df1860a56e3617f14a6c307e6a71b4fff8c48fdc50f3ed2c",
+      "kind": "wheel",
+      "package": "websockets",
+      "version": "16.0",
+      "tag": "cp313-cp313-macosx_11_0_arm64"
+    },
+    {
+      "name": "GUI-Stub-3.13-b12.zip",
+      "url": "https://briefcase-support.s3.amazonaws.com/python/3.13/macOS/GUI-Stub-3.13-b12.zip",
+      "bytes": 15794,
+      "sha256": "969f71ee85e2320587d8f5da486144eb1509d2d03192db477f09370e8668367d",
+      "kind": "stub"
+    }
+  ],
+  "members": [
+    {
+      "destination": "Contents/Resources/app_packages/httptools/parser/url_parser.cpython-313-darwin.so",
+      "archive": "httptools-0.7.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "httptools/parser/url_parser.cpython-313-darwin.so",
+      "bytes": 130560,
+      "sha256": "69b122eec1de0f5f95ee62b7ccfbed0fe9d52935c0aaad4fc8ae6c02fb8f8dc3",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/httptools/parser/parser.cpython-313-darwin.so",
+      "archive": "httptools-0.7.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "httptools/parser/parser.cpython-313-darwin.so",
+      "bytes": 212096,
+      "sha256": "2cb3b5688bcb080f95b4624c87092ffd407e5f64d302be7d239fcc1d34ebc39c",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/pydantic_core/_pydantic_core.cpython-313-darwin.so",
+      "archive": "pydantic_core-2.46.4-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "pydantic_core/_pydantic_core.cpython-313-darwin.so",
+      "bytes": 4169216,
+      "sha256": "4bc2d486ad6cb684f751bb791f719da158cb42160970f3e5988e1c898960bab4",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/pydantic_core-2.46.4.dist-info/sboms/pydantic-core.cyclonedx.json",
+      "archive": "pydantic_core-2.46.4-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "pydantic_core-2.46.4.dist-info/sboms/pydantic-core.cyclonedx.json",
+      "bytes": 125379,
+      "sha256": "b38338ebbd412b306342e500ad435944df75fd98e927ed39868662aa31016cec",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/yaml/_yaml.cpython-313-darwin.so",
+      "archive": "pyyaml-6.0.3-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "yaml/_yaml.cpython-313-darwin.so",
+      "bytes": 381208,
+      "sha256": "ba1d658938053d44a1bf09dfcaab837676ecad1b0d5d6ac35cc15d7a31d7bb33",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/regex/_regex.cpython-313-darwin.so",
+      "archive": "regex-2026.5.9-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "regex/_regex.cpython-313-darwin.so",
+      "bytes": 791008,
+      "sha256": "3d506ed051b70d5cd944ddde858175e3f5db1bf5c2f9be5e13309bc02fb8b1a2",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/rpds/rpds.cpython-313-darwin.so",
+      "archive": "rpds_py-2026.9.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "rpds/rpds.cpython-313-darwin.so",
+      "bytes": 959888,
+      "sha256": "e009c0b645141152ea8d09b7f0015bc2fa10d550200075afb443f5f9595de978",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/rpds_py-2026.9.1.dist-info/sboms/rpds-py.cyclonedx.json",
+      "archive": "rpds_py-2026.9.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "rpds_py-2026.9.1.dist-info/sboms/rpds-py.cyclonedx.json",
+      "bytes": 20597,
+      "sha256": "68a78a5ba573630537d2d00da64725d4492555f5570edc762511dfe2744f436a",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/uvloop/loop.cpython-313-darwin.so",
+      "archive": "uvloop-0.22.1-cp313-cp313-macosx_10_13_universal2.whl",
+      "member": "uvloop/loop.cpython-313-darwin.so",
+      "bytes": 3882984,
+      "sha256": "560c1a9bb368d48d0b7bec0f68da8c2b204cd0da362b25474c0990d859a3b28f",
+      "forms": [
+        "exact",
+        "arm64-slice"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/watchfiles/_rust_notify.cpython-313-darwin.so",
+      "archive": "watchfiles-1.2.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "watchfiles/_rust_notify.cpython-313-darwin.so",
+      "bytes": 915920,
+      "sha256": "be55264fc5759f47b3bcf831f33f788662fb818fac04b6fa8c7471190b0f035f",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/watchfiles-1.2.0.dist-info/sboms/watchfiles_rust_notify.cyclonedx.json",
+      "archive": "watchfiles-1.2.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "watchfiles-1.2.0.dist-info/sboms/watchfiles_rust_notify.cyclonedx.json",
+      "bytes": 30662,
+      "sha256": "e53a3410410dcb0252103e3720a8fac7200edb7ec319093642f043fa25041371",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/Resources/app_packages/websockets/speedups.cpython-313-darwin.so",
+      "archive": "websockets-16.0-cp313-cp313-macosx_11_0_arm64.whl",
+      "member": "websockets/speedups.cpython-313-darwin.so",
+      "bytes": 51376,
+      "sha256": "3e39716c0d2a430ac65da2194b7a02651107d51089873cd067e32362f37fb36f",
+      "forms": [
+        "exact"
+      ]
+    },
+    {
+      "destination": "Contents/MacOS/Stub",
+      "archive": "GUI-Stub-3.13-b12.zip",
+      "member": "Stub",
+      "bytes": 106016,
+      "sha256": "035321b10e5d9529b5734ff889b75ea3d920bedd469931c5f8a96f15865788bf",
+      "forms": [
+        "exact",
+        "arm64-slice"
+      ]
+    }
+  ]
+}

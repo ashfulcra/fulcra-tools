@@ -175,6 +175,163 @@ the smaller PNG beside it remains the monochrome menu-bar template. A release
 asset test catches a missing native icon before Briefcase can substitute its
 default.
 
+
+### Invocation-bound public-input QA
+
+The constrained QA path uses the fixed [public input catalog](scripts/public_bundle_inputs.json)
+and [stage helper](scripts/bundle_provenance_stages.py). It is opt-in through
+`COLLECT_PROVENANCE_REQUEST`, an independently prepared private request;
+`COLLECT_PROVENANCE_RUN_DIR` names a fresh private directory outside the workspace,
+and `COLLECT_PROVENANCE_COMPLETION_FD` is a parent-owned inherited writable pipe.
+The parent closes its own writer after spawn and drains concurrently through
+EOF. Whole-script success emits one length-framed compact context with a
+5-second writer deadline; regular files, read ends, truncation, extra data and
+timeout fail. Never wait for script exit before draining that pipe. The parent
+retains only the trusted requested completion as current authority.
+Never upload those artifacts or recover authority from a candidate receipt.
+
+The existing order is prepare inputs before CREATE, install launchers, bind
+exact inputs, raw sanitizer, controlled BUILD, postbuild sanitizer, then
+postbuild check-only. The live trusted shell owns schema2
+`COLLECT_PROVENANCE_CONTEXT`: a compact
+nonce/Invocation-digest/current-head envelope, capped at 32 KiB, plus an
+independently pinned immutable metadata path/hash/size. Metadata is write-once
+0600, capped at 8 MiB, and contains no head. Only successful requested transitions
+update current authority. Every producer reserves remaining head growth through
+generation 64 and checks environment/argv capacity against current SC_ARG_MAX
+before success; argv is capped at 16 KiB. Oversize inputs fail before receipts.
+Old full contexts require a fresh invocation. Lost authority requires a fresh
+invocation and controller-owned inactive-lock recovery. An old self-consistent
+receipt or saved context cannot supply current expectations.
+
+Inspect the exact command surfaces without running a build:
+
+```sh
+python3 packages/menubar/scripts/bundle_provenance_stages.py --help
+python3 packages/menubar/scripts/sanitize_bundle.py --help
+```
+
+The narrow verbs are `start --request PATH --run-dir PATH`,
+`prepare-public-inputs`, `bind-public-inputs`, `controlled-install-and-bind`, `controlled-build`, and
+`controlled-sign`, with `emit-completion --fd N` for final framed pipe delivery.
+The canonical sanitizer accepts `--phase raw|postbuild|signed
+--provenance-receipt PATH`; signed requires `--check-only` and current independent
+context. No-provenance calls retain strict rejection. Runtime/help and cleanup
+use in-memory `boundary_before`/`boundary_after` around their existing command
+positions; cache-only writes/removals are accounted and mutation marks DIRTY.
+Final acceptance requires controlled re-sign, signed check-only, fresh native
+checks and exact unchanged inventory. Retain all independent source, wheel,
+support, inventory and late signature gates.
+
+Receipts are private, atomic, write-once (256 KiB maximum); their separate exact
+inventories are capped at 8 MiB. Every consumption rechecks current source,
+lock, catalog, recipe, tool and app bytes. Public marker permission covers only
+whole unchanged selected-member intervals; paths, links, signatures and changed
+regions never receive permission. Actual HOME and declared QA root/runner temp
+are scanned in UTF-8/UTF-16LE/BE; do not substitute HOME or strip native/SBOM data.
+
+Compiler selection is closed in [the qualifier module](scripts/bundle_compiler_qualifiers.py).
+The original four-key `compiler_baseline` tuple selects only `local-v1` with its
+unchanged source/clang/output literals. The exact three-key form
+`{"schema":2,"profile":"cloud-xcode16.4-arm64-v1","source":"ABS_C_SOURCE"}`
+selects the cloud proposal; `source` must be the workspace's
+[launcher source](scripts/cli_launcher.c). Both forms cross-bind the selected
+clang hash to the independently declared invocation tools at start, context,
+current and native entries. Cloud additionally requires the four fixed OS
+wrappers and a root-pinned regular Python executable, plus a `compiler_producer`
+record containing pinned Python/workflow paths and hashes and the exact
+controlled environment. Source/config/workflow pins belong to the pre-CREATE
+manifest; candidate output cannot supply expectations.
+
+Cloud replaces the installer-and-bind span with `controlled-install-and-bind`:
+PREPARED generation 1 becomes BOUND generation 2, before the first sanitizer.
+Ordinary binding rejects cloud. The private ownership bootstrap checks the
+trusted envelope, immutable metadata, external 0700 directory and matching scope
+lock, then publishes a 0600 consumed-attempt marker **before full recipe checks**.
+A damaged recipe therefore consumes the attempt. Any later failure retains that
+marker and the caller's old head. No retry, output cleanup, saved receipt or
+self-consistent compiler proof can recover the same attempt: use a fresh
+controller-owned nonce/run directory/app namespace after inactive-lock recovery.
+An unsafe ownership envelope writes nothing and must also be discarded.
+
+The unchanged [installer](scripts/install_bundle_launchers.py) runs with pinned
+Python `-I -B`, a fixed environment, umask 022 and inherited hard/soft 2 MiB
+file-size limits established before exec. Only three exact regular 0755 launcher
+leaves may be added. Fresh before/after OS tool identities, source continuity,
+nine native checks and the full inventory delta precede proof publication.
+A private one-use live witness authorizes first BOUND admission; later owned
+heads validate its digest-linked historical proof without replaying production.
+The proof records installer-leader completion; compiler success follows from the
+pinned installer's synchronous checked child, not separately observed child
+telemetry. SDK evidence covers directory/link identity, not SDK contents.
+
+Only the typed compiler observer permits 256 MiB files. Its one ledger reserves
+`540039872 + 6 * sum(invocation tool sizes)` bytes before production, at most
+570425344 bytes and 60 seconds of cumulative physical reading, including failed
+reads and repeated paths/inodes. The six ordinary passes are initial receipt
+validation (two), native verification (one), final current check (one), and
+witnessed admission (two). Ordinary tool reads retain their 128 MiB limit.
+An actual tool set over 5064245 bytes per pass fails before production; no hash
+is skipped. The operation permits 17 command leaders, 30 seconds/1 MiB each,
+8 MiB retained output and 300 seconds overall. The
+[private operation deadline](scripts/bundle_operation_deadline.py) starts on entry,
+before ownership bootstrap; nested reads and operations inherit that same absolute
+expiry. Source/metadata/inventory/scanner/pair work, physical tool reads, proof and
+receipt publication, and final admission all check it. The independent cumulative
+60-second read allowance never extends the operation. Commands reserve the existing
+one-second kill/reap safety inside the remaining operation time; expired work
+cannot begin production, publish a new proof, or return a new head. A presented
+live admission witness is revoked on every failure, including an early selector
+or source-read failure. Existing completion framing keeps its separate bound.
+The immutable proof honestly
+marks the final two passes reserved; the live ledger must complete them before
+returning an envelope. Existing metadata/receipt/inventory/context bounds and
+all later signature/privacy gates remain unchanged. This source contract and
+pure tests **do not establish actual cloud app or N1 qualification**.
+
+The canonical expected Python 3.13 framework alias from the pinned b10 origin
+also selects one mandatory source-data record in
+[the pure native proof module](scripts/bundle_native_proof.py):
+`Contents/Frameworks/Python.framework/Versions/3.13/lib/python3.13/config-3.13-darwin/python.o`.
+Before local binding, cloud C0/C1 binding, and every full native verifier, it must
+be exactly one regular 0644 file with the record's fixed size and whole hash,
+confirmed by a stable no-follow current read. The expected alias's origin Info
+hash and exact version/link geometry activate the requirement; observed app Info
+and caller flags cannot select it. The support binder must check the pinned
+archive/member and consumed app bytes before its general config-directory skip.
+When the same expected policy also owns the canonical Collect outer alias
+(`.`, `Contents/MacOS/Fulcra Collect`, `Contents/Info.plist`, empty Info hash and
+links), the closed registry additionally requires the two exact PyObjC 12.2.2
+debug companions recorded there. Python-only policies retain just `python.o`.
+The private raw-input binder checks the pinned whole wheel, unique regular 0644
+members, whole universal hashes and fixed ARM64 slices against the consumed
+files. Signing snapshots classify these required data before native parsing and
+retain their complete hash and mode; any byte change fails UNKNOWN. Missing,
+moved or changed data cannot disappear from the required set, and other debug
+files gain no exclusion from their type or suffix.
+Only the selected exact data leaves are omitted from signed-native target enumeration.
+They remain in complete inventories and source/privacy checks; framework and app
+verification still run. It grants no marker permission, signing mask, byte
+removal, or exemption for another object/FAT file. The fixed privacy catalog and
+public-pair semantics are unchanged. Actual manifest and app qualification remain
+separate from this source-only contract.
+
+Signing policy derives from pinned Briefcase/template/config before operations.
+Ad-hoc QA is supported; release policy is unsupported. Qualified compiler-leaf
+baselines, exact identifiers/flags and complete typed entitlement maps are
+checked separately; unreadability is never entitlement absence. Every supported
+framework/nested-app main executable derives its final policy from pinned origin
+Info.plist and exact canonical paths/version links. Identifiers, typed
+entitlements, flags and team must agree with the container in both BUILD/sign
+policy; unknown geometry stops before mutation. Controlled late signing
+explicitly enumerates targets inside-out; fresh absolute
+`/usr/bin/codesign` verification also keeps the deep/strict app check. Native
+verification is bounded to 30 seconds/command, 300 seconds total and 1 MiB
+combined output/command; BUILD to 900 seconds and 16 MiB. Exceeding bounds kills
+and reaps the process group; missing/partial evidence fails UNKNOWN without head
+advancement. The current pure/fake-tool tests do **not** qualify actual cloud
+native transforms (N1 remains UNKNOWN) or establish runtime/release readiness.
+
 For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,
 staples, and checks the installer. The build also verifies a fresh copy of the

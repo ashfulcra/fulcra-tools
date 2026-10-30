@@ -2977,6 +2977,62 @@ release QA.
   roots; urllib/Auth0 needs this explicit default. Preserve operator trust
   overrides and TLS/hostname verification; never work around this with disabled
   verification. Missing roots fail before auth. Source/venv trust is unchanged.
+- **Public-input bundle QA:** follow the [invocation-bound stages](packages/menubar/README.md#invocation-bound-public-input-qa)
+  and [stage helper](packages/menubar/scripts/bundle_provenance_stages.py), with
+  [canonical sanitizer](packages/menubar/scripts/sanitize_bundle.py) at the existing
+  raw/postbuild/check-only positions. Prepare BEFORE CREATE; local launchers retain
+  the exact legacy tuple, while cloud uses the closed source-owned
+  `cloud-xcode16.4-arm64-v1` qualifier and `controlled-install-and-bind` for
+  PREPARED generation1 → BOUND generation2 before raw sanitize. Profile/tool
+  cross-binding is mandatory at start/context/current/native entries. The cloud
+  ownership bootstrap consumes a durable attempt before full recipe validation;
+  any later UNKNOWN requires a fresh nonce/run directory/app namespace after
+  inactive-lock recovery, never retry or saved-proof adoption. First admission
+  needs the live one-use witness; descendants use their independently owned
+  digest chain. The typed observer alone allows256MiB/file, with544MiB/60s for
+  two OS passes plus six ordinary128MiB tool passes; actual toolsets that cannot
+  fit fail before producer effects. One original300s deadline starts before
+  ownership bootstrap and spans all reads, sweeps, publication and final admission;
+  nested operations never renew it, and commands reserve kill/reap time within it.
+  Every presented live witness is revoked even on early source/selector failure.
+  The exact source-owned Python b10 linker-data requirement stays outside the
+  unchanged privacy catalog: owned expected alias selection requires its presence,
+  regular type, mode and bytes at local/cloud binding and full verification, plus
+  exact support-member consumption before the config skip. Only the additional
+  canonical Collect outer alias activates the two fixed PyObjC debug companions:
+  their complete wheel/member/fixed-slice origin and current bytes stay exact,
+  including full-hash signing snapshots before native parsing. Only these selected
+  exact data leaves leave the native target set; full inventories, privacy and framework/app
+  verification remain. See the linked package contract and
+  [pure source-data record](packages/menubar/scripts/bundle_native_proof.py).
+  Exact limits, pinned environment/installer,
+  SDK scope and local compatibility live in the linked package contract.
+  Actual cloud app/N1 qualification remains required; pure tests do not grant it.
+  Preserve the stage ordering; only the controlled BUILD/sign wrappers can mint a
+  signed generation. Current I/H live in trusted entry/completion plumbing
+  (`COLLECT_PROVENANCE_CONTEXT`), never candidate receipts or saved old contexts.
+  Its schema2 envelope is capped at 32 KiB and independently binds immutable
+  metadata (0600/write-once/8 MiB/no head); remaining head growth through gen64
+  and current environment/argv capacity are checked before receipt publication.
+  The build uses a fresh external private run directory and parent-owned private
+  completion FD (`COLLECT_PROVENANCE_RUN_DIR`, `COLLECT_PROVENANCE_COMPLETION_FD`)
+  when `COLLECT_PROVENANCE_REQUEST` selects the constrained path. It must be a
+  writable pipe, concurrently drained through bounded length framing and EOF;
+  regular files/partial frames fail, and old full contexts require fresh entry.
+  Lost authority restarts fresh; no receipt adoption or scope-lock stealing. Preserve strict
+  no-provenance fallback, source/wheel/support/inventory gates, and independent
+  review. Exact current app inventories precede broader transform comparisons;
+  only whole unchanged public intervals receive marker permission. Source-derived
+  ad-hoc per-target policy and fresh absolute codesign observations are required.
+  Bind framework/nested-app executable aliases to pinned origin Info.plist and
+  exact scoped paths/version links; all final alias policy fields agree in both
+  BUILD/sign sets. Unknown geometry stops before mutation; unknown compiler/tool/
+  entitlement forms stop UNKNOWN. Runtime/help/cache
+  boundaries mark mutations DIRTY and require controlled re-sign/fresh final
+  signed checks. Receipts/inventories are 0600 write-once, capped at 256 KiB/8 MiB;
+  native verification 30s/command,300s total,1 MiB/command; BUILD900s/16 MiB;
+  timeout/cap kills and reaps the whole group. Actual cloud N1 remains UNKNOWN:
+  pure/fake-tool GREEN is neither native qualification nor release permission.
 - **AppleScript writeback is experimental:** it additionally requires explicit
   writeback_enabled = true and refuses all attachment types. Do not enable it
   as part of ordinary Notes setup.
