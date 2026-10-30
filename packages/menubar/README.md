@@ -175,6 +175,77 @@ the smaller PNG beside it remains the monochrome menu-bar template. A release
 asset test catches a missing native icon before Briefcase can substitute its
 default.
 
+
+### Invocation-bound public-input QA
+
+The constrained QA path uses the fixed [public input catalog](scripts/public_bundle_inputs.json)
+and [stage helper](scripts/bundle_provenance_stages.py). It is opt-in through
+`COLLECT_PROVENANCE_REQUEST`, an independently prepared private request;
+`COLLECT_PROVENANCE_RUN_DIR` names a fresh private directory outside the workspace,
+and `COLLECT_PROVENANCE_COMPLETION_FD` is a parent-owned inherited writable pipe.
+The parent closes its own writer after spawn and drains concurrently through
+EOF. Whole-script success emits one length-framed compact context with a
+5-second writer deadline; regular files, read ends, truncation, extra data and
+timeout fail. Never wait for script exit before draining that pipe. The parent
+retains only the trusted requested completion as current authority.
+Never upload those artifacts or recover authority from a candidate receipt.
+
+The existing order is prepare inputs before CREATE, install launchers, bind
+exact inputs, raw sanitizer, controlled BUILD, postbuild sanitizer, then
+postbuild check-only. The live trusted shell owns schema2
+`COLLECT_PROVENANCE_CONTEXT`: a compact
+nonce/Invocation-digest/current-head envelope, capped at 32 KiB, plus an
+independently pinned immutable metadata path/hash/size. Metadata is write-once
+0600, capped at 8 MiB, and contains no head. Only successful requested transitions
+update current authority. Every producer reserves remaining head growth through
+generation 64 and checks environment/argv capacity against current SC_ARG_MAX
+before success; argv is capped at 16 KiB. Oversize inputs fail before receipts.
+Old full contexts require a fresh invocation. Lost authority requires a fresh
+invocation and controller-owned inactive-lock recovery. An old self-consistent
+receipt or saved context cannot supply current expectations.
+
+Inspect the exact command surfaces without running a build:
+
+```sh
+python3 packages/menubar/scripts/bundle_provenance_stages.py --help
+python3 packages/menubar/scripts/sanitize_bundle.py --help
+```
+
+The narrow verbs are `start --request PATH --run-dir PATH`,
+`prepare-public-inputs`, `bind-public-inputs`, `controlled-build`, and
+`controlled-sign`, with `emit-completion --fd N` for final framed pipe delivery.
+The canonical sanitizer accepts `--phase raw|postbuild|signed
+--provenance-receipt PATH`; signed requires `--check-only` and current independent
+context. No-provenance calls retain strict rejection. Runtime/help and cleanup
+use in-memory `boundary_before`/`boundary_after` around their existing command
+positions; cache-only writes/removals are accounted and mutation marks DIRTY.
+Final acceptance requires controlled re-sign, signed check-only, fresh native
+checks and exact unchanged inventory. Retain all independent source, wheel,
+support, inventory and late signature gates.
+
+Receipts are private, atomic, write-once (256 KiB maximum); their separate exact
+inventories are capped at 8 MiB. Every consumption rechecks current source,
+lock, catalog, recipe, tool and app bytes. Public marker permission covers only
+whole unchanged selected-member intervals; paths, links, signatures and changed
+regions never receive permission. Actual HOME and declared QA root/runner temp
+are scanned in UTF-8/UTF-16LE/BE; do not substitute HOME or strip native/SBOM data.
+
+Signing policy derives from pinned Briefcase/template/config before operations.
+Ad-hoc QA is supported; release policy is unsupported. Qualified compiler-leaf
+baselines, exact identifiers/flags and complete typed entitlement maps are
+checked separately; unreadability is never entitlement absence. Every supported
+framework/nested-app main executable derives its final policy from pinned origin
+Info.plist and exact canonical paths/version links. Identifiers, typed
+entitlements, flags and team must agree with the container in both BUILD/sign
+policy; unknown geometry stops before mutation. Controlled late signing
+explicitly enumerates targets inside-out; fresh absolute
+`/usr/bin/codesign` verification also keeps the deep/strict app check. Native
+verification is bounded to 30 seconds/command, 300 seconds total and 1 MiB
+combined output/command; BUILD to 900 seconds and 16 MiB. Exceeding bounds kills
+and reaps the process group; missing/partial evidence fails UNKNOWN without head
+advancement. The current pure/fake-tool tests do **not** qualify actual cloud
+native transforms (N1 remains UNKNOWN) or establish runtime/release readiness.
+
 For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,
 staples, and checks the installer. The build also verifies a fresh copy of the

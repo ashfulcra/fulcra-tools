@@ -17,6 +17,11 @@ REPO="$PWD"
 WHEELHOUSE="$REPO/wheelhouse"
 
 MANIFEST="$REPO/packages/menubar/scripts/bundle_manifest.py"
+if [ -n "${COLLECT_PROVENANCE_REQUEST:-}" ]; then
+  : "${COLLECT_PROVENANCE_RUN_DIR:?private external run directory is required}"
+  : "${COLLECT_PROVENANCE_COMPLETION_FD:?parent-owned private completion descriptor is required}"
+  [[ "$COLLECT_PROVENANCE_COMPLETION_FD" =~ ^[0-9]+$ ]] || exit 1
+fi
 
 echo "=== 1/3  build workspace wheels into wheelhouse/ ==="
 # Derived from Briefcase `requires` (see bundle_manifest.py) — never hand-listed.
@@ -36,12 +41,37 @@ ls "$WHEELHOUSE"
 echo "=== 3/3  briefcase create + build (PIP_FIND_LINKS=wheelhouse) ==="
 cd "$REPO/packages/menubar"
 rm -rf build dist
+# Opt-in constrained input provenance. Trusted start/completion owns current
+# invocation/head; a candidate receipt must never be used to reconstruct it.
+PROVENANCE=false
+if [ -n "${COLLECT_PROVENANCE_REQUEST:-}" ]; then
+  : "${COLLECT_PROVENANCE_RUN_DIR:?private external run directory is required}"
+  PROVENANCE=true
+  export COLLECT_PROVENANCE_CONTEXT
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/bundle_provenance_stages.py start \
+    --request "$COLLECT_PROVENANCE_REQUEST" --run-dir "$COLLECT_PROVENANCE_RUN_DIR")"
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/bundle_provenance_stages.py prepare-public-inputs)"
+fi
 PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase create macOS
 python3 scripts/install_bundle_launchers.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
-python3 scripts/sanitize_bundle.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
-PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase build macOS
-python3 scripts/sanitize_bundle.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
-python3 scripts/sanitize_bundle.py --check-only "build/fulcra-menubar/macos/app/Fulcra Collect.app"
+if "$PROVENANCE"; then
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/bundle_provenance_stages.py bind-public-inputs)"
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/sanitize_bundle.py \
+    --phase raw --provenance-receipt "$COLLECT_PROVENANCE_RUN_DIR/002-BOUND.json" \
+    "build/fulcra-menubar/macos/app/Fulcra Collect.app")"
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/bundle_provenance_stages.py controlled-build)"
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/sanitize_bundle.py \
+    --phase postbuild --provenance-receipt "$COLLECT_PROVENANCE_RUN_DIR/004-BUILD_SIGNED.json" \
+    "build/fulcra-menubar/macos/app/Fulcra Collect.app")"
+  COLLECT_PROVENANCE_CONTEXT="$(python3 scripts/sanitize_bundle.py \
+    --phase postbuild --check-only --provenance-receipt "$COLLECT_PROVENANCE_RUN_DIR/005-POSTBUILD.json" \
+    "build/fulcra-menubar/macos/app/Fulcra Collect.app")"
+else
+  python3 scripts/sanitize_bundle.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
+  PIP_FIND_LINKS="$WHEELHOUSE" uvx briefcase build macOS
+  python3 scripts/sanitize_bundle.py "build/fulcra-menubar/macos/app/Fulcra Collect.app"
+  python3 scripts/sanitize_bundle.py --check-only "build/fulcra-menubar/macos/app/Fulcra Collect.app"
+fi
 
 APP="$REPO/packages/menubar/build/fulcra-menubar/macos/app/Fulcra Collect.app"
 PKGS="$APP/Contents/Resources/app_packages"
@@ -61,3 +91,9 @@ done
 
 echo "Built: $APP"
 echo "Verify with: bash packages/menubar/scripts/verify_bundle.sh"
+
+# Only a successful complete stage group publishes trusted completion. The
+# parent retains its own current authority; receipt files cannot set this FD.
+if "$PROVENANCE"; then
+  python3 scripts/bundle_provenance_stages.py emit-completion --fd "$COLLECT_PROVENANCE_COMPLETION_FD"
+fi
