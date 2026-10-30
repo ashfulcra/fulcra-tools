@@ -13,6 +13,7 @@ import logging
 import re
 import sys
 import traceback
+from copy import deepcopy
 from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
@@ -191,9 +192,26 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         out.write(json.dumps(event) + "\n")
         out.flush()
 
+    source_profile = str(config.profile_path()) if plugin.id == "trakt" else None
     cfg = config.load()
+    try:
+        ctx_credentials = credentials.get_plugin_credentials(plugin)
+    except credentials.CredentialReadError as exc:
+        emit({"type": "result", "outcome": "error", "code": "keychain_unavailable" if exc.detail['availability'] == 'unavailable' else "keychain_access_required",
+              "credential_error": exc.detail,
+              "error": "Keychain access is required. Open Configure and choose Allow Keychain access."})
+        return "error"
+    except (credentials.KeychainAccessRequired, TimeoutError):
+        emit({"type": "result", "outcome": "error", "code": "keychain_access_required",
+              "error": "Keychain access is required. Open Configure and choose Allow Keychain access."})
+        return "error"
+    except credentials.keyring.errors.KeyringError:
+        emit({"type": "result", "outcome": "error", "code": "keychain_unavailable",
+              "error": "Keychain access is unavailable. Your saved credential was kept."})
+        return "error"
     ctx = RunContext(
         plugin_id=plugin.id,
+        _trakt_source_profile=source_profile,
         config=normalize_legacy_plugin_settings(
             plugin, cfg.plugin_settings.get(plugin.id, {}),
         ),
@@ -204,18 +222,14 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         # _credential_status / _set_credential / _delete_credential routing;
         # reading only the plugin scope here made any required user_level
         # credential falsely "missing" every run (P3 #14).
-        credentials={
-            c.key: (
-                credentials.get_user_secret(c.key)
-                if getattr(c, "user_level", False)
-                else credentials.get_secret(plugin.id, c.key)
-            )
-            for c in plugin.required_credentials
-        },
+        credentials=ctx_credentials,
         state=state.load(plugin.id),
         log=logging.getLogger(f"fulcra_collect.plugin.{plugin.id}"),
         _emit=emit,
         _fulcra_client_factory=_make_fulcra_definition_client,
+        _persisted_config=deepcopy(cfg.plugin_settings.get(plugin.id, {})),
+        _record_outbox_get=lambda key, default: db.get_record_outbox(db.open(), plugin.id, key, default),
+        _record_outbox_set=lambda key, value: db.set_record_outbox(db.open(), plugin.id, key, value),
         _claim_dedup_keys=_claim_dedup_keys,
         _unclaim_dedup_keys=_unclaim_dedup_keys,
         # Generic plugin-scoped persistent state.  Binding plugin.id here is
@@ -244,6 +258,9 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
                    for c in plugin.required_credentials if c.key == key)
             else credentials.set_secret(plugin.id, key, value)),
     )
+    if plugin.id == "trakt":
+        from .trakt_source import Owner, KeychainStore
+        ctx._trakt_source_owner = Owner(KeychainStore())
     # Only a *required* credential (the default) hard-blocks a run. An
     # optional credential (required=False) is one that some operating modes
     # need and others don't — e.g. PurpleAir's api_key: needed for the cloud
@@ -271,6 +288,17 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         # accidental writes from inside plugin.run are quarantined to stderr.
         with contextlib.redirect_stdout(sys.stderr):
             plugin.run(ctx)
+    except credentials.CredentialReadError as exc:
+        # Keep bounded stack frames without serializing arbitrary backend exception
+        # text. Scope comes only from the actual read site, never string parsing.
+        emit({"type": "result", "outcome": "error", "code": "keychain_unavailable" if exc.detail['availability'] == 'unavailable' else "keychain_access_required",
+              "credential_error": exc.detail,
+              "error": _scrub_secrets("Saved Collect sign-in access is unverified. Open Fulcra Settings.\n"
+                                      + ''.join(traceback.format_tb(exc.__traceback__))),
+              "watermark": getattr(ctx.state, "watermark", None),
+              "definition_id": getattr(ctx.state, "definition_id", None),
+              "definition_validated_at": getattr(ctx.state, "definition_validated_at", None)})
+        return "error"
     except Exception as exc:  # noqa: BLE001 — report, never propagate
         # The watermark is reported even on error: a plugin may advance it
         # partway through a run, and a partial advance must still persist.

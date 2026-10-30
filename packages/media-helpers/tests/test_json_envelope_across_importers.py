@@ -5,8 +5,8 @@ import pytest
 from click.testing import CliRunner
 
 from fulcra_media.cli import cli
-from fulcra_media.fulcra import ImportResult
-from fulcra_media.state import State, save
+from test_file_routes_v1 import server as server
+from test_twin_dedup_integration import make_configured_netflix
 
 
 REQUIRED_ENVELOPE_KEYS = {
@@ -16,31 +16,13 @@ REQUIRED_ENVELOPE_KEYS = {
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
-    state_path = tmp_path / "state.json"
-    save(State(
-        watched_definition_id="w-uuid",
-        listened_definition_id="l-uuid",
-        tag_ids={
-            "netflix": "tn", "trakt": "tt", "apple-podcasts": "tp",
-            "spotify": "ts", "apple-tv": "ta", "lastfm": "tl",
-        },
-    ), state_path)
-    monkeypatch.setattr("fulcra_media.cli.STATE_PATH", state_path)
-    monkeypatch.setattr(
-        "fulcra_media.twin_cache.DEFAULT_CACHE_PATH", tmp_path / "twin_cache.json",
-    )
-    monkeypatch.setattr(
-        "fulcra_media.fulcra.FulcraClient.ensure_tag", lambda self, name, state: "t",
-    )
-    monkeypatch.setattr(
-        "fulcra_media.fulcra.FulcraClient.run_import",
-        lambda self, events, state, **kw: ImportResult(
-            total=len(events), skipped_existing=0, posted=len(events),
-            verified=len(events),
-        ),
-    )
-    return tmp_path
+def env(server):
+    return server
+
+
+@pytest.fixture
+def netflix_env(tmp_path, monkeypatch):
+    return make_configured_netflix(tmp_path, monkeypatch)
 
 
 def _assert_envelope(stdout: str, *, importer: str, ok: bool = True) -> dict:
@@ -48,24 +30,31 @@ def _assert_envelope(stdout: str, *, importer: str, ok: bool = True) -> dict:
     payload = json.loads(stdout.strip())
     missing = REQUIRED_ENVELOPE_KEYS - set(payload.keys())
     assert not missing, f"envelope missing keys: {missing}"
+    assert len(stdout.strip().splitlines()) == 1
     assert payload["importer"] == importer
     assert payload["ok"] is ok
     return payload
 
 
-def test_netflix_emits_envelope(env):
+def test_netflix_emits_envelope(netflix_env):
+    env = netflix_env.root
     csv = env / "f.csv"
     csv.write_text('Title,Date\n"Movie","5/12/26"\n')
     res = CliRunner().invoke(cli, ["import", "netflix", str(csv), "--json"])
     assert res.exit_code == 0, res.output
-    _assert_envelope(res.output, importer="netflix")
+    payload = _assert_envelope(res.output, importer="netflix")
+    assert payload["posted"] == payload["verified"] == 1
 
 
-def test_netflix_missing_file_emits_failure_envelope(env):
+def test_netflix_missing_file_emits_failure_envelope(netflix_env):
+    env = netflix_env.root
     res = CliRunner().invoke(cli, [
         "import", "netflix", str(env / "nonexistent.csv"), "--json",
     ])
-    assert res.exit_code != 0
+    assert res.exit_code == 2
+    payload = _assert_envelope(res.output, importer="netflix", ok=False)
+    assert payload["errors"][0]["stage"] == "import"
+    assert "bootstrap" not in payload["errors"][0]["message"]
 
 
 def test_apple_podcasts_emits_envelope(env, monkeypatch):
@@ -108,14 +97,15 @@ def test_spotify_extended_emits_envelope(env, monkeypatch, tmp_path):
     _assert_envelope(res.output, importer="spotify-extended")
 
 
-def test_netflix_resolve_errors_emit_envelope(env, monkeypatch):
+def test_netflix_resolve_errors_emit_envelope(netflix_env, monkeypatch):
     """Missing file from library.resolve → structured envelope, not raw stacktrace."""
     res = CliRunner().invoke(cli, [
         "import", "netflix", "/nonexistent/path.csv", "--json",
     ])
     assert res.exit_code == 2
     payload = _assert_envelope(res.output, importer="netflix", ok=False)
-    assert payload["errors"][0]["stage"] in ("args", "fetch")
+    assert payload["errors"][0]["stage"] == "import"
+    assert "bootstrap" not in payload["errors"][0]["message"]
 
 
 def test_apple_takeout_missing_csv_failure_envelope(env, tmp_path):
@@ -141,7 +131,8 @@ def test_generic_csv_invalid_tz_failure_envelope(env, tmp_path):
     assert payload["errors"][0]["stage"] == "args"
 
 
-def test_check_only_sets_would_post_field(env):
+def test_check_only_sets_would_post_field(netflix_env):
+    env = netflix_env.root
     csv = env / "f.csv"
     csv.write_text('Title,Date\n"Movie","5/12/26"\n')
     res = CliRunner().invoke(cli, [
@@ -153,7 +144,8 @@ def test_check_only_sets_would_post_field(env):
     assert payload["would_post"] == 1
 
 
-def test_no_double_output_in_json_mode(env):
+def test_no_double_output_in_json_mode(netflix_env):
+    env = netflix_env.root
     """JSON mode should produce exactly one line on stdout, nothing else."""
     csv = env / "f.csv"
     csv.write_text('Title,Date\n"Movie","5/12/26"\n')

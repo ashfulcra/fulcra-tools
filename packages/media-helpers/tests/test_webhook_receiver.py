@@ -1,11 +1,11 @@
 """Integration tests for the Plex/Jellyfin webhook receiver.
 
-Each test spins up a real ThreadingHTTPServer on an ephemeral port, points
-the receiver's FulcraClient at an httpx MockTransport so /ingest hits are
-captured locally, and then exercises the server over a real TCP socket.
+Each protocol test uses a real loopback HTTP server and an explicit fake
+writer capturing normalized events. Actual configured native delivery is
+covered separately in test_webhook_v1.py and test_webhook_cli.py.
 
 Goals exercised:
-- Plex media.scrobble (TV) → 1 ingest, correct shape
+- Plex media.scrobble (TV) → 1 normalized event, correct fields
 - Plex media.scrobble (movie) → 1 ingest, movie fingerprint
 - Plex media.play / media.pause → 204, no ingest
 - Plex malformed payload → 400 + structured error JSON
@@ -17,8 +17,8 @@ Goals exercised:
 - GET /health → 200 + counters
 - Loopback-only mode rejects non-127.0.0.1 (simulated via fake address)
 - Bearer mode requires bearer
-- Same scrobble within a minute → second hit dedups at Fulcra layer
-  (deterministic_id matches; we assert that)
+- Same scrobble within a minute → stable deterministic identity
+  (native dedup delivery is covered by test_webhook_v1.py)
 """
 from __future__ import annotations
 
@@ -31,7 +31,9 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-from fulcra_media.fulcra import FulcraClient
+from fulcra_common import ImportResult
+from fulcra_media.state import State
+from fulcra_media import webhook_receiver as wr
 
 
 # Thin shim so the test reads like a `requests`-style flow even though we
@@ -50,25 +52,23 @@ class _RequestsShim:
 
 
 requests = _RequestsShim()
-from fulcra_media.state import State
-from fulcra_media import webhook_receiver as wr
 
 
 # ----------------------------------------------------------------------
-# Test infrastructure: spin up a real server backed by a MockTransport
+# Test infrastructure: spin up a real server with a protocol-only fake
 # ----------------------------------------------------------------------
 
 class IngestCapture:
-    """Records every POST /ingest/v1/record/batch hit + returns 204."""
+    """Protocol-only fake: capture normalized events, without encoding records."""
+    record_destination_ids = None
+    record_preview_mode = False
 
-    def __init__(self) -> None:
-        self.bodies: list[bytes] = []
-        self.requests: list[httpx.Request] = []
+    def __init__(self):
+        self.events = []
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        self.bodies.append(request.content)
-        return httpx.Response(204)
+    def ingest_batch(self, events, state):
+        self.events.extend(vars(event) for event in events)
+        return ImportResult(len(events), 0, len(events), len(events))
 
 
 @pytest.fixture
@@ -86,16 +86,8 @@ def state() -> State:
 
 
 @pytest.fixture
-def fulcra_client(capture: IngestCapture, monkeypatch) -> FulcraClient:
-    # Bypass the subprocess auth fetch entirely.
-    monkeypatch.setattr(
-        "fulcra_media.fulcra.FulcraClient.get_token",
-        lambda self: "fake-test-token",
-    )
-    return FulcraClient(
-        base_url="https://api.fulcradynamics.test",
-        transport=httpx.MockTransport(capture.handler),
-    )
+def fulcra_client(capture: IngestCapture) -> IngestCapture:
+    return capture
 
 
 class ServerHandle:
@@ -248,15 +240,13 @@ def test_plex_media_scrobble_tv_posts_one_event(make_running_server, capture):
     assert r.status_code == 200, r.text
     payload = r.json()
     assert payload == {"posted": 1, "skipped": 0}
-    assert len(capture.bodies) == 1
-    line = json.loads(capture.bodies[0].decode("utf-8"))
-    data = json.loads(line["data"])
+    assert len(capture.events) == 1
+    data = capture.events[0]
     assert data["service"] == "plex"
     assert "Demo Show S01E05" in data["note"]
     assert data["title"] == "The Pilot"
     assert data["external_ids"]["content_fingerprint"] == "tv:demo-show:s01e05"
-    # source-id is in metadata.source[0]
-    assert any(s.startswith("com.fulcra.media.plex.v1.") for s in line["metadata"]["source"])
+    assert data["deterministic_id"].startswith("com.fulcra.media.plex.v1.")
 
 
 def test_plex_media_scrobble_movie_posts_with_movie_fingerprint(make_running_server, capture):
@@ -264,8 +254,8 @@ def test_plex_media_scrobble_movie_posts_with_movie_fingerprint(make_running_ser
     body, ctype = _multipart_body(plex_payload("media.scrobble", media_type="movie"))
     r = requests.post(f"{h.url}/webhook", data=body, headers={"Content-Type": ctype})
     assert r.status_code == 200
-    assert len(capture.bodies) == 1
-    data = json.loads(json.loads(capture.bodies[0])["data"])
+    assert len(capture.events) == 1
+    data = capture.events[0]
     assert data["external_ids"]["content_fingerprint"] == "movie:demo-movie:y2022"
     assert data["title"] == "Demo Movie"
 
@@ -275,7 +265,7 @@ def test_plex_media_play_returns_204_no_ingest(make_running_server, capture):
     body, ctype = _multipart_body(plex_payload("media.play"))
     r = requests.post(f"{h.url}/webhook", data=body, headers={"Content-Type": ctype})
     assert r.status_code == 204
-    assert len(capture.bodies) == 0
+    assert len(capture.events) == 0
 
 
 def test_plex_media_pause_returns_204_no_ingest(make_running_server, capture):
@@ -283,7 +273,7 @@ def test_plex_media_pause_returns_204_no_ingest(make_running_server, capture):
     body, ctype = _multipart_body(plex_payload("media.pause"))
     r = requests.post(f"{h.url}/webhook", data=body, headers={"Content-Type": ctype})
     assert r.status_code == 204
-    assert len(capture.bodies) == 0
+    assert len(capture.events) == 0
 
 
 def test_plex_malformed_payload_returns_400_envelope(make_running_server, capture):
@@ -305,7 +295,7 @@ def test_plex_malformed_payload_returns_400_envelope(make_running_server, captur
     payload = r.json()
     assert payload["ok"] is False
     assert "message" in payload
-    assert len(capture.bodies) == 0
+    assert len(capture.events) == 0
 
 
 def test_plex_multipart_without_payload_field_returns_400(make_running_server, capture):
@@ -334,8 +324,8 @@ def test_jellyfin_playback_stop_tv_posts_one_event(make_running_server, capture)
     r = requests.post(f"{h.url}/webhook", json=payload)
     assert r.status_code == 200, r.text
     assert r.json() == {"posted": 1, "skipped": 0}
-    assert len(capture.bodies) == 1
-    data = json.loads(json.loads(capture.bodies[0])["data"])
+    assert len(capture.events) == 1
+    data = capture.events[0]
     assert data["service"] == "jellyfin"
     assert "Demo Show S01E05" in data["note"]
     assert data["external_ids"]["content_fingerprint"] == "tv:demo-show:s01e05"
@@ -346,7 +336,7 @@ def test_jellyfin_playback_stop_movie_posts_with_movie_fingerprint(make_running_
     payload = jellyfin_payload("PlaybackStop", item_type="Movie")
     r = requests.post(f"{h.url}/webhook", json=payload)
     assert r.status_code == 200, r.text
-    data = json.loads(json.loads(capture.bodies[0])["data"])
+    data = capture.events[0]
     assert data["external_ids"]["content_fingerprint"] == "movie:demo-movie:y2022"
     assert data["title"] == "Demo Movie"
 
@@ -356,7 +346,7 @@ def test_jellyfin_playback_start_returns_204_no_ingest(make_running_server, capt
     payload = jellyfin_payload("PlaybackStart")
     r = requests.post(f"{h.url}/webhook", json=payload)
     assert r.status_code == 204
-    assert len(capture.bodies) == 0
+    assert len(capture.events) == 0
 
 
 def test_jellyfin_below_threshold_does_not_post(make_running_server, capture):
@@ -365,7 +355,7 @@ def test_jellyfin_below_threshold_does_not_post(make_running_server, capture):
     payload = jellyfin_payload("PlaybackStop", position_fraction=0.40)
     r = requests.post(f"{h.url}/webhook", json=payload)
     assert r.status_code == 204
-    assert len(capture.bodies) == 0
+    assert len(capture.events) == 0
 
 
 def test_jellyfin_invalid_json_returns_400(make_running_server, capture):
@@ -396,6 +386,42 @@ def test_health_endpoint_returns_ok_and_counters(make_running_server, capture):
     assert health["posted"] == 1
 
 
+@pytest.mark.parametrize("mode", ["new", "duplicate", "preview", "unverified", "malformed", "wrong_total", "none", "bool", "negative"])
+def test_v1_webhook_reports_verified_duplicate_and_preview_outcomes(make_running_server, fulcra_client, mode):
+    from fulcra_common import ImportResult
+    destination = "Event/11111111-2222-4333-8444-555555555555"
+    result = ImportResult(total=1, skipped_existing=int(mode == "duplicate"),
+        posted=int(mode != "duplicate"), verified=int(mode in {"new", "wrong_total"}))
+    if mode == "wrong_total":
+        result.total = 2
+    if mode == "malformed":
+        result = object()
+    if mode == "none":
+        result = None
+    if mode == "bool":
+        result.verified = True
+    if mode == "negative":
+        result.skipped_existing = -1
+    fulcra_client.record_preview_mode = mode == "preview"
+    fulcra_client.record_destination_ids = {"watched": destination}
+    fulcra_client.ingest_batch = lambda *args, **kwargs: result
+    h = make_running_server()
+    response = requests.post(f"{h.url}/webhook", json=jellyfin_payload())
+    if mode in {"unverified", "malformed", "wrong_total", "none", "bool", "negative"}:
+        assert response.status_code == 502
+        assert response.json()["error"] == "ingest_failed"
+        assert requests.get(f"{h.url}/health").json()["posted"] == 0
+        return
+    assert response.status_code == 200
+    expected = {"posted": result.verified, "skipped": result.skipped_existing}
+    if mode == "preview":
+        expected.update(preview=True, would_post=1)
+    assert response.json() == expected
+    health = requests.get(f"{h.url}/health").json()
+    assert health["posted"] == result.verified and health["skipped"] == result.skipped_existing
+    assert health["data_type_id"] == destination and "definition_id" not in health
+
+
 def test_get_webhook_returns_405(make_running_server, capture):
     h = make_running_server()
     r = requests.get(f"{h.url}/webhook")
@@ -417,7 +443,7 @@ def test_bearer_token_required_when_configured(make_running_server, capture):
     r = requests.post(f"{h.url}/webhook", data=body,
                       headers={"Content-Type": ctype, "Authorization": "Bearer secret-xyz"})
     assert r.status_code == 200
-    assert len(capture.bodies) == 1
+    assert len(capture.events) == 1
 
 
 def test_bearer_token_accepts_query_string_fallback(make_running_server, capture):
@@ -454,8 +480,7 @@ def test_loopback_only_rejects_simulated_remote_client():
             self.context = ctx
 
     state = State(watched_definition_id="def")
-    client = FulcraClient(transport=httpx.MockTransport(
-        lambda r: httpx.Response(204)))
+    client = IngestCapture()
     ctx = ReceiverContext(client=client, state=state,
                           bearer_token=None, host="0.0.0.0")
 
@@ -486,9 +511,8 @@ def test_plex_same_scrobble_within_minute_produces_same_source_id(
 ):
     """Two webhook hits for the same content within a minute → same det id.
 
-    The receiver doesn't dedup locally (Fulcra's source-id dedup at the ingest
-    layer handles that), but we *do* need the deterministic_id to be stable
-    so dedup works. Truncating now to the minute makes it stable within a
+    The receiver passes repeated events to the writer; the deterministic_id
+    must stay stable so dedup works. Truncating now to the minute makes it stable within a
     minute and distinct across rewatches.
     """
     h = make_running_server()
@@ -497,15 +521,8 @@ def test_plex_same_scrobble_within_minute_produces_same_source_id(
     r2 = requests.post(f"{h.url}/webhook", data=body, headers={"Content-Type": ctype})
     assert r1.status_code == 200
     assert r2.status_code == 200
-    assert len(capture.bodies) == 2
-    # Extract source ids from both ingest calls
-    sources = []
-    for body_bytes in capture.bodies:
-        line = json.loads(body_bytes)
-        for s in line["metadata"]["source"]:
-            if s.startswith("com.fulcra.media.plex.v1."):
-                sources.append(s)
-                break
+    assert len(capture.events) == 2
+    sources = [event["deterministic_id"] for event in capture.events]
     assert len(sources) == 2
     assert sources[0] == sources[1]
 

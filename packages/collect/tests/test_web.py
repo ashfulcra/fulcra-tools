@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import datetime
 import errno
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from collect_test_helpers import install_fake_httpx
 from fastapi.testclient import TestClient
 
 from fulcra_collect import config as _config
@@ -928,109 +928,88 @@ def _mock_httpx_success(mocker):
     return mock_client
 
 
-def test_fulcra_auth_token_set_and_clear(collect_home, _in_memory_keyring, mocker):
-    mock_client = _mock_httpx_success(mocker)
-    mocker.patch("httpx.Client", return_value=mock_client)
+def auth_validation_transport(monkeypatch, handler):
+    import httpx
+    client_class = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: client_class(
+        transport=httpx.MockTransport(handler), **kwargs))
 
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
 
-    r = client.post("/api/fulcra/auth/token", json={"token": "abc"})
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
-
-    r = client.get("/api/fulcra/auth/status")
-    assert r.json()["authenticated"] is True
-
-    r = client.delete("/api/fulcra/auth/token")
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
-
-    r = client.get("/api/fulcra/auth/status")
-    assert r.json()["authenticated"] is False
+def test_fulcra_auth_token_set_and_clear(collect_home, _in_memory_keyring, monkeypatch):
+    from collect_test_helpers import synthetic_account_token
+    from fulcra_collect import credentials
+    import httpx
+    token = synthetic_account_token()
+    auth_validation_transport(monkeypatch, lambda request: httpx.Response(200, stream=httpx.ByteStream(json.dumps({
+        'userid': credentials._token_principal(token)}).encode())))
+    client = _client(_build_test_daemon(collect_home))
+    assert client.post('/api/fulcra/auth/token', json={'token': token}).status_code == 200
+    assert client.get('/api/fulcra/auth/status').json()['authenticated'] is True
+    assert client.delete('/api/fulcra/auth/token').status_code == 200
+    assert client.get('/api/fulcra/auth/status').json()['authenticated'] is False
 
 
 def test_fulcra_auth_token_empty_rejected(collect_home, _in_memory_keyring):
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "   "})
-    assert r.status_code == 400
+    client = _client(_build_test_daemon(collect_home))
+    assert client.post('/api/fulcra/auth/token', json={'token': '   '}).status_code == 400
 
 
-def test_fulcra_auth_token_strips_whitespace(collect_home, _in_memory_keyring, mocker):
-    mock_client = _mock_httpx_success(mocker)
-    mocker.patch("httpx.Client", return_value=mock_client)
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "  mytoken  "})
-    assert r.status_code == 200
-
-    # Verify the stored token has no surrounding whitespace
-    import fulcra_collect.credentials as _creds
-    assert _creds.get_user_secret("bearer-token") == "mytoken"
-
-
-def test_fulcra_auth_token_validates_and_stores_on_success(collect_home, _in_memory_keyring, mocker):
-    """A valid Fulcra token is verified against the API before storage."""
-    daemon = _build_test_daemon(collect_home)
-    mock_client = _mock_httpx_success(mocker)
-    mocker.patch("httpx.Client", return_value=mock_client)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "real-token"})
-    assert r.status_code == 200
-    from fulcra_collect import credentials as _creds
-    assert _creds.get_user_secret("bearer-token") == "real-token"
-
-
-def test_fulcra_auth_token_rejects_401_from_fulcra(collect_home, _in_memory_keyring, mocker):
-    """A token that Fulcra rejects with 401 is NOT stored."""
-    daemon = _build_test_daemon(collect_home)
-    mock_resp = mocker.Mock()
-    mock_resp.status_code = 401
-    mock_client = mocker.MagicMock()
-    mock_client.__enter__ = mocker.Mock(return_value=mock_client)
-    mock_client.__exit__ = mocker.Mock(return_value=False)
-    mock_client.get = mocker.Mock(return_value=mock_resp)
-    mocker.patch("httpx.Client", return_value=mock_client)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "bad-typo"})
-    assert r.status_code == 401
-    assert "Fulcra rejected" in r.json()["detail"]
-    from fulcra_collect import credentials as _creds
-    assert _creds.get_user_secret("bearer-token") is None
-
-
-def test_fulcra_auth_token_validation_respects_api_base_override(
-        collect_home, _in_memory_keyring, mocker, monkeypatch):
-    """P3 #18: the paste-token validation must hit the same base URL every
-    other Fulcra caller uses (fulcra_common.DEFAULT_BASE_URL, which honors
-    the FULCRA_API_BASE env override) — not a hardcoded prod URL."""
-    monkeypatch.setattr(
-        "fulcra_common.DEFAULT_BASE_URL", "https://fulcra.test")
-    mock_client = _mock_httpx_success(mocker)
-    mocker.patch("httpx.Client", return_value=mock_client)
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "abc"})
-    assert r.status_code == 200
-    (url,), _kwargs = mock_client.get.call_args
-    assert url == "https://fulcra.test/user/v1alpha1/annotation"
-
-
-def test_fulcra_auth_token_rejects_network_failure(collect_home, _in_memory_keyring, mocker):
-    """If Fulcra is unreachable, the token is NOT stored."""
+def test_fulcra_auth_token_strips_whitespace(collect_home, _in_memory_keyring, monkeypatch):
+    from collect_test_helpers import synthetic_account_token
+    from fulcra_collect import credentials
     import httpx
-    daemon = _build_test_daemon(collect_home)
-    mock_client = mocker.MagicMock()
-    mock_client.__enter__ = mocker.Mock(return_value=mock_client)
-    mock_client.__exit__ = mocker.Mock(return_value=False)
-    mock_client.get = mocker.Mock(side_effect=httpx.ConnectError("DNS failed"))
-    mocker.patch("httpx.Client", return_value=mock_client)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "valid-but-fulcra-down"})
-    assert r.status_code == 502
+    token = synthetic_account_token()
+    auth_validation_transport(monkeypatch, lambda request: httpx.Response(200, stream=httpx.ByteStream(json.dumps({
+        'userid': credentials._token_principal(token)}).encode())))
+    client = _client(_build_test_daemon(collect_home))
+    assert client.post('/api/fulcra/auth/token', json={'token': '  '+token+'  '}).status_code == 200
+    assert credentials.get_user_secret('bearer-token') == token
+
+
+@pytest.mark.parametrize('status,body', [(401,{}),(403,{}),(200,{'userid':'other'}),
+    (200,[]),(302,{}),(500,{'error':'synthetic-private-provider-error'})])
+def test_fulcra_auth_token_requires_verified_current_principal(
+        collect_home, _in_memory_keyring, monkeypatch, status,body):
+    from collect_test_helpers import synthetic_account_token
+    from fulcra_collect import credentials
+    import httpx
+    auth_validation_transport(monkeypatch, lambda request: httpx.Response(status,stream=httpx.ByteStream(json.dumps(body).encode())))
+    client = _client(_build_test_daemon(collect_home))
+    response = client.post('/api/fulcra/auth/token', json={'token':synthetic_account_token()})
+    assert response.status_code == 409
+    assert 'synthetic-private-provider-error' not in response.text
+    assert credentials.get_user_secret('bearer-token') is None
+
+
+def test_fulcra_auth_token_validation_respects_api_base_override(collect_home, _in_memory_keyring, monkeypatch):
+    from collect_test_helpers import synthetic_account_token
+    from fulcra_collect import credentials
+    import httpx
+    token = synthetic_account_token()
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, stream=httpx.ByteStream(json.dumps({'userid':credentials._token_principal(token)}).encode()))
+    monkeypatch.setattr('fulcra_common.DEFAULT_BASE_URL', 'https://api.example.com')
+    auth_validation_transport(monkeypatch, handler)
+    client = _client(_build_test_daemon(collect_home))
+    assert client.post('/api/fulcra/auth/token', json={'token':token}).status_code == 200
+    assert str(seen[0].url) == 'https://api.example.com/user/v1alpha1/info'
+    assert seen[0].headers['Authorization'] == 'Bearer '+token
+
+
+def test_fulcra_auth_token_rejects_network_failure(collect_home, _in_memory_keyring, monkeypatch):
+    from collect_test_helpers import synthetic_account_token
+    from fulcra_collect import credentials
+    import httpx
+    def unavailable(request):
+        raise httpx.ConnectError('synthetic-private-network-detail')
+    auth_validation_transport(monkeypatch, unavailable)
+    client = _client(_build_test_daemon(collect_home))
+    response = client.post('/api/fulcra/auth/token', json={'token':synthetic_account_token()})
+    assert response.status_code == 409
+    assert 'synthetic-private-network-detail' not in response.text
+    assert credentials.get_user_secret('bearer-token') is None
 
 
 # ---------------------------------------------------------------------------
@@ -1854,8 +1833,8 @@ def test_delete_definition_leaves_other_plugins_state_alone(
 # ---------------------------------------------------------------------------
 # POST /api/definitions/{def_id}/restore — undo for the soft-delete above.
 # Fulcra's cancel_deletion endpoint un-tombstones the definition; plugin
-# bindings and quick-record favorites cleared by the delete are NOT
-# re-established (the response carries that caveat).
+# bindings cleared by the delete are NOT re-established (the response carries
+# that caveat). Both favorites stores remain untouched.
 # ---------------------------------------------------------------------------
 
 def _patch_fulcra_restore(monkeypatch, *, status_code: int, body: dict | None = None):
@@ -1904,7 +1883,7 @@ def test_restore_definition_happy_path_does_not_rebind(
     collect_home, _in_memory_keyring, monkeypatch,
 ):
     """A 2xx from Fulcra returns ok — and explicitly does NOT re-bind
-    plugin state or favorites that the earlier delete cleared."""
+    plugin state that the earlier delete cleared; favorites remain untouched."""
     import fulcra_collect.credentials as _creds_mod
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
@@ -2224,202 +2203,6 @@ def test_definitions_route_include_deleted_shows_tombstones(
 # ---------------------------------------------------------------------------
 
 
-def test_quick_record_definitions_requires_auth(collect_home):
-    """GET /api/quick-record/definitions requires the web Bearer token."""
-    daemon = _build_test_daemon(collect_home)
-    app = build_app(daemon)
-    from fastapi.testclient import TestClient
-    client = TestClient(app)  # no auth header
-    r = client.get("/api/quick-record/definitions")
-    assert r.status_code == 401
-
-
-def test_quick_record_definitions_unauthenticated_fulcra(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Route returns ok=False with empty list when no Fulcra bearer token."""
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.get("/api/quick-record/definitions")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is False
-    assert body["definitions"] == []
-
-
-def test_quick_record_definitions_returns_all_types(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Route returns ALL non-deleted defs (Sprint B widened this from
-    Moment-only); menubar groups by annotation_type client-side."""
-    import fulcra_collect.credentials as _creds_mod
-    _creds_mod.set_user_secret("bearer-token", "valid-token")
-
-    fake_defs = [
-        {"id": "m1", "name": "Coffee", "annotation_type": "moment",
-         "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
-        {"id": "dur1", "name": "Work", "annotation_type": "duration",
-         "deleted_at": None, "created_at": "2026-05-09T00:00:00Z"},
-    ]
-    install_fake_httpx(monkeypatch, get_data=fake_defs)
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.get("/api/quick-record/definitions")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    # Both annotation types come back — duration is no longer filtered.
-    types = {d["annotation_type"] for d in body["definitions"]}
-    assert types == {"moment", "duration"}
-
-
-def test_record_annotation_requires_auth(collect_home):
-    """POST /api/annotations requires the web Bearer token."""
-    daemon = _build_test_daemon(collect_home)
-    app = build_app(daemon)
-    from fastapi.testclient import TestClient
-    c = TestClient(app)
-    r = c.post("/api/annotations", json={"definition_id": "abc"})
-    assert r.status_code == 401
-
-
-def test_record_annotation_unauthenticated_fulcra(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Route returns ok=False when no Fulcra bearer token is stored."""
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/annotations", json={"definition_id": "def-abc"})
-    assert r.status_code == 200
-    assert r.json()["ok"] is False
-
-
-def test_record_annotation_happy_path(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Route calls Fulcra POST and returns ok=True. Activity buffer is updated.
-
-    The daemon's `_record_annotation` warms the quick-record cache via the
-    same GET /user/v1alpha1/annotation it uses for the popover list — so the
-    fake httpx layer needs to return a matching def for the lookup to
-    succeed. Without this, every record_annotation call short-circuits
-    with 'unknown definition id ...'.
-    """
-    import fulcra_collect.credentials as _creds_mod
-    _creds_mod.set_user_secret("bearer-token", "valid-token")
-    install_fake_httpx(monkeypatch, get_data=[
-        {"id": "def-abcdef12", "name": "Test Moment",
-         "annotation_type": "moment", "tags": ["t-1"],
-         "created_at": "2026-05-25T00:00:00Z", "deleted_at": None},
-    ])
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/annotations",
-                    json={"definition_id": "def-abcdef12", "comment": None})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    # Sprint B: source_id and name come back so the menubar can stash
-    # them in its "Recently recorded" list for undo.
-    assert "source_id" in body
-    assert body["name"] == "Test Moment"
-    # Activity buffer has one success entry
-    entries = daemon.activity.recent(limit=1)
-    assert entries[0].ok is True
-    assert entries[0].plugin_id == "quick-record"
-
-
-def test_record_annotation_api_failure_returns_error(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Route returns ok=False and surfaces activity entry on Fulcra API failure."""
-    import fulcra_collect.credentials as _creds_mod
-    _creds_mod.set_user_secret("bearer-token", "valid-token")
-    # Cache-warm GET succeeds (returns a matching def) so the test reaches
-    # the POST path; the POST raises and we assert on that error surface.
-    install_fake_httpx(monkeypatch,
-                            get_data=[{"id": "def-xyz", "name": "X",
-                                       "annotation_type": "moment",
-                                       "tags": [], "deleted_at": None,
-                                       "created_at": "2026-05-25T00:00:00Z"}],
-                            post_exc=RuntimeError("connection refused"))
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/annotations", json={"definition_id": "def-xyz"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is False
-    assert "Fulcra" in body["error"]
-    entries = daemon.activity.recent(limit=1)
-    assert entries[0].ok is False
-
-
-def test_record_annotation_missing_definition_id_rejected(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Route returns 422 when definition_id is missing from the body."""
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    # definition_id is a required field; omitting it gives a validation error
-    r = client.post("/api/annotations", json={})
-    assert r.status_code == 422
-
-
-def test_record_annotation_duration_round_trips(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Sprint B: POST /api/annotations with start_time + end_time writes
-    a Duration record through the daemon."""
-    import fulcra_collect.credentials as _creds_mod
-    _creds_mod.set_user_secret("bearer-token", "valid-token")
-    install_fake_httpx(monkeypatch, get_data=[
-        {"id": "def-d1", "name": "Movie", "annotation_type": "duration",
-         "tags": [], "deleted_at": None,
-         "created_at": "2026-05-25T00:00:00Z"},
-    ])
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/annotations", json={
-        "definition_id": "def-d1",
-        "start_time": "2026-05-26T20:00:00Z",
-        "end_time": "2026-05-26T22:14:00Z",
-    })
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert "source_id" in body
-
-
-def test_delete_annotation_requires_auth(collect_home):
-    """DELETE /api/annotations/{source_id} requires the web Bearer token."""
-    daemon = _build_test_daemon(collect_home)
-    app = build_app(daemon)
-    from fastapi.testclient import TestClient
-    c = TestClient(app)
-    r = c.delete("/api/annotations/src-x")
-    assert r.status_code == 401
-
-
-def test_delete_annotation_writes_tombstone(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """DELETE /api/annotations/{source_id} posts a sentinel annotation
-    so the user has a paper trail. Soft-delete only — see daemon
-    docstring."""
-    import fulcra_collect.credentials as _creds_mod
-    _creds_mod.set_user_secret("bearer-token", "valid-token")
-    install_fake_httpx(monkeypatch, get_data=[])
-
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.delete(
-        "/api/annotations/"
-        "com.fulcradynamics.fulcra-collect.quick-record.abc123"
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["tombstone_source_id"].startswith(
-        "com.fulcradynamics.fulcra-collect.quick-record.undo."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Browser-extension routes were retired (refactor/collect-attention-pointer).
 #
@@ -2672,93 +2455,93 @@ def test_docs_route_requires_auth(collect_home):
 # Task #64 — quick-record favorites HTTP routes
 # ---------------------------------------------------------------------------
 
-def test_quick_record_favorites_requires_auth(collect_home):
-    """Both GET and PUT on /api/quick-record/favorites require the web
-    Bearer token — same shape as every other /api/* route."""
-    daemon = _build_test_daemon(collect_home)
-    app = build_app(daemon)
-    c = TestClient(app)
-    assert c.get("/api/quick-record/favorites").status_code == 401
-    assert c.put(
-        "/api/quick-record/favorites", json={"favorites": []},
-    ).status_code == 401
 
+@pytest.mark.parametrize("surface", ["http", "uds"])
+def test_delete_definition_preserves_unscoped_favorites_and_v1_state(
+        collect_home, _in_memory_keyring, monkeypatch, surface):
+    """Metadata deletion must not adopt/prune legacy pins or alter v1 state."""
+    import hashlib
+    import sqlite3
+    from types import SimpleNamespace
 
-def test_quick_record_favorites_get_returns_empty_initially(collect_home):
-    """A fresh install has no favorites file → the GET succeeds with []."""
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.get("/api/quick-record/favorites")
-    assert r.status_code == 200
-    assert r.json() == {"ok": True, "favorites": []}
-
-
-def test_quick_record_favorites_put_then_get_round_trips(collect_home):
-    """PUT persists the list; the next GET reflects it."""
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.put(
-        "/api/quick-record/favorites",
-        json={"favorites": ["def-z", "def-a"]},
-    )
-    assert r.status_code == 200
-    assert r.json() == {"ok": True}
-    r = client.get("/api/quick-record/favorites")
-    # Daemon returns favorites sorted for stability.
-    assert r.json() == {"ok": True, "favorites": ["def-a", "def-z"]}
-
-
-def test_quick_record_favorites_put_persists_to_file(collect_home):
-    """The PUT actually hits disk under the test's FULCRA_COLLECT_HOME —
-    proves the daemon isn't keeping the list in memory only."""
-    daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    client.put(
-        "/api/quick-record/favorites",
-        json={"favorites": ["def-1"]},
-    )
-    from fulcra_collect import quick_record_favorites as _favs
-    assert _favs.load() == {"def-1"}
-
-
-def test_delete_definition_prunes_from_favorites(
-        collect_home, _in_memory_keyring, monkeypatch):
-    """Soft-deleting a def must also drop it from favorites — otherwise
-    the favorites file would accumulate orphan UUIDs the menubar would
-    keep trying to surface but Fulcra would no longer return."""
-    import fulcra_collect.credentials as _creds_mod
-    _creds_mod.set_user_secret("bearer-token", "valid-token")
-
-    # Patch httpx INSIDE web.py (not daemon.py) — the delete route uses
-    # the web module's own httpx client factory, not the daemon's.
+    import httpx
+    import fulcra_collect.credentials as credentials
     import fulcra_collect.web as web_mod
+    from fulcra_collect.quick_record_choices import QuickRecordChoices
+    from fulcra_collect.quick_record_state import QuickRecordState
+    from fulcra_collect.record_actions import ActionJournal
+    from fulcra_common.v1 import V1DataClient
 
-    class _Resp204:
-        status_code = 204
-        def raise_for_status(self): pass
-        def json(self): return {}
+    account = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    other_account = "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+    track = "00000000-0000-0000-0000-000000000021"
+    hidden = "00000000-0000-0000-0000-000000000022"
+    destination = "Event/11111111-2222-4333-8444-555555555555"
+    legacy = collect_home / "quick_record_favorites.json"
+    legacy_bytes = ('{ "version": 1, "favorites": ["' + track + '", "' + hidden
+                    + '"], "unmapped": true }\n').encode()
+    legacy.write_bytes(legacy_bytes)
 
-    class _WebClient:
-        def __init__(self, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def delete(self, *a, **kw): return _Resp204()
+    journal = ActionJournal(collect_home / "quick-record-actions.sqlite")
+    pins = QuickRecordState(journal)
+    pins.change_favorites(account, expected_revision=0, add=[track], remove=[])
+    pins.change_favorites(account, expected_revision=1, add=[hidden], remove=[])
+    pins.change_favorites(other_account, expected_revision=0, add=[track], remove=[])
+    QuickRecordChoices(SimpleNamespace(), journal)
+    template = json.dumps({"version": 1, "track_id": track, "kind": "moment",
+                           "initial_name": "Synthetic track", "legacy_definition_id": track},
+                          sort_keys=True)
+    with journal._db(write=True) as db:
+        db.execute("INSERT INTO quick_record_choice_bindings VALUES (?,?,?,?,?)",
+                   (account, track, template, hashlib.sha256(template.encode()).hexdigest(), destination))
+    cfg = _config.load()
+    cfg.update_plugin_settings("v1-source", {"v1_destination_ids": {"watched": destination}})
+    _config.save(cfg)
+    config_bytes = (collect_home / "config.toml").read_bytes()
 
-    monkeypatch.setattr(web_mod, "httpx",
-                        type("httpx", (), {"Client": _WebClient,
-                                            "HTTPStatusError": Exception,
-                                            "ConnectError": Exception,
-                                            "ConnectTimeout": Exception,
-                                            "TimeoutException": Exception,
-                                            "HTTPError": Exception})())
+    def saved_interactive_state():
+        with sqlite3.connect(journal.path) as db:
+            return (db.execute("SELECT * FROM quick_record_preferences ORDER BY account_id").fetchall(),
+                    db.execute("SELECT * FROM quick_record_choice_bindings ORDER BY account_id,track_id").fetchall())
 
-    from fulcra_collect import quick_record_favorites as _favs
-    _favs.save({"def-pinned", "def-other"})
+    interactive_before = saved_interactive_state()
+    calls = []
 
+    def metadata_delete(request):
+        calls.append((request.method, request.url.path))
+        assert (request.method, request.url.path) == ("DELETE", "/user/v1alpha1/annotation/" + track)
+        return httpx.Response(204)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(web_mod.httpx, "Client", lambda **kwargs: real_client(
+        **kwargs, transport=httpx.MockTransport(metadata_delete)))
+
+    def no_record_effect(*args, **kwargs):
+        pytest.fail("legacy metadata deletion attempted a record mutation")
+
+    monkeypatch.setattr(V1DataClient, "ingest", no_record_effect)
+    monkeypatch.setattr(V1DataClient, "delete_records", no_record_effect)
+    from fulcra_collect import macos_keychain
+
+    def no_native_keychain(*args, **kwargs):
+        pytest.fail("native Keychain access is forbidden in this regression")
+
+    monkeypatch.setattr(macos_keychain, "get_password", no_native_keychain)
+    monkeypatch.setattr(macos_keychain, "_isolated_request", no_native_keychain)
+    monkeypatch.setattr(credentials, "_uses_macos_keychain", lambda: False)
+    credentials.set_user_secret("bearer-token", "valid-token")
     daemon = _build_test_daemon(collect_home)
-    client = _client(daemon)
-    r = client.delete("/api/definitions/def-pinned")
-    assert r.status_code == 200
-
-    # def-pinned was removed from favorites; def-other is untouched.
-    assert _favs.load() == {"def-other"}
+    if surface == "http":
+        response = _client(daemon).delete("/api/definitions/" + track)
+        assert response.status_code == 200, response.text
+        result = response.json()
+    else:
+        result = daemon.handle_request({"cmd": "delete_definition", "def_id": track})
+    assert result["ok"] is True
+    assert calls == [("DELETE", "/user/v1alpha1/annotation/" + track)]
+    assert legacy.read_bytes() == legacy_bytes
+    assert saved_interactive_state() == interactive_before
+    assert pins.favorites(account) == {"revision": 2, "favorites": [track, hidden]}
+    assert pins.favorites(other_account) == {"revision": 1, "favorites": [track]}
+    assert (collect_home / "config.toml").read_bytes() == config_bytes
+    assert _config.load().plugin_settings["v1-source"]["v1_destination_ids"] == {"watched": destination}

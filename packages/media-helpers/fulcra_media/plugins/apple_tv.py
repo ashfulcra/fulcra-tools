@@ -7,15 +7,14 @@ from pathlib import Path
 from fulcra_collect.plugin import Permission, Plugin, RunContext, SetupStep
 
 from ..apple_tv_health import apple_tv_health_check
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import apple_tv as apple_tv_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
-from ._common import DURATION_SPEC, ensure_media_def, import_events
+from ._common import DURATION_SPEC, import_events
 
 
-# Same structure as NETFLIX_WATCHED_SPEC and the other "Watched" plugins.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 APPLE_TV_WATCHED_SPEC: dict = DURATION_SPEC
 
 _FULL_DISK_ACCESS_PERMISSION = Permission(
@@ -29,6 +28,7 @@ _FULL_DISK_ACCESS_PERMISSION = Permission(
 )
 
 
+@media_run
 def _run_apple_tv(ctx: RunContext) -> None:
     """Scan the TV app's UTS cache and import watch events.
 
@@ -44,15 +44,6 @@ def _run_apple_tv(ctx: RunContext) -> None:
     """
     raw_dir = ctx.config.get("cache_dir")
     cache_dir = Path(raw_dir) if raw_dir else apple_tv_importer.DEFAULT_CACHE_DIR
-
-    # Ensure the "Watched" annotation definition is known before importing.
-    # On a fresh install the media state file may have no
-    # watched_definition_id; the shared resolver adopts an existing
-    # "Watched" definition rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="watched_definition_id",
-                     spec=APPLE_TV_WATCHED_SPEC, canonical_name="Watched",
-                     state_save=_state_save)
 
     try:
         events = apple_tv_importer.parse_cache(cache_dir)
@@ -82,6 +73,8 @@ PLUGIN = Plugin(
     kind="scheduled",
     collect_mode="live_polled",
     run=_run_apple_tv,
+    record_data_types=media_destinations("watched"),
+    record_pending=media_pending,
     description=(
         "Captures what you watch in the Apple TV app by reading the app's "
         "local Watch Now cache — no sign-in or export needed; requires a "
@@ -133,7 +126,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your watches?",
             body_md=(
-                "We can write to your existing 'Watched' annotation or "
+                "We can write to your existing 'Watched' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

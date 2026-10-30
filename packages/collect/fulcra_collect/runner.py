@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+import selectors
 import signal
 import subprocess
-import threading
+import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -60,45 +62,70 @@ class _CapturedOutput:
 def _bounded_communicate(
     proc: subprocess.Popen, *, timeout_s: float,
 ) -> _CapturedOutput:
-    """Drain both worker pipes concurrently into bounded tail buffers."""
+    """Bound child exit and both EOFs by one deadline for this owned run.
+
+    ``run`` starts the worker in its own POSIX session. Its process group
+    remains the cleanup target even if the leader exits before a pipe-owning
+    descendant. Nonblocking reads avoid leaving reader threads behind.
+    """
+    deadline = time.monotonic() + timeout_s
     stdout_capture = _TailCapture(MAX_STDOUT_CAPTURE_BYTES)
     stderr_capture = _TailCapture(MAX_STDERR_CAPTURE_BYTES)
-
-    def drain(stream, capture: _TailCapture) -> None:
-        try:
-            while True:
-                chunk = stream.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    return
-                capture.append(chunk)
-        finally:
-            stream.close()
-
-    if proc.stdout is None or proc.stderr is None:
-        raise ValueError("worker process must expose stdout and stderr pipes")
-    threads = (
-        threading.Thread(target=drain, args=(proc.stdout, stdout_capture)),
-        threading.Thread(target=drain, args=(proc.stderr, stderr_capture)),
-    )
-    for thread in threads:
-        thread.start()
-
     timed_out = False
+    completed = False
     try:
-        proc.wait(timeout=timeout_s)
+        if proc.stdout is None or proc.stderr is None:
+            raise ValueError("worker process must expose stdout and stderr pipes")
+        with selectors.DefaultSelector() as selector:
+            for stream, capture in (
+                (proc.stdout, stdout_capture), (proc.stderr, stderr_capture),
+            ):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, capture)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(getattr(proc, "args", "worker"), timeout_s)
+                for key, _ in selector.select(remaining):
+                    try:
+                        chunk = os.read(key.fd, _READ_CHUNK_BYTES)
+                    except BlockingIOError:
+                        continue
+                    if chunk:
+                        key.data.append(chunk)
+                    else:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+            # EOF is independent of child exit: a worker can close both
+            # streams and keep running. Spend only the remaining run budget.
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(getattr(proc, "args", "worker"), timeout_s)
+        completed = True
     except subprocess.TimeoutExpired:
         timed_out = True
-        if os.name == "posix":
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:  # pragma: no cover - Collect's shipped app is macOS
-            proc.kill()
-        proc.wait()
     finally:
-        for thread in threads:
-            thread.join()
+        if not completed:
+            # This also runs for pipe/setup/wait failures and cancellation.
+            # Cleanup must not replace the original exception or timeout.
+            try:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:  # pragma: no cover - Collect's shipped app is macOS
+                    proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=.5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
+            except OSError:
+                if completed:
+                    raise
 
     captured = _CapturedOutput(
         stdout=bytes(stdout_capture.data),
@@ -141,6 +168,9 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     If `daemon` is given, annotation events emitted by the worker are
     forwarded to ``daemon.activity`` so the web UI's dashboard "Recently"
     feed reflects real writes to Fulcra."""
+    capture_scope = getattr(daemon, '_capture_worker_scope', None)
+    job_scope = capture_scope(plugin_id) if capture_scope is not None else None
+    credential_error = None
     outcome = "error"
     error: str | None = "worker emitted no result"
     watermark: str | None = None
@@ -193,6 +223,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                 watermark = event.get("watermark")
                 definition_id = event.get("definition_id")
                 definition_validated_at = event.get("definition_validated_at")
+                credential_error = event.get("credential_error") if outcome == "error" else None
             elif event_type == "annotation":
                 # Surface this in the daemon's activity buffer so the web UI's
                 # dashboard "Recently" feed shows the receipt.
@@ -235,59 +266,64 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
             f"worker launch failed: {type(exc).__name__}: {exc}"
         )
 
-    st = state.load(plugin_id)
-    # Persist values the plugin advanced in the worker process. The runner
-    # is the single writer of plugin state in the core process, so both
-    # watermark and definition_id cross the worker boundary via the result
-    # event.
-    if watermark is not None:
-        st.watermark = watermark
-    if definition_id is not None:
-        st.definition_id = definition_id
-    if definition_validated_at is not None:
-        st.definition_validated_at = definition_validated_at
-    st.record_finish(outcome=outcome, when=now, error=error)
-    # Freshness is recorded from what the run PRODUCED, never from its outcome.
-    # A run that exits "done" having accepted nothing must leave last_yield_at
-    # untouched — that untouched watermark is the entire signal.
-    if accepted_count:
-        st.record_yield(when=now, observed_at=newest_observed_at)
-    state.save(st)
+    result_scope = (daemon._worker_result_scope(plugin_id, job_scope, credential_error)
+                    if capture_scope is not None else nullcontext(True))
+    with result_scope as current:
+        if not current:
+            return outcome  # Old/unknown authority cannot rewrite the new account's status.
+        st = state.load(plugin_id)
+        # Persist values the plugin advanced in the worker process. The runner
+        # is the single writer of plugin state in the core process, so both
+        # watermark and definition_id cross the worker boundary via the result
+        # event.
+        if watermark is not None:
+            st.watermark = watermark
+        if definition_id is not None:
+            st.definition_id = definition_id
+        if definition_validated_at is not None:
+            st.definition_validated_at = definition_validated_at
+        st.record_finish(outcome=outcome, when=now, error=error)
+        # Freshness is recorded from what the run PRODUCED, never from its outcome.
+        # A run that exits "done" having accepted nothing must leave last_yield_at
+        # untouched — that untouched watermark is the entire signal.
+        if accepted_count:
+            st.record_yield(when=now, observed_at=newest_observed_at)
+        state.save(st)
 
-    # Add a run-summary entry to the activity feed so failures are visible
-    # in the dashboard without users having to read state files on disk
-    # (the gap that hid the Last.fm KeyError + the quick-record dead URL
-    # bugs during the 2026-05-25 QA pass). The worker already scrubbed
-    # secrets out of `error` before serialising it; we just truncate so
-    # the feed stays readable.
-    if daemon is not None:
-        if outcome == "done":
-            # Skip the "Ran, no new data" entry when the worker already
-            # told the feed about specific writes — otherwise every
-            # successful run with N writes ends up with N+1 entries.
-            if annotation_count == 0:
+        # Add a run-summary entry to the activity feed so failures are visible
+        # in the dashboard without users having to read state files on disk
+        # (the gap that hid the Last.fm KeyError + the quick-record dead URL
+        # bugs during the 2026-05-25 QA pass). The worker already scrubbed
+        # secrets out of `error` before serialising it; we just truncate so
+        # the feed stays readable.
+        if daemon is not None:
+            if outcome == "done":
+                # Skip the "Ran, no new data" entry when the worker already
+                # told the feed about specific writes — otherwise every
+                # successful run with N writes ends up with N+1 entries.
+                if annotation_count == 0:
+                    daemon.activity.add(
+                        plugin_id=plugin_id,
+                        summary="Ran successfully — no new data.",
+                        ok=True,
+                    )
+            else:
+                # outcome is "error" or "timeout". Surface both.
+                short_err = (error or "Plugin failed.").strip()
+                # Keep summary on one screen line in the dashboard. The full
+                # traceback already lives in state/<id>.json.last_error.
+                if len(short_err) > 200:
+                    short_err = short_err[:200].rstrip() + "…"
+                label = "timed out" if outcome == "timeout" else "failed"
+                # First line of the (possibly multi-line) error makes the
+                # most informative one-liner. Plugins emit "ExceptionName: msg"
+                # as the first line of the traceback per worker._scrub_secrets.
+                first_line = short_err.splitlines()[0] if short_err else ""
                 daemon.activity.add(
                     plugin_id=plugin_id,
-                    summary="Ran successfully — no new data.",
-                    ok=True,
+                    summary=f"Run {label}: {first_line}" if first_line
+                            else f"Run {label}.",
+                    ok=False,
                 )
-        else:
-            # outcome is "error" or "timeout". Surface both.
-            short_err = (error or "Plugin failed.").strip()
-            # Keep summary on one screen line in the dashboard. The full
-            # traceback already lives in state/<id>.json.last_error.
-            if len(short_err) > 200:
-                short_err = short_err[:200].rstrip() + "…"
-            label = "timed out" if outcome == "timeout" else "failed"
-            # First line of the (possibly multi-line) error makes the
-            # most informative one-liner. Plugins emit "ExceptionName: msg"
-            # as the first line of the traceback per worker._scrub_secrets.
-            first_line = short_err.splitlines()[0] if short_err else ""
-            daemon.activity.add(
-                plugin_id=plugin_id,
-                summary=f"Run {label}: {first_line}" if first_line
-                        else f"Run {label}.",
-                ok=False,
-            )
 
     return outcome

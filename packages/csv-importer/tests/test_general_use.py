@@ -1,10 +1,8 @@
-"""Tests for non-media use cases: instant annotations, measurement values,
-built-in data types."""
-import json
+"""Pure parser/value contracts and explicit retirement of legacy CSV writes."""
+
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 import pytest
 
 from fulcra_csv import ColumnMap, parse_csv
@@ -15,6 +13,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 # ---------- value coercion ----------
+
 
 def test_coerce_value_float():
     assert coerce_value("82.4", "float") == 82.4
@@ -44,9 +43,16 @@ def test_coerce_value_unknown_type_raises():
 
 # ---------- instant annotations ----------
 
+
 def test_parse_instant_has_no_end_time():
-    cm = ColumnMap(timestamp="timestamp", title=None, note="note", value="mood_score",
-                   value_type="int", tag="tags")
+    cm = ColumnMap(
+        timestamp="timestamp",
+        title=None,
+        note="note",
+        value="mood_score",
+        value_type="int",
+        tag="tags",
+    )
     events = list(parse_csv(FIXTURES / "mood.csv", column_map=cm, annotation_type=INSTANT))
     assert len(events) == 3
     e = events[0]
@@ -71,6 +77,7 @@ def test_duration_event_rejects_missing_end_time():
 
 # ---------- value-only rows (no title/note) ----------
 
+
 def test_value_only_row_synthesizes_note_from_value():
     """A weight CSV has only timestamp + kg — no text column. The parser
     synthesizes a note from str(value) so events still pass GenericEvent
@@ -82,90 +89,44 @@ def test_value_only_row_synthesizes_note_from_value():
     assert events[0].note == "82.4"
 
 
-# ---------- built-in type targeting ----------
-
-def _mock_transport(captured: list) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/data/v1alpha1/event/BodyMass":
-            return httpx.Response(200, json=[])
-        if request.url.path == "/ingest/v1/record/batch":
-            captured.append(request.read())
-            return httpx.Response(204)
-        if request.url.path.startswith("/user/v1alpha1/tag"):
-            return httpx.Response(200, json={"id": "tag-id"})
-        return httpx.Response(404)
-    return httpx.MockTransport(handler)
+# ---------- retired legacy writer boundaries ----------
 
 
-def test_run_import_to_builtin_type_omits_annotation_def_source(monkeypatch):
-    """Targeting a built-in type (no --definition-id) must not append the
-    annotation-def source-id, so dedup works against native records."""
-    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-token")
-    captured: list[bytes] = []
-    client = FulcraClient(transport=_mock_transport(captured))
-    events = [GenericEvent(
-        start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        note="82.4",
-        title=None,
-        source_id="prefix.weight-row-1",
-        annotation_type=INSTANT,
-        value=82.4,
-        data_fields={"unit": "kg"},
-    )]
-    client.run_import(events, data_type="BodyMass")
-    assert len(captured) == 1
-    line = json.loads(captured[0])
-    # source array contains only the row source_id — no
-    # com.fulcradynamics.annotation.<uuid> entry
-    assert line["metadata"]["source"] == ["prefix.weight-row-1"]
-    assert line["metadata"]["data_type"] == "BodyMass"
-    payload = json.loads(line["data"])
-    assert payload["value"] == 82.4
-    assert payload["unit"] == "kg"
-    # No note (None text) is fine on built-in types
-    assert payload.get("note") == "82.4"
-    assert "title" not in payload
-    # Instant events carry recorded_at as a bare scalar datetime string.
-    # Fulcra's recorded_at field is a union — a scalar datetime OR a
-    # {start_time, end_time} range — and an instant has no range, so a
-    # {start_time}-only object matches neither arm and is rejected.
-    assert line["metadata"]["recorded_at"] == "2026-01-01T00:00:00Z"
+@pytest.mark.parametrize("method", ["_build_record", "ingest_batch", "run_import"])
+@pytest.mark.parametrize("events", [[], None])
+def test_legacy_csv_writer_refuses_before_auth_or_input(monkeypatch, method, events):
+    """Native equivalents live in test_standalone_v1, using real Click/runtime.
 
+    Old built-in/definition-wrapped writes no longer authorize any record path.
+    Even empty input must fail before credentials or source materialization.
+    """
+    client = FulcraClient()
+    monkeypatch.setattr(client, "get_token", lambda: pytest.fail("auth before retirement refusal"))
 
-def test_run_import_to_user_def_keeps_annotation_def_source(monkeypatch):
-    """When --definition-id is provided, the source array has both entries."""
-    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-token")
-    captured: list[bytes] = []
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.startswith("/data/v1alpha1/event/"):
-            return httpx.Response(200, json=[])
-        if request.url.path == "/ingest/v1/record/batch":
-            captured.append(request.read())
-            return httpx.Response(204)
-        return httpx.Response(200, json={"id": "x"})
-    client = FulcraClient(transport=httpx.MockTransport(handler))
-    events = [GenericEvent(
-        start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        end_time=datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
-        note="hello",
-        title="hello",
-        source_id="prefix.row-1",
-        annotation_type=DURATION,
-    )]
-    client.run_import(events, definition_id="abc-123")
-    line = json.loads(captured[0])
-    assert line["metadata"]["source"] == [
-        "prefix.row-1",
-        "com.fulcradynamics.annotation.abc-123",
-    ]
+    class Unreadable:
+        def __iter__(self):
+            pytest.fail("input before retirement refusal")
+
+    with pytest.raises(RuntimeError, match="Legacy CSV annotation writer retired"):
+        getattr(client, method)(
+            Unreadable() if events is None else events,
+            definition_id="historical-selection",
+            data_type="BodyMass",
+            dry_run=True,
+        )
 
 
 # ---------- data_fields lift into top-level payload ----------
 
+
 def test_data_fields_land_in_data_payload():
     cm = ColumnMap(
-        timestamp="timestamp", title=None, note="note", value="mood_score",
-        value_type="int", tag="tags",
+        timestamp="timestamp",
+        title=None,
+        note="note",
+        value="mood_score",
+        value_type="int",
+        tag="tags",
         data_fields=(("tags", "primary_tag"),),
     )
     events = list(parse_csv(FIXTURES / "mood.csv", column_map=cm, annotation_type=INSTANT))
@@ -173,6 +134,7 @@ def test_data_fields_land_in_data_payload():
 
 
 # ---------- dedup with same-content-different-time ----------
+
 
 def test_repeat_value_at_different_times_keeps_two_events():
     cm = ColumnMap(timestamp="date", title=None, value="kg")
@@ -182,6 +144,7 @@ def test_repeat_value_at_different_times_keeps_two_events():
 
 
 # ---------- annotation_type validation ----------
+
 
 def test_parse_csv_rejects_unknown_annotation_type():
     with pytest.raises(ValueError, match="annotation_type must be"):

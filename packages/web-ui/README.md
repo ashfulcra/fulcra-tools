@@ -12,15 +12,49 @@ then use **Sign in with Fulcra** in the dashboard. You do not need to paste a
 token for normal setup. [Testing and source setup](../../docs/TESTING.md) are
 for contributors.
 
+Onboarding and Settings reconnect share the [browser-link sign-in flow](dist/static/browser-signin.js).
+Both show the verification code while awaiting explicit protocol 2 completion.
+The shared helper polls bounded pending replies using one captured attempt UUID
+and device code; it never exposes the device code in component state. Token-mode
+switching and reconnect cancellation fence late UI completions and cancel that
+captured server attempt. Unsupported/malformed replies stay errors. New sign-in
+and renewal use the [Collect-owned SDK actor](../collect/fulcra_collect/owned_auth.py),
+without CLI credential adoption; the retired blocking endpoint refuses effects.
+
 The dashboard shows installed plugins, setup steps, run status, and settings.
 [Plugin availability](../../docs/collect.md#plugin-status) depends on the release
 or Python environment running the daemon. Apple Notes setup verifies Full Disk
 Access and requires **Enable & start sync**, or **Enable & run preview** in
 preview mode. Navigating or skipping steps does not start a Notes import.
 
+Settings separates [legacy definition management](../collect/README.md#quick-record-protocol-2-development)
+from v1 recording and native Undo. The [favorites UI](dist/static/settings.js)
+uses protocol2; its contract also covers preserved legacy favorites and existing
+track choices.
+
 Tech: vanilla HTML5 + CSS3 + JavaScript, with pinned copies of Alpine.js,
 Tailwind CSS, Marked, and Lit 3 under `dist/static/vendor/`. No build step and
 no runtime CDN dependency. The matching license texts ship beside the bundles.
+
+## Saved credential availability (development branch)
+
+Settings starts with loading/unknown access and shows **Saved sign-in readable**
+only after the daemon's fresh quiet local check. This is not server, provider,
+worker or automatic-refresh verification. Missing, pending and unavailable
+states preserve saved items. The explicit **Allow Keychain access** action uses
+the closed shared sign-in scope and requires quiet confirmation; a one-time
+allowance can remain unverified. **Check access again (quiet)** never requests UI.
+Plugin Configure remains scoped to its declared key. Neither button starts a run.
+
+Dashboard recovery links consume only the daemon's current structured scope:
+source credential hydration goes to Configure; Collect bearer access goes to
+Fulcra Settings. Missing/stale/post-restart scope has no inferred recovery link,
+even if historical error text names Keychain. See the [backend response contract](../collect/README.md#current-availability-and-scoped-recovery-development-branch).
+
+`dist/` is the served editable source in this package; there is no separate
+source-generation or build command. Test the edited assets with the documented
+Node command below, and inspect the source/dist diff. Browser/native acceptance
+and signed-app recovery remain separate from those source tests.
 
 ## Local development
 
@@ -93,6 +127,17 @@ blocks inline in `index.html` — duplicated at two render sites
 
 After #68 each kind is a Lit 3 web component, registered into a window
 registry, and routed by a `<fulcra-step>` dispatcher.
+
+Next shows **Saving…** and stays disabled while an asynchronous step saves.
+Repeated clicks share that one operation. Back, Skip and Leave release Next on
+the new step and invalidate the old operation’s UI continuation, so a late
+response cannot skip another step or proceed from a departed confirmation to
+Enable or Run. An already-sent service Enable still settles its UI state. Requests already sent may finish;
+saved settings are retained and leaving setup does not stop an existing sync.
+Data-type choices and new-name editing stay fixed while their save is pending.
+Both onboarding and Configure use these bindings. The
+[destination-navigation tests](tests/wizard-v1-destinations.test.cjs) exercise
+delayed saves, retries, skipped steps and cancellation between start requests.
 
 ### Explicit native permission consent
 

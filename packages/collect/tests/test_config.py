@@ -10,6 +10,56 @@ import pytest
 from fulcra_collect import config
 
 
+def test_guarded_binding_rotates_epoch_and_keeps_unrelated_settings(collect_home):
+    cfg = config.load()
+    cfg.enable("synthetic")
+    cfg.update_plugin_settings("synthetic", {"source": "original"})
+    config.save(cfg)
+    epoch = cfg.plugin_epochs["synthetic"]
+    saved = config.update_plugin_settings_if_current("synthetic", expected_epoch=epoch,
+        expected_settings={"source": "original"}, values={"v1_destination_ids": {"watched": "synthetic"}},
+        validate=lambda: None)
+    assert saved.plugin_epochs["synthetic"] != epoch
+    assert saved.plugin_settings["synthetic"]["source"] == "original"
+    assert saved.enabled == {"synthetic"}
+
+
+@pytest.mark.parametrize("change", ["settings", "disable", "account_gate", "validation"])
+def test_guarded_binding_rejects_changed_consent_without_overwriting_state(collect_home, change):
+    cfg = config.load()
+    cfg.enable("synthetic")
+    cfg.update_plugin_settings("synthetic", {"source": "original"})
+    config.save(cfg)
+    epoch = cfg.plugin_epochs["synthetic"]
+    if change == "settings":
+        cfg.update_plugin_settings("synthetic", {"source": "changed"})
+        config.save(cfg)
+    elif change == "disable":
+        cfg.disable("synthetic")
+        config.save(cfg)
+    elif change == "account_gate":
+        config._persist_account_transition(config._config_path(), True)
+    before = config._config_path().read_bytes()
+    def validate():
+        if change == "validation":
+            raise RuntimeError("captured account changed")
+    with pytest.raises(RuntimeError):
+        config.update_plugin_settings_if_current("synthetic", expected_epoch=epoch,
+            expected_settings={"source": "original"}, values={"v1_destination_ids": {"watched": "new"}},
+            validate=validate)
+    assert config._config_path().read_bytes() == before
+
+
+def test_boolean_number_setting_change_revokes_epoch_even_when_python_values_compare_equal(collect_home):
+    cfg = config.load()
+    cfg.update_plugin_settings("synthetic", {"selected": False})
+    config.save(cfg)
+    old_epoch = cfg.plugin_epochs["synthetic"]
+    cfg.update_plugin_settings("synthetic", {"selected": 0})
+    config.save(cfg)
+    assert cfg.plugin_epochs["synthetic"] != old_epoch
+
+
 def test_stale_disjoint_plugin_saves_merge(collect_home):
     alpha, beta = config.load(), config.load()
     alpha.enable('alpha')

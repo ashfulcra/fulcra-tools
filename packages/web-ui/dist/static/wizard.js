@@ -133,6 +133,9 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     healthError: "",
     // Error message for current step
     stepError: "",
+    _nextPendingEpoch: null,
+    _nextEpoch: 0,
+    get nextPending() { return this._nextPendingEpoch === this._nextEpoch; },
     // Whether next is allowed (gated on some steps)
     nextBlocked: false,
     // Browser extension confirmed?
@@ -140,6 +143,11 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // Definition picker state
     dpLoading: false,
     dpError: "",
+    get dpIsV1() { return this.plugin_contract.record_api_version === "v1"; },
+    dpV1Slot: null,
+    dpV1Name: "",
+    dpLegacyMapping: false,
+    _destinationEpoch: 0,
     dpDefinitions: [],        // compatible defs — annotation_type matches current step
     dpOtherDefinitions: [],   // defs present on the account but a different type
     dpShowOther: false,       // whether the "Other annotations" section is expanded
@@ -161,6 +169,9 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     //   • the input renders a "(currently set — leave blank to keep)" placeholder
     //   • _submitInputs skips overwriting with an empty string
     _credPresent: {},
+    _credStatus: {},
+    _credAccessBusy: false,
+    _credAccessError: "",
 
     // First-run state on the wizard's "done" step. User feedback 2026-05-26:
     // after completing setup, the user expected the plugin to actually run
@@ -173,6 +184,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     //   "error"   — last_outcome="error"/"timeout", surfaced as failure
     //   "slow"    — 10s elapsed without completion, told user to check dashboard
     firstRunStatus: "idle",
+    _firstRunPolling: false,
     firstRunSummary: "",          // optional message from activity feed
     firstRunPollTimer: null,
     _firstRunPriorLastRun: null,  // ISO string of last_run before we triggered
@@ -249,7 +261,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.current_permission_id,
           this.extensionConfirmed,
           this.firstRunStatus, this.firstRunSummary, this.firstRunTimelineUrl,
-          this.nextBlocked, this.stepError,
+          this.nextBlocked, this.nextPending, this.stepError,
           this.input_fields, this.settingOptions,
         ];
         // Notify every mounted dispatcher. We bubble through window so
@@ -283,18 +295,50 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         // 404 = plugin not yet configured; any other error is non-fatal.
         // Leave inputValues empty.
       }
+      await this._loadCredentialStatus();
+    },
+
+    async _loadCredentialStatus(current = () => true) {
       // Credentials — mark which keys are already set in the keychain.
       // The response shape is: {ok: bool, credentials: {key: "set"|"missing"}}
       try {
         const resp = await api(`/api/plugin/${this.plugin_id}/credentials`);
+        if (!current()) return;
         const credMap = (resp && resp.credentials) ? resp.credentials : {};
+        this._credStatus = {};
         this._credPresent = {};
+        for (const key of Object.keys(this.credsMap)) {
+          this._credStatus[key] = credMap[key] || "unavailable";
+        }
         for (const [key, status] of Object.entries(credMap)) {
           if (status === "set") this._credPresent[key] = true;
         }
       } catch (e) {
-        // 404 or transport error — leave _credPresent empty.
+        if (!current()) return;
+        // Transport failures keep access unverified, never missing.
         this._credPresent = {};
+        this._credStatus = Object.fromEntries(Object.keys(this.credsMap).map(key => [key, "unavailable"]));
+      }
+    },
+
+    async authorizeCredential(key) {
+      if (!Object.hasOwn(this.credsMap, key) || this._credAccessBusy) return;
+      const epoch = this._nextEpoch;
+      const current = () => epoch === this._nextEpoch;
+      this._credAccessBusy = true;
+      this._credAccessError = "";
+      try {
+        const result = await api(`/api/plugin/${this.plugin_id}/credential/${encodeURIComponent(key)}/authorize`, {method: "POST"});
+        if (!current()) return;
+        await this._loadCredentialStatus(current); // Quiet recheck, preserving unsaved settings.
+        if (!current()) return;
+        if (!result?.ok || !this._credPresent[key]) {
+          this._credAccessError = result?.error || "Access is still unavailable. Always Allow remembers access for this app.";
+        }
+      } catch (e) {
+        if (current()) this._credAccessError = "Keychain access could not be verified. Your saved key was kept.";
+      } finally {
+        if (current()) this._credAccessBusy = false;
       }
     },
 
@@ -452,7 +496,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       return "";
     },
 
-    async _saveSelectionsBeforeEnable() {
+    async _saveSelectionsBeforeEnable(current = () => true) {
       const selections = {};
       for (const field of Object.values(this.settingsMap)) {
         if (field.kind !== "multiselect") continue;
@@ -468,7 +512,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         });
         return true;
       } catch (error) {
-        this.stepError = `Failed to save list selections: ${error.message}`;
+        if (current()) this.stepError = `Failed to save list selections: ${error.message}`;
         return false;
       }
     },
@@ -502,21 +546,39 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     async next() {
+      if (this.nextPending) return;
+      const epoch = this._nextEpoch;
+      this._nextPendingEpoch = epoch;
+      try {
+        await this._next(epoch);
+      } catch (error) {
+        if (epoch === this._nextEpoch) this.stepError = error.message || "Could not save this setup step.";
+      } finally {
+        if (this._nextPendingEpoch === epoch) this._nextPendingEpoch = null;
+      }
+    },
+
+    async _next(epoch) {
       this.stepError = "";
       const step = this.current_step;
+      const index = this.step_index;
+      const current = () => epoch === this._nextEpoch && this.current_step === step && this.step_index === index;
 
       if (step.kind === "input") {
-        const ok = await this._submitInputs(step);
+        const ok = await this._submitInputs(step, current);
+        if (!current()) return;
         if (!ok) return;
       }
 
       if (step.kind === "file_upload") {
-        const ok = await this._submitFileUpload(step);
+        const ok = await this._submitFileUpload(step, current);
+        if (!current()) return;
         if (!ok) return;
       }
 
       if (step.kind === "definition_picker") {
-        const ok = await this._submitDefinitionPick();
+        const ok = await this._submitDefinitionPick(current);
+        if (!current()) return;
         if (!ok) return;
       }
 
@@ -525,20 +587,23 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         if (this.firstRunStatus === "idle" || this.firstRunStatus === "error") {
           if (this.plugin_contract.kind !== "service") {
             this.firstRunStatus = "idle";
-            await this._triggerFirstRun();
+            await this._triggerFirstRun(current);
             return;
           }
           this.firstRunStatus = "running";
-          if (!await this._saveSelectionsBeforeEnable()) {
+          if (!await this._saveSelectionsBeforeEnable(current) || !current()) {
             this.firstRunStatus = "idle";
             return;
           }
           try {
             await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
+            // The enable request already happened. Settle its result even
+            // after navigation, without completing the departed screen.
             this.firstRunStatus = "done";
+            if (!current()) return;
           } catch (e) {
             this.firstRunStatus = "idle";
-            this.stepError = e.message || "Could not enable the plugin.";
+            if (current()) this.stepError = e.message || "Could not enable the plugin.";
             return;
           }
         }
@@ -548,7 +613,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           clearTimeout(this.firstRunPollTimer);
           this.firstRunPollTimer = null;
         }
-        on_complete();
+        if (current()) on_complete();
         return;
       }
 
@@ -646,7 +711,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this._onStepEnter();
       } else {
         // Last step — skipping past "Done" means skip-plugin.
-        this._invalidatePermissions();
+        this._invalidateStepWork();
         if (on_skip_plugin) on_skip_plugin();
       }
     },
@@ -654,7 +719,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // Abandon the current plugin's setup entirely. Plugin is NOT enabled.
     // Onboarding advances to the next plugin (or to the done screen).
     skipPlugin() {
-      this._invalidatePermissions();
+      this._invalidateStepWork();
       if (on_skip_plugin) on_skip_plugin();
     },
 
@@ -664,7 +729,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // walk; the single-plugin Configure flow leaves this callback unset.
     // (task #64)
     backToPluginList() {
-      this._invalidatePermissions();
+      this._invalidateStepWork();
       if (on_back_to_pick_plugins) on_back_to_pick_plugins();
     },
 
@@ -685,7 +750,20 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     // Called after step index advances — trigger auto-actions
-    _invalidatePermissions() {
+    _invalidateStepWork() {
+      this._nextEpoch += 1;
+      this._credAccessBusy = false;
+      this._credAccessError = "";
+      if (this.firstRunPollTimer !== null || this._firstRunPolling) {
+        clearTimeout(this.firstRunPollTimer);
+        this.firstRunPollTimer = null;
+        this._firstRunPolling = false;
+        if (this.firstRunStatus === "running") {
+          this.firstRunStatus = "slow";
+          this.firstRunSummary = "Run started — check the dashboard for its outcome.";
+        }
+      }
+      this.uploadInFlight = false;
       this._permissionEpoch += 1;
       this.permissionChecking = false;
       this.permissionRequesting = false;
@@ -693,7 +771,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     _onStepEnter() {
-      this._invalidatePermissions();
+      this._invalidateStepWork();
       // Seed declared defaults into inputValues so the validator agrees with
       // what the user sees in the rendered field (e.g. Day One mode dropdown
       // showed live_app but _submitInputs read inputValues[key] as undefined
@@ -748,96 +826,123 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // First-run trigger + polling (wizard done step)
     // ---------------------------------------------------------------------
 
-    async _triggerFirstRun() {
+    async _triggerFirstRun(current = () => true) {
       if (this.firstRunStatus !== "idle") return;
       this.firstRunStatus = "running";
       this.firstRunSummary = "";
-      if (!await this._saveSelectionsBeforeEnable()) {
-        this.firstRunStatus = "error";
-        this.firstRunSummary = this.stepError;
-        return;
-      }
-      // Persist exactly the execution mode named by the start button, even
-      // if the user skipped the input step after changing its preview toggle.
-      if (this.settingsMap.dry_run) {
-        const preview = this.inputValues.dry_run;
-        try {
-          await api(`/api/plugin/${this.plugin_id}/settings`, {
-            method: "PUT",
-            body: JSON.stringify({dry_run: preview === true || preview === "true"}),
-          });
-        } catch (e) {
+      let runRequested = false;
+      try {
+        const saved = await this._saveSelectionsBeforeEnable(current);
+        if (!current()) return;
+        if (!saved) {
           this.firstRunStatus = "error";
-          this.firstRunSummary = e.message || "Could not save preview mode.";
+          this.firstRunSummary = this.stepError;
           return;
         }
-      }
-      // Capture the prior last_run so we can tell whether the run we kick
-      // off has completed (vs reading a stale state from a previous run).
-      try {
-        const status = await api("/api/status");
-        const me = (status.plugins || []).find(p => p.id === this.plugin_id);
-        this._firstRunPriorLastRun = me?.last_run || null;
-      } catch (_) {
-        this._firstRunPriorLastRun = null;
-      }
-      // The user explicitly chose to enable and start the import.
-      try {
-        await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
-        await api(`/api/plugin/${this.plugin_id}/run`, { method: "POST" });
-      } catch (e) {
-        this.firstRunStatus = "error";
-        this.firstRunSummary = e.message || "Couldn't start the run.";
-        return;
-      }
-      // Poll /api/status every 1s for up to 10s. The run is done when
-      // last_run advances past _firstRunPriorLastRun.
-      const deadline = Date.now() + 10_000;
-      const tick = async () => {
+        // Persist exactly the execution mode named by the start button, even
+        // if the user skipped the input step after changing its preview toggle.
+        if (this.settingsMap.dry_run) {
+          const preview = this.inputValues.dry_run;
+          try {
+            await api(`/api/plugin/${this.plugin_id}/settings`, {
+              method: "PUT",
+              body: JSON.stringify({dry_run: preview === true || preview === "true"}),
+            });
+          } catch (e) {
+            if (!current()) return;
+            this.firstRunStatus = "error";
+            this.firstRunSummary = e.message || "Could not save preview mode.";
+            return;
+          }
+        }
+        if (!current()) return;
+        // Capture the prior last_run so we can tell whether the run we kick
+        // off has completed (vs reading a stale state from a previous run).
         try {
           const status = await api("/api/status");
           const me = (status.plugins || []).find(p => p.id === this.plugin_id);
-          if (me && me.last_run && me.last_run !== this._firstRunPriorLastRun) {
-            if (me.last_outcome === "done") {
-              this.firstRunStatus = "done";
-              this.firstRunSummary = "First run succeeded.";
-              // Build the timeline deep-link if the run resolved a
-              // definition_id. URL pattern is the timeline's annotation
-              // filter + a 24h window around the run; the timeline accepts
-              // unknown params gracefully (worst case the user lands on
-              // an unfiltered timeline, still useful). Open in a new tab
-              // — keep the daemon UI accessible too.
-              if (me.definition_id) {
-                const now = new Date();
-                const dayAgo = new Date(now.getTime() - 24 * 3600_000);
-                const params = new URLSearchParams({
-                  annotation: me.definition_id,
-                  start: dayAgo.toISOString(),
-                  end: now.toISOString(),
-                });
-                this.firstRunTimelineUrl =
-                  `https://context.fulcradynamics.com/timeline?${params.toString()}`;
-              }
-            } else {
-              this.firstRunStatus = "error";
-              this.firstRunSummary = (
-                me.last_error || `Last run reported ${me.last_outcome || "error"}.`
-              );
-            }
-            return;  // stop polling
-          }
+          this._firstRunPriorLastRun = me?.last_run || null;
         } catch (_) {
-          // Network blip — keep polling until deadline.
+          this._firstRunPriorLastRun = null;
         }
-        if (Date.now() < deadline) {
-          this.firstRunPollTimer = setTimeout(tick, 1000);
-        } else {
-          this.firstRunStatus = "slow";
-          this.firstRunSummary =
-            "Run is still in progress — check the dashboard's status badge for the outcome.";
+        if (!current()) return;
+        // The user explicitly chose to enable and start the import.
+        try {
+          await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
+          if (!current()) return;
+          runRequested = true;
+          await api(`/api/plugin/${this.plugin_id}/run`, { method: "POST" });
+        } catch (e) {
+          if (!current()) return;
+          this.firstRunStatus = "error";
+          this.firstRunSummary = e.message || "Couldn't start the run.";
+          return;
         }
-      };
-      this.firstRunPollTimer = setTimeout(tick, 1000);
+        if (!current()) return;
+        // Poll /api/status every 1s for up to 10s. The run is done when
+        // last_run advances past _firstRunPriorLastRun.
+        this._firstRunPolling = true;
+        const deadline = Date.now() + 10_000;
+        const tick = async () => {
+          if (!current()) return;
+          this.firstRunPollTimer = null;
+          try {
+            const status = await api("/api/status");
+            if (!current()) return;
+            const me = (status.plugins || []).find(p => p.id === this.plugin_id);
+            if (me && me.last_run && me.last_run !== this._firstRunPriorLastRun) {
+              this._firstRunPolling = false;
+              if (me.last_outcome === "done") {
+                this.firstRunStatus = "done";
+                this.firstRunSummary = "First run succeeded.";
+                // Build the timeline deep-link if the run resolved a
+                // definition_id. URL pattern is the timeline's annotation
+                // filter + a 24h window around the run; the timeline accepts
+                // unknown params gracefully (worst case the user lands on
+                // an unfiltered timeline, still useful). Open in a new tab
+                // — keep the daemon UI accessible too.
+                if (me.definition_id) {
+                  const now = new Date();
+                  const dayAgo = new Date(now.getTime() - 24 * 3600_000);
+                  const params = new URLSearchParams({
+                    annotation: me.definition_id,
+                    start: dayAgo.toISOString(),
+                    end: now.toISOString(),
+                  });
+                  this.firstRunTimelineUrl =
+                    `https://context.fulcradynamics.com/timeline?${params.toString()}`;
+                }
+              } else {
+                this.firstRunStatus = "error";
+                this.firstRunSummary = (
+                  me.last_error || `Last run reported ${me.last_outcome || "error"}.`
+                );
+              }
+              return;  // stop polling
+            }
+          } catch (_) {
+            // Network blip — keep polling until deadline.
+          }
+          if (!current()) return;
+          if (Date.now() < deadline) {
+            this.firstRunPollTimer = setTimeout(tick, 1000);
+          } else {
+            this._firstRunPolling = false;
+            this.firstRunStatus = "slow";
+            this.firstRunSummary =
+              "Run is still in progress — check the dashboard's status badge for the outcome.";
+          }
+        };
+        this.firstRunPollTimer = setTimeout(tick, 1000);
+      } finally {
+        // Keep ownership while an issued request is in flight. Navigation
+        // cancels later actions, but cannot undo a request already sent.
+        if (!current() && this.firstRunStatus === "running") {
+          this.firstRunStatus = runRequested ? "slow" : "idle";
+          this.firstRunSummary = runRequested
+            ? "Run started — check the dashboard for its outcome." : "";
+        }
+      }
     },
 
     // Initiate the OAuth flow for the current step. Calls the start route,
@@ -872,6 +977,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // ---------------------------------------------------------------------------
 
     async _loadDefinitions() {
+      if (this.dpIsV1) return this._loadV1Destinations();
       this.dpLoading = true;
       this.dpError = "";
       this.dpDefinitions = [];
@@ -956,12 +1062,60 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       }
     },
 
+    async _loadV1Destinations() {
+      const epoch = ++this._destinationEpoch;
+      this.dpLoading = true;
+      this.dpError = "";
+      this.dpDefinitions = [];
+      this.dpOtherDefinitions = [];
+      this.dpSelectedId = null;
+      this.dpForceNew = false;
+      this.dpV1Slot = null;
+      this.dpV1Name = "";
+      this.dpNewName = "";
+      this.dpLegacyMapping = false;
+      this.nextBlocked = true;
+      try {
+        const slot = this.current_step.record_slot;
+        const query = slot ? `?slot=${encodeURIComponent(slot)}` : "";
+        const body = await api(`/api/plugin/${this.plugin_id}/data-types${query}`);
+        if (epoch !== this._destinationEpoch || this.current_step.kind !== "definition_picker") return;
+        if (!body.slot || !["Event", "Metric"].includes(body.base_type) || !Array.isArray(body.destinations)) {
+          throw new Error("Destination choices are unavailable. Choose a source track and retry.");
+        }
+        this.dpV1Slot = body.slot;
+        this.dpV1Name = body.name || this.plugin_contract.canonical_definition_name || "";
+        this.dpNewName = this.dpV1Name;
+        this.dpLegacyMapping = body.requires_legacy_mapping === true;
+        this.dpDefinitions = body.destinations.map(def => ({...def, annotation_type: body.base_type,
+          _preview: [], _previewLoading: false, _previewLoaded: false, _previewError: ""}));
+        this.dpDefinitions.sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase()) ||
+          String(a.created_at || "").localeCompare(String(b.created_at || "")));
+        if (body.selected && this.dpDefinitions.some(def => def.id === body.selected)) {
+          this.dpSelectedId = body.selected;
+          this.nextBlocked = false;
+          await this.dpLoadPreview(this.dpDefinitions.find(def => def.id === body.selected));
+        } else if (this.dpDefinitions.length === 0) {
+          this.dpForceNew = true;
+          this.nextBlocked = false;
+        }
+      } catch (error) {
+        if (epoch === this._destinationEpoch && this.current_step.kind === "definition_picker") this.dpError = error.message;
+      } finally {
+        if (epoch === this._destinationEpoch) this.dpLoading = false;
+      }
+    },
+
     async dpLoadPreview(def) {
       if (def._previewLoaded || def._previewLoading) return;
       def._previewLoading = true;
       def._previewError = "";
       try {
-        const body = await api(`/api/definitions/${encodeURIComponent(def.id)}/recent?limit=3`);
+        const previewUrl = this.dpIsV1
+          ? `/api/plugin/${this.plugin_id}/data-type/recent?slot=${encodeURIComponent(this.dpV1Slot)}&data_type_id=${encodeURIComponent(def.id)}`
+          : `/api/definitions/${encodeURIComponent(def.id)}/recent?limit=3`;
+        const body = await api(previewUrl);
+        def._previewWindowDays = body.window_days;
         def._preview = body.entries || [];
         def._previewLoaded = true;
       } catch (e) {
@@ -972,6 +1126,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     dpSelectDef(def) {
+      if (this.nextPending) return;
       this.dpSelectedId = def.id;
       this.dpForceNew = false;
       this.nextBlocked = false;
@@ -980,6 +1135,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     dpChooseForceNew() {
+      if (this.nextPending) return;
       this.dpSelectedId = null;
       this.dpForceNew = true;
       this.nextBlocked = false;
@@ -987,8 +1143,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       // click. Don't clobber a typed value if the user re-clicks the
       // button (e.g. toggling off another selection).
       if (!this.dpNewName) {
-        this.dpNewName = (this.plugin_contract
-                          && this.plugin_contract.canonical_definition_name) || "";
+        this.dpNewName = (this.dpIsV1 ? this.dpV1Name : this.plugin_contract.canonical_definition_name) || "";
       }
     },
 
@@ -1004,7 +1159,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     dpEntryLabel(entry) {
-      // Try to extract a human label from a Fulcra event record
+      // V1 records carry flat timestamps and declared display fields.
+      if (typeof entry.start_time === "string") {
+        const value = typeof entry.value === "number" ? `${entry.value}${entry.unit ? " " + entry.unit : ""}` : "";
+        const label = entry.note || entry.title || value;
+        return entry.start_time.slice(0, 10) + (label ? ": " + label : "");
+      }
       const rat = (entry.metadata || {}).recorded_at;
       if (!rat) return "(no timestamp)";
       if (typeof rat === "string") return rat.slice(0, 10);
@@ -1013,8 +1173,24 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     // Submit the definition pick to the daemon
-    async _submitDefinitionPick() {
+    async _submitDefinitionPick(current = () => true) {
       try {
+        if (this.dpIsV1) {
+          if (!this.dpV1Slot || (!this.dpForceNew && !this.dpSelectedId)) {
+            this.stepError = "Choose a data type before continuing.";
+            return false;
+          }
+          const payload = {slot: this.dpV1Slot};
+          if (this.dpForceNew) {
+            payload.use_or_create = true;
+            const name = (this.dpNewName || "").trim();
+            if (name && name !== this.dpV1Name) payload.new_name = name;
+          } else {
+            payload.data_type_id = this.dpSelectedId;
+          }
+          await api(`/api/plugin/${this.plugin_id}/data-type`, {method: "POST", body: JSON.stringify(payload)});
+          return true;
+        }
         if (this.dpForceNew) {
           const trimmedName = (this.dpNewName || "").trim();
           const payload = { force_new: true };
@@ -1031,7 +1207,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         }
         return true;
       } catch (e) {
-        this.stepError = `Failed to save definition choice: ${e.message}`;
+        if (current()) this.stepError = `Failed to save ${this.dpIsV1 ? "data type" : "definition"} choice: ${e.message}`;
         return false;
       }
     },
@@ -1128,9 +1304,10 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     // Submit all input fields for the current input step
-    async _submitInputs(step) {
+    async _submitInputs(step, current = () => true) {
       const fields = this.input_fields;
       for (const f of fields) {
+        if (!current()) return false;
         const val = this.inputValues[f.key] ?? (f.kind === "multiselect" ? [] : "");
         if (f.kind === "multiselect") {
           const error = this._selectionError(this.settingsMap[f.key], val);
@@ -1143,10 +1320,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
             // we don't overwrite a live secret with an empty string.
             continue;
           }
-          if (this.settingsMap[f.key]?.required !== false) {
+          const declared = f._kind === "credential" ? this.credsMap[f.key] : this.settingsMap[f.key];
+          if (declared?.required !== false) {
             this.stepError = `"${f.label}" is required.`;
             return false;
           }
+          if (f._kind === "credential") continue; // Optional blank keeps the saved item.
         }
         try {
           if (f._kind === "credential") {
@@ -1162,7 +1341,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
             });
           }
         } catch (e) {
-          this.stepError = `Failed to save "${f.label}": ${e.message}`;
+          if (current()) this.stepError = `Failed to save "${f.label}": ${e.message}`;
           return false;
         }
       }
@@ -1181,7 +1360,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // file in the browser and stuffed the blob into the setting value
     // directly; plugins crashed trying to resolve the blob as a path, and
     // for large takeouts the tab OOMed during encoding.)
-    async _submitFileUpload(step) {
+    async _submitFileUpload(step, current = () => true) {
       if (!this.uploadedFile) {
         this.stepError = "Please select a file before continuing.";
         return false;
@@ -1199,7 +1378,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           const xhr = new XMLHttpRequest();
           xhr.open("POST", url, true);
           xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
+            if (current() && e.lengthComputable) {
               this.uploadProgress = Math.round((e.loaded / e.total) * 100);
             }
           };
@@ -1225,16 +1404,17 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           xhr.onerror = () => reject(new Error("network error"));
           xhr.send(fd);
         });
+        if (!current()) return false;
         if (!result.ok) {
           this.stepError = result.error || "Upload failed.";
           return false;
         }
         return true;
       } catch (e) {
-        this.stepError = `Upload failed: ${e.message}`;
+        if (current()) this.stepError = `Upload failed: ${e.message}`;
         return false;
       } finally {
-        this.uploadInFlight = false;
+        if (current()) this.uploadInFlight = false;
       }
     },
 

@@ -13,29 +13,19 @@ from zoneinfo import ZoneInfo
 from fulcra_collect.plugin import Plugin, RunContext
 
 from .. import library
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import spotify_ifttt as spotify_ifttt_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
-from ._common import DURATION_SPEC, ensure_media_def, import_events, resolve_path
+from ._common import DURATION_SPEC, import_events, resolve_path
 
 
-# Identical structure to LASTFM_LISTENED_SPEC and SPOTIFY_EXTENDED_LISTENED_SPEC.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 SPOTIFY_IFTTT_LISTENED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_spotify_ifttt(ctx: RunContext) -> None:
-    # Ensure the "Listened" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # listened_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Listened" definition
-    # rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="listened_definition_id",
-                     spec=SPOTIFY_IFTTT_LISTENED_SPEC,
-                     canonical_name="Listened",
-                     state_save=_state_save)
 
     resolved = resolve_path(ctx, library)
     tz = ZoneInfo(ctx.config.get("tz", "UTC"))
@@ -53,6 +43,8 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_spotify_ifttt,
+    record_data_types=media_destinations("listened"),
+    record_pending=media_pending,
     default_interval=None,
     canonical_definition_name="Listened",
     required_credentials=(),

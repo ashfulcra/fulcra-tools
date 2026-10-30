@@ -1,187 +1,148 @@
 # fulcra-netflix-skill
 
-An agent skill that takes a brand-new user from "I messaged a skill link to
-my bot" to "my Netflix viewing history lives in my own Fulcra account as a
-Watched annotation, optionally shared with a recipient the user chooses."
+An agent-guided Netflix export/import workflow plus an installed native importer.
+The canonical script serves the console entrypoint and the bundled skill; it
+writes owned v1 Event records to the shared Watched destination on this development
+branch. Released app/native-sharing/historical-conversion acceptance remain
+separate. The original annotation writer is retired.
 
-The deliverable is the **skill folder** (`skills/fulcra-netflix/`), not a
-Python library: a runtime-agnostic SKILL.md conversation state machine
-(auth → export → import → share) plus a vendored, PEP 723 self-contained
-import script that any agent runs with `uv run`. The Python package wrapper
-exists so the monorepo's pytest tooling covers the script; end users never
-install it.
+The [agent guide](skills/fulcra-netflix/SKILL.md) covers authentication, export,
+reviewed import and the optional explicitly legacy sharing boundary. The
+[original design](docs/design.md) records the earlier annotation-based approach;
+it is historical context, not the native runtime contract.
 
-The importer and conversation flow are implemented and covered by synthetic
-parser, wire, API, and CLI tests. This is an experimental standalone skill;
-Collect is not required.
+## Install and invocation
 
-**Sharing is manual and broader than Netflix.** The checked-in skill walks the
-user through Context Web, where its described share includes all annotation data,
-not just Watched records. The user chooses the recipient and whether to share at
-all. The `TODO(share-cli)` marks an unimplemented replacement for that walkthrough;
-it is not evidence of current upstream CLI availability. Read the
-[skill's sharing step](skills/fulcra-netflix/SKILL.md#state-5--share) before using it.
-See [docs/design.md](docs/design.md) for the original design and deferred work.
-
-## Why this exists
-
-It's the flagship concrete demo of Fulcra as an agent context layer: a
-relatable dataset (Netflix history), imported by the user's own agent over
-chat, landing in the user's own datastore, then shared into a pool that
-group-recommendation agents can work over. See the design doc for the
-composition with upstream `fulcradynamics/agent-skills` (onboarding auth
-flow, ingest-beta record pattern) and this repo's `media-helpers` (export
-walkthrough, fingerprint conventions).
-
-## Layout
-
-```
-docs/design.md                              the approved design spec
-skills/fulcra-netflix/SKILL.md              the conversational state machine (HELLO→AUTH→EXPORT→IMPORT→SHARE)
-skills/fulcra-netflix/references/           auth, export-walkthrough, and record-schema detail docs
-skills/fulcra-netflix/scripts/netflix_import.py   the vendored, self-contained importer
-fulcra_netflix/                             test-support shims for the vendored script
-tests/                                      parser/wire/API/CLI tests over synthetic fixtures
-```
-
-Both the importer script (parsing, wire encoding, auth, batch POST, readback
-verification, the CLI entry point below) and the conversational `SKILL.md`
-(the onboard → export → import → share state machine that walks a
-brand-new user through getting a CSV and invoking this script) are built.
-Sharing retains the manual flow and scope limitation described above.
-
-## Running the importer
-
-From the repository root (Python 3.11+ and `uv`):
+Use a checkout pinned to the verified published release commit, Python 3.11+ and
+`uv`. From its repository root:
 
 ```sh
-uv run packages/netflix-skill/skills/fulcra-netflix/scripts/netflix_import.py viewing-history.csv --check-only --json
-# After reviewing the parsed result, remove --check-only to import.
+uv sync --all-packages --all-extras
+source .venv/bin/activate
+fulcra auth login
+fulcra-netflix viewing-history.csv --check-only --json
+fulcra-netflix viewing-history.csv --json
 ```
 
-When installing only the [skill folder](skills/fulcra-netflix/), run
-`scripts/netflix_import.py` relative to that folder. Load
-[SKILL.md](skills/fulcra-netflix/SKILL.md) in your agent for the guided workflow.
+The final public release must supply and verify its exact release ref and clean
+installation; the current development checkout is not that receipt. The package
+requires the installed `fulcra-common`, `fulcra-collect` and
+`fulcra-media-helpers` siblings. Do not assume current PyPI version numbers expose
+the required development APIs or dynamically install them from the script.
 
-The script is a self-contained PEP 723 file — `uv run` fetches its one
-dependency (`httpx`) automatically, no separate install step needed. Both
-Netflix CSV export variants are auto-detected from the header, no flag
-needed:
+The console entrypoint delegates through `fulcra_netflix.loader` to the same
+canonical script. An installed checkout's `.venv/bin/python` can also invoke
+`packages/netflix-skill/skills/fulcra-netflix/scripts/netflix_import.py` directly.
+The script is no longer a self-contained PEP 723 upload. A skill-folder-only copy
+supports local check-only under Python 3.11+; live upload requires the installed
+adapter/runtime. Missing/incompatible version/namespace/API capabilities fail
+before authentication, runtime entry or source access, without a legacy fallback.
 
-- **slim** — the plain `NetflixViewingHistory.csv` (`Title,Date` columns
-  only). Timestamps are synthesized (noon UTC, 1-second duration) and marked
-  low confidence, since the slim export carries no real time-of-day.
-- **rich** — the GDPR/"Download all my data" `ViewingActivity.csv` (10
-  columns including a real UTC `Start Time` and `Duration`). Timestamps here
-  are high confidence and durations are real. Trailer/hook/promotional rows
-  are dropped automatically — they aren't real viewing sessions.
+## Source and destination
 
-Flags:
+Headers select the export variant; main opens one reader after recovery and
+materializes the full input before new metadata/record effects. Existing public
+parser algorithms and source hashes stay aligned with their established vectors:
 
-- `--json` — emit a single-line JSON envelope on stdout instead of the
-  human-readable summary. Use this for scripting or CI; see the envelope
-  contract below.
-- `--check-only` — parse and count events only; makes no network call and
-  requires no auth. Use this to sanity-check a CSV (row counts, that it
-  parses cleanly) before actually importing.
-- `--no-verify` — skip the post-import readback sampling step (see
-  "Readback verification" below) for faster iteration.
+- **Slim:** `Title,Date`; noon UTC, one-second interval, low confidence. Repeated
+  identical raw date/title pairs retain separate file-order occurrence IDs.
+- **Rich:** GDPR ViewingActivity; real UTC timestamp/duration, profile/device
+  provenance and high confidence. Supplemental trailer/promotional rows remain
+  excluded by the existing parser.
 
-A malformed row anywhere in the CSV aborts the whole run *before* anything
-is posted — events are fully parsed and materialized first, so a bad row
-never results in a partial import sitting on the server. Parse errors
-include row context, e.g. `row 214 ('BEEF: Season 1: Episode 3'): not a
-H:MM:SS duration: 'bogus'`.
+Native records keep original note/title/integer duration/external fields,
+including nested fingerprint and confidence, plus declared service/importer/
+category/top-level confidence. Tags stay empty; fingerprint is provenance, not an
+alternate primary source. Primary record UUID qualifies the unchanged source ID
+by full Event destination. Full [native schema/identity contract](skills/fulcra-netflix/references/record-schema.md).
 
-### Auth
+Optional `--data-type Event/UUID` pins an owned compatible destination. Without it,
+the shared full-spec Watched resolver/journal may adopt/create after local input
+validation. It proves ownership, base, API version, recordability and served
+schema; it never retypes or discovers a native target through the legacy
+annotation description marker. Shared key `collect.media.watched.v1` means a
+prior media binding constrains target substitution and preserves renames. A bound
+missing/deprecated/incompatible destination holds; explicit pin cannot silently
+replace it. Never reset journals to evade that conflict.
 
-The script never asks for or stores credentials itself. It mints a bearer
-token by shelling out to the `fulcra-api` CLI (a separate tool, not part of
-this monorepo):
+All finalized new payloads pass complete served-schema and current primary-ID
+proof before current record mutation. A differing existing incoming field holds
+the whole new input before chunk one; unrelated extra top-level cloud fields may
+remain. Nested external-ID changes, source/tag/time or note differences are
+conflicts. Same source hashes do not prove two tools emitted equal native content.
+This is local serialization, not provider compare-and-swap or a correction API.
+Already-staged recovery retains its original payload/kernel behavior.
+
+## Recovery, chunks and counts
+
+Live authority uses CLI authentication independently of Collect's daemon account,
+within the selected `FULCRA_COLLECT_HOME` profile (default
+`~/.config/fulcra-collect`) and dedicated `cli-netflix` namespace. Stable authority
+captures codec/spec and explicit target or null, not CSV path/variant/current rows
+or discovered target. Changing profile/account/pin/spec holds pending work.
+
+Original pending targets are fully envelope/scope checked, then all are freshly
+proven against the watched spec with no target creation before drain. Recovery
+finishes before opening/detecting/parsing new input, even missing/empty/bad CSV.
+Kernel payload/schema/dispatch proof remains per recovered group; it is not a
+whole-pending-payload preflight. Unknown issued POSTs stay retained and reconcile
+by exact reads rather than blind resend. Do not erase outboxes or invoke the old
+CLI token/annotation helpers to clear a hold.
+
+The whole NEW input is parsed and preflighted first, then at most 500 records per
+chunk are staged and drained serially. Only the in-flight chunk is durable.
+Unstarted remainder requires the original source on a later invocation; this is
+not a durable whole-file queue or atomic import. Every delivered record needs
+exact v1 readback, not upload acceptance or a three-row sample. Exclusions are
+separate. `--no-verify` is refused before auth; verification cannot be disabled.
+
+`--check-only` is purely local and needs no target/runtime/httpx/auth/profile/DB
+or recovery. It reports parse intent; it does not prove ownership or clear old
+pending work. Malformed late source prevents NEW metadata/record effects, while
+original-pending recovery may already have completed. CLI errors are sanitized;
+inspect local source separately instead of expecting raw values in logs.
+
+`--json` retains the original envelope keys with explicitly versioned native
+count semantics. `posted` and `verified` are known current completed-chunk/group
+verified lower bounds, including exact already-visible records, not POST attempts,
+new-record counts or sampled verification. `skipped_existing` remains null. `would_post` is check-only intent. Recovery
+counts remain separate; never sum retries. If a chunk lacks complete group proof,
+its lower bound may be zero despite some rows being visible. Earlier completed
+chunks survive later failures/clear/receipt/close errors. A nonzero exit/UNKNOWN
+holds pending work; no output claims rejected-or-empty provider state from a
+failure. Final JSON success follows context cleanup, not merely its last POST.
+
+## Sharing and preserved history
+
+Personal native import can complete without sharing. Native Event share propagation
+and movie-night pool discovery are UNKNOWN here; a legacy annotation browser
+share does not prove it exposes these new records. Do not promise Netflix-only
+native sharing, select a default recipient or change permissions automatically.
+
+The retained optional legacy workflow is explicitly all-annotation sharing through
+Context Web, only for a recipient the user chooses/confirms. Its broad scope must
+be disclosed whenever that workflow is discussed. Preserve original annotation
+records, shares and permissions. Legacy wrapped-reader/export shapes and historical
+conversion need separate evidence; no native history migration is implied.
+
+## Tests and distribution limits
+
+From the repository root:
 
 ```sh
-fulcra-api auth print-access-token
+uv run --offline pytest -c pyproject.toml packages/netflix-skill/tests -q
 ```
 
-falling back to `uv tool run fulcra-api auth print-access-token` if
-`fulcra-api` isn't directly on `PATH` (a code-level last resort inside the
-script — agents and docs should use the installed binary). This means:
+Synthetic actual-main tests exercise the installed adapter, real session/outbox
+and MockTransport with fake credentials. Package-local function-scoped guards
+block subprocess/OS shell, connection/DNS, real HTTP transports and saved-auth
+fallbacks before canonical script loading, then restore at test teardown. This is
+a Python test boundary, not an OS sandbox; it cannot prove absence of effects in
+an earlier unguarded process. Trace and fence both pre-migration and replacement
+auth paths before an actual-caller RED test.
 
-- The `fulcra-api` CLI must be installed (`uv tool install fulcra-api`) and
-  already authenticated (run its own login flow once beforehand).
-- The token is minted fresh per run, never written to disk, and never
-  printed or logged by this script — including in the `--json` envelope and
-  in error messages, which report only `HTTP <code> on <path>`, never
-  response bodies.
-
-### Readback verification
-
-After a successful import (unless `--no-verify` is passed), the script
-samples a few of the just-posted events and asks `fulcra-api get-records`
-whether a matching record shows up in a window around their timestamp.
-This is best-effort: if the `fulcra-api` CLI isn't available, `verified` is
-`None` ("couldn't check"), which is deliberately kept distinct from `0`
-("checked, found nothing") — the latter is a real signal (e.g. indexing
-lag), the former just means the check didn't run at all.
-
-### JSON envelope
-
-With `--json`, the script prints one line of JSON with this shape:
-
-```json
-{
-  "importer": "netflix",
-  "variant": "slim",
-  "ok": true,
-  "total": 128,
-  "posted": 128,
-  "skipped_existing": null,
-  "verified": 3,
-  "would_post": null,
-  "errors": []
-}
-```
-
-- `variant` — `"slim"` or `"rich"`, whichever was auto-detected.
-- `posted` — count of records included in successful (or partially
-  successful) batch POST requests, **not** a count of novel/new records.
-  The ingest endpoint returns no dedup feedback, so a full re-run of the
-  same CSV reports `posted` equal to the full record count again — the
-  server silently no-ops the duplicate POSTs, but this script has no way
-  to see that, so `posted` is honest about "attempted and accepted the
-  request" rather than "created a new record." On a partial batch failure
-  (some chunks succeed before one fails), `posted` reflects only the
-  chunks that actually landed before the failure, not the full batch.
-- `skipped_existing` — currently **always `null`**. It's reserved for a
-  future dedup-aware count but the ingest endpoint doesn't expose which
-  records were skipped as duplicates vs. newly created, so this script
-  cannot populate it today. The key is kept in the envelope (append-only
-  contract) for forward compatibility.
-- `would_post` — populated only for `--check-only` runs (parsed count,
-  nothing posted); `null` otherwise.
-- `verified` — count of sampled events confirmed present after import, or
-  `null` when verification was skipped/unavailable.
-- `errors` — list of `{"stage": ..., "message": ...}` dicts. `stage` is one
-  of `args` (bad path — including unreadable/directory paths), `parse`
-  (malformed CSV/row), `auth` (couldn't mint or the server rejected the
-  token), or `post` (any other HTTP failure, including a batch that failed
-  partway through — see `posted` above).
-
-This is a **stable, append-only contract**: existing keys are never removed
-or repurposed, so other tooling can depend on specific keys without
-breaking on a future change. New keys may be added over time.
-
-Exit code is `0` for success (including `--check-only` runs) and `2` for
-any failure, with `errors[0].stage` telling the caller which phase broke.
-
-## Testing
-
-```sh
-uv run --package fulcra-netflix-skill --extra dev pytest packages/netflix-skill/tests/ -q
-```
-
-The suite covers: parsing (both variants, including row-context
-error messages on malformed dates/durations), wire-format encoding, the
-`ensure_watched_def`/`post_batch` API helpers (chunking, content-type), and
-the CLI itself (happy path, `--check-only`, and parse/auth failure envelopes)
-via monkeypatched `get_token`/`make_api_client` seams — no real network calls.
+Wheel bytes must include the same adapter and bundled script. Clean pinned-checkout
+installation plus non-editable installed-entrypoint acceptance remain release
+gates; editable imports and source tests do not certify them. No real account,
+CSV, native sharing, app rollout or historical readback completion is established
+by synthetic tests alone.

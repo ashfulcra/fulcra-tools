@@ -1,5 +1,7 @@
-"""Bounded Files adapter matching fulcra-api 0.1.41's file implementation."""
+"""Version-history Files adapter with explicit token or captured transport."""
 from pathlib import PurePosixPath
+from datetime import datetime, timezone
+from uuid import UUID
 import time
 from typing import Protocol
 from urllib.parse import quote, urlparse
@@ -21,18 +23,27 @@ class Vault(Protocol):
 
 
 class FulcraVault:
-    def __init__(self, token: str, *, base_url='https://api.fulcradynamics.com',
-                 namespace=None, timeout_s=20, max_versions=500, transport=None):
+    def __init__(self, token: str | None = None, *, base_url='https://api.fulcradynamics.com',
+                 namespace=None, timeout_s=20, max_versions=500, transport=None, bound_files=None):
         self._validate_url(base_url)
         self.base_url = base_url.rstrip('/')
+        self._bound_files = bound_files
+        if bound_files is not None:
+            if token is not None or (namespace is not None and namespace != bound_files.namespace):
+                raise VaultError('ambiguous bound account')
+            namespace = bound_files.namespace
+        elif not isinstance(token, str) or not token:
+            raise VaultError('explicit task vault sign-in required')
         self._namespace = namespace
         self.timeout_s = min(float(timeout_s), 30)
         self.max_versions = max_versions
         self.deadline = None
-        self._api = httpx.Client(headers={'Authorization': f'Bearer {token}'},
-                                 transport=transport, follow_redirects=False)
-        # A separate client also prevents default credentials/cookies leaking.
-        self._storage = httpx.Client(transport=transport, follow_redirects=False)
+        self._api = self._storage = None
+        if bound_files is None:
+            self._api = httpx.Client(headers={'Authorization': f'Bearer {token}'},
+                                     transport=transport, follow_redirects=False)
+            # A separate client also prevents default credentials/cookies leaking.
+            self._storage = httpx.Client(transport=transport, follow_redirects=False)
 
     @staticmethod
     def _validate_url(url):
@@ -50,6 +61,9 @@ class FulcraVault:
             timeout = min(timeout, self.deadline - time.monotonic())
         if timeout <= 0:
             raise VaultError('run deadline')
+        if self._bound_files is not None:
+            return self._bound_files._request(method, url, storage=storage,
+                timeout=timeout, limit=MAX_BYTES, **kwargs)
         client = self._storage if storage else self._api
         try:
             with client.stream(method, url, timeout=timeout, **kwargs) as response:
@@ -81,6 +95,8 @@ class FulcraVault:
 
     @property
     def namespace(self):
+        if self._bound_files is not None:
+            self._bound_files.guard()
         if self._namespace is None:
             value = self._json('GET', '/user/v1alpha1/info').get('userid')
             if not isinstance(value, str) or not value:
@@ -90,11 +106,14 @@ class FulcraVault:
 
     def versions(self, path):
         p = PurePosixPath('/' + path.lstrip('/'))
-        result = self._json('GET', '/input/v1/file_upload', params={
-            'path': str(p.parent), 'name': p.name, 'state': 'uploaded,archived'})
+        namespace = self.namespace if self._bound_files is not None else None
+        params = {'path': str(p.parent), 'name': p.name, 'state': 'uploaded,archived'}
+        if self._bound_files is not None:
+            params['fulcra_userid'] = namespace
+        result = self._json('GET', '/input/v1/file_upload', params=params)
         rows = result.get('files')
         if (not isinstance(rows, list) or len(rows) > self.max_versions
-                or any(result.get(k) for k in ('next_cursor', 'next_page', 'has_more'))):
+                or any(result.get(k) for k in ('next_cursor', 'next_page', 'has_more', 'continuation_token'))):
             raise VaultError('incomplete version history')
         if any(not isinstance(r, dict) or not isinstance(r.get('id'), str) or not r['id']
                or r.get('state') not in ('uploaded', 'archived')
@@ -102,9 +121,27 @@ class FulcraVault:
             raise VaultError('invalid version history')
         if rows and not any(r['state'] == 'uploaded' for r in rows):
             raise VaultError('missing current version')
-        ids = [r['id'] for r in sorted(rows, key=lambda r: r['uploaded_at'], reverse=True)]
+        if self._bound_files is not None:
+            try:
+                if rows and sum(row['state'] == 'uploaded' for row in rows) != 1:
+                    raise ValueError
+                for row in rows:
+                    if (str(UUID(row['id'])) != row['id'] or row.get('name') != p.name
+                            or PurePosixPath(row.get('path')) != p.parent
+                            or row.get('fulcra_userid', namespace) != namespace
+                            or datetime.fromisoformat(row['uploaded_at'].replace('Z', '+00:00')).tzinfo is None):
+                        raise ValueError
+                rows = sorted(rows, key=lambda row: (row['state'] == 'uploaded',
+                    datetime.fromisoformat(row['uploaded_at'].replace('Z', '+00:00')).astimezone(timezone.utc)), reverse=True)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise VaultError('version history identity is ambiguous or mismatched') from None
+        else:
+            rows = sorted(rows, key=lambda r: r['uploaded_at'], reverse=True)
+        ids = [r['id'] for r in rows]
         if len(set(ids)) != len(ids):
             raise VaultError('duplicate versions')
+        if self._bound_files is not None:
+            self._bound_files.guard()
         return ids
 
     def read_version(self, version_id):
@@ -132,6 +169,12 @@ class FulcraVault:
         version = result.get('file', {}).get('id')
         if not isinstance(version, str) or not version:
             raise VaultError('upload identity unavailable')
+        if self._bound_files is not None:
+            try:
+                if str(UUID(version)) != version:
+                    raise ValueError
+            except (ValueError, TypeError):
+                raise VaultError('upload identity unavailable') from None
         status, _, _ = self._request('POST', result.get('url', ''), storage=True,
                                     content=data, headers={'Content-Type': content_type,
                                                           'Content-Length': str(len(data))})
@@ -140,8 +183,10 @@ class FulcraVault:
         return version
 
     def close(self):
-        self._api.close()
-        self._storage.close()
+        if self._api is not None:
+            self._api.close()
+        if self._storage is not None:
+            self._storage.close()
 
     def __enter__(self):
         return self

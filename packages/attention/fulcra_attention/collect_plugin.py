@@ -12,9 +12,9 @@ user to install the Fulcra Attention browser extension and sign in via the
 browser. It declares no credentials, no setup steps, and no definition
 binding; its run() emits a single informational message.
 
-The rest of the `fulcra_attention` package (CLI / state / ingest /
-definition_spec) is intentionally left in place — retiring it is a later
-phase.
+The relay-era CLI, state and ingest modules have been retired. The package
+also provides the opt-in v1 schema and pure record builder; those helpers do
+not turn this pointer into a daemon-side writer.
 """
 from __future__ import annotations
 

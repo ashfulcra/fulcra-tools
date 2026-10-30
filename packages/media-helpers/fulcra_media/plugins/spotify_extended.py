@@ -4,33 +4,20 @@ from __future__ import annotations
 from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 
 from .. import library
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import spotify as spotify_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ..takeout_health import spotify_extended_health_check
-from ._common import DURATION_SPEC, ensure_media_def, run_file_import
+from ._common import DURATION_SPEC, run_file_import
 
 
-# Identical structure to LASTFM_LISTENED_SPEC — both plugins produce "Listened"
-# Duration annotations against the same shared definition.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 SPOTIFY_EXTENDED_LISTENED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_spotify_extended(ctx: RunContext) -> None:
-    # Ensure the "Listened" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # listened_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Listened" definition
-    # rather than creating a duplicate.  lastfm and spotify-extended share the
-    # same State.listened_definition_id field — whichever plugin runs first
-    # on a new machine will populate it; the other will find it already set.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="listened_definition_id",
-                     spec=SPOTIFY_EXTENDED_LISTENED_SPEC,
-                     canonical_name="Listened",
-                     state_save=_state_save)
 
     run_file_import(
         ctx,
@@ -48,6 +35,8 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_spotify_extended,
+    record_data_types=media_destinations("listened"),
+    record_pending=media_pending,
     description=(
         "Imports the Spotify Extended Streaming History GDPR export — a "
         "zip of `Streaming_History_Audio_*.json` files covering your full "
@@ -116,7 +105,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Spotify listens?",
             body_md=(
-                "We can write to your existing 'Listened' annotation or "
+                "We can write to your existing 'Listened' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

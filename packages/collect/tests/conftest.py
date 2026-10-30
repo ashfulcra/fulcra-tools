@@ -73,7 +73,9 @@ def _in_memory_keyring(monkeypatch):
     on the ``fulcra_collect.credentials`` module with a dict-backed stub so
     tests that touch the credentials / auth code paths never reach the real
     OS keychain (which would prompt the user, mutate global state, or fail
-    in CI). Used by every test that exercises sign-in, token rotation,
+    in CI). The separate macOS getter uses the same store, while unexpected
+    native API/helper/mutation paths fail closed even if their error is caught.
+    Used by every test that exercises sign-in, token rotation,
     OAuth callback handling, or any Daemon method that reads a stored
     bearer token (e.g. ``_delete_definition``).
 
@@ -85,7 +87,7 @@ def _in_memory_keyring(monkeypatch):
     def _set(service, key, value):
         store[(service, key)] = value
 
-    def _get(service, key):
+    def _get(service, key, *, allow_ui=False):
         return store.get((service, key))
 
     def _delete(service, key):
@@ -98,7 +100,23 @@ def _in_memory_keyring(monkeypatch):
     monkeypatch.setattr(_creds_mod.keyring, "set_password", _set)
     monkeypatch.setattr(_creds_mod.keyring, "get_password", _get)
     monkeypatch.setattr(_creds_mod.keyring, "delete_password", _delete)
-    return store
+    # This fixture owns a fake backend; do not discover the host's real one.
+    monkeypatch.setattr(_creds_mod, "_uses_macos_keychain", lambda: False)
+    from fulcra_collect import macos_keychain
+    monkeypatch.setattr(macos_keychain, "get_password", _get)
+    native_calls = []
+
+    def forbidden(name):
+        def fail(*args, **kwargs):
+            native_calls.append(name)
+            raise AssertionError(f"in-memory keyring reached native path: {name}")
+        return fail
+
+    for name in ("_api", "_Security", "_read_password", "_mutate_password",
+                 "_isolated_request", "mutate_trakt_password", "child_main"):
+        monkeypatch.setattr(macos_keychain, name, forbidden(name))
+    yield store
+    assert not native_calls, f"in-memory keyring reached native paths: {native_calls}"
 
 # The shared fake-httpx seam (FakeHttpxClient / install_fake_httpx) lives in
 # the sibling module ``collect_test_helpers.py``, NOT here: a bare ``from

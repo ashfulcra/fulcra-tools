@@ -5,6 +5,10 @@
 // Uses a distinct CLIENT string so backfilled events can be told
 // apart from real-time ones in Fulcra queries.
 
+import {v1HeldMode} from "../relayless/v1AuthClient";
+import {loadSettings} from "../storage";
+import {sha256Hex} from "../relayless/sha256";
+import {scrubTitle} from "../title-scrub";
 import { addToOutbox } from "../outbox";
 import { requestFlush } from "../flushRequest";
 import { categorize } from "../categorize";
@@ -29,6 +33,7 @@ export async function backfillHistory(
   groups: DomainGroup[],
   opts: { onProgress?: (done: number, total: number) => void } = {},
 ): Promise<number> {
+  if(await v1HeldMode())return backfillHeld(groups,opts);
   // Pre-flatten so we can report total + progress accurately.
   const rows: ScannedUrl[] = [];
   for (const g of groups) for (const u of g.urls) rows.push(u);
@@ -88,4 +93,23 @@ export async function backfillHistory(
 
 function toIsoSecondZ(ms: number): string {
   return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000", "");
+}
+
+async function backfillHeld(groups:DomainGroup[],opts:{onProgress?:(done:number,total:number)=>void}):Promise<number>{
+ const settings=await loadSettings();
+ if(!settings.enabled||settings.pausedUntil!==null&&Date.now()<settings.pausedUntil)throw new Error('Attention capture consent closed; selection remains available');
+ const selected=groups.flatMap(g=>g.urls);let retained=0;const seen=new Set<string>();
+ for(const row of selected){
+  const current=await loadSettings();if(!current.enabled||current.pausedUntil!==null&&Date.now()<current.pausedUntil)throw new Error('Attention capture consent closed; partial retention only');
+  if(await isIgnored(row.url))continue;
+  const category=await categorize(row.url);let host:string|null=null;try{host=new URL(row.url).hostname;}catch{/* invalid selection rejected by worker */}
+  // row.url already crossed groupByHost's canonical JS scrub boundary.
+  const raw={kind:'backfill',url:category?null:row.url,title:category?null:scrubTitle(host,row.title),category,
+   startTime:row.lastVisitTime-SYNTHETIC_VISIT_DURATION_MS,endTime:row.lastVisitTime,syntheticDurationMs:SYNTHETIC_VISIT_DURATION_MS};
+  const id='backfill:'+await sha256Hex(JSON.stringify([row.url,row.lastVisitTime,BACKFILL_CLIENT]));if(seen.has(id))continue;seen.add(id);
+  const response=await chrome.runtime.sendMessage({type:'attention-capture-v1',version:1,command:'backfill',payload:{id,raw,matchingUrl:row.url}});
+  if(!response||response.version!==1||response.ok!==true||response.receipt?.id!==id||response.receipt?.durable!==true)throw new Error('Attention capture retention UNKNOWN; partial selection retained locally; retry same selection');
+  retained++;opts.onProgress?.(retained,selected.length);
+ }
+ return retained;
 }

@@ -101,7 +101,7 @@ def test_reconcile_failures_leave_mode_specific_failed_reports(monkeypatch):
         monkeypatch.setattr(plugin.report, 'write', write)
         ctx = SimpleNamespace(config={'mode': mode, 'writeback_enabled': True}, log=Mock())
         with pytest.raises(RuntimeError, match='synthetic unreadable vault'):
-            plugin.run(ctx)
+            (plugin._run_reconcile if mode == 'reconcile' else plugin._run_writeback)(ctx)
         write.assert_called_once()
         assert write.call_args.args[0]['ok'] is False
         assert write.call_args.args[0]['mode'] == mode

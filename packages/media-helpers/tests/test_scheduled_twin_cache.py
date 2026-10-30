@@ -13,10 +13,11 @@ inert. These tests drive the shared scheduled-import glue in
   3. The default twin policy ("keep") leaves the incoming events untouched —
      the machinery is wired but the default behaviour is unchanged.
 
-We exercise the real seam (``run_scheduled_import``) through the Last.fm
-plugin, which is the simplest plugin that delegates to it, plus the
-``import_events`` and ``rss_import_and_advance`` glue used by the file-based
-and RSS plugins, to prove the wiring is shared rather than trakt-only.
+Guarded poll tests exercise actual configured decorators, strict source scans,
+native writer visibility and account/destination-scoped hints. Synthetic
+high/low variants change only normalized twin metadata. Remaining helper tests
+cover the retained legacy glue separately; its global JSON cache is never an
+authority for the five guarded poll routes.
 """
 from __future__ import annotations
 
@@ -79,6 +80,8 @@ class _FakeResult:
 
 def _make_fake_client(captured, *, result):
     class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
         def ensure_tag(self, name, state):
             captured["ensure_tag"] = name
 
@@ -88,254 +91,139 @@ def _make_fake_client(captured, *, result):
     return FakeClient
 
 
-# ---------------------------------------------------------------------------
-# 1. Scheduled import populates the cache (real run_scheduled_import seam)
-# ---------------------------------------------------------------------------
-
-def test_scheduled_import_populates_twin_cache(cache_path, monkeypatch):
-    """A scheduled import of a HIGH-confidence event with a content_fingerprint
-    writes that fingerprint into the twin cache — which the scheduled path did
-    NOT do before Component 4."""
-    high = _evt(fp="tv:dune:s01e01", confidence="high", sid="lastfm-1")
-
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
-                        lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [high])
-
-    captured = {}
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
-                        _make_fake_client(captured, result=_FakeResult(posted=1)))
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
-                        lambda events: "2026-05-22T12:00:00Z")
-    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
-                        lambda path: _bootstrapped_media_state())
-
-    from fulcra_media.collect_plugins import LASTFM_PLUGIN
-    st = PluginState("lastfm")
-    ctx = RunContext(plugin_id="lastfm",
-                     config={"username": "u"},
-                     credentials={"api-key": "K"},
-                     state=st, log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx)
-
-    cache = twin_cache.load(cache_path)
-    assert "tv:dune:s01e01" in cache
-    assert cache["tv:dune:s01e01"]["source_id"] == "lastfm-1"
+# The six former Last.fm.__wrapped__/global-JSON-cache tests now drive
+# configured decorated routes. The legacy helper tests below remain separate.
+from test_daemon_poll import (  # noqa: E402
+    ACCOUNT, DESTINATION, daemon as daemon, save_settings,
+)
+from fulcra_media import collect_v1  # noqa: E402
+from fulcra_media.collect_twins import MediaTwinIndex  # noqa: E402
 
 
-def test_scheduled_import_does_not_populate_when_nothing_posted(cache_path, monkeypatch):
-    """Mirror the CLI guard: don't cache events that weren't written. When the
-    import posts nothing (all duplicates / failure), the cache stays empty so
-    we never record an event that isn't actually in Fulcra."""
-    high = _evt(fp="tv:dune:s01e01", confidence="high", sid="lastfm-1")
-
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
-                        lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [high])
-
-    captured = {}
-    monkeypatch.setattr(
-        "fulcra_media.plugins.lastfm.FulcraClient",
-        _make_fake_client(captured, result=_FakeResult(posted=0, skipped_existing=1)),
-    )
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
-                        lambda events: "2026-05-22T12:00:00Z")
-    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
-                        lambda path: _bootstrapped_media_state())
-
-    from fulcra_media.collect_plugins import LASTFM_PLUGIN
-    st = PluginState("lastfm")
-    ctx = RunContext(plugin_id="lastfm",
-                     config={"username": "u"},
-                     credentials={"api-key": "K"},
-                     state=st, log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx)
-
-    assert twin_cache.load(cache_path) == {}
+def _variants(daemon, monkeypatch, transform):
+    """Keep real strict scan/normalization; vary only synthetic twin metadata."""
+    import importlib
+    from dataclasses import replace
+    name = daemon.name
+    module = daemon.plugin if name == "lastfm" else importlib.import_module("fulcra_media.importers." + name)
+    method = "normalize_history" if name in ("lastfm", "deezer") else "normalize_feed" if name == "generic_rss" else "fetch_diary"
+    actual = getattr(module, method)
+    def normalized(*args, **kwargs):
+        events = list(actual(*args, **kwargs))
+        return [replace(event, **transform(index, event)) for index, event in enumerate(events)]
+    monkeypatch.setattr(module, method, normalized)
 
 
-def test_scheduled_import_only_caches_high_confidence(cache_path, monkeypatch):
-    """Only high-confidence events go into the cache (a low-conf event is the
-    one that DEFERS to a cached twin — it must never become a twin itself)."""
-    low = _evt(fp="tv:other:s01e01", confidence="low", sid="lastfm-low")
-    high = _evt(fp="tv:dune:s01e01", confidence="high", sid="lastfm-high")
-
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
-                        lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [low, high])
-
-    captured = {}
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
-                        _make_fake_client(captured, result=_FakeResult(posted=2)))
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
-                        lambda events: "2026-05-22T12:00:00Z")
-    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
-                        lambda path: _bootstrapped_media_state())
-
-    from fulcra_media.collect_plugins import LASTFM_PLUGIN
-    st = PluginState("lastfm")
-    ctx = RunContext(plugin_id="lastfm",
-                     config={"username": "u"},
-                     credentials={"api-key": "K"},
-                     state=st, log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx)
-
-    cache = twin_cache.load(cache_path)
-    assert set(cache.keys()) == {"tv:dune:s01e01"}
+def _fingerprints(daemon):
+    return [event.external_ids["content_fingerprint"] for event in daemon.info["events"]]
 
 
-# ---------------------------------------------------------------------------
-# 2. A subsequent scheduled import consults the cache (cross-run twin match)
-# ---------------------------------------------------------------------------
-
-def test_second_scheduled_import_consults_cache_for_low_conf_twin(cache_path, monkeypatch):
-    """End-to-end: run 1 imports a HIGH-conf event (populating the cache);
-    run 2 imports a LOW-conf event for the SAME content. The scheduled glue
-    loads the cache as the extra_pool for find_low_conf_twins, so the matcher
-    pairs the incoming low-conf event with the cached high-conf twin. Before
-    Component 4 the cache was empty so there was nothing to match against on
-    the scheduled path. (Run 2 sets twin_policy='auto-discard' so the consult
-    machinery actually runs — the default 'keep' short-circuits as a no-op,
-    matching trakt's existing pattern.)"""
-    from fulcra_csv import find_low_conf_twins
-    from fulcra_media.collect_plugins import LASTFM_PLUGIN
-
-    # --- run 1: high-conf populates cache ---
-    high = _evt(fp="tv:dune:s01e01", confidence="high", sid="netflix-1",
-                ts=datetime(2026, 4, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
-                        lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [high])
-    captured1 = {}
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
-                        _make_fake_client(captured1, result=_FakeResult(posted=1)))
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
-                        lambda events: "2026-04-01T00:00:00Z")
-    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
-                        lambda path: _bootstrapped_media_state())
-
-    ctx1 = RunContext(plugin_id="lastfm", config={"username": "u"},
-                      credentials={"api-key": "K"}, state=PluginState("lastfm"),
-                      log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx1)
-    assert "tv:dune:s01e01" in twin_cache.load(cache_path)
-
-    # --- run 2: low-conf for the same content; the glue must consult the
-    # cache. We capture the extra_pool find_low_conf_twins is called with to
-    # prove the cached high-conf twin reaches the matcher. ---
-    low = _evt(fp="tv:dune:s01e01", confidence="low", sid="trakt-1",
-               ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
-    seen = {}
-    real_find = find_low_conf_twins
-
-    def spy_find(events, *, twin_key="content_fingerprint", extra_pool=None):
-        pairs = real_find(events, twin_key=twin_key, extra_pool=extra_pool)
-        seen["pairs"] = pairs
-        seen["extra_pool"] = list(extra_pool or [])
-        return pairs
-
-    monkeypatch.setattr("fulcra_media.plugins._common.find_low_conf_twins", spy_find)
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [low])
-    captured2 = {}
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
-                        _make_fake_client(captured2, result=_FakeResult(posted=1)))
-
-    ctx2 = RunContext(plugin_id="lastfm",
-                      config={"username": "u", "twin_policy": "auto-discard"},
-                      credentials={"api-key": "K"}, state=PluginState("lastfm"),
-                      log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx2)
-
-    # The cache was consulted: the cached high-conf twin was in the pool, and
-    # the low-conf incoming event matched it.
-    assert any(c.external_ids.get("content_fingerprint") == "tv:dune:s01e01"
-               for c in seen["extra_pool"]), "cached twin not loaded into extra_pool"
-    assert len(seen["pairs"]) == 1
-    low_ev, high_ev = seen["pairs"][0]
-    assert twin_cache._source_id_of(low_ev) == "trakt-1"
-    assert twin_cache._source_id_of(high_ev) == "netflix-1"
+def _preview_then_seed_high(daemon):
+    """Seed a real verified other-importer row in this owned destination."""
+    from dataclasses import replace
+    save_settings(daemon, preview_only=True)
+    daemon.invoke()
+    event = daemon.info["events"][0]
+    assert not daemon.info["posts"]
+    save_settings(daemon, preview_only=False)
+    high = replace(event, importer="synthetic-other", deterministic_id="com.fulcra.media.synthetic-other.v1.high",
+        timestamp_confidence="high", extra_source_ids=(),
+        external_ids={**event.external_ids, "content_fingerprint": "daemon-twin:match"})
+    with collect_v1.CollectRecordSession(daemon.ctx) as session:
+        result = collect_v1.MediaRecordWriter(daemon.ctx, session).run_import([high])
+    assert result.posted == result.verified == result.total == 1
+    identifier = daemon.info["posts"][0]["id"]
+    assert identifier in daemon.info["rows"]
+    daemon.info["posts"].clear()
+    return identifier
 
 
-# ---------------------------------------------------------------------------
-# 3. Default policy is a no-op (behaviour unchanged)
-# ---------------------------------------------------------------------------
-
-def test_default_twin_policy_does_not_discard(cache_path, monkeypatch):
-    """With no twin_policy configured (default 'keep'), an incoming low-conf
-    event that HAS a cached high-conf twin is still imported — the default
-    behaviour is unchanged; only the machinery is now available."""
-    # Pre-seed the cache with a high-conf twin.
-    twin_cache.record_imported_events(
-        [_evt(fp="tv:dune:s01e01", confidence="high", sid="netflix-1",
-              ts=datetime(2026, 4, 1, tzinfo=timezone.utc))],
-        cache_path,
-    )
-    low = _evt(fp="tv:dune:s01e01", confidence="low", sid="trakt-1",
-               ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
-
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
-                        lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [low])
-    captured = {}
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
-                        _make_fake_client(captured, result=_FakeResult(posted=1)))
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
-                        lambda events: "2026-05-16T00:00:00Z")
-    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
-                        lambda path: _bootstrapped_media_state())
-
-    from fulcra_media.collect_plugins import LASTFM_PLUGIN
-    ctx = RunContext(plugin_id="lastfm", config={"username": "u"},
-                     credentials={"api-key": "K"}, state=PluginState("lastfm"),
-                     log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx)
-
-    # The low-conf event was NOT discarded — default 'keep' policy.
-    assert captured["imported"] == [low]
+def _low_variant(index, event):
+    return {"timestamp_confidence": "low", "external_ids": {**event.external_ids,
+        "content_fingerprint": "daemon-twin:match" if index == 0 else f"daemon-twin:unmatched-{index}"}}
 
 
-def test_auto_discard_policy_drops_low_conf_twin_on_scheduled_path(cache_path, monkeypatch):
-    """When twin_policy='auto-discard' is explicitly configured, the scheduled
-    glue drops the low-conf incoming event whose fingerprint matches a cached
-    high-conf twin — proving the consult-and-apply machinery is live, not just
-    the load. (Opt-in; not the default.)"""
-    twin_cache.record_imported_events(
-        [_evt(fp="tv:dune:s01e01", confidence="high", sid="netflix-1",
-              ts=datetime(2026, 4, 1, tzinfo=timezone.utc))],
-        cache_path,
-    )
-    low = _evt(fp="tv:dune:s01e01", confidence="low", sid="trakt-1",
-               ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
-    keep = _evt(fp="tv:keep:s01e01", confidence="low", sid="keep-1",
-                ts=datetime(2026, 5, 17, tzinfo=timezone.utc))
+def _observe_native_high_authority(monkeypatch):
+    reads, exclusions = [], []
+    # The underlying canonical class is used by the fixture constructor.
+    from fulcra_collect.v1_session import CollectRecordSession
+    get_records, excluded_ids = CollectRecordSession.get_records, CollectRecordSession.excluded_ids
+    def records(session, destination, identifiers):
+        reads.extend((destination, identifier) for identifier in identifiers)
+        return get_records(session, destination, identifiers)
+    def excluded(session, destination, identifiers, **kwargs):
+        exclusions.extend((destination, identifier) for identifier in identifiers)
+        return excluded_ids(session, destination, identifiers, **kwargs)
+    monkeypatch.setattr(CollectRecordSession, "get_records", records)
+    monkeypatch.setattr(CollectRecordSession, "excluded_ids", excluded)
+    return reads, exclusions
 
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
-                        lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
-                        lambda raw: [low, keep])
-    captured = {}
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
-                        _make_fake_client(captured, result=_FakeResult(posted=1)))
-    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
-                        lambda events: "2026-05-17T00:00:00Z")
-    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
-                        lambda path: _bootstrapped_media_state())
 
-    from fulcra_media.collect_plugins import LASTFM_PLUGIN
-    ctx = RunContext(plugin_id="lastfm",
-                     config={"username": "u", "twin_policy": "auto-discard"},
-                     credentials={"api-key": "K"}, state=PluginState("lastfm"),
-                     log=logging.getLogger("t"), _emit=lambda e: None)
-    LASTFM_PLUGIN.run(ctx)
+def test_scheduled_guarded_import_populates_scoped_verified_index(daemon, cache_path, monkeypatch):
+    _variants(daemon, monkeypatch, lambda i, e: {"timestamp_confidence": "high",
+        "external_ids": {**e.external_ids, "content_fingerprint": f"daemon-twin:{i}"}})
+    daemon.invoke()
+    found = MediaTwinIndex().lookup(ACCOUNT, DESTINATION, _fingerprints(daemon))
+    assert found and all(identifier in daemon.info["rows"] for identifier in found.values())
+    assert not MediaTwinIndex().lookup("other-account", DESTINATION, _fingerprints(daemon))
+    assert not MediaTwinIndex().lookup(ACCOUNT, "Event/aaaaaaaa-2222-4333-8444-555555555555", _fingerprints(daemon))
+    assert twin_cache.load(cache_path) == {}  # machine-wide cache cannot authorize guarded routes
 
-    # The matched low-conf twin was dropped; the unmatched low-conf event stays.
-    assert captured["imported"] == [keep]
+
+def test_scheduled_zero_post_exact_existing_can_seed_scoped_index(daemon, monkeypatch):
+    _variants(daemon, monkeypatch, lambda i, e: {"timestamp_confidence": "high",
+        "external_ids": {**e.external_ids, "content_fingerprint": f"daemon-twin:{i}"}})
+    daemon.invoke()
+    count = len(daemon.info["posts"])
+    index = MediaTwinIndex()
+    index.path.unlink()
+    daemon.invoke()
+    assert len(daemon.info["posts"]) == count
+    found = index.lookup(ACCOUNT, DESTINATION, _fingerprints(daemon))
+    assert found and all(identifier in daemon.info["rows"] for identifier in found.values())
+    assert any(e.get("stage") == "imported" and e.get("posted") == 0 and e.get("skipped", 0) > 0 for e in daemon.emitted)
+
+
+def test_scheduled_guarded_index_only_caches_high_confidence(daemon, monkeypatch):
+    _variants(daemon, monkeypatch, lambda i, e: {"timestamp_confidence": "low" if i == 0 else "high",
+        "external_ids": {**e.external_ids, "content_fingerprint": f"daemon-twin:{i}"}})
+    daemon.invoke()
+    assert daemon.info["posts"]
+    found = MediaTwinIndex().lookup(ACCOUNT, DESTINATION, _fingerprints(daemon))
+    assert "daemon-twin:0" not in found
+    assert found and all(daemon.info["rows"][identifier]["timestamp_confidence"] == "high" for identifier in found.values())
+
+
+def test_scheduled_guarded_auto_discard_rechecks_native_high_and_exclusions(daemon, monkeypatch):
+    high = _preview_then_seed_high(daemon)
+    save_settings(daemon, twin_policy="auto-discard")
+    _variants(daemon, monkeypatch, _low_variant)
+    reads, exclusions = _observe_native_high_authority(monkeypatch)
+    daemon.invoke()
+    assert (DESTINATION, high) in reads and (DESTINATION, high) in exclusions
+    assert len(daemon.info["posts"]) == len(daemon.info["events"]) - 1
+    assert all(row["external_ids"]["content_fingerprint"] != "daemon-twin:match" for row in daemon.info["posts"])
+
+
+def test_scheduled_guarded_default_keep_does_not_discard_native_twin(daemon, monkeypatch):
+    _preview_then_seed_high(daemon)
+    _variants(daemon, monkeypatch, _low_variant)
+    daemon.invoke()
+    assert len(daemon.info["posts"]) == len(daemon.info["events"])
+    assert any(row["external_ids"]["content_fingerprint"] == "daemon-twin:match" for row in daemon.info["posts"])
+
+
+def test_scheduled_guarded_all_low_twins_skip_without_post_or_low_index(daemon, monkeypatch):
+    high = _preview_then_seed_high(daemon)
+    save_settings(daemon, twin_policy="auto-discard")
+    _variants(daemon, monkeypatch, lambda i, e: {"timestamp_confidence": "low",
+        "external_ids": {**e.external_ids, "content_fingerprint": "daemon-twin:match"}})
+    reads, exclusions = _observe_native_high_authority(monkeypatch)
+    daemon.invoke()
+    assert not daemon.info["posts"]
+    assert (DESTINATION, high) in reads and (DESTINATION, high) in exclusions
+    assert MediaTwinIndex().lookup(ACCOUNT, DESTINATION, ["daemon-twin:match"]) == {"daemon-twin:match": high}
+    assert any(e.get("stage") == "imported" and e.get("posted") == 0 and e.get("skipped") == len(daemon.info["events"]) for e in daemon.emitted)
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +303,7 @@ def test_apple_podcasts_scheduled_import_populates_twin_cache(cache_path, monkey
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: _bootstrapped_media_state())
 
-    APPLE_PODCASTS_PLUGIN.run(_ap_ctx({}))
+    APPLE_PODCASTS_PLUGIN.run.__wrapped__(_ap_ctx({}))
 
     cache = twin_cache.load(cache_path)
     assert "pod:show:ep1" in cache
@@ -439,7 +327,7 @@ def test_apple_podcasts_does_not_populate_when_nothing_posted(cache_path, monkey
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: _bootstrapped_media_state())
 
-    APPLE_PODCASTS_PLUGIN.run(_ap_ctx({}))
+    APPLE_PODCASTS_PLUGIN.run.__wrapped__(_ap_ctx({}))
 
     assert twin_cache.load(cache_path) == {}
 
@@ -470,7 +358,7 @@ def test_apple_podcasts_auto_discard_consults_cache(cache_path, monkeypatch):
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: _bootstrapped_media_state())
 
-    APPLE_PODCASTS_PLUGIN.run(_ap_ctx({"twin_policy": "auto-discard"}))
+    APPLE_PODCASTS_PLUGIN.run.__wrapped__(_ap_ctx({"twin_policy": "auto-discard"}))
 
     # The matched low-conf twin was dropped; the unmatched one stays.
     assert captured["imported"] == [keep]
@@ -549,7 +437,7 @@ def test_apple_tv_plugin_defaults_to_auto_discard(monkeypatch):
     ctx = RunContext(plugin_id="apple-tv", config={}, credentials={},
                      state=PluginState("apple-tv"),
                      log=logging.getLogger("t"), _emit=lambda e: None)
-    APPLE_TV_PLUGIN.run(ctx)
+    APPLE_TV_PLUGIN.run.__wrapped__(ctx)
     assert captured["policy"] == "auto-discard"
 
 
@@ -560,14 +448,12 @@ def test_netflix_plugin_defaults_to_auto_discard(monkeypatch):
     # netflix.run ensures the Watched definition before importing; stub that
     # pre-step (it needs a real client factory) so the test isolates the
     # policy passed to run_file_import.
-    monkeypatch.setattr("fulcra_media.plugins.netflix.ensure_media_def",
-                        lambda *a, **k: None)
     monkeypatch.setattr("fulcra_media.plugins.netflix._state_load",
                         lambda p: _bootstrapped_media_state())
     ctx = RunContext(plugin_id="netflix", config={"path": "/x.csv"},
                      credentials={}, state=PluginState("netflix"),
                      log=logging.getLogger("t"), _emit=lambda e: None)
-    NETFLIX_PLUGIN.run(ctx)
+    NETFLIX_PLUGIN.run.__wrapped__(ctx)
     assert captured["policy"] == "auto-discard"
 
 
@@ -585,5 +471,5 @@ def test_apple_takeout_plugin_defaults_to_auto_discard(monkeypatch):
     ctx = RunContext(plugin_id="apple-takeout", config={"path": "/x.zip"},
                      credentials={}, state=PluginState("apple-takeout"),
                      log=logging.getLogger("t"), _emit=lambda e: None)
-    APPLE_TAKEOUT_PLUGIN.run(ctx)
+    APPLE_TAKEOUT_PLUGIN.run.__wrapped__(ctx)
     assert captured["policy"] == "auto-discard"

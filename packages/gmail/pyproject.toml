@@ -9,8 +9,10 @@ description = "Local Gmail relay for Fulcra: per-account read-only client + OAut
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    "fulcra-api>=0.1.56",  # verified standalone record/catalog command seam
     # Sibling packages in this monorepo.
     "fulcra-common",
+    "coord-engine>=2.0.6",  # canonical relay protocol; embedded with bound transport
     "fulcra-collect",  # keychain/credential helpers + config dir + PluginState store
 ]
 
@@ -21,6 +23,7 @@ gmail = "fulcra_gmail.collect_plugin:PLUGIN"
 # Resolve the sibling packages from the workspace, not PyPI.
 fulcra-common = { workspace = true }
 fulcra-collect = { workspace = true }
+coord-engine = { workspace = true }
 
 [project.optional-dependencies]
 dev = [

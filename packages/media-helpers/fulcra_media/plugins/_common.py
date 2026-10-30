@@ -1,9 +1,8 @@
 """Helpers shared by two or more per-plugin modules.
 
 Anything used by only one plugin lives in that plugin's module; this file
-is for the genuinely shared bits (definition resolution, watermark
-arithmetic, the canonical Duration spec shape, plus the constant maps
-used by generic-rss and generic-csv).
+holds import progress, source-window arithmetic and compatibility spec aliases.
+V1 account/selection guards and pending writes live in collect_v1.
 
 Note on monkeypatching: each per-plugin module imports ``FulcraClient`` /
 ``_state_load`` / ``library`` / its importer directly so that test
@@ -39,56 +38,6 @@ DURATION_SPEC: dict = {
         "unit": None,
     },
 }
-
-
-# Maps the runtime config category to the canonical Fulcra definition name.
-# Used by generic-rss and generic-csv where the canonical identity is chosen
-# at run-time from plugin config rather than baked into the Plugin definition.
-CATEGORY_TO_CANONICAL: dict[str, str] = {
-    "watched": "Watched",
-    "listened": "Listened",
-    "read": "Read",
-}
-
-
-def ensure_media_def(ctx: RunContext, media_state, *,
-                     attr: str, spec: dict, canonical_name: str,
-                     state_save) -> str:
-    """Get/refresh a canonical definition id stored on the shared media
-    state file. Wraps ``ctx.ensure_definition`` to also write the new id
-    back to per-package state when it changes.
-
-    ``state_save`` is passed in by the caller (rather than imported here)
-    so the per-plugin module's binding wins — monkeypatching
-    ``fulcra_media.plugins.<id>._state_save`` will flow through.
-
-    Replaces the older ``if not media_state.<attr>: resolve; save`` pattern
-    that trusted the per-package cache blindly across daemon re-auths
-    to a different Fulcra account — the same orphan-ingest hazard task
-    #12 fixed for the attention plugin. See [[task #13]] for the
-    generalisation and [[task #16]] for the tag_ids parity.
-
-    When the def is re-resolved (cached value was stale on the current
-    account), also invalidate the tag_ids dict — those tag UUIDs were
-    populated alongside the now-orphan def and almost certainly belong
-    to the prior account too. ensure_tag will repopulate fresh UUIDs
-    from the current account on next access. Costs O(N) round-trips
-    once, only after an account switch.
-    """
-    cached = getattr(media_state, attr, None)
-    def_id = ctx.ensure_definition(
-        cached=cached, expected_spec=spec, canonical_name=canonical_name,
-    )
-    if cached != def_id:
-        setattr(media_state, attr, def_id)
-        # Stale-def detected → tag cache is also suspect on an account
-        # switch. Clear only when ``cached`` was truthy (i.e. we had a
-        # cache and it was wrong) — first-run resolves shouldn't pay
-        # the tag-rebuild cost.
-        if cached and hasattr(media_state, "tag_ids"):
-            media_state.tag_ids = {}
-        state_save(media_state)
-    return def_id
 
 
 def newest_event_iso(events: list) -> str | None:
@@ -127,10 +76,10 @@ def since_from_watermark(ctx: RunContext) -> datetime | None:
 # content_fingerprint) imported on a previous run — the kind of match the
 # exact-bucket .content.* dedup key can't catch because confidence and
 # timestamps differ. Both halves below run for EVERY scheduled / file / RSS
-# plugin that routes through this shared glue, mirroring what the CLI import
-# path does in cli_common.run_and_emit + cli._maybe_apply_twin_dedup. Trakt
-# keeps its own inline copy of this logic (it predates the shared seam and
-# carries extra cluster-policy handling); the behaviour is identical.
+# plugin that routes through this shared glue. Guarded v1 callers instead use
+# MediaRecordWriter._twin_pairs for fresh account/destination-scoped proof;
+# standalone Trakt inspects that same proof through StandaloneMediaRun before
+# applying its invocation-only choice. These helpers retain their legacy callers.
 # ---------------------------------------------------------------------------
 
 def apply_twin_policy(
@@ -190,6 +139,14 @@ def consult_twin_cache(
     "keep" so unmigrated plugins are behaviour-preserving.
     """
     twin_policy = ctx.config.get("twin_policy", default_twin_policy)
+    writer = getattr(ctx, "_media_record_writer", None)
+    if writer is not None:
+        # V1 resolves hints in the captured account/destination and rereads
+        # their records. Legacy machine-wide cache entries are not evidence.
+        writer.default_twin_policy = default_twin_policy
+        if twin_policy not in {"keep", "auto-discard"}:
+            raise RuntimeError("headless twin_policy must be keep or auto-discard")
+        return events
     if twin_policy == "keep":
         # Fast path: no need to touch the cache for the no-op default.
         return events
@@ -197,16 +154,16 @@ def consult_twin_cache(
     return apply_twin_policy(events, twin_policy=twin_policy, cached_pool=cached)
 
 
-def record_twins_after_post(events: list, *, posted: int) -> None:
+def record_twins_after_post(events: list, *, posted: int, ctx=None) -> None:
     """Populate the twin cache with this run's high-confidence events — but
     only after a successful POST (``posted`` > 0), so we never cache an event
-    that wasn't actually written to Fulcra. Mirrors cli_common.run_and_emit.
+    that wasn't actually written to Fulcra.
 
     ``record_imported_events`` itself filters to high-confidence events that
     carry a content_fingerprint, so we pass the full batch. Cache failures
     must never break an import, so we swallow and log.
     """
-    if posted <= 0:
+    if posted <= 0 or getattr(ctx, "_media_record_writer", None) is not None:
         return
     try:
         twin_cache.record_imported_events(events)
@@ -215,6 +172,19 @@ def record_twins_after_post(events: list, *, posted: int) -> None:
         logging.getLogger("fulcra_media.twin_cache").warning(
             "twin cache write failed after scheduled import", exc_info=True
         )
+
+
+def report_import(ctx, result, label):
+    """Progress is distinct from the writer's exact-visibility receipt."""
+    preview = any(ctx.config.get(key) is True for key in ("preview_only", "dry_run"))
+    ctx.progress(stage="preview" if preview else "imported",
+                 posted=0 if preview else result.posted,
+                 skipped=result.skipped_existing,
+                 **({"would_post": result.posted} if preview else {}))
+    # Compatibility for callers outside the guarded v1 runtime. V1 batches
+    # emit their one authoritative receipt from the pending-outbox commit.
+    if result.posted > 0 and not preview and getattr(ctx, "_media_record_writer", None) is None:
+        ctx.annotation(f"{label}: {result.posted} new record" + ("s" if result.posted != 1 else ""), ok=True)
 
 
 def run_scheduled_import(
@@ -244,6 +214,9 @@ def run_scheduled_import(
     since = since_from_watermark(ctx)
     raw = list(fetch(since))
     events = list(normalize(raw))
+    poll = getattr(ctx, "_daemon_poll", None)
+    if poll is not None:
+        return poll.deliver(events, tag.capitalize())
     ctx.progress(stage="fetched", count=len(events))
 
     # Cross-source twin dedup: consult the local high-conf twin cache and apply
@@ -251,22 +224,14 @@ def run_scheduled_import(
     events = consult_twin_cache(ctx, events)
 
     media_state = state_load(STATE_PATH)
-    client = fulcra_client_cls()
-    client.ensure_tag(tag, media_state)
+    client = fulcra_client_cls(collect_context=ctx)
     result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
                                unclaim=ctx.unclaim_dedup_keys)
-    ctx.progress(stage="imported", posted=result.posted,
-                 skipped=result.skipped_existing)
-    if result.posted > 0:
-        ctx.annotation(
-            f"{tag.capitalize()}: {result.posted} new annotation"
-            + ("s" if result.posted != 1 else ""),
-            ok=True,
-        )
+    report_import(ctx, result, tag.capitalize())
 
     # Populate the twin cache with this run's high-conf events (after a
     # successful POST only), so a future low-conf twin can defer to them.
-    record_twins_after_post(events, posted=result.posted)
+    record_twins_after_post(events, posted=result.posted, ctx=ctx)
 
     # Advance even when posted == 0: every event in ``events`` was either posted
     # OR skipped-as-already-in-Fulcra — both count as successfully processed.
@@ -312,21 +277,13 @@ def import_events(
                                 default_twin_policy=default_twin_policy)
 
     media_state = state_load(STATE_PATH)
-    client = fulcra_client_cls()
-    client.ensure_tag(tag, media_state)
+    client = fulcra_client_cls(collect_context=ctx)
     result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
                                unclaim=ctx.unclaim_dedup_keys)
-    ctx.progress(stage="imported", posted=result.posted,
-                 skipped=result.skipped_existing)
-    if result.posted > 0:
-        ctx.annotation(
-            f"{tag.capitalize()}: {result.posted} new annotation"
-            + ("s" if result.posted != 1 else ""),
-            ok=True,
-        )
+    report_import(ctx, result, tag.capitalize())
 
     # Populate the twin cache with this run's high-conf events (post-POST only).
-    record_twins_after_post(events, posted=result.posted)
+    record_twins_after_post(events, posted=result.posted, ctx=ctx)
 
 
 def run_file_import(
@@ -394,27 +351,22 @@ def rss_import_and_advance(
     if max_entries is not None:
         events = events[:max_entries]
 
+    poll = getattr(ctx, "_daemon_poll", None)
+    if poll is not None:
+        return poll.deliver(events, tag.capitalize())
     ctx.progress(stage="fetched", count=len(events))
 
     # Cross-source twin dedup (default "keep" → no-op); see run_scheduled_import.
     events = consult_twin_cache(ctx, events)
 
     media_state = state_load(STATE_PATH)
-    client = fulcra_client_cls()
-    client.ensure_tag(tag, media_state)
+    client = fulcra_client_cls(collect_context=ctx)
     result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
                                unclaim=ctx.unclaim_dedup_keys)
-    ctx.progress(stage="imported", posted=result.posted,
-                 skipped=result.skipped_existing)
-    if result.posted > 0:
-        ctx.annotation(
-            f"{tag.capitalize()}: {result.posted} new annotation"
-            + ("s" if result.posted != 1 else ""),
-            ok=True,
-        )
+    report_import(ctx, result, tag.capitalize())
 
     # Populate the twin cache with this run's high-conf events (post-POST only).
-    record_twins_after_post(events, posted=result.posted)
+    record_twins_after_post(events, posted=result.posted, ctx=ctx)
 
     # Advance even when posted == 0 — same rationale as run_scheduled_import.
     new_wm = newest_iso(events)

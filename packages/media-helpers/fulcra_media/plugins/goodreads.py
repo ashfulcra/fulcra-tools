@@ -7,23 +7,20 @@ from datetime import timedelta
 from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 
 from ..feed_plugin_health import goodreads_health_check
+from ..collect_v1 import media_destinations, media_pending
+from ..daemon_poll import daemon_poll
 from ..fulcra import FulcraClient
 from ..importers import goodreads as gr_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ._common import (
     DURATION_SPEC,
-    ensure_media_def,
     newest_event_iso,
     rss_import_and_advance,
     rss_since,
 )
 
 
-# Same structure as NETFLIX_WATCHED_SPEC and LASTFM_LISTENED_SPEC — all
-# typed-media plugins share the same duration shape; only the canonical name
-# differs.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 GOODREADS_READ_SPEC: dict = DURATION_SPEC
 
 
@@ -61,6 +58,7 @@ def _extract_goodreads_user_id(raw: str) -> str:
     )
 
 
+@daemon_poll
 def _run_goodreads(ctx: RunContext) -> None:
     raw_user_id = ctx.config.get("user_id")
     if not raw_user_id:
@@ -69,23 +67,13 @@ def _run_goodreads(ctx: RunContext) -> None:
             f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
         )
     user_id = _extract_goodreads_user_id(raw_user_id)
-    max_entries: int | None = ctx.config.get("max_entries")
 
-    # Ensure the "Read" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # read_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Read" definition
-    # rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="read_definition_id",
-                     spec=GOODREADS_READ_SPEC, canonical_name="Read",
-                     state_save=_state_save)
-
+    ctx._daemon_poll.select("read", "goodreads", ["goodreads", user_id, gr_importer.feed_url_for(user_id)])
     since = rss_since(ctx)
-    all_events = list(gr_importer.fetch_diary(user_id))
+    all_events = list(gr_importer.fetch_diary(user_id, **ctx._daemon_poll.strict))
     rss_import_and_advance(
         ctx, all_events, tag="goodreads", since=since,
-        max_entries=max_entries,
+        max_entries=ctx._daemon_poll.max_entries,
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
         newest_iso=newest_event_iso,
@@ -98,6 +86,8 @@ PLUGIN = Plugin(
     kind="scheduled",
     collect_mode="live_polled",
     run=_run_goodreads,
+    record_data_types=media_destinations("read"),
+    record_pending=media_pending,
     health_check=goodreads_health_check,
     description=(
         "Polls your Goodreads 'read' shelf RSS feed every 12 hours. "
@@ -127,7 +117,7 @@ PLUGIN = Plugin(
             body_md=(
                 "Goodreads publishes your 'read' shelf as an RSS feed. "
                 "We poll it every 12 hours and record each book you "
-                "mark as read as a 'Read' annotation in Fulcra."
+                "mark as read as a 'Read' data type in Fulcra."
             ),
         ),
         SetupStep(
@@ -165,7 +155,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Goodreads reads?",
             body_md=(
-                "We can write to your existing 'Read' annotation or "
+                "We can write to your existing 'Read' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

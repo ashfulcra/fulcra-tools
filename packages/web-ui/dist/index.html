@@ -16,7 +16,7 @@
        resolves AFTER the Lit module above. Order matters: components must
        be registered as custom elements before <fulcra-step> appears in
        the DOM. Loaded before wizard.js / page scripts as a result. -->
-  <script type="module" src="/static/components/index.js"></script>
+  <script type="module" src="/static/components/index.js?v=20261024d"></script>
 </head>
 <body class="bg-white text-slate-900 min-h-screen"
       x-data="app()"
@@ -127,17 +127,17 @@
                 → your avatar → <strong>Settings</strong> → <strong>API tokens</strong>.
               </p>
               <p class="text-slate-500 text-xs" x-show="signinMode === 'auto'">
-                Checking for the fulcra CLI…
+                Preparing sign-in…
               </p>
             </div>
 
-            <!-- CLI / browser flow -->
+            <!-- Browser sign-in flow -->
             <div class="space-y-3" x-show="signinMode === 'cli'">
               <template x-if="signinError">
                 <p class="text-red-600 text-sm" x-text="signinError"></p>
               </template>
 
-              <!-- Split flow (fulcra-api >= 0.1.35): the daemon returned a
+              <!-- SDK device flow: the daemon returned a
                    sign-in URL — render it as a real link the user clicks.
                    Nothing here depends on the daemon being able to open a
                    browser (it can't under launchd / SSH / headless). -->
@@ -155,25 +155,15 @@
                   </p>
                   <p class="text-violet-700">
                     This page will move on automatically once you approve.
-                    The flow times out after 2 minutes — the code is
-                    short-lived, so click <strong>Sign in with Fulcra</strong>
+                    The code is short-lived, so click <strong>Sign in with Fulcra</strong>
                     again if it stalls.
                   </p>
                 </div>
               </template>
 
-              <!-- Classic fallback (fulcra CLI without --get-auth-url): the
-                   daemon-side CLI subprocess tries to open the tab itself. -->
               <template x-if="signinLoading && !authUrl">
                 <div class="rounded border border-violet-200 bg-violet-50 p-3 text-sm text-violet-800">
-                  <p class="font-medium">Waiting for browser sign-in…</p>
-                  <p class="text-violet-700 mt-1">
-                    A browser tab should have opened. Finish signing in there;
-                    this page will move on automatically. The flow times out
-                    after 2 minutes. If no tab appeared, upgrade the CLI with
-                    <code class="font-mono">uv tool upgrade fulcra-api</code>
-                    and try again, or use a token instead.
-                  </p>
+                  <p class="font-medium">Preparing a secure sign-in link…</p>
                 </div>
               </template>
 
@@ -189,7 +179,7 @@
               </div>
 
               <p class="text-xs text-slate-500">
-                <a href="#" @click.prevent="signinMode = 'token'; signinError = ''"
+                <a href="#" @click.prevent="switchSigninMode('token')"
                    class="text-violet-600 hover:underline">Use a token instead</a>
               </p>
             </div>
@@ -222,7 +212,7 @@
               </div>
 
               <p class="text-xs text-slate-500" x-show="cliAvailable">
-                <a href="#" @click.prevent="signinMode = 'cli'; signinError = ''"
+                <a href="#" @click.prevent="switchSigninMode('cli')"
                    class="text-violet-600 hover:underline">Use the browser sign-in instead</a>
               </p>
             </div>
@@ -554,7 +544,9 @@
 
                   <template x-if="!is_done_step">
                     <button @click="next()"
-                            :disabled="nextBlocked"
+                            :disabled="nextBlocked || nextPending"
+                            :aria-busy="nextPending"
+                            x-text="nextPending ? 'Saving…' : 'Next'"
                             class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 disabled:opacity-40 transition-colors text-sm">
                       Next
                     </button>
@@ -562,7 +554,7 @@
 
                   <template x-if="is_done_step">
                     <button @click="next()"
-                            :disabled="firstRunStatus === 'running'"
+                            :disabled="firstRunStatus === 'running' || nextPending"
                             x-text="completion_label"
                             class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors text-sm">
                       Continue
@@ -772,7 +764,9 @@
 
               <template x-if="!is_done_step">
                 <button @click="next()"
-                        :disabled="nextBlocked"
+                        :disabled="nextBlocked || nextPending"
+                        :aria-busy="nextPending"
+                        x-text="nextPending ? 'Saving…' : 'Next'"
                         class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 disabled:opacity-40 transition-colors text-sm">
                   Next
                 </button>
@@ -780,7 +774,7 @@
 
               <template x-if="is_done_step">
                 <button @click="next()"
-                        :disabled="firstRunStatus === 'running'"
+                        :disabled="firstRunStatus === 'running' || nextPending"
                         x-text="completion_label"
                         class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors text-sm">
                   Done
@@ -889,10 +883,9 @@
         <!--     button covers both paths so the user never sees two      -->
         <!--     "Reconnect" controls.                                    -->
         <!--                                                              -->
-        <!-- Plugins with their own credentials (Trakt, Last.fm, etc.)    -->
-        <!-- keep ingesting events regardless; only Fulcra-API management -->
-        <!-- actions (def listing, soft-delete) are gated on a fresh      -->
-        <!-- sign-in.                                                     -->
+        <!-- Source credentials and shared Collect account access are   -->
+        <!-- independent. Neither this panel nor a successful local read -->
+        <!-- proves that a source worker can ingest successfully.        -->
         <!-- ──────────────────────────────────────────────────────────── -->
         <div class="rounded-lg border p-4 space-y-3"
              :class="fulcraAuthStatus.refresh_failed
@@ -900,30 +893,37 @@
                        : 'border-slate-200 bg-white'">
           <div class="flex items-baseline justify-between gap-3">
             <h3 class="text-base font-semibold">Fulcra account</h3>
-            <template x-if="!fulcraAuthStatus.refresh_failed">
-              <span class="text-xs text-emerald-700 font-medium">Connected</span>
+            <template x-if="fulcraAuthStatus.authenticated === true && !fulcraAuthStatus.refresh_failed">
+              <span class="text-xs text-emerald-700 font-medium">Saved sign-in readable</span>
             </template>
             <template x-if="fulcraAuthStatus.refresh_failed">
-              <span class="text-xs text-amber-800 font-medium">Sign-in expired</span>
+              <span class="text-xs text-amber-800 font-medium">Reconnect required</span>
             </template>
           </div>
           <template x-if="fulcraAuthStatus.refresh_failed">
             <div class="text-sm text-amber-900">
-              <span class="font-semibold">Your Fulcra sign-in expired.</span>
-              Some management actions (listing annotation tracks,
-              soft-deleting) will fail until you reconnect. Plugins
-              with their own credentials (Trakt, Last.fm, etc.) will
-              keep ingesting events.
+              <span class="font-semibold">Saved sign-in renewal reported a failure.</span>
+              Check current access before reconnecting. Retry sources separately after access is available.
             </div>
           </template>
-          <template x-if="!fulcraAuthStatus.refresh_failed">
+          <template x-if="fulcraAuthStatus.authenticated === true && !fulcraAuthStatus.refresh_failed">
             <p class="text-xs text-slate-500 max-w-2xl">
-              The daemon refreshes your Fulcra token automatically. Reconnect here
-              if you want to sign in as a different account or force a fresh
-              token mint.
+              The saved bearer was readable by a fresh quiet local check. This
+              does not verify the server, a source worker, provider access, or
+              automatic refresh. Reconnect to change accounts.
             </p>
           </template>
-          <div class="flex items-center gap-3">
+          <template x-if="fulcraAuthStatus.authenticated === null">
+            <div class="space-y-2 text-sm text-amber-900">
+              <p x-text="fulcraAuthStatus.availability === 'loading' ? 'Checking saved sign-in access…' : 'Saved sign-in access is unverified. Your credentials have been kept.'"></p>
+              <button x-show="fulcraAuthStatus.availability !== 'loading'" @click="authorizeFulcraKeychain()" :disabled="keychainAccessBusy || fulcraAuthStatus.availability === 'pending'"
+                      class="text-violet-700 underline disabled:opacity-50">Allow Keychain access</button>
+              <p class="text-xs">Finish any pending request before checking again. A one-time allowance may not permit quiet background access.</p>
+              <button x-show="fulcraAuthStatus.availability !== 'loading'" @click="_loadAuthStatus()" :disabled="keychainAccessBusy" class="text-violet-700 underline">Check access again (quiet)</button>
+              <p x-show="keychainAccessError" x-text="keychainAccessError" role="alert"></p>
+            </div>
+          </template>
+          <div class="flex items-center gap-3" x-show="fulcraAuthStatus.authenticated !== null">
             <button @click="reconnectToFulcra()"
                     :disabled="reconnectInFlight"
                     class="px-4 py-2 rounded font-medium disabled:opacity-50 text-sm"
@@ -935,11 +935,22 @@
             <span x-show="reconnectError" x-text="reconnectError"
                   class="text-sm text-red-700"></span>
           </div>
+          <template x-if="reconnectInFlight && reconnectAuthUrl">
+            <div class="rounded border border-violet-200 bg-violet-50 p-3 text-sm text-violet-800 space-y-2">
+              <p>Finish signing in, then return here.</p>
+              <a :href="reconnectAuthUrl" target="_blank" rel="noopener"
+                 class="inline-block px-4 py-2 rounded bg-violet-600 text-white">Open the sign-in page</a>
+              <p>Check that the page shows this code:
+                <code class="font-mono font-semibold" x-text="reconnectWebAuthCode"></code>
+              </p>
+              <button @click="cancelReconnect()" class="text-violet-700 underline">Cancel sign-in</button>
+            </div>
+          </template>
         </div>
 
         <!-- ──────────────────────────────────────────────────────────── -->
         <!-- Quick-record favorites (task #64).                           -->
-        <!-- Per-machine. The menubar's pin toggle and this list share   -->
+        <!-- Account-scoped on this Mac. Pin toggles and this list share   -->
         <!-- the same daemon endpoints; opening this page after pinning  -->
         <!-- in the menubar shows the user's actual current pin state.   -->
         <!-- ──────────────────────────────────────────────────────────── -->
@@ -950,41 +961,41 @@
                   x-text="`${favoritesCount} favorite${favoritesCount === 1 ? '' : 's'} selected`"></span>
           </div>
           <p class="text-xs text-slate-500 max-w-2xl">
-            Pinned annotations appear at the top of the menubar's quick-record list,
-            and the menubar defaults to showing only favorites when any are set.
-            The menubar's pin toggle and this page stay in sync — both write to
-            <code class="text-[10px] bg-slate-100 px-1 py-0.5 rounded">~/.config/fulcra-collect/quick_record_favorites.json</code>
-            on this machine. Cross-machine sync is coming in a later release.
+            Pin existing moment and duration track choices in the menu-bar app.
+            New captures use v1 Events. Favorites are saved for the signed-in
+            account on this Mac.
           </p>
+          <button @click="_loadFavorites()" :disabled="favoritesLoading || favoritesSaving"
+                  class="text-xs text-violet-700 disabled:opacity-40">Refresh favorites</button>
 
           <template x-if="favoritesError">
             <div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2"
                  x-text="favoritesError"></div>
           </template>
 
-          <template x-if="!loading && sortedDefinitions.length > 0">
+          <template x-if="!favoritesLoading && quickRecordChoices.length > 0">
             <div class="divide-y divide-slate-100 border border-slate-100 rounded">
-              <template x-for="def in sortedDefinitions" :key="`fav-${def.id}`">
+              <template x-for="def in quickRecordChoices" :key="`fav-${def.id}`">
                 <label class="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer">
                   <input type="checkbox"
                          :checked="isFavorite(def)"
-                         :disabled="favoritesSaving"
+                         :disabled="favoritesSaving || !quickRecordScope"
                          @change="toggleFavorite(def)"
                          class="w-4 h-4 text-violet-600 border-slate-300 rounded focus:ring-violet-500 disabled:opacity-40">
                   <div class="flex-1 min-w-0">
                     <div class="text-sm text-slate-900 truncate" x-text="def.name"></div>
                     <div class="text-[11px] text-slate-500"
-                         x-text="`${def.annotation_type || 'unknown type'} · created ${humanDate(def.created_at)}`"></div>
+                         x-text="def.annotation_type"></div>
                   </div>
                 </label>
               </template>
             </div>
           </template>
 
-          <template x-if="!loading && sortedDefinitions.length === 0">
+          <template x-if="!favoritesLoading && !favoritesError && quickRecordChoices.length === 0">
             <div class="text-xs text-slate-400">
-              No annotation definitions yet — favorites become available once
-              you have at least one annotation track.
+              No existing moment or duration track choices. These choices come
+              from your account's legacy annotation definitions.
             </div>
           </template>
         </div>
@@ -992,14 +1003,13 @@
         <!-- ──────────────────────────────────────────────────────────── -->
         <!-- Annotation tracks (soft-delete; existing task #42 surface). -->
         <!-- ──────────────────────────────────────────────────────────── -->
-        <h3 class="text-base font-semibold pt-2">Annotation tracks</h3>
+        <h3 class="text-base font-semibold pt-2">Legacy annotation definitions</h3>
 
         <p class="text-sm text-slate-500 max-w-2xl">
-          These are the annotation definitions on your Fulcra account.
-          Soft-deleting one removes it from pickers; the events already
-          written under it stay in Fulcra but no longer surface in the
-          definitions list. Any plugin currently bound to a deleted track
-          will resolve a fresh one on its next run.
+          These legacy definitions supply existing track metadata and quick-record
+          choices. Soft-deleting one hides that choice; recorded data, saved
+          favorites and v1 source destinations are kept. This does not delete
+          v1 Events or reconfigure migrated sources.
         </p>
 
         <!-- Inline success banner (last successful delete) -->
@@ -1028,9 +1038,9 @@
         <!-- Empty state — user has no defs at all (or just deleted the last one) -->
         <template x-if="!loading && !error && sortedDefinitions.length === 0">
           <div class="text-center py-12 text-slate-400">
-            <p class="text-sm">No annotation definitions on your account yet.</p>
+            <p class="text-sm">No legacy annotation definitions on your account.</p>
             <p class="text-xs mt-1">
-              Enabled plugins create them on first run.
+              Quick-record lists existing moment and duration definitions; new captures use v1 Events.
             </p>
           </div>
         </template>
@@ -1094,7 +1104,7 @@
                  @go-to-settings.window listener calls goToSettings(). -->
             <button @click="$dispatch('go-to-settings')"
                     class="text-xs text-slate-400 hover:text-violet-600 underline"
-                    title="Manage annotation tracks">
+                    title="Manage legacy annotation definitions">
               Settings
             </button>
             <!-- "How do I get my data?" reference. The doc is bundled
@@ -1142,6 +1152,8 @@
                             x-text="pillLabel(p)"></span>
                     </div>
                     <p class="text-xs text-slate-500" x-text="p.description || ''"></p>
+                    <button x-show="credentialRecoveryLabel(p)" @click="recoverCredential(p)"
+                            class="text-xs text-amber-800 underline" x-text="credentialRecoveryLabel(p)"></button>
                     <div class="flex items-center gap-3 mt-1">
                       <template x-if="humanInterval(p)">
                         <p class="text-xs text-slate-400" x-text="humanInterval(p)"></p>
@@ -1191,6 +1203,8 @@
                             x-text="pillLabel(p)"></span>
                     </div>
                     <p class="text-xs text-slate-500" x-text="p.description || ''"></p>
+                    <button x-show="credentialRecoveryLabel(p)" @click="recoverCredential(p)"
+                            class="text-xs text-amber-800 underline" x-text="credentialRecoveryLabel(p)"></button>
                     <div class="flex items-center gap-3 mt-1">
                       <template x-if="humanInterval(p)">
                         <p class="text-xs text-slate-400" x-text="humanInterval(p)"></p>
@@ -1265,10 +1279,11 @@
        happily serves the cached body on conditional GETs. Bumping the v=
        query string here is the cheap way to force a fresh load when the
        file actually changed. Daemon-side fix is a follow-up. -->
-  <script src="/static/wizard.js?v=20260527d"></script>
-  <script src="/static/onboarding.js?v=20260527d"></script>
+  <script src="/static/wizard.js?v=20261024d"></script>
+  <script src="/static/browser-signin.js?v=20261024b"></script>
+  <script src="/static/onboarding.js?v=20261024b"></script>
   <script src="/static/dashboard.js?v=20260527d"></script>
-  <script src="/static/settings.js?v=20260527d"></script>
-  <script src="/static/app.js?v=20260527d"></script>
+  <script src="/static/settings.js?v=20261024d"></script>
+  <script src="/static/app.js?v=20261024d"></script>
 </body>
 </html>

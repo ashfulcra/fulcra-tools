@@ -41,6 +41,48 @@ To load a from-source build: **Load unpacked** → select the **`dist/`** build 
 > means you picked the wrong folder. Run `npm run build` and choose `packages/attention/chrome/dist/`.
 > (`dist/` is gitignored, so it won't exist until you build.)
 
+The [v1 development contract and journal](../README.md#v1-contract-development)
+are opt-in foundations. Default capture/auth/destination/queue paths still use
+the existing transport. [Journal tests](tests/relayless/v1Journal.test.ts) run
+against the pinned development-only `fake-indexeddb`; the browser implementation
+uses native IndexedDB and requires actual upgrade/persistence QA before rollout.
+
+The opt-in [account-scoped HTTP helper](src/relayless/v1Http.ts) adds API principal
+proof, current gate/token checks, captured finite JSON, bounded decoded-body
+retention and no blind mutation retries. It performs no auth publication or
+refresh, and default senders do not call it. The same linked rollout gates apply;
+see its [mock-only tests](tests/relayless/v1Http.test.ts).
+
+The opt-in [tag resolver](src/relayless/v1Tags.ts) adds account-scoped durable
+creation and immutable UUID bindings. Its journal upgrades from IndexedDB v1
+without clearing prior gates or datatype intents. Lost/unknown creation never
+permits an automatic second POST, and a known UUID is retained before required
+readback. See the [synthetic upgrade/restart tests](tests/relayless/v1Tags.test.ts)
+and linked development contract; actual browser upgrade/persistence is still a
+rollout gate.
+
+The opt-in [owned-type inventory](src/relayless/v1OwnedTypes.ts) reads the direct
+authenticated input endpoint with complete-response and whole-list validation.
+It preserves retired types and returns frozen account-bound entries; it does
+not bind destinations, create types or authorize uploads. Its
+[HTTP-integrated synthetic tests](tests/relayless/v1OwnedTypes.test.ts) retain
+the same actual-browser rollout limits.
+
+The pure [Attention schema proof](src/relayless/v1AttentionSpec.ts) adds the
+pinned Python-compatible creation specification and a closed served-schema
+check. Unsupported constraints remain held. Its retained schema-text digest
+has the exact definition in the linked development contract; it is not account
+or upload authority. See the [synthetic tests](tests/relayless/v1AttentionSpec.test.ts).
+
+The opt-in [destination setup binder](src/relayless/v1Destination.ts) combines
+fresh ownership, input/served-schema proof and a current-generation journal
+commit. It writes local bindings and only explicitly permitted remote type
+creation; it is not a preview or record sender. Unknown creation is reconciled
+without blind retry, known UUIDs remain immutable, and one journal handle must
+serve each operation's transport and local effects. See the
+[race/restart tests](tests/relayless/v1Destination.test.ts) and linked contract
+for input-transform handling and remaining rollout gates.
+
 ## Cutting a release
 
 Bump the version in [package.json](package.json) and the Chrome/Safari manifest

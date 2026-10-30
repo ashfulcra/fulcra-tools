@@ -45,18 +45,28 @@ def test_refresh_when_expired(tmp_path: Path, mocker):
     mocker.patch("fulcra_media.importers.trakt.CREDS_PATH", p)
 
     def fake_post(url, json=None, timeout=None):
-        assert "/oauth/token" in url
-        assert json["refresh_token"] == "rt"
+        assert url == "https://auth.trakt.tv/oauth/token"
+        assert json == {
+            "refresh_token": "rt",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "grant_type": "refresh_token",
+        }
+        assert timeout == 30
         return httpx.Response(200, json={
             "access_token": "new",
             "refresh_token": "rt2",
             "expires_in": 86400,
             "created_at": int(time.time()),
         })
-    mocker.patch("httpx.post", side_effect=fake_post)
+    post = mocker.patch("httpx.post", side_effect=fake_post)
 
     a = TraktAuth()
     a.headers()  # triggers refresh internally
     c = json.loads(p.read_text())
     assert c["access_token"] == "new"
     assert c["refresh_token"] == "rt2"
+    assert c["client_id"] == "cid"
+    assert c["client_secret"] == "csec"
+    assert post.call_count == 1  # Never replay a rotating grant on another host.

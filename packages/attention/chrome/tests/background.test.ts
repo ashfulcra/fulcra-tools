@@ -472,3 +472,8 @@ describe("withSwLock serialises concurrent storage transitions", () => {
     expect(visits[1].state).toBe("focused");
   });
 });
+
+test.each(['same-day','stale-day'])('R2 N2 default legacy ignored navigation retains %s counter behavior',async(day)=>{
+ const today=new Date().toISOString().slice(0,10);await chrome.storage.local.set({counts:{date:day==='same-day'?today:'2000-01-01',logged:19,categorized:7,ignored:4}});await saveIgnoreList([{pattern:'ignored.invalid',addedAt:'2026-01-01T00:00:00Z'}]);stubTab(1,'https://ignored.invalid/');
+ await handleNavigation({tabId:1,url:'https://ignored.invalid/',frameId:0,timeStamp:T0});expect((await chrome.storage.local.get('counts')).counts).toEqual(day==='same-day'?{date:today,logged:19,categorized:7,ignored:5}:{date:today,logged:0,categorized:0,ignored:1});expect(await loadVisits()).toEqual({});
+});

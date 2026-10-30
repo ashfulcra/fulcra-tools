@@ -149,6 +149,7 @@ def refresh_access_token(
     client_id: str,
     client_secret: str,
     transport: httpx.BaseTransport | None = None,
+    still_allowed=None,
 ) -> str:
     """Mint a fresh access token from a stored refresh token.
 
@@ -156,14 +157,17 @@ def refresh_access_token(
     grant was revoked or expired — the account needs re-authorization). Any
     other HTTP error propagates as ``httpx.HTTPStatusError``.
     """
+    guard = still_allowed or (lambda: None)
+    guard()
     payload = {
         "refresh_token": refresh_token,
         "client_id": client_id,
         "client_secret": client_secret,
         "grant_type": "refresh_token",
     }
-    with httpx.Client(timeout=_TIMEOUT, transport=transport) as client:
+    with httpx.Client(timeout=_TIMEOUT, transport=transport, event_hooks={"request": [lambda _: guard()]}) as client:
         resp = client.post(GOOGLE_TOKEN_ENDPOINT, data=payload)
+        guard()
     if resp.status_code == 400:
         error = ""
         try:
@@ -220,25 +224,30 @@ class GmailClient:
         *,
         registry: "AccountRegistry",
         transport: httpx.BaseTransport | None = None,
+        still_allowed=None,
     ) -> None:
         self.account_id = account_id
         self._registry = registry
         self._transport = transport
         self._access_token: str | None = None
+        self._guard = still_allowed or (lambda: None)
 
     # -- token plumbing -----------------------------------------------------
 
     def _mint_access_token(self) -> str | None:
         """Refresh this account's access token. Returns None (and marks the
         account ``auth_failed``) on ``invalid_grant`` — never raises for it."""
+        self._guard()
         refresh_token = self._registry.get_refresh_token(self.account_id)
         client_id, client_secret = self._registry.client_credentials()
+        self._guard()
         if not (refresh_token and client_id and client_secret):
             _log.warning(
                 "gmail: account %s missing refresh token or client creds — "
                 "marking auth_failed",
                 self.account_id,
             )
+            self._guard()
             self._registry.mark_auth_failed(self.account_id)
             return None
         try:
@@ -247,8 +256,10 @@ class GmailClient:
                 client_id=client_id,
                 client_secret=client_secret,
                 transport=self._transport,
+                still_allowed=self._guard,
             )
         except AccountAuthFailedError:
+            self._guard()
             _log.warning(
                 "gmail: account %s refresh returned invalid_grant — "
                 "marking auth_failed (fail-soft; other accounts proceed)",
@@ -256,6 +267,7 @@ class GmailClient:
             )
             self._registry.mark_auth_failed(self.account_id)
             return None
+        self._guard()
         self._access_token = token
         return token
 
@@ -270,25 +282,30 @@ class GmailClient:
         Returns the ``httpx.Response`` on success, or ``None`` if the account
         is auth-failed (fail-soft). Non-401 HTTP errors raise.
         """
+        self._guard()
         token = self._ensure_token()
         if token is None:
             return None
         url = f"{GMAIL_API_BASE}/{path}"
-        with httpx.Client(timeout=_TIMEOUT, transport=self._transport) as client:
+        with httpx.Client(timeout=_TIMEOUT, transport=self._transport, event_hooks={"request": [lambda _: self._guard()]}) as client:
+            self._guard()
             resp = client.get(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
                 params=params or {},
             )
+            self._guard()
             if resp.status_code == 401:
                 token = self._ensure_token(force=True)
                 if token is None:
                     return None
+                self._guard()
                 resp = client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
                     params=params or {},
                 )
+                self._guard()
         resp.raise_for_status()
         return resp
 

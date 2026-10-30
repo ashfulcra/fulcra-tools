@@ -65,9 +65,11 @@ flow supplies that revision; direct configuration file edits bypass its lifecycl
 tracking. `selection_epoch` defaults to an empty string for integrations that only
 need transitions observed by consecutive sync runs.
 
-`still_selected()` returns the current enabled selection, or an empty collection if
-disabled, preview was enabled, or the captured configuration epoch changed mid-run.
-The whole selection must still match. It is checked before source writes, vault
+`still_selected()` is read consent for the captured run, including preview. It
+returns the current enabled selection, or an empty collection (or raises) after
+disabling, changing the captured preview mode/selection, or changing the saved
+configuration epoch. The whole selection must still match. It is checked around
+snapshot iteration, before subsequent source/history reads, before source/vault
 writes and every KV write, including immutable chunks. An already-started network
 or EventKit operation cannot be recalled. Preview performs reads and planning
 without source/file writes, checkpoint changes or advancing the active epoch.
@@ -146,12 +148,13 @@ The engine cannot guarantee merging arbitrary concurrent prose edits.
 
 ## Bounds and transport
 
-`FulcraVault(token, *, base_url, namespace, timeout_s=20, max_versions=500,
-transport=None)` provides `versions(path)` (newest first), `read_version(id)`,
+`FulcraVault(token=None, *, base_url, namespace, timeout_s=20, max_versions=500,
+transport=None, bound_files=None)` provides `versions(path)` (newest first), `read_version(id)`,
 `write(path,text)` (confirmed upload version ID), `namespace`, `close()` and context
-manager cleanup. Without an explicit namespace it reads `/user/v1alpha1/info` for
+manager cleanup. Standalone integrations must supply an explicit token. Without
+an explicit namespace that mode reads `/user/v1alpha1/info` for
 the authenticated `userid`. Routes and upload shapes follow the bundled
-`fulcra-api` **0.1.41**: `GET/POST /input/v1/file_upload` and
+`fulcra-api` (verified with **0.1.56**): `GET/POST /input/v1/file_upload` and
 `GET /input/v1/file_upload/{id}/download`. History requests include both uploaded
 and archived versions. Signed storage uploads use POST, as the bundled client
 does, with no Fulcra Authorization header. Downloads follow at most one secure
@@ -200,3 +203,35 @@ and repeat runs created no extra versions. Tests included recovery after an
 interrupted Todoist confirmation; all disposable source and vault data was
 removed afterward. These checks do not establish reliability for every account
 or source race.
+
+
+## Collect account and read consent (development branch)
+
+The [Reminders](../apple-reminders/README.md) and [Todoist](../todoist/README.md)
+callers capture `CollectRecordSession` before constructing a source provider.
+The session checks current sign-in/principal, enabled state, epoch and the whole
+persisted settings snapshot. Same-account silent renewal updates request headers;
+a different account stops the old run. Todoist also checks its currently stored
+source token. Preview keeps its captured read consent and performs no source,
+Files or checkpoint writes; changing that consent stops further reads too.
+
+Both callers inject [Collect Files HTTP](../collect/fulcra_collect/files_io.py)
+through `FulcraVault(bound_files=files)`, so task sync uses the same guarded
+account and anonymous signed-storage path as Notes/Gmail. The task engine retains
+its independent explicit-token adapter for standalone integrations and does not
+import Collect at runtime. An injected Files object is owned by its caller;
+closing the vault does not close that shared transport.
+
+Bound version listings name the captured account and validate exact path/name,
+canonical version UUIDs, account ownership, aware timestamps and a single current
+version. That current version is first; archived versions follow by UTC time.
+Malformed or partial history stays unknown. Upload identities are checked before
+signed-storage delivery. Existing task paths, metadata/fences, selection generations
+and completion journals are retained.
+
+Todoist checks read consent before every HTTP request and after response/chunks;
+its observation checkpoints also check consent. The Reminders adapter checks
+before and after each bounded bridge-process invocation. An already-started
+native operation can finish before that final check; its result is discarded
+when consent changed, and no next provider operation is scheduled. Native/library
+access on the destination Mac and packaged/live source QA remain release gates.
