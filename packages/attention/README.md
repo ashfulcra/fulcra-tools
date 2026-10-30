@@ -810,6 +810,42 @@ and actual draining remain separate work. Native Chrome proof, provider acceptan
 installed identity/storage preservation and sender fencing remain required;
 Safari native ownership is not implemented by this Chrome slice.
 
+### Candidate presentation preparation
+
+The source-only [candidate adapter](chrome/src/relayless/v1DestinationCandidates.ts)
+and [Wizard](chrome/src/wizard/Wizard.tsx) can display a future synthetic
+`{version: 1, status: "candidates", accountId, candidates: [{id, name}]}` response.
+The projection accepts only these fields, at most 128 unique full canonical
+`Event/<UUID>` IDs, nonblank labels of at most 256 UTF-16 code units without
+control characters, and at most 64 KiB of lossless JSON. It rejects malformed
+Unicode, duplicate IDs, extra fields (including credentials/schema/provenance),
+and an account differing from current display data. Labels and IDs may be private
+UI data; neither payloads nor errors containing them are logged. Errors are static.
+Account matching scopes presentation only; it proves no principal, ownership,
+schema compatibility, freshness or completed setup.
+
+Candidates have no default selection. Choose/create and Continue remain disabled;
+no destination/settings write or setup advance follows. Late results after Back
+or unmount are discarded, and the current display account is read after the list
+response to reject stale account data. This is inert preparation: the actual
+worker still returns `SETUP_HELD`, publishes no capture descriptor and keeps both
+drains disabled. It does not call `runRead('types')` or install/fake read protection.
+Protected production listing, setup/descriptor publication, explicit choice,
+Task 4 C0/native sequencing, installed state and Safari remain open gates.
+
+[Wizard regressions](chrome/tests/wizard.test.tsx) use synthetic messages, while
+[worker regressions](chrome/tests/relayless/v1AuthCallers.test.ts) preserve the
+actual held boundary and original legacy evidence. These are component/source
+checks, not production listing or native acceptance. Shared
+[test setup](chrome/tests/setup.ts) denies global `fetch` before caller imports and
+reinstalls that denial in `beforeEach`, including after a previous fixture's
+`vi.unstubAllGlobals()`. Later per-case hooks may install synthetic transports;
+Chrome/IndexedDB remain synthetic. A fixture that resets globals within a case
+must supply its synthetic transport before invoking a request caller. This guards
+that JavaScript fetch seam at those boundaries, not Node sockets, native/browser
+APIs or an OS network sandbox. The [reset-survival regression](chrome/tests/fetch-guard.test.ts)
+uses only a synthetic fallback even during RED; it never invokes native fetch.
+
 ### Bounded local evidence development
 
 The source-only [bounded read job](chrome/src/relayless/v1ReadBudget.ts) supplies

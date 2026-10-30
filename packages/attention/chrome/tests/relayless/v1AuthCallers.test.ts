@@ -116,3 +116,22 @@ test('N1 readonly settings command rejects payloads and page rejects non-Setting
  const {handleV1AuthCommand}=await import('../../src/relayless/v1AuthWorker'),{loadSettings}=await import('../../src/storage'),{DEFAULT_SETTINGS}=await import('../../src/types');for(const payload of [{},'settings',{access_token:'synthetic-forbidden'}])expect(await handleV1AuthCommand({type:'attention-auth-v1',version:1,command:'settings-read',payload})).toMatchObject({ok:false,code:'COMMAND_INVALID'});
  vi.spyOn(chrome.runtime,'sendMessage').mockResolvedValue({version:1,ok:true,result:{...DEFAULT_SETTINGS,access_token:'synthetic-forbidden'}});await expect(loadSettings()).rejects.toThrow('SETTINGS_UNKNOWN');expect(await indexedDB.databases()).toEqual([]);
 });
+
+
+test('actual candidate/setup worker commands remain held without provider, cache mutation or descriptors',async()=>{
+ const network=vi.fn(()=>{throw Error('No provider requests permitted');});vi.stubGlobal('fetch',network);
+ const {DEFAULT_SETTINGS}=await import('../../src/types');
+ const evidence={settings:{...DEFAULT_SETTINGS,enabled:false},relaylessTokens:{accessToken:'synthetic-legacy',expiresAt:9999999999999},relaylessResolvedAttention:{definitionId:'synthetic-original',tagIds:['synthetic-tag']},relaylessSentIds:['synthetic-sent'],outbox:[]};await chrome.storage.local.set(evidence);
+ const worker=await import('../../src/relayless/v1AuthWorker');await worker.loadWorkerSettings();await worker.initializeWorkerAuth();
+ const {V1AuthStorage}=await import('../../src/relayless/v1AuthStorage'),observer=new V1AuthStorage(),authorityBefore=await observer.readState();
+ const before=await chrome.storage.local.get(null),command=(command:string)=>({type:'attention-auth-v1',version:1,command,payload:null});
+ expect(await worker.handleV1AuthCommand(command('destination-list'))).toEqual({version:1,ok:true,result:{status:'held',code:'SETUP_HELD',destinations:[]}});
+ for(const name of ['destination-choose','destination-create'])expect(await worker.handleV1AuthCommand(command(name))).toEqual({version:1,ok:false,code:'SETUP_HELD'});
+ expect(await worker.readWorkerCaptureDescriptor()).toBeNull();expect(await worker.workerCaptureDescriptorCurrent({} as any)).toBe(false);
+ expect(await worker.legacyDrainAllowed()).toBe(false);
+ expect(await worker.handleV1AuthCommand(command('display'))).toMatchObject({ok:true,result:{drains:'disabled'}});
+ const {flushOutbox}=await import('../../src/outbox');await flushOutbox();
+ expect(await chrome.storage.local.get(null)).toEqual(before);expect(network).not.toHaveBeenCalled();
+ expect(chrome.declarativeNetRequest.updateDynamicRules).not.toHaveBeenCalled();
+ expect(await observer.readState()).toEqual(authorityBefore);await observer.close();
+});

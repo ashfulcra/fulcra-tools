@@ -52,8 +52,9 @@ on:
 jobs:
   test:
     runs-on: macos-latest
-    # One bounded diagnostic after the 15-minute job expired at 81%.
-    # Preserve coverage/assertions and measure completion before finalizing this cap.
+    # The full suite completed in about 23m30s on 2026-10-30:
+    # https://github.com/ashfulcra/fulcra-tools/actions/runs/41065760322
+    # Keep finite setup/cleanup margin without dropping tests or assertions.
     timeout-minutes: 30
 
     steps:

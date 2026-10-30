@@ -1898,9 +1898,9 @@ Upstream reports must be understandable without reading this repository.
   Everything on Linux ([`uv-workspace.yml`](.github/workflows/uv-workspace.yml))
   runs on every push/PR to `main`. Both gates retain their full selections and
   report interpreter/cwd/module paths, test nodes and slow setup/call/teardown
-  phases. Their finite job bounds live in the workflows. The Linux bound has
-  completed-run evidence; the macOS bound remains a diagnostic pending complete
-  timing evidence. A timeout is an incomplete run, never a passing gate.
+  phases. Their finite job bounds and completed-run evidence live in the workflows.
+  These measurements do not guarantee future runtimes. A timeout is an incomplete
+  run, never a passing gate; investigate it before changing coverage or the bound.
   The upshot: for anything outside the macOS trigger set (docs, most skills),
   the **local run is the only pre-merge macOS check** — run the relevant suite
   before you push.
@@ -2510,6 +2510,20 @@ draining, installed sender fencing and Safari native integration remain gates.
 The guarded issue CAS stays the last authority await before application fetch;
 no cached proof bypasses journal predicates. Actual isolated synthetic Chrome
 checks are separate from provider latency, installed auth and default activation.
+
+The inert [browser candidate presentation adapter](packages/attention/README.md#candidate-presentation-preparation)
+can display bounded, strictly shaped full Event ID/name candidates through the
+Wizard's versioned page seam. Account matching is presentation scoping only.
+The actual worker still reports `SETUP_HELD`; no protected production listing,
+selection/setup write, descriptor publication or drain activation is added.
+Candidates have no default choice and late/unmounted results are discarded.
+Preserve Task 4/C0/native sequencing, installed evidence and Safari gates; synthetic
+message/Chrome/IndexedDB tests do not certify production listing. Shared Chrome
+test setup denies global fetch before imports and each case, reestablishing it
+after global restoration while permitting later synthetic fixture overrides.
+This is a JavaScript fetch-seam guard, not an OS/socket/native-browser sandbox;
+follow the linked fixture-reset limits. Candidate labels, IDs and raw response
+errors must not enter logs.
 
 The unused [bounded local evidence APIs](packages/attention/README.md#bounded-local-evidence-development)
 keep read cancellation separate from writer completion and use noncreating exact-version

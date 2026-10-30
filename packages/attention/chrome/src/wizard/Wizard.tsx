@@ -1,4 +1,5 @@
 import {v1HeldMode,v1Display,v1Command} from "../relayless/v1AuthClient";
+import {projectV1DestinationCandidates,type V1DestinationCandidate} from "../relayless/v1DestinationCandidates";
 import { useEffect, useMemo, useState } from "react";
 import "./wizard.css";
 import markUrl from "../assets/fulcra-mark.png";
@@ -363,6 +364,8 @@ function ChooseDestinationStep(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [destinations, setDestinations] = useState<AttentionDestination[]>([]);
+  const [candidateMode, setCandidateMode] = useState<boolean | null>(null);
+  const [candidates, setCandidates] = useState<readonly V1DestinationCandidate[]>([]);
   // selection: a destination id, or the sentinel "__create__".
   const CREATE = "__create__";
   const [selected, setSelected] = useState<string>(CREATE);
@@ -383,13 +386,24 @@ function ChooseDestinationStep(props: {
 
   useEffect(() => {
     let cancelled = false;
+    let held = true;
     setLoading(true);
     setError(null);
     console.info("[wizard:destination] load start");
     void (async () => {
       try {
-        if(await v1HeldMode()){
-          const result=await v1Command('destination-list');if(result.status==='held')throw new Error(result.code);return;
+        held=await v1HeldMode();
+        if(cancelled)return;
+        setCandidateMode(held);
+        if(held){
+          const result=await v1Command('destination-list');
+          if(cancelled)return;
+          if(result?.status==='held'){setError('Candidate list unavailable. Setup remains held (SETUP_HELD).');return;}
+          const display=await v1Display();
+          if(cancelled)return;
+          const rows=projectV1DestinationCandidates(result,display.accountId);
+          setCandidates(rows);
+          return;
         }
         const rows = await list(ensureOpts);
         if (cancelled) return;
@@ -400,8 +414,8 @@ function ChooseDestinationStep(props: {
         console.info("[wizard:destination] load done", { count: rows.length });
       } catch (e) {
         if (cancelled) return;
-        const msg = (e as Error).message ?? String(e);
-        console.error("[wizard:destination] load error", msg);
+        const msg = held ? "Candidate list unavailable. Setup remains held." : (e as Error).message ?? String(e);
+        if(!held)console.error("[wizard:destination] load error", msg);
         setError(msg);
       } finally {
         if (!cancelled) setLoading(false);
@@ -442,13 +456,13 @@ function ChooseDestinationStep(props: {
   const labelBlank = identityLabel.trim() === "";
 
   async function onContinue(): Promise<void> {
-    if (saving || loading || labelBlank) return;
+    if (candidateMode !== false || saving || loading || labelBlank) return;
     setSaving(true);
     setError(null);
     const label = identityLabel.trim();
     try {
       if(await v1HeldMode()){
-        await v1Command(selected===CREATE?'destination-create':'destination-choose',{selection:selected,name:newName.trim(),identityLabel:label});return;
+        setCandidateMode(true);setError('Setup remains held.');return;
       }
       // Persist the identity label first so capture (and a re-run of the
       // wizard) sees it even if the destination call fails partway.
@@ -475,7 +489,7 @@ function ChooseDestinationStep(props: {
   return (
     <>
       <h2>Where your attention is saved</h2>
-      <p>Choose where your browsing attention is saved in Fulcra.</p>
+      <p>{candidateMode ? "Candidates only. Setup remains held; no destination is selected or verified." : "Choose where your browsing attention is saved in Fulcra."}</p>
 
       <div style={{ margin: "12px 0" }}>
         <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>
@@ -485,7 +499,7 @@ function ChooseDestinationStep(props: {
           type="text"
           value={identityLabel}
           onChange={(e) => setIdentityLabel(e.target.value)}
-          disabled={saving}
+          disabled={saving || candidateMode !== false}
           placeholder="e.g. Work MBP — Chrome"
           style={{ width: "100%", boxSizing: "border-box" }}
         />
@@ -495,9 +509,15 @@ function ChooseDestinationStep(props: {
         </span>
       </div>
 
-      {loading && <p className="muted">Loading your Fulcra annotations…</p>}
+      {loading && <p className="muted">{candidateMode ? "Loading candidate metadata…" : "Loading your Fulcra annotations…"}</p>}
 
-      {!loading && (
+      {!loading && candidateMode === true && (
+        <ul aria-label="Destination candidates">
+          {candidates.map(candidate => <li key={candidate.id}>{candidate.name} · {candidate.id}</li>)}
+        </ul>
+      )}
+
+      {!loading && candidateMode === false && (
         <div style={{ margin: "12px 0" }}>
           {destinations.map((d) => (
             <label
@@ -553,7 +573,7 @@ function ChooseDestinationStep(props: {
 
       {error && (
         <p style={{ color: "var(--fa-danger)" }}>
-          Couldn't save your choice: {error}
+          {candidateMode === false ? "Couldn't save your choice: " : ""}{error}
         </p>
       )}
 
@@ -565,7 +585,7 @@ function ChooseDestinationStep(props: {
         <button
           className="primary"
           onClick={() => void onContinue()}
-          disabled={loading || saving || labelBlank}
+          disabled={candidateMode !== false || loading || saving || labelBlank}
         >
           {saving ? "Saving…" : "Continue →"}
         </button>

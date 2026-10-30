@@ -83,6 +83,20 @@ serve each operation's transport and local effects. See the
 [race/restart tests](tests/relayless/v1Destination.test.ts) and linked contract
 for input-transform handling and remaining rollout gates.
 
+The inert [candidate presentation adapter](src/relayless/v1DestinationCandidates.ts)
+lets the Wizard display a strictly bounded future candidate-only response. It
+adds no production listing, selection, completed setup or upload authority;
+the actual worker still reports `SETUP_HELD`. See the canonical
+[contract and remaining gates](../README.md#candidate-presentation-preparation).
+[Test setup](tests/setup.ts) denies global fetch before imports and reinstalls the
+guard before every case, so a previous `vi.unstubAllGlobals()` cannot leave the
+next case unguarded. Later per-case fixture transports may override it. This is a
+JavaScript fetch-seam guard, not a socket/OS/native-browser sandbox; a fixture
+resetting globals within a case must install a synthetic transport before a
+request caller. See the [safe consecutive-case regression](tests/fetch-guard.test.ts).
+Synthetic UI messages and fake Chrome/IndexedDB are not installed-browser or
+provider acceptance.
+
 ## Cutting a release
 
 Bump the version in [package.json](package.json) and the Chrome/Safari manifest

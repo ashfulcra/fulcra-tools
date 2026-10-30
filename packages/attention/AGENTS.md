@@ -30,7 +30,17 @@ budget. Their raw capture point reads are unvalidated evidence; retained old or
 terminal owners grant no action authority. Preserve full original-body reproduction,
 private credential access and existing strict writer/lifetime predicates. Do not
 activate a caller or infer native acceptance from this prerequisite.
-Both opted-in drains remain disabled. Retain legacy state and unknown original
+The inert [candidate presentation slice](README.md#candidate-presentation-preparation)
+accepts only bounded versioned full Event ID/name metadata matching current display
+account data; it grants no principal/schema/ownership/setup proof. The actual
+worker list/choose/create commands remain `SETUP_HELD`. Never connect unprotected
+JSON inventory to this UI as if native protection/setup existed. Candidate display
+has no default choice, setup write or advance; ordinary synthetic tests cannot
+clear Task 4/C0/native/Safari gates. Shared test setup denies global fetch before
+imports and reinstalls it before each case after global restoration; later fixture
+hooks may supply synthetic transports. This is not a socket/OS/native sandbox;
+follow the [fetch-seam limits](README.md#candidate-presentation-preparation).
+Keep private labels, IDs and payload errors out of logs. Both opted-in drains remain disabled. Retain legacy state and unknown original
 owners. Source-only [held ingress](README.md#held-capture-ingress-development)
 now retains actual visit/backfill input under strict atomic 64 MiB serialized-row
 accounting, without eviction or an uploaded claim. Positive capture descriptors

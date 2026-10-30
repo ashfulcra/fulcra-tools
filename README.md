@@ -219,9 +219,9 @@ requirements.
 
 The always-on [Linux selected-suite gate](.github/workflows/uv-workspace.yml)
 and [full macOS gate](.github/workflows/macos.yml) retain their test coverage and
-report interpreter/import paths plus per-test and slow-phase timings. Linux's
-finite budget has completed-run evidence; the macOS budget remains under
-evaluation. A timed-out run is incomplete. See the
+report interpreter/import paths plus per-test and slow-phase timings. Their
+finite budgets have completed-run evidence, without guaranteeing future runtime.
+A timed-out run is incomplete. See the
 [CI conventions](AGENTS.md#ci-and-workspace-membership).
 
 Every repository change must update the relevant READMEs in the same PR. Keep
