@@ -239,6 +239,11 @@ nonnegative integer and compare complete body bytes before UTF-8 decoding on
 both direct and signed-storage legs. A short HTTP 200 with a self-consistent
 Content-Length cannot override that version size. Missing size metadata remains
 supported for older listings, without this independent length proof.
+The task vault's separate exact-version reader retains the validated size for
+each current/archived ID in its latest complete history snapshot and enforces
+the same byte comparison before task parsing/rendering. Failed or superseded
+listings invalidate that snapshot; it never replaces a version read with the
+current-path reader. See [task history transport](../task-sync/README.md#bounds-and-transport).
 
 ### Observed outbox progress (development)
 

@@ -161,6 +161,16 @@ does, with no Fulcra Authorization header. Downloads follow at most one secure
 redirect using a separate anonymous client. TLS and bounded response bodies are
 required; raw upstream errors are not included in sync reports.
 
+`read_version(id)` requires that exact ID from the most recent complete
+`versions(path)` result. Each listing attempt invalidates the earlier snapshot
+before I/O; a failed listing cannot leave stale read metadata usable. Supplied
+version sizes must be strict nonnegative integers. Direct and signed downloads
+require HTTP 200 and must match that version's byte count before UTF-8 decoding,
+parsing or rendering. Archived versions keep their own size and are downloaded
+by ID, without substituting the current path. Older size-less metadata remains
+supported without this independent length proof. A short body or malformed size
+is an error, so source updates cannot consume that version or drop a user suffix.
+
 The Files adapter converts task paths to absolute Fulcra paths for both version
 lookup and upload. The API requires a leading slash; a relative upload path is
 rejected, and a relative lookup does not find the existing task history.

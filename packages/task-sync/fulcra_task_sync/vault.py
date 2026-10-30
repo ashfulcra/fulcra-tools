@@ -37,6 +37,7 @@ class FulcraVault:
         self._namespace = namespace
         self.timeout_s = min(float(timeout_s), 30)
         self.max_versions = max_versions
+        self._version_sizes = {}
         self.deadline = None
         self._api = self._storage = None
         if bound_files is None:
@@ -105,6 +106,9 @@ class FulcraVault:
         return self._namespace
 
     def versions(self, path):
+        # Metadata belongs to one complete history snapshot. A failed or later
+        # listing cannot leave an old exact-version read capability behind.
+        self._version_sizes = {}
         p = PurePosixPath('/' + path.lstrip('/'))
         namespace = self.namespace if self._bound_files is not None else None
         params = {'path': str(p.parent), 'name': p.name, 'state': 'uploaded,archived'}
@@ -117,7 +121,8 @@ class FulcraVault:
             raise VaultError('incomplete version history')
         if any(not isinstance(r, dict) or not isinstance(r.get('id'), str) or not r['id']
                or r.get('state') not in ('uploaded', 'archived')
-               or not isinstance(r.get('uploaded_at'), str) for r in rows):
+               or not isinstance(r.get('uploaded_at'), str)
+               or ('size' in r and (type(r['size']) is not int or r['size'] < 0)) for r in rows):
             raise VaultError('invalid version history')
         if rows and not any(r['state'] == 'uploaded' for r in rows):
             raise VaultError('missing current version')
@@ -142,16 +147,22 @@ class FulcraVault:
             raise VaultError('duplicate versions')
         if self._bound_files is not None:
             self._bound_files.guard()
+        self._version_sizes = {row['id']: row.get('size') for row in rows}
         return ids
 
     def read_version(self, version_id):
+        if not isinstance(version_id, str) or version_id not in self._version_sizes:
+            raise VaultError('exact version metadata unavailable; relist history')
+        expected_size = self._version_sizes[version_id]
         status, headers, data = self._request('GET', self.base_url +
             f'/input/v1/file_upload/{quote(version_id, safe="")}/download')
         if 300 <= status < 400:
             # Follow a signed storage redirect with no Fulcra credentials.
             status, _, data = self._request('GET', headers.get('location', ''), storage=True)
-        if status >= 300:
-            raise VaultError('unexpected storage redirect')
+        if status != 200:
+            raise VaultError('task version download is not a complete HTTP success')
+        if expected_size is not None and len(data) != expected_size:
+            raise VaultError('task version download disagrees with listed size')
         try:
             return data.decode('utf-8')
         except UnicodeError as exc:

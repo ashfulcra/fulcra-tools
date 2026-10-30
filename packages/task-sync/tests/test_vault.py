@@ -48,3 +48,20 @@ def test_download_and_upload_reject_insecure_signed_urls():
                      transport=httpx.MockTransport(lambda _: httpx.Response(302, headers={'location': 'http://storage.example/x'}))) as vault:
         with pytest.raises(VaultError):
             vault.read_version('v1')
+
+
+@pytest.mark.parametrize('signed', [False, True])
+@pytest.mark.parametrize('size,status', [(4, 200), (3, 206)])
+def test_explicit_token_version_reads_reject_short_known_size_and_partial_status(signed, size, status):
+    from fulcra_task_sync.vault import FulcraVault, VaultError
+    def handle(request):
+        if request.url.path == '/input/v1/file_upload':
+            return httpx.Response(200, json={'files': [{'id': 'v1', 'state': 'uploaded',
+                'uploaded_at': '2026-01-01T00:00:00Z', 'size': size}]})
+        if signed and request.url.host != 'storage.example':
+            return httpx.Response(302, headers={'location': 'https://storage.example/v1'})
+        return httpx.Response(status, content=b'pre')
+    with FulcraVault('synthetic-token', namespace='synthetic-user', transport=httpx.MockTransport(handle)) as vault:
+        assert vault.versions('/vault/tasks/synthetic/one.md') == ['v1']
+        with pytest.raises(VaultError):
+            vault.read_version('v1')

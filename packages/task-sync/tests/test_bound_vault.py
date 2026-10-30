@@ -116,3 +116,87 @@ def test_bound_history_partial_http_is_unknown_before_followon_write(tmp_path, m
         with pytest.raises((VaultError, FilesIOError)):
             vault.versions(REMOTE)
     assert calls == ["GET"]
+
+
+@pytest.mark.parametrize('signed', [False, True])
+@pytest.mark.parametrize('short', [False, True])
+def test_real_task_history_source_update_preserves_user_suffix_or_holds(tmp_path, monkeypatch, signed, short):
+    from copy import deepcopy
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from fulcra_task_sync.documents import render, task_path
+    from fulcra_task_sync.models import Collection, Task
+    from fulcra_task_sync.engine import run_sync
+    task = Task('synthetic-task', 'synthetic-list', 'Updated source title', 'source body', False, revision='r2')
+    prefix = render('synthetic', replace(task, title='Original source title', revision='r1'), 'synthetic-generation')
+    suffix = '\nUser-authored suffix must survive. café ☃\n'
+    complete = prefix + suffix
+    body = (prefix if short else complete).encode()
+    ctx, _ = context(tmp_path, monkeypatch)
+    calls, writes, state = [], [], {}
+    def handle(request):
+        calls.append(request)
+        if request.url.host == 'storage.example' or request.url.path.endswith('/download'):
+            if signed and request.url.host != 'storage.example':
+                return httpx.Response(302, headers={'location': 'https://storage.example/task'})
+            return httpx.Response(200, content=body, headers={'Content-Length': str(len(body))})
+        return httpx.Response(200, json={'files': [history(path=request.url.params['path'],
+            name=request.url.params['name'], size=len(complete.encode()))]})
+    provider = SimpleNamespace(name='synthetic', namespace='synthetic-source',
+        collections=lambda: [Collection('synthetic-list', 'Synthetic list')],
+        tasks=lambda selected: [task], get_task=lambda _: task,
+        complete=lambda *_: pytest.fail('source completion forbidden'))
+    transport = httpx.MockTransport(handle)
+    with CollectRecordSession(ctx, transport=transport) as session, CollectFiles(session, storage_transport=transport) as files, FulcraVault(bound_files=files) as vault:
+        # Capture the real engine's proposed file write; no real upload/source mutation.
+        vault.write = lambda path, text: writes.append((path, text)) or '11111111-2222-4333-8444-666666666666'
+        result = run_sync(provider, {'synthetic-list'}, vault,
+            lambda key: deepcopy(state.get(key)), lambda key, value: state.__setitem__(key, deepcopy(value)))
+    if short:
+        assert result.errors and writes == []
+        assert VERSION not in json.dumps(state)  # failed bytes never become seen version authority
+    else:
+        assert not result.errors and len(writes) == 1
+        assert writes[0][0] == task_path('synthetic', task.id) and suffix in writes[0][1]
+    assert calls and all(request.method == 'GET' for request in calls)
+
+
+@pytest.mark.parametrize('size', [-1, True, False, 3.0, '3', None])
+def test_supplied_version_size_must_be_strict_before_history_publication(tmp_path, monkeypatch, size):
+    ctx, _ = context(tmp_path, monkeypatch)
+    with CollectRecordSession(ctx, transport=httpx.MockTransport(lambda _: httpx.Response(200, json={'files': [history(size=size)]}))) as session, CollectFiles(session) as files, FulcraVault(bound_files=files) as vault:
+        with pytest.raises(VaultError):
+            vault.versions(REMOTE)
+
+
+def test_failed_history_invalidates_old_exact_version_metadata(tmp_path, monkeypatch):
+    ctx, _ = context(tmp_path, monkeypatch)
+    payload = [{'files': [history(size=3)]}]
+    with CollectRecordSession(ctx, transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload[0]))) as session, CollectFiles(session) as files, FulcraVault(bound_files=files) as vault:
+        assert vault.versions(REMOTE) == [VERSION]
+        payload[0] = {'files': [], 'has_more': True}
+        with pytest.raises(VaultError):
+            vault.versions(REMOTE)
+        with pytest.raises(VaultError, match='version metadata'):
+            vault.read_version(VERSION)
+
+
+@pytest.mark.parametrize('signed', [False, True])
+def test_exact_archived_version_keeps_its_own_size_not_current_path_size(tmp_path, monkeypatch, signed):
+    archived = '11111111-2222-4333-8444-666666666666'
+    bodies = {VERSION: b'current', archived: 'older café body'.encode()}
+    ctx, _ = context(tmp_path, monkeypatch)
+    def handle(request):
+        if request.url.host == 'storage.example':
+            return httpx.Response(200, content=bodies[request.url.path.lstrip('/')])
+        if request.url.path.endswith('/download'):
+            identifier = request.url.path.split('/')[-2]
+            return (httpx.Response(302, headers={'location': 'https://storage.example/' + identifier}) if signed
+                    else httpx.Response(200, content=bodies[identifier]))
+        return httpx.Response(200, json={'files': [history(size=len(bodies[VERSION])),
+            history(id=archived, state='archived', size=len(bodies[archived]))]})
+    transport = httpx.MockTransport(handle)
+    with CollectRecordSession(ctx, transport=transport) as session, CollectFiles(session, storage_transport=transport) as files, FulcraVault(bound_files=files) as vault:
+        assert vault.versions(REMOTE) == [VERSION, archived]
+        assert vault.read_version(archived) == bodies[archived].decode()
+        assert vault.read_version(VERSION) == bodies[VERSION].decode()

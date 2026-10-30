@@ -61,6 +61,12 @@ state, and preview mode before each write. Task status is `open` or `resolved`;
 identity and generation fields bind a completion to the source task. Normalize task paths to absolute Fulcra paths at the Files adapter boundary
 for both history lookup and upload; the API rejects relative upload paths. Read all
 unseen Fulcra file versions so a concurrent bot edit survives an importer write.
+Task `read_version` requires metadata from the latest complete history snapshot;
+invalidate it before every listing attempt. Retain each exact version's supplied
+strict nonnegative byte size and compare direct/signed HTTP200 body bytes before
+decoding or task parse/render/checkpoint. Archive reads remain by ID; never borrow
+the current path or another version's size. Size-less older metadata supplies no
+independent length proof.
 Missing source tasks are never completion evidence. Todoist task-detail lookup
 can return `checked: true` after completion; accept it only with valid explicit
 completion evidence. Keep active-list validation separate: a checked task there
