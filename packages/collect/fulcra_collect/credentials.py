@@ -254,6 +254,26 @@ def set_user_secret(key: str, value: str) -> None:
         keyring.set_password(_USER_SERVICE, key, value)
 
 
+def _mutate_user_secret_quiet(key: str, value: str) -> None:
+    """No UI-capable backend fallback for automatic credential publication."""
+    if not _uses_macos_keychain():
+        raise KeychainAccessRequired('Quiet account credential writes unavailable; reconnect.')
+    from .macos_keychain import mutate_user_password
+    mutate_user_password(key, value)
+
+
+def set_user_secret_quiet(key: str, value: str) -> None:
+    """Bounded, quiet renewal write; ambiguous acknowledgement is failure.
+
+    Interactive sign-in uses set_user_secret. A missing quiet backend requires
+    reconnecting rather than a background fallback that might prompt.
+    """
+    if key not in {'bearer-token', 'oauth-credentials'}:
+        raise KeychainAccessRequired('Automatic credential scope unavailable.')
+    with _credential_write():
+        _mutate_user_secret_quiet(key, value)
+
+
 def get_user_secret(key: str) -> str | None:
     with _user_secret_cache_lock:
         with _pending_reads_lock:
@@ -495,7 +515,7 @@ def _refresh_access_token_locked(*, expected_token=None):
                 if _token_principal(current, fresh=True) == principal:
                     return current
                 return None
-            set_user_secret("bearer-token", new_token)
+            set_user_secret_quiet("bearer-token", new_token)
     except Exception:
         return None
     _log.info("refresh_fulcra_access_token: succeeded; keychain updated")

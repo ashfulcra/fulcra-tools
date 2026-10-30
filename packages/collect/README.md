@@ -1071,6 +1071,19 @@ access. It is **not** server/principal authentication or provider/worker success
 refreshes a token, requests UI, queries a provider or deletes saved credentials.
 The account-transition lease and credential-write generation fence stale reads.
 
+Automatic owned-token renewal publishes `oauth-credentials` and `bearer-token`
+through the bounded quiet mutation child, with interaction disabled for that
+child and per-query UI refusal. Existing refresh revision/account guards and
+the consumed-grant journal remain in force. The legacy principal-checked
+renewal path uses the same quiet publication boundary. Quiet writes update
+existing items in place; only confirmed absence permits adding an item. They
+never fall back to an interactive writer. Denial, timeout or ambiguous
+acknowledgement requires reconnecting; a consumed owned refresh grant is not
+replayed. Explicit sign-in keeps its interactive writer. A configured backend
+without this quiet mutation capability cannot silently publish renewed tokens.
+Synthetic tests cover the dispatch and failures; native signed-app validation
+is a separate prerequisite.
+
 Only explicit authenticated authorization actions may request Keychain UI.
 `POST /api/fulcra/auth/keychain_access` has the closed shared scope
 `bearer-token` / `oauth-credentials`: each `items[key]` reports `present`,

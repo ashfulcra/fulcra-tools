@@ -161,7 +161,10 @@ def _valid_mutation(value):
     if not isinstance(value, dict) or value.get('op') not in ('set', 'delete'):
         return False
     keys = {'op', 'service', 'account'} | ({'value'} if value['op'] == 'set' else set())
-    return (set(value) == keys and value.get('service') == 'fulcra-collect:trakt'
+    scope = (value.get('service') == 'fulcra-collect:trakt'
+             or value.get('service') == 'fulcra-collect:user' and value['op'] == 'set'
+             and value.get('account') in ('bearer-token', 'oauth-credentials'))
+    return (set(value) == keys and scope
             and _valid_request({k: value.get(k) for k in ('service', 'account')})
             and (value['op'] == 'delete' or isinstance(value.get('value'), str)
                  and len(value['value'].encode('utf-8')) <= 65536))
@@ -209,6 +212,15 @@ def mutate_trakt_password(account, value):
                'service': 'fulcra-collect:trakt', 'account': account}
     if value is not None:
         request['value'] = value
+    if not _valid_mutation(request):
+        raise KeyringError('Keychain request is unavailable')
+    return _isolated_request(request, writing=True)
+
+
+def mutate_user_password(account: str, value: str) -> None:
+    """Quiet automatic renewal only; closed shared keys and no deletion."""
+    request = {'op': 'set', 'service': 'fulcra-collect:user',
+               'account': account, 'value': value}
     if not _valid_mutation(request):
         raise KeyringError('Keychain request is unavailable')
     return _isolated_request(request, writing=True)

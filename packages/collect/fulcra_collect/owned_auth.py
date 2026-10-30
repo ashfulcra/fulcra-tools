@@ -222,10 +222,10 @@ def refresh_owned(*, expected_token=None):
                         return True, None
                     # New refresh first: if the access-token write fails, mismatch
                     # is explicit and requires sign-in rather than grant replay.
-                    credentials.set_user_secret('oauth-credentials', json.dumps({
+                    credentials.set_user_secret_quiet('oauth-credentials', json.dumps({
                         'version': 1, 'attempt_id': revision[0], 'access_token': token,
                         'refresh_token': refresh}, sort_keys=True))
-                    credentials.set_user_secret('bearer-token', token)
+                    credentials.set_user_secret_quiet('bearer-token', token)
             return True, token
     except Exception:
         # No SDK exception/body/token in logs or API errors; never fall back to

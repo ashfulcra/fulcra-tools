@@ -91,6 +91,16 @@ clearing the gate on success. Task callbacks reject the gate as well as stale
 epochs. Failure leaves the gate closed until an interactive retry succeeds; normal
 configuration saves and automatic token refresh must never clear it.
 
+Automatic Collect token renewal must publish only the closed shared keys
+`bearer-token` and `oauth-credentials` through `set_user_secret_quiet`, never
+ordinary `set_user_secret`/`keyring.set_password`. The disposable mutation child
+suppresses legacy interaction and per-query UI, uses bounded private-pipe I/O,
+and requires an exact acknowledgement. Keep final account/revision checks and
+the consumed-grant no-replay journal; denial/timeout/ambiguous publication
+requires reconnecting. Explicit interactive sign-in remains separate. Tests
+must inject an isolated quiet backend or fence the native child, and must not
+interpret a synthetic quiet-write pass as signed-app Keychain acceptance.
+
 ## Public repository privacy
 
 **Selected local-source uploads:** use Collect's captured Fulcra token, never

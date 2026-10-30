@@ -488,3 +488,10 @@ without staging runtime assets. Direct/extracted/default wheel parity and
 fail-closed disposable fixtures are the package gate; immutable inputs, cached
 offline backend, frontend preparation, installed dependency/app QA and signing
 remain separate. See the [canonical build contract](../../../packages/collect/README.md#distribution-resources-development-branch).
+
+### Review correction: automatic quiet user-secret writes
+
+1. RED actual owned/legacy renewal with ordinary interactive writer forbidden; synthetic native-child packets must disable UI before mutation.
+2. Reuse the bounded quiet child for only shared bearer/owned-refresh sets; preserve explicit interactive paths and grant no-replay.
+3. Exercise denied/timeout/ambiguous second-write cases, unsupported backend and closed scope. Keep account/config/auth regressions and README/AGENTS current.
+4. Independently review the delta; rerun privacy and exact source CI before publication. Existing native/app/cutover/history gates remain incomplete.

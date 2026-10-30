@@ -100,6 +100,8 @@ def _in_memory_keyring(monkeypatch):
     monkeypatch.setattr(_creds_mod.keyring, "set_password", _set)
     monkeypatch.setattr(_creds_mod.keyring, "get_password", _get)
     monkeypatch.setattr(_creds_mod.keyring, "delete_password", _delete)
+    monkeypatch.setattr(_creds_mod, "_mutate_user_secret_quiet",
+                        lambda key, value: _set("fulcra-collect:user", key, value))
     # This fixture owns a fake backend; do not discover the host's real one.
     monkeypatch.setattr(_creds_mod, "_uses_macos_keychain", lambda: False)
     from fulcra_collect import macos_keychain
@@ -113,7 +115,7 @@ def _in_memory_keyring(monkeypatch):
         return fail
 
     for name in ("_api", "_Security", "_read_password", "_mutate_password",
-                 "_isolated_request", "mutate_trakt_password", "child_main"):
+                 "_isolated_request", "mutate_trakt_password", "mutate_user_password", "child_main"):
         monkeypatch.setattr(macos_keychain, name, forbidden(name))
     yield store
     assert not native_calls, f"in-memory keyring reached native paths: {native_calls}"

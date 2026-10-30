@@ -193,3 +193,7 @@ Before every turn ends: recover pending answers/reviews, verify changed work,
 update the owned bus task and private checkpoint, run the local exit check, and
 continue any safe executable step. A heartbeat re-enters this same chat for
 unfinished work; its configured state is not proof it has actually fired.
+
+### Review amendment: quiet automatic credential publication
+
+Automatic owned-auth renewal was still reaching an unbounded UI-capable Keychain writer. Reuse the existing isolated quiet mutation boundary for the two closed shared account keys, retaining update-before-add, exact acknowledgements, account/revision checks and consumed-grant no-replay. Apply the same publication boundary to legacy principal-checked renewal. Explicit interactive sign-in retains its existing writer. Unsupported quiet backends fail closed and require reconnect; native signed-app acceptance remains separate. This implements the existing no-background-prompt requirement; it does not change account/source consent or authorize credential migration.
