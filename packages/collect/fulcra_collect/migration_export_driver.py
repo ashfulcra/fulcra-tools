@@ -17,7 +17,7 @@ import time
 from uuid import UUID, uuid5
 
 from fulcra_common.v1 import _canonical_uuid
-from .migration_export import _private
+from .migration_export import _private, _EXPORT_FORMAT_VERSION
 from .migration_ledger import _MAX_WINDOW_JSON
 from .migration_plan import _time
 from .record_actions import _json, _hash
@@ -61,7 +61,7 @@ class ExportDriver:
         self.pass_id = _canonical_uuid(reader.pass_id)
         self._contract_json = _json(contract)
         self.cap = contract['row_cap']
-        self._scope = _json({'pass_id': self.pass_id, 'plan_fingerprint': ledger.plan.fingerprint,
+        self._scope = _json({'export_protocol_version': _EXPORT_FORMAT_VERSION, 'pass_id': self.pass_id, 'plan_fingerprint': ledger.plan.fingerprint,
                             'provider_contract': contract})
         document = ledger.plan.document
         self.root_window_id = self._window_id(document['start_time'], document['end_time'])
@@ -76,7 +76,7 @@ class ExportDriver:
                 if db.execute('SELECT 1 FROM migration_windows LIMIT 1').fetchone():
                     raise ValueError('historical export cannot adopt existing unbound windows')
                 db.execute('CREATE TABLE migration_export_pass(version INTEGER NOT NULL,document TEXT NOT NULL)')
-                db.execute('INSERT INTO migration_export_pass VALUES (2,?)', (self._scope,))
+                db.execute('INSERT INTO migration_export_pass VALUES (?,?)', (_EXPORT_FORMAT_VERSION, self._scope))
                 db.execute('CREATE TABLE migration_window_reads(window_id TEXT PRIMARY KEY '
                     'REFERENCES migration_windows(window_id),document TEXT NOT NULL,fingerprint TEXT NOT NULL)')
                 ledger._open_window(db, self.root_window_id, document['start_time'], document['end_time'])
@@ -87,7 +87,7 @@ class ExportDriver:
         self.ledger._guard(db)
         try:
             rows = db.execute('SELECT version,document FROM migration_export_pass').fetchall()
-            if (len(rows) != 1 or type(rows[0]['version']) is not int or rows[0]['version'] != 2
+            if (len(rows) != 1 or type(rows[0]['version']) is not int or rows[0]['version'] != _EXPORT_FORMAT_VERSION
                     or rows[0]['document'] != self._scope
                     or db.execute('SELECT 1 FROM migration_windows WHERE window_id=?',
                                   (self.root_window_id,)).fetchone() is None):
@@ -159,7 +159,7 @@ class ExportDriver:
     def _validate_proof(self, db, proof):
         fields = {'version', 'window_id', 'pass_scope_sha256', 'provider_contract', 'outcome',
                   'provider_count', 'asc', 'desc', 'multiset_sha256', 'entry_ids'}
-        if set(proof) != fields or type(proof['version']) is not int or proof['version'] != 2:
+        if set(proof) != fields or type(proof['version']) is not int or proof['version'] != _EXPORT_FORMAT_VERSION:
             raise ValueError
         def digest(value):
             return isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value)
@@ -298,7 +298,7 @@ class ExportDriver:
                 matched = fingerprints[0] == fingerprints[1]
                 children = self._children(window) if saturated or not matched else None
                 outcome = ('split-saturated' if saturated else 'split-inconsistent') if children else 'sealed-matched-below-cap'
-                proof = {'version': 2, 'window_id': window['window_id'], 'pass_scope_sha256': _hash(self._scope),
+                proof = {'version': _EXPORT_FORMAT_VERSION, 'window_id': window['window_id'], 'pass_scope_sha256': _hash(self._scope),
                     'provider_contract': json.loads(self._contract_json), 'outcome': outcome,
                     'provider_count': len(left) if matched else None, 'asc': asc_proof, 'desc': desc_proof,
                     'entry_ids': sorted(retained),

@@ -202,7 +202,11 @@ unimplemented gates.
 A separate [raw HTTP reader](../packages/collect/fulcra_collect/migration_export.py)
 retains private scoped manifests/bodies/EOF receipts before strict bounded JSON
 parsing. It refuses compressed decoding, redirects, truncated/error responses and
-scope changes. Saved bytes must match the receipt hash. Each receipt explicitly
+scope changes. Explicit malformed/duplicate/other-account response headers are
+refused before body access; bounded response-account facts are retained and
+rechecked at consumption. Protocol3 raw/pass/proof state cannot adopt older
+v1/v2 completed windows that may lack that evidence; originals stay preserved.
+Saved bytes must match the original receipt hash. Each receipt explicitly
 denies provider-coverage proof. The paired library driver now resumes indexed
 windows under an immutable explicit provider completeness contract, retaining
 parent variants and splitting capped/unequal pairs atomically. Its bounded queue

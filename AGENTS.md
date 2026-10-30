@@ -2873,16 +2873,21 @@ Preserve failed/partial attempts; never reuse an orphan body as a complete read.
 JSON wrappers, duplicate keys, lossy/non-finite numbers or invalid Unicode fail
 visibly. A receipt/result always has `coverage_complete: false`; EOF is not
 provider coverage. No credentials or arbitrary header values enter artifacts.
-Version-2 receipts retain only known partial-header names and bounded total/length
-counts. Explicit partial/pagination evidence or malformed/contradictory counts
-refuse both initial reads and later artifact consumption; verification binds the
-original receipt hash as well as the body.
+Version-3 receipts retain known partial-header names, bounded total/length
+counts, and the optional canonical response account UUID (or absence/invalid
+marker). An explicit malformed, duplicate or other-account response header
+refuses body access; retain its incomplete receipt with no transport EOF or
+decoded-body claim. Absence preserves request/guard authority and adds no account
+proof. Explicit partial/pagination evidence or malformed/contradictory counts
+refuse initial reads and later artifact consumption; verification rechecks the
+account fact and binds the original receipt hash as well as the body.
 The driver requires an explicit, externally justified provider contract
 (`version: 1`, `semantics: complete-below-row-cap`, `row_cap: 1..4000`, nonempty
 `basis`); it supplies no default. The public legacy endpoint has no cursor/total
 count/ceiling attestation, and matching two reads cannot invent one. Pass UUID,
-plan and contract bind immutable version-2 pass/proof tables in the private
-ledger; old version-1 evidence cannot resume or certify coverage, and a new pass
+plan, contract and export protocol bind immutable version-3 pass/proof tables in
+the private ledger. Old v1/v2 evidence may have discarded response-account facts
+and cannot resume or certify current-format coverage; a new pass
 refuses existing unbound windows. Preserve old artifacts; use a fresh authorized
 pass/ledger for new evidence. Indexed next-open reads
 avoid prefix-rescan starvation; a nonblocking owned-file lease serializes runs.
@@ -2894,8 +2899,11 @@ missing from later children (at most 8,000 versions/32 MiB canonical JSON per
 pair). Pair proof + raw versions + seal/split are one transaction. Metadata proof
 reads do not audit artifacts afresh. Runs reserve both request timeouts, cap at
 64 windows/300 seconds and report queue progress, never final coverage. The
-ledger coverage fold is conditional on the supplied provider assertion; final
-raw audit, cutoff/queue/late-delta and disposition gates remain mandatory.
+ledger coverage fold is conditional on the supplied provider assertion. Its
+lower-level status can still summarize old stored windows; that metadata is not
+current-format proof or raw-account/integrity verification. The versioned driver
+guard is mandatory before reuse. Final raw audit, cutoff/queue/late-delta and
+disposition gates remain mandatory.
 Raw variants and overlapping observations are retained; missing IDs quarantine.
 Never treat an HTTP 200, capped read or observation count alone as coverage:
 sealed windows bind the exact integer ordinal sequence `0, 1, …, count−1` and

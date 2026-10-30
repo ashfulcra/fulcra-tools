@@ -322,7 +322,7 @@ def test_response_facts_are_bounded_nonsecret_and_bound_to_verification(tmp_path
     result = fetch(export)
     receipt_bytes = result.receipt_path.read_bytes()
     receipt = json.loads(receipt_bytes)
-    assert receipt["response_metadata"] == {"partial_headers": [], "total_counts": [0, 0], "content_length": 2}
+    assert receipt["response_metadata"] == {"partial_headers": [], "total_counts": [0, 0], "content_length": 2, "response_account_id": None}
     proof = export.verify_result(result, uid(10), start_time=START, end_time=END, order="asc")
     assert proof["receipt_sha256"] == hashlib.sha256(receipt_bytes).hexdigest()
     assert len(receipt_bytes) <= 4096 and b"synthetic-secret" not in receipt_bytes

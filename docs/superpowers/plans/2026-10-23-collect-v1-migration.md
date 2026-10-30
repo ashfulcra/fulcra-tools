@@ -495,3 +495,10 @@ remain separate. See the [canonical build contract](../../../packages/collect/RE
 2. Reuse the bounded quiet child for only shared bearer/owned-refresh sets; preserve explicit interactive paths and grant no-replay.
 3. Exercise denied/timeout/ambiguous second-write cases, unsupported backend and closed scope. Keep account/config/auth regressions and README/AGENTS current.
 4. Independently review the delta; rerun privacy and exact source CI before publication. Existing native/app/cutover/history gates remain incomplete.
+
+### Review correction: historical response account binding
+
+1. RED actual reader and paired export for a wrong-account empty response, malformed/duplicate header, retained facts and old completed-pass resume.
+2. Retain only canonical optional account UUID/invalid marker/absence, refuse contradictions before body reads, and revalidate during saved-artifact consumption.
+3. Advance raw/paired pass/proof protocol together to3; preserve and refuse v1/v2 scopes/windows, with all reader/driver/proof consumers audited.
+4. Re-run synthetic migration/replay tests, privacy and independent correction review; require fresh exact-head CI before publication. Historical apply remains0 and H1–H5/H3 gates UNKNOWN.

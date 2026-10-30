@@ -402,9 +402,13 @@ the plan's explicit account/type/range with redirects disabled. A pass UUID is
 immutably bound to the plan fingerprint. Each GET gets a new owner-only attempt
 directory: a fsynced request manifest precedes dispatch, raw response bytes
 are retained before parsing, and a hash/EOF receipt follows a fully flushed body.
-No credentials or arbitrary header values are saved. Version-2 receipts retain
-only known partial-header names and bounded numeric total counts/content length
-(or an invalid marker). Pagination/range evidence, malformed counts, totals
+No credentials or arbitrary header values are saved. Version-3 receipts retain
+known partial-header names, bounded numeric total counts/content length, and the
+canonical response account UUID when supplied (otherwise an invalid marker or
+explicit absence). An explicit malformed, duplicate or other-account header
+rejects the response before reading its body; its retained receipt records no
+transport EOF and no decoded body. A missing header preserves the existing
+request/guard authority and supplies no independent response-account proof. Pagination/range evidence, malformed counts, totals
 unequal to parsed rows or a length unequal to retained bytes reject the read. Failed or oversized reads retain
 their bounded partial body; orphan attempts are never reused as successful reads.
 The default body limit is 64 MiB; each request has a 30-second deadline
@@ -422,7 +426,7 @@ Every result/receipt says `coverage_complete: false`: transport EOF does not
 prove provider completeness. `verify_result` reopens the scoped request/body/EOF
 artifacts before a later actor consumes them; the exact bytes must reproduce the
 immutable returned snapshot and match account/type/pass/range/order and hashes.
-Verification rechecks completeness metadata and the original receipt SHA-256;
+Verification rechecks response-account/completeness metadata and the original receipt SHA-256;
 stripping or replacing response facts cannot turn an incomplete read into proof.
 
 [`ExportDriver`](fulcra_collect/migration_export_driver.py) adds a bounded,
@@ -433,10 +437,14 @@ The public legacy endpoint describes inclusive/exclusive bounds and sort order,
 but supplies no cursor, total count or ceiling attestation. Matching two reads
 cannot establish an undocumented completeness guarantee; do not invent a basis.
 
-The pass UUID/plan/contract are immutable in separate version-2 pass/proof tables
-inside the private migration ledger. Old version-1 artifacts/passes lack the
-required response evidence and cannot resume or certify coverage. Preserve them;
-a new authorized pass requires a fresh ledger rather than adopting old windows. Deterministic window UUIDs and a status/start index resume the next open
+The pass UUID/plan/contract/export protocol are immutable in separate version-3
+pass/proof tables inside the private migration ledger. Version-1 and version-2
+artifacts/passes lack required retained response-account/completeness evidence
+and cannot resume or certify coverage. Preserve them;
+a new authorized pass requires a fresh ledger rather than adopting old windows.
+The lower-level ledger status may still summarize those old stored windows;
+its conditional `coverage_complete` fold is not current-format proof or fresh
+raw/account verification. Versioned driver admission remains mandatory. Deterministic window UUIDs and a status/start index resume the next open
 window without rescanning completed prefixes. A nonblocking private file lease
 prevents simultaneous driver runs. Each step reads both sort directions and
 rechecks their saved artifacts. Equal canonical multisets below the asserted cap
