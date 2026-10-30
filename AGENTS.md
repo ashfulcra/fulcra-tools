@@ -1896,10 +1896,11 @@ Upstream reports must be understandable without reading this repository.
   [`.github/workflows/macos.yml`](.github/workflows/macos.yml);
   `test_ci_trigger_coverage.py` fails if trigger and coverage drift apart.
   Everything on Linux ([`uv-workspace.yml`](.github/workflows/uv-workspace.yml))
-  runs on every push/PR to `main`. The selected-suite diagnostic retains its
-  full test selection, prints test nodes and slow setup/call/teardown phases,
-  and has a finite job bound in that workflow. A timeout is an incomplete run;
-  require completed-run timing evidence before accepting a changed budget.
+  runs on every push/PR to `main`. Both gates retain their full selections and
+  report interpreter/cwd/module paths, test nodes and slow setup/call/teardown
+  phases. Their finite job bounds live in the workflows. The Linux bound has
+  completed-run evidence; the macOS bound remains a diagnostic pending complete
+  timing evidence. A timeout is an incomplete run, never a passing gate.
   The upshot: for anything outside the macOS trigger set (docs, most skills),
   the **local run is the only pre-merge macOS check** — run the relevant suite
   before you push.

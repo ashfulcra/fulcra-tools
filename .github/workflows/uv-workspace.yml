@@ -24,8 +24,9 @@ on:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    # Diagnostic bound for the expanded selected suites. Preserve all coverage
-    # and inspect completed node/phase timings before accepting a final budget.
+    # The expanded selection completed in 15m19s on 2026-10-30:
+    # https://github.com/ashfulcra/fulcra-tools/actions/runs/41061380898
+    # Retain every selected test and allow finite setup/cleanup margin.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +46,10 @@ jobs:
         # THE check: fails if any packages/* workspace member is missing a
         # pyproject.toml (the #42 break) or otherwise can't be resolved.
         run: uv sync --all-packages
+
+      - name: Report test interpreter and imports
+        run: |
+          uv run --all-packages --extra dev python -c 'import json, os, sys, fulcra_collect, fulcra_common, fulcra_media, coord_engine; print(json.dumps({"interpreter": sys.executable, "cwd": os.getcwd(), "modules": {m.__name__: m.__file__ for m in (fulcra_collect, fulcra_common, fulcra_media, coord_engine)}}))'
 
       - name: Skill contract + installer tests (OS-agnostic)
         # Fast ubuntu gate for skill trees the expensive macOS job path-filters

@@ -217,6 +217,13 @@ workspace dependencies and runs the tests. It does not start Collect for you.
 See [`docs/TESTING.md`](docs/TESTING.md) for the development setup and platform
 requirements.
 
+The always-on [Linux selected-suite gate](.github/workflows/uv-workspace.yml)
+and [full macOS gate](.github/workflows/macos.yml) retain their test coverage and
+report interpreter/import paths plus per-test and slow-phase timings. Linux's
+finite budget has completed-run evidence; the macOS budget remains under
+evaluation. A timed-out run is incomplete. See the
+[CI conventions](AGENTS.md#ci-and-workspace-membership).
+
 Every repository change must update the relevant READMEs in the same PR. Keep
 this package and skill index complete, and distinguish released behavior from
 work in progress. Examples and fixtures must be synthetic. Personal content,

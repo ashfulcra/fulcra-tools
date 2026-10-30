@@ -52,7 +52,9 @@ on:
 jobs:
   test:
     runs-on: macos-latest
-    timeout-minutes: 15
+    # One bounded diagnostic after the 15-minute job expired at 81%.
+    # Preserve coverage/assertions and measure completion before finalizing this cap.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +79,11 @@ jobs:
         # extra and PyObjC/rumps is in `macos`. AGENTS.md documents this.
         run: uv sync --all-packages --all-extras
 
+      - name: Report test interpreter and imports
+        run: |
+          uv run --all-packages --all-extras --no-editable python -c 'import json, os, sys, fulcra_collect, fulcra_common, fulcra_media, coord_engine; print(json.dumps({"interpreter": sys.executable, "cwd": os.getcwd(), "modules": {m.__name__: m.__file__ for m in (fulcra_collect, fulcra_common, fulcra_media, coord_engine)}}))'
+
       - name: Run the full test suite
-        # Must NOT hit the network. ~1500 tests, ~20s on a clean runner.
+        # Must NOT hit external services. Keep the complete workspace selection.
         # Fail fast on the first error to surface the cause quickly.
-        run: uv run --all-packages --all-extras --no-editable pytest packages/ -q --maxfail=1
+        run: uv run --all-packages --all-extras --no-editable pytest packages/ -vv --durations=40 --durations-min=0.1 --maxfail=1
