@@ -48,6 +48,11 @@ what they need from us is surfaces that are durable.
 baseline. Reconciliation reads tracked vault bodies so edits near a sync are not
 missed; retain the complete internal change list and cap only report presentation.
 Partial AppleScript write failures must produce a failed report and failed run.
+Shared Collect Files text reads must validate a supplied exact-version size as
+a strict nonnegative integer and compare complete downloaded bytes before UTF-8
+decoding, on both direct and signed-storage legs. A short 200/Content-Length
+prefix must not authorize Notes merge/write/checkpoint; absent metadata is not
+an independent size proof.
 
 **Selected-list task sync:** Reminders uses EventKit, with separate read-only
 permission checks and explicit permission requests. No lists are selected by
@@ -2510,6 +2515,17 @@ draining, installed sender fencing and Safari native integration remain gates.
 The guarded issue CAS stays the last authority await before application fetch;
 no cached proof bypasses journal predicates. Actual isolated synthetic Chrome
 checks are separate from provider latency, installed auth and default activation.
+
+The source-only [explicit browser protection command](packages/attention/README.md#explicit-protection-setup-source)
+installs the concrete fixed DNR policy only on null-payload `protection-setup`
+under an already admitted worker-owned lease. Do not install on boot, start
+online admission or supply a protector/ready flag from a page. Preserve original
+state/credential/gate and lifetime checks, including a synchronous cancellation
+check immediately before native update. A timed-out/revoked native promise retains
+its installer reservation until actual settlement; effects remain UNKNOWN and
+must not trigger compensating cleanup. Its as-of-read result leaves capture and
+drains held. Task 4 permits source preparation; actual native procedure, original
+C0/browser obligations, real account/destination and Safari gates remain separate.
 
 The inert [browser candidate presentation adapter](packages/attention/README.md#candidate-presentation-preparation)
 can display bounded, strictly shaped full Event ID/name candidates through the

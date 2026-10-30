@@ -131,11 +131,16 @@ class CollectFiles:
 
     def read_text(self, remote, *, timeout=60):
         row = self._resolve(remote, timeout=timeout)
+        expected_size = row.get("size")
+        if "size" in row and (type(expected_size) is not int or expected_size < 0):
+            raise FilesIOError("Files version size is unreadable; remote state is unknown")
         status, headers, body = self._request("GET", f"/input/v1/file_upload/{row['id']}/download", timeout=timeout)
         if 300 <= status < 400:
             status, _, body = self._request("GET", headers.get("location", ""), storage=True, timeout=timeout)
         if status >= 300:
             raise FilesIOError("unexpected storage redirect")
+        if expected_size is not None and len(body) != expected_size:
+            raise FilesIOError("Files download disagrees with version size; remote state is unknown")
         try:
             return body.decode("utf-8")
         except UnicodeError:

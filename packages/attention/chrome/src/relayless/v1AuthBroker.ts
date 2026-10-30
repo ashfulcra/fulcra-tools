@@ -17,14 +17,14 @@ const config=Object.freeze({clientId:OIDC_CLIENT_ID,issuer:OIDC_DOMAIN,audience:
 const EMPTY_SCOPE='0'.repeat(64);
 type ScopeClaim={signal:AbortSignal;transition:V1ScopeTransition|null;};
 type Lease={controller:AbortController;deadline:number;ended:boolean;done:Promise<void>;release:()=>void;};
-interface Options {storage:V1AuthStorage;journal:V1Journal;fetch?:FetchFn;now?:()=>number;refresh?:(token:string,signal:AbortSignal)=>Promise<unknown>;registerOriginStrip?:()=>Promise<void>;readProtection?:V1ReadProtection;}
+interface Options {storage:V1AuthStorage;journal:V1Journal;fetch?:FetchFn;now?:()=>number;refresh?:(token:string,signal:AbortSignal)=>Promise<unknown>;registerOriginStrip?:()=>Promise<void>;readProtection?:V1ReadProtection;readProtectionFactory?:()=>V1ReadProtection;}
 export type V1AuthDisplay=Readonly<{protocol:'attention-auth-v1';mode:'v1-held';status:'committed'|'paused'|'disconnected'|'held';code:string;accountId:string|null;publicationId:string|null;label:string|null;drains:'disabled';}>;
 function changed(s:V1AuthState,patch:Partial<V1AuthState>):V1AuthState{return {...s,...patch,revision:crypto.randomUUID()};}
 function gateFor(p:V1Publication):V1Gate{return {version:1,accountId:p.accountId,generation:p.generation,enabled:true};}
 function left(deadline:number,cap=30000):number {const remaining=deadline-performance.now();if(!Number.isFinite(deadline)||remaining<=0||remaining>cap)authHold('DEADLINE');return remaining;}
 export class V1AuthBroker {
  private readonly storage:V1AuthStorage;private readonly journal:V1Journal;private readonly fetchFn:FetchFn;private readonly now:()=>number;private readonly refreshGrant:(token:string,signal:AbortSignal)=>Promise<unknown>;private readonly registerOriginStrip:()=>Promise<void>;
- private readonly readProtection:V1ReadProtection|undefined;
+ private readProtection:V1ReadProtection|undefined;private readonly readProtectionFactory:(()=>V1ReadProtection)|undefined;private protectionInstalling=false;
  private scopeClaim:ScopeClaim|null=null;private publisher=new AbortController();private scopeLifetimes=new Map<string,AbortSignal>();private refreshLifetimes=new Map<string,AbortSignal>();
  private checkPublisher(signal:AbortSignal):void{if(signal.aborted)authHold('PUBLICATION_REVOKED');}
  fencePublishers():void{this.beginScopeClaim();}
@@ -45,7 +45,7 @@ export class V1AuthBroker {
  }
  private initialized=false;private admitted=false;private heldCode='STARTUP_HELD';private leases=new Set<Lease>();private publishers=0;private renewals=new Map<string,Promise<V1AuthDisplay>>();private publicationTail:Promise<unknown>=Promise.resolve();
  private signin:{transitionId:string;device:DeviceCodeResponse;status:'pending'|'done'|'held'}|null=null;
- constructor(options:Options){this.readProtection=options.readProtection;this.storage=options.storage;this.journal=options.journal;this.fetchFn=options.fetch??((...args)=>fetch(...args));this.now=options.now??Date.now;this.refreshGrant=options.refresh??((token,signal)=>new FulcraOidc({fetch:this.providerFetch(signal)}).refresh(token));this.registerOriginStrip=options.registerOriginStrip??registerAuth0OriginStrip;}
+ constructor(options:Options){this.readProtection=options.readProtection;this.readProtectionFactory=options.readProtectionFactory;this.storage=options.storage;this.journal=options.journal;this.fetchFn=options.fetch??((...args)=>fetch(...args));this.now=options.now??Date.now;this.refreshGrant=options.refresh??((token,signal)=>new FulcraOidc({fetch:this.providerFetch(signal)}).refresh(token));this.registerOriginStrip=options.registerOriginStrip??registerAuth0OriginStrip;}
  private providerFetch(signal:AbortSignal):FetchFn{return async(input,init={})=>{
   this.checkPublisher(signal);
   const response=await this.fetchFn(input,{...init,signal,redirect:'error',credentials:'omit',cache:'no-store'});
@@ -256,7 +256,7 @@ export class V1AuthBroker {
   await this.storage.compareAndSwap(final.s,changed(final.s,{committed:successor,pending:null}),{before:final.a,after:{...final.a,state:'COMMITTED_SUCCESSOR'}},deadline,this.refreshLifetimes.get(id));
   const committed=await this.storage.readState();await this.validateCommitted(committed);this.checkPublisher(this.refreshLifetimes.get(id)!);this.admitted=true;this.heldCode='COMMITTED';
  }
- private async lease(deadline:number):Promise<{lease:Lease;http:V1Http;journal:V1Journal;finish:()=>void}>{
+ private async lease(deadline:number):Promise<{lease:Lease;http:V1Http;journal:V1Journal;state:V1AuthState;credential:V1Credential;finish:()=>void}>{
   left(deadline);if(!this.initialized||!this.admitted||this.publishers||this.scopeClaim)authHold('ADMISSION_HELD');
   // Registration precedes awaits: a pending publisher cannot pass this lease.
   let release!:()=>void;const done=new Promise<void>(resolve=>{release=resolve;});
@@ -270,7 +270,7 @@ export class V1AuthBroker {
    const check=()=>{left(deadline);if(lease.ended||lease.controller.signal.aborted)authHold('LEASE_ENDED');};
    const owned=this.journal.withLifetime(lease.controller.signal,deadline);ownedJournal=owned;
    const http=new V1Http({journal:owned,scope:gateFor(publication),readToken:async()=>{check();return c.tokens.accessToken;},fetch:this.fetchFn,now:this.now,timeoutMs:Math.min(30000,left(deadline)),readProtection:this.readProtection,lifetime:{signal:lease.controller.signal,deadline}});
-   check();return {lease,http,journal:owned,finish};
+   check();return {lease,http,journal:owned,state:s,credential:c,finish};
   }catch(e){finish();throw e;}
  }
  async runAction(intent:V1MutationIntent,deadline:number,reconcile=false){
@@ -285,6 +285,29 @@ export class V1AuthBroker {
   }finally{owned.finish();}
  }
  async runRead(kind:'types',deadline:number):Promise<unknown>{const owned=await this.lease(deadline);try{if(kind!=='types')authHold('READ_INVALID');return await readV1OwnedTypes(owned.http,Math.min(8000,left(deadline)));}finally{owned.finish();}}
+ /** Explicit policy setup only. A timed-out native promise retains its slot and
+  * lease until settlement; returning UNKNOWN cannot make its effects quiescent. */
+ async installReadProtection(deadline:number):Promise<{version:1;status:'installed-as-of-read';capture:'held';drains:'disabled'}>{
+  if(this.protectionInstalling)authHold('PROTECTION_BUSY');left(deadline);this.protectionInstalling=true;
+  const publisher=this.publisher.signal;let timer:ReturnType<typeof setTimeout>|undefined,cancel:()=>void=()=>{};
+  const interrupted=new Promise<never>((_,reject)=>{cancel=()=>reject(new V1AuthError('PROTECTION_UNKNOWN'));publisher.addEventListener('abort',cancel,{once:true});timer=setTimeout(cancel,Math.ceil(left(deadline)));});
+  const operation=(async()=>{
+   const owned=await this.lease(deadline);
+   try{
+    const before=owned.state,publication=before.committed;if(!publication)authHold('ADMISSION_HELD');
+    const credential=owned.credential;
+    const check=async()=>{
+     left(deadline);if(publisher.aborted||owned.lease.controller.signal.aborted)authHold('PROTECTION_UNKNOWN');
+     const state=await this.storage.readState();if(!exactAuth(state,before)||!exactAuth(await this.storage.readCredential(publication.credentialId),credential))authHold('PROTECTION_UNKNOWN');
+     await this.validateCommitted(state);left(deadline);if(publisher.aborted||owned.lease.controller.signal.aborted)authHold('PROTECTION_UNKNOWN');
+    };
+    await check();this.readProtection??=this.readProtectionFactory?.();if(!this.readProtection)authHold('PROTECTION_UNAVAILABLE');
+    await this.readProtection.install({signal:owned.lease.controller.signal,deadline,check});await check();
+    return {version:1 as const,status:'installed-as-of-read' as const,capture:'held' as const,drains:'disabled' as const};
+   }finally{owned.finish();}
+  })().finally(()=>{this.protectionInstalling=false;});
+  try{return await Promise.race([operation,interrupted]);}finally{clearTimeout(timer);publisher.removeEventListener('abort',cancel);}
+ }
  async startSignIn():Promise<{transitionId:string;verificationUriComplete:string;userCode:string}>{
   const t=await this.claimScope('signin');
   try{await this.registerOriginStrip();await this.scopeCurrent(t.transitionId);const deadline=performance.now()+600000,oidc=new FulcraOidc({fetch:this.boundedFetch(deadline,this.scopeLifetimes.get(t.transitionId),async(input,response)=>{if(String(input).endsWith('/oauth/token')&&response.status===200){const credential=makeV1Credential(t.receiptId,t.transitionId,t.expectedPublication?.publicationId??null,parseV1JSON(await response.text()),this.now());await this.storage.retainCredential(credential);}})}),device=await oidc.requestDeviceCode();await this.scopeCurrent(t.transitionId);

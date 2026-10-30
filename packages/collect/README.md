@@ -234,6 +234,11 @@ are UNKNOWN, never absence or a UTF-8 prefix. Consumers stop before follow-on
 file or checkpoint writes. Signed storage redirects still use the separate
 credential-free transport; successful upload statuses such as 201/204 remain
 supported.
+When the exact listed version includes `size`, text downloads require a strict
+nonnegative integer and compare complete body bytes before UTF-8 decoding on
+both direct and signed-storage legs. A short HTTP 200 with a self-consistent
+Content-Length cannot override that version size. Missing size metadata remains
+supported for older listings, without this independent length proof.
 
 ### Observed outbox progress (development)
 

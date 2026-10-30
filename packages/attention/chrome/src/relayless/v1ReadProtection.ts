@@ -13,6 +13,13 @@ interface DNR {
  getEnabledRulesets():Promise<string[]>;
  updateDynamicRules(options:{removeRuleIds:number[];addRules:Rule[]}):Promise<unknown>;
 }
+type Lifetime={signal:AbortSignal;deadline:number;check?:()=>Promise<void>};
+function currentNow(lifetime?:Lifetime):void{
+ if(lifetime&&(lifetime.signal.aborted||!Number.isFinite(lifetime.deadline)||performance.now()>=lifetime.deadline))refuse();
+}
+async function current(lifetime?:Lifetime):Promise<void>{
+ currentNow(lifetime);if(lifetime?.check)await lifetime.check();currentNow(lifetime);
+}
 const IDS=[1002,1003,1004,1005];
 function refuse():never {throw new Error("Attention v1 read protection is unavailable. Keep queued data and complete setup again.");}
 export function v1ReadProtectionRules(extensionId:string):Rule[] {
@@ -65,9 +72,19 @@ export class V1ReadProtection {
   if(["getDynamicRules","getSessionRules","getEnabledRulesets","updateDynamicRules"].some(key=>typeof dnr[key as keyof DNR]!=="function"))refuse();
   this.#id=id;this.#dnr=dnr;
  }
- private async state(requireInstalled:boolean):Promise<void> {
+ private async state(requireInstalled:boolean,lifetime?:Lifetime):Promise<void> {
   try {
-   const [dynamic,session,enabled]=await Promise.all([this.#dnr.getDynamicRules(),this.#dnr.getSessionRules(),this.#dnr.getEnabledRulesets()]);
+   await current(lifetime);
+   currentNow(lifetime);
+   // Rejection must not release an installer while another native call is
+   // still pending. Deferred calls also retain synchronous native throws.
+   const [dynamicRead,sessionRead,enabledRead]=await Promise.allSettled([
+    Promise.resolve().then(()=>{currentNow(lifetime);return this.#dnr.getDynamicRules();}),
+    Promise.resolve().then(()=>{currentNow(lifetime);return this.#dnr.getSessionRules();}),
+    Promise.resolve().then(()=>{currentNow(lifetime);return this.#dnr.getEnabledRulesets();})]);
+   await current(lifetime);
+   if(dynamicRead.status!=='fulfilled'||sessionRead.status!=='fulfilled'||enabledRead.status!=='fulfilled')refuse();
+   const dynamic=dynamicRead.value,session=sessionRead.value,enabled=enabledRead.value;
    if(!Array.isArray(dynamic)||dynamic.length>5||!Array.isArray(session)||session.length||!Array.isArray(enabled)||enabled.length)refuse();
    const wanted=v1ReadProtectionRules(this.#id),seen=new Set<number>();
    for(const rule of dynamic) {
@@ -80,11 +97,14 @@ export class V1ReadProtection {
  }
  /** Explicit setup only. Preserve the known Auth0 rule; never clear unknown
   * rules/session/static policy to make a read appear protected. */
- async install():Promise<void> {
-  await this.state(false);
+ async install(lifetime?:Lifetime):Promise<void> {
+  await this.state(false,lifetime);
+  await current(lifetime);
+  currentNow(lifetime); // no await between the cancellation check and native mutation
   try{await this.#dnr.updateDynamicRules({removeRuleIds:[...IDS],addRules:v1ReadProtectionRules(this.#id)});}catch{return refuse();}
-  await this.assert();
+  await current(lifetime);
+  await this.assert(lifetime);
  }
  /** Read-only assertion; V1Http includes this await in its request deadline. */
- async assert():Promise<void>{await this.state(true);}
+ async assert(lifetime?:Lifetime):Promise<void>{await this.state(true,lifetime);}
 }

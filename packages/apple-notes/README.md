@@ -57,6 +57,10 @@ are errors, never evidence of missing state. The shared
 [HTTP completeness checks](../collect/README.md#files-read-completeness) reject
 partial status/headers and malformed or contradictory totals before Notes can
 write follow-on files or checkpoints.
+They also compare downloaded bytes with the exact version's size when provided,
+before decoding or merging. A short HTTP 200 cannot silently drop text outside
+the imported owner fence. Malformed sizes fail; older size-less listings remain
+supported without that independent length proof.
 
 Sync, reconciliation and experimental writeback pass this adapter explicitly.
 Source guards run around snapshots, between Notes/attachment reads, per note,

@@ -4,6 +4,7 @@ import {V1AuthBroker} from './v1AuthBroker';
 import {V1AuthStorage,V1AuthError,readV1Settings} from './v1AuthStorage';
 import {V1Journal} from './v1Journal';
 import {V1CaptureIngress} from './v1CaptureIngress';
+import {V1ReadProtection} from './v1ReadProtection';
 import {readAuthMode,type AttentionAuthMode} from './v1AuthMode';
 import {DEFAULT_SETTINGS,type Settings} from '../types';
 // Local cancellation marker only; never account/generation/setup evidence.
@@ -16,7 +17,7 @@ export async function workerAuthMode():Promise<AttentionAuthMode>{
 }
 async function startWorkerOwner(recover=true,scope=false):Promise<V1AuthBroker>{
  if(await workerAuthMode()!=='v1-held')throw new V1AuthError('MODE_MISMATCH');
- if(!owner){owner=new V1AuthBroker({storage:new V1AuthStorage(),journal:new V1Journal()});settingsReady=owner.initializeSettings();void settingsReady.catch(()=>{});if(scope)authReady=settingsReady;}
+ if(!owner){owner=new V1AuthBroker({storage:new V1AuthStorage(),journal:new V1Journal(),readProtectionFactory:()=>new V1ReadProtection()});settingsReady=owner.initializeSettings();void settingsReady.catch(()=>{});if(scope)authReady=settingsReady;}
  if(recover&&!authReady){authReady=settingsReady!.then(()=>owner!.initialize());void authReady.catch(()=>{});}
  return owner;
 }
@@ -28,7 +29,7 @@ export async function handleV1AuthCommand(message:unknown):Promise<unknown>{
   if(Object.keys(m).sort().join(',')!=='command,payload,type,version'||m.type!=='attention-auth-v1'||m.version!==1||typeof m.command!=='string')throw new V1AuthError('PROTOCOL_MISMATCH');
   const localScope=['signout','settings','signin-start'].includes(m.command);if(localScope){fenceCapture();owner?.fencePublishers();}
   if(m.command==='settings-read'&&m.payload!==null)throw new V1AuthError('COMMAND_INVALID');
-  const b=await startWorkerOwner(!localScope&&m.command!=='settings-read',localScope);if(m.command==='display')await settingsReady!.catch(()=>{});else await settingsReady;const p=m.payload as Record<string,unknown>|null;let result:unknown;
+  const b=await startWorkerOwner(!localScope&&!['settings-read','protection-setup'].includes(m.command),localScope);if(m.command==='display')await settingsReady!.catch(()=>{});else await settingsReady;const p=m.payload as Record<string,unknown>|null;let result:unknown;
   switch(m.command){
    case 'settings-read':result=await b.readSettings();break;
    case 'display':if(p!==null)throw new V1AuthError('COMMAND_INVALID');result=await b.display();break;
@@ -37,6 +38,7 @@ export async function handleV1AuthCommand(message:unknown):Promise<unknown>{
    case 'refresh':if(!p||Object.keys(p).join(',')!=='expectedPublicationId'||typeof p.expectedPublicationId!=='string')throw new V1AuthError('COMMAND_INVALID');result=await b.refresh(p.expectedPublicationId);break;
    case 'signout':if(p!==null)throw new V1AuthError('COMMAND_INVALID');result=await b.signOut();break;
    case 'settings':result=await b.changeSettings(p);if((result as {status:string}).status==='held')throw new V1AuthError('SCOPE_UNKNOWN');break;
+   case 'protection-setup':if(p!==null)throw new V1AuthError('COMMAND_INVALID');result=await b.installReadProtection(performance.now()+10000);break;
    case 'destination-list':result={status:'held',code:'SETUP_HELD',destinations:[]};break;
    case 'destination-choose':case 'destination-create':throw new V1AuthError('SETUP_HELD');
    default:throw new V1AuthError('PROTOCOL_MISMATCH');

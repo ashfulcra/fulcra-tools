@@ -83,6 +83,13 @@ serve each operation's transport and local effects. See the
 [race/restart tests](tests/relayless/v1Destination.test.ts) and linked contract
 for input-transform handling and remaining rollout gates.
 
+The source-only worker now has an explicit null-payload `protection-setup`
+command using the real DNR class under existing broker ownership. It returns
+only installed-as-of-read; it cannot complete destination setup or activate
+capture/drains. There is no automatic UI caller or boot installation. Native
+calls that outlive cancellation retain the installer slot until settlement;
+unknown effects are not rolled back. See the [source contract and native gates](../README.md#explicit-protection-setup-source).
+
 The inert [candidate presentation adapter](src/relayless/v1DestinationCandidates.ts)
 lets the Wizard display a strictly bounded future candidate-only response. It
 adds no production listing, selection, completed setup or upload authority;

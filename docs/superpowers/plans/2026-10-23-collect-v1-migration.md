@@ -248,6 +248,17 @@ Original capture identities, strict writers and default/held modes remain. This
 does not waive native QA or permit later setup/discovery/activation stages; new
 source/build bytes need their own exact review and relevant native proof.
 
+Source-stage amendment: prepare the actual worker-owned `protection-setup`
+producer with the concrete DNR class under an existing admitted broker lease.
+This explicit command installs/readbacks fixed policy with inherited cancellation,
+original state/credential/gate validation and one nonabortable native operation
+reserved until settlement. It starts no online admission and has no boot/UI
+caller. Synthetic actual-caller regression and exact-source review precede any
+native invocation. This amendment permits source preparation only; applicable
+original C0/browser native prerequisites, exact reviewed native procedure, real
+account/destination canary and Safari remain required. No completed setup,
+positive capture descriptor, drain or default-mode activation is permitted.
+
 **Files:** Attention TypeScript/Swift, relay, Netflix script and their tests/docs.
 
 - [ ] RED: v1 destination selection, moment/duration shape, offline queue retry,

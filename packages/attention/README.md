@@ -768,6 +768,34 @@ lifetime through descendants and final transactions. No reusable write root is
 returned. Confirmed settlement survives late cancellation; uncertain issued work
 retains its original identity without a new submission.
 
+#### Explicit protection setup source
+
+The versioned worker `protection-setup` command accepts only a null payload. It
+uses the real [protection class](chrome/src/relayless/v1ReadProtection.ts), created
+lazily in the worker, under an already admitted broker lease. It does not start
+online admission, install on boot or run from the Wizard. Missing native APIs
+refuse setup without breaking read-only display or local revocation. Exact
+original state, credential, journal gate, deadline and cancellation are checked
+around native policy reads and immediately before the native write.
+
+A success result says only `installed-as-of-read`, with capture held and drains
+disabled. It is not completed destination setup or future policy authority.
+Nonabortable native calls keep the single installer slot and original lease until
+they settle, even after a prompt UNKNOWN result on timeout/revocation. A late
+write may have occurred; no cleanup or rollback is inferred. A never-settling
+native call keeps that worker's installer slot held. A later explicit operation
+reads actual rules again rather than adopting a saved success flag.
+
+Current fixed rules protect own-extension JSONL record GETs and Event/DeletedRecord
+receipt POSTs; they do not cover JSON inventories, account information, OIDC or
+Metric POST. [Synthetic actual-caller tests](chrome/tests/relayless/v1ProtectionSetup.test.ts)
+exercise source semantics only. The source-stage Task 4 amendment permits this
+producer preparation; actual native invocation requires its exact reviewed
+procedure and applicable original C0/browser prerequisites. Real browser policy,
+account/destination canary, installed-state migration and Safari acceptance remain
+unverified. Default legacy mode, list/choose/create holds, null descriptors and
+both disabled drains remain.
+
 The [auth store](chrome/src/relayless/v1AuthStorage.ts) keeps finite attempts and
 publication metadata in `fulcra-attention-auth-v1` IndexedDB, separately from
 addressed `relaylessV1Credential:<UUID>` Chrome-local credential records. Retain a

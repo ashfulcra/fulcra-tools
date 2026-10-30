@@ -31,6 +31,15 @@ terminal owners grant no action authority. Preserve full original-body reproduct
 private credential access and existing strict writer/lifetime predicates. Do not
 activate a caller or infer native acceptance from this prerequisite.
 The inert [candidate presentation slice](README.md#candidate-presentation-preparation)
+has a separate [explicit protection producer](README.md#explicit-protection-setup-source)
+in the worker. Only `protection-setup` with null payload may install real DNR
+rules, under an already admitted original broker lease; it must not start online
+admission or run on boot/display. Preserve exact state/credential/gate checks,
+deadline and synchronous cancellation immediately before update. Keep one native
+installer reserved until actual settlement after caller UNKNOWN; never fake
+quiescence, rollback or reusable readiness. Source tests do not clear original
+native/C0/browser/Safari gates. List/choose/create, descriptors and drains stay held.
+The candidate presentation slice itself
 accepts only bounded versioned full Event ID/name metadata matching current display
 account data; it grants no principal/schema/ownership/setup proof. The actual
 worker list/choose/create commands remain `SETUP_HELD`. Never connect unprotected

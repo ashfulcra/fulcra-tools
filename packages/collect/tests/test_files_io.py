@@ -105,6 +105,57 @@ def test_partial_download_never_returns_utf8_prefix(tmp_path, monkeypatch, stora
             files.read_text("/team/synthetic/task/one.md")
 
 
+@pytest.mark.parametrize("storage", [False, True])
+@pytest.mark.parametrize("size", [0, 4, -1, True, False, 3.0, "3", None])
+def test_known_version_size_must_match_complete_download_before_text(tmp_path, monkeypatch, storage, size):
+    calls = []
+    def handle(request):
+        calls.append(request.method)
+        if request.url.path.endswith("/download"):
+            return (httpx.Response(302, headers={"location": "https://storage.example/read"}) if storage
+                    else httpx.Response(200, content=b"pre", headers={"Content-Length": "3"}))
+        return httpx.Response(200, json={"files": [row(size=size)]})
+    with session_for(tmp_path, monkeypatch, handle) as session, CollectFiles(session,
+            storage_transport=httpx.MockTransport(lambda _: httpx.Response(200, content=b"pre", headers={"Content-Length": "3"}))) as files:
+        with pytest.raises(FilesIOError):
+            files.read_text("/team/synthetic/task/one.md")
+    assert set(calls) == {"GET"}
+
+
+@pytest.mark.parametrize("storage", [False, True])
+@pytest.mark.parametrize("text", ["", "full", "Unicode café ☃"])
+def test_matching_version_size_uses_utf8_bytes_including_empty_files(tmp_path, monkeypatch, storage, text):
+    body = text.encode("utf-8")
+    def handle(request):
+        if request.url.path.endswith("/download"):
+            return (httpx.Response(302, headers={"location": "https://storage.example/read"}) if storage
+                    else httpx.Response(200, content=body))
+        return httpx.Response(200, json={"files": [row(size=len(body))]})
+    with session_for(tmp_path, monkeypatch, handle) as session, CollectFiles(session,
+            storage_transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body))) as files:
+        assert files.read_text("/team/synthetic/task/one.md") == text
+
+
+@pytest.mark.parametrize("storage", [False, True])
+def test_actual_note_merge_cannot_accept_a_known_size_short_200_suffix_loss(tmp_path, monkeypatch, storage):
+    from fulcra_apple_notes.render import OPEN_FENCE, CLOSE_FENCE, merge_note
+    prefix = "---\ntitle: Synthetic\n---\n" + OPEN_FENCE + "\nold\n" + CLOSE_FENCE
+    suffix = "\nUser-maintained text outside the imported section.\n"
+    complete = prefix + suffix
+    def handle(request):
+        if request.url.path.endswith("/download"):
+            return (httpx.Response(302, headers={"location": "https://storage.example/read"}) if storage
+                    else httpx.Response(200, content=prefix.encode()))
+        return httpx.Response(200, json={"files": [row(size=len(complete.encode()))]})
+    with session_for(tmp_path, monkeypatch, handle) as session, CollectFiles(session,
+            storage_transport=httpx.MockTransport(lambda _: httpx.Response(200, content=prefix.encode()))) as files:
+        try:
+            downloaded = files.read_text("/team/synthetic/task/one.md")
+        except FilesIOError:
+            return
+    assert suffix in merge_note(downloaded, prefix.replace("\nold\n", "\nnew\n"))
+
+
 def test_complete_listing_totals_and_created_upload_remain_supported(tmp_path, monkeypatch):
     def handle(request):
         if request.method == "POST":
