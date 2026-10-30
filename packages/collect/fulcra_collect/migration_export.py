@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import time
 from uuid import uuid4
@@ -19,6 +20,7 @@ from uuid import uuid4
 import httpx
 
 from fulcra_common.json_values import snapshot_json
+from fulcra_common.record_observations import _PARTIAL_HEADERS
 from fulcra_common.v1 import _canonical_uuid
 from .migration_plan import MigrationPlan, _time
 from .record_actions import _json
@@ -26,6 +28,31 @@ from .record_actions import _json
 _MAX_BODY = 64 * 1024 * 1024
 _MAX_ROW = 1024 * 1024
 _MAX_SNAPSHOT = 16 * 1024 * 1024
+
+
+def _response_metadata(headers):
+    """Retain fixed names and bounded counts, never arbitrary header values."""
+    def count(name):
+        value = headers.get(name)
+        if value is None:
+            return None
+        return int(value) if re.fullmatch(r'[0-9]{1,10}', value) else 'invalid'
+    return {'partial_headers': [name for name in _PARTIAL_HEADERS if name in headers],
+            'total_counts': [count('x-total-count'), count('x-total')],
+            'content_length': count('content-length')}
+
+
+def _validate_response_metadata(value, *, row_count, byte_count):
+    if (not isinstance(value, dict)
+            or set(value) != {'partial_headers', 'total_counts', 'content_length'}
+            or value['partial_headers'] != []
+            or not isinstance(value['total_counts'], list) or len(value['total_counts']) != 2):
+        raise ValueError('incomplete response metadata')
+    for observed, expected in [*( (v, row_count) for v in value['total_counts']),
+                               (value['content_length'], byte_count)]:
+        if observed is not None and (type(observed) is not int or not 0 <= observed <= 9999999999
+                                     or observed != expected):
+            raise ValueError('incomplete response metadata totals')
 
 
 def _private(info, *, directory=False):
@@ -159,6 +186,7 @@ class RawExport:
     body_path: Path
     receipt_path: Path
     _encoded: str = field(repr=False)
+    _receipt_sha256: str = field(repr=False)
     coverage_complete: bool = field(default=False, init=False)
 
     @property
@@ -191,7 +219,7 @@ class HistoricalReader:
         self.root = Path(artifacts).absolute()
         self._guard()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._scope = {'version': 1, 'pass_id': self.pass_id, 'plan_fingerprint': self.plan.fingerprint}
+        self._scope = {'version': 2, 'pass_id': self.pass_id, 'plan_fingerprint': self.plan.fingerprint}
         with _directory(self.root) as parent:
             created = False
             try:
@@ -247,13 +275,16 @@ class HistoricalReader:
                     request_body = _read(folder, 'request.json', 16384)
                     if json.loads(request_body, object_pairs_hook=_pairs) != request:
                         raise ValueError
-                    receipt = json.loads(_read(folder, 'receipt.json', 4096), object_pairs_hook=_pairs)
+                    receipt_body = _read(folder, 'receipt.json', 4096)
+                    receipt_hash = hashlib.sha256(receipt_body).hexdigest()
+                    receipt = json.loads(receipt_body, object_pairs_hook=_pairs)
                     body = _read(folder, 'body.json', self.max_bytes)
                     request_hash = hashlib.sha256(request_body).hexdigest()
                     body_hash = hashlib.sha256(body).hexdigest()
                     if (set(receipt) != {'version', 'request_sha256', 'body_sha256', 'bytes', 'http_status',
-                                        'transport_eof', 'decoded_body', 'body_encoding', 'coverage_complete'}
-                            or type(receipt['version']) is not int or receipt['version'] != 1
+                                        'transport_eof', 'decoded_body', 'body_encoding', 'coverage_complete', 'response_metadata'}
+                            or receipt_hash != result._receipt_sha256
+                            or type(receipt['version']) is not int or receipt['version'] != 2
                             or receipt['request_sha256'] != request_hash or receipt['body_sha256'] != body_hash
                             or type(receipt['bytes']) is not int or receipt['bytes'] != len(body)
                             or type(receipt['http_status']) is not int or receipt['http_status'] != 200
@@ -261,8 +292,11 @@ class HistoricalReader:
                             or receipt['body_encoding'] not in {'', 'identity'} or receipt['coverage_complete'] is not False
                             or _records(body) != result._encoded):
                         raise ValueError
+                    _validate_response_metadata(receipt['response_metadata'],
+                                                row_count=len(result.records), byte_count=len(body))
             self._guard()
             return {'attempt_id': attempt, 'request_sha256': request_hash, 'body_sha256': body_hash,
+                    'receipt_sha256': receipt_hash,
                     'snapshot_sha256': hashlib.sha256(result._encoded.encode()).hexdigest(),
                     'count': len(result.records)}
         except (ValueError, OSError, TypeError, AttributeError, UnicodeError, RecursionError, InvalidOperation):
@@ -276,7 +310,7 @@ class HistoricalReader:
                 or end <= start or order not in {'asc', 'desc'}):
             raise ValueError('historical export window/order is outside the immutable plan')
         start_time, end_time = [value.isoformat().replace('+00:00', 'Z') for value in (start, end)]
-        return {'version': 1, **self._scope, 'window_id': window_id,
+        return {**self._scope, 'window_id': window_id,
             'account_id': self.plan.account_id, 'source_data_type': self.plan.source_data_type,
             'start_time': start_time, 'end_time': end_time, 'order': order,
             'max_body_bytes': self.max_bytes, 'timeout_seconds': self.timeout}
@@ -316,6 +350,7 @@ class HistoricalReader:
                                     headers={**headers, 'Accept-Encoding': 'identity'}, follow_redirects=False,
                                     timeout=httpx.Timeout(self.timeout)) as response:
                                 encoding = response.headers.get('Content-Encoding', 'identity').strip().lower()
+                                metadata = _response_metadata(response.headers)
                                 for chunk in response.iter_raw():
                                     check()
                                     retained = chunk[:self.max_bytes - count]
@@ -334,11 +369,11 @@ class HistoricalReader:
                     raise RuntimeError('historical export transport failed; response state is unknown') from None
                 finally:
                     os.close(body_fd)
-                _write(folder, 'receipt.json', {'version': 1, 'request_sha256': request_hash,
+                receipt_hash = _write(folder, 'receipt.json', {'version': 2, 'request_sha256': request_hash,
                     'body_sha256': digest.hexdigest(), 'bytes': count, 'http_status': status,
                     'transport_eof': True, 'decoded_body': encoding in {'', 'identity'},
                     'body_encoding': encoding if encoding in {'', 'identity', 'gzip', 'deflate', 'br', 'zstd'} else 'unsupported',
-                    'coverage_complete': False})
+                    'coverage_complete': False, 'response_metadata': metadata})
                 if status != 200:
                     raise RuntimeError('historical export HTTP status is not a complete successful read')
                 if encoding not in {'', 'identity'}:
@@ -351,6 +386,10 @@ class HistoricalReader:
                     encoded = _records(retained_body)
                 except (ValueError, TypeError, UnicodeError, InvalidOperation, RecursionError):
                     raise RuntimeError('historical export JSON is unreadable, unsupported or not lossless; raw artifact retained') from None
+                try:
+                    _validate_response_metadata(metadata, row_count=len(json.loads(encoded)), byte_count=count)
+                except ValueError:
+                    raise RuntimeError('historical export response metadata is not complete; raw artifact retained') from None
                 check()
                 path = self.root / self.pass_id / attempt
-                return RawExport(path / 'body.json', path / 'receipt.json', encoded)
+                return RawExport(path / 'body.json', path / 'receipt.json', encoded, receipt_hash)

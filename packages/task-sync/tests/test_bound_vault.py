@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from fulcra_collect import config
-from fulcra_collect.files_io import CollectFiles
+from fulcra_collect.files_io import CollectFiles, FilesIOError
 from fulcra_collect.plugin import RunContext
 from fulcra_collect.state import PluginState
 from fulcra_collect.v1_session import CollectRecordSession
@@ -102,3 +102,17 @@ def test_large_history_does_not_reread_keychain_for_each_metadata_row(tmp_path, 
         before = ctx.collect_token.call_count
         assert len(vault.versions(REMOTE)) == 500
         assert ctx.collect_token.call_count - before <= 20
+
+
+@pytest.mark.parametrize("status,headers", [(206, {}), (200, {"Content-Range": "items 0-0/2"}),
+                                            (200, {"X-Total-Count": "1"})])
+def test_bound_history_partial_http_is_unknown_before_followon_write(tmp_path, monkeypatch, status, headers):
+    ctx, _ = context(tmp_path, monkeypatch)
+    calls = []
+    def handle(request):
+        calls.append(request.method)
+        return httpx.Response(status, json={"files": []}, headers=headers)
+    with CollectRecordSession(ctx, transport=httpx.MockTransport(handle)) as session, CollectFiles(session) as files, FulcraVault(bound_files=files) as vault:
+        with pytest.raises((VaultError, FilesIOError)):
+            vault.versions(REMOTE)
+    assert calls == ["GET"]

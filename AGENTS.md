@@ -85,9 +85,9 @@ configuration saves and automatic token refresh must never clear it.
 **Selected local-source uploads:** use Collect's captured Fulcra token, never
 the CLI's independently stored account. Use `RunContext.collect_token()` for
 selected-source uploads; its missing/expired token requires reconnecting in Collect.
-The legacy `fulcra_token()` helper still supports independent CLI/env fallback
-and is unsuitable for account-bound sources. Capture and compare the stored
-token as well as the epoch before uploading. Use the bounded
+`fulcra_token()` is a compatibility alias with the same Collect-only behavior;
+see the canonical [strict authentication contract](packages/collect/README.md#collect-authentication).
+Capture and compare the stored token as well as the epoch before uploading. Use the bounded
 `credentials.get_user_secret_fresh()` read for capture and final upload guards;
 the ordinary cached reader cannot detect another process changing the token. Do not re-canonicalize a selected
 folder path on subsequent scans: substituted ancestor/root links must fail closed.
@@ -1895,7 +1895,11 @@ Upstream reports must be understandable without reading this repository.
   itself, and the dependency manifests (`pyproject.toml`, `uv.lock`) — see
   [`.github/workflows/macos.yml`](.github/workflows/macos.yml);
   `test_ci_trigger_coverage.py` fails if trigger and coverage drift apart.
-  Everything on Linux (`uv-workspace.yml`) runs on every push/PR to `main`.
+  Everything on Linux ([`uv-workspace.yml`](.github/workflows/uv-workspace.yml))
+  runs on every push/PR to `main`. The selected-suite diagnostic retains its
+  full test selection, prints test nodes and slow setup/call/teardown phases,
+  and has a finite job bound in that workflow. A timeout is an incomplete run;
+  require completed-run timing evidence before accepting a changed budget.
   The upshot: for anything outside the macOS trigger set (docs, most skills),
   the **local run is the only pre-merge macOS check** — run the relevant suite
   before you push.
@@ -2263,7 +2267,7 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   not grow per rerender. Explicit old-epoch reauthorization and packaged QA
   remain release gates.
   Tag names are limited to 30 characters on creation. Collect reuses saved owned
-  tag UUIDs through renames; new long/slashed source labels get stable short tag
+  tag UUIDs through renames; new long/slashed or dot-segment source labels get stable short tag
   names without shortening record enrichment. Unknown creation remains fenced.
   Media validates raw declared fields before notes/metadata, reuses a codec
   validator, and compares UTC instants for durations, order, windows and receipts
@@ -2821,13 +2825,19 @@ stay raw artifacts needing a narrower read, never silently discarded rows.
 Preserve failed/partial attempts; never reuse an orphan body as a complete read.
 JSON wrappers, duplicate keys, lossy/non-finite numbers or invalid Unicode fail
 visibly. A receipt/result always has `coverage_complete: false`; EOF is not
-provider coverage. No credentials or response headers enter artifacts.
+provider coverage. No credentials or arbitrary header values enter artifacts.
+Version-2 receipts retain only known partial-header names and bounded total/length
+counts. Explicit partial/pagination evidence or malformed/contradictory counts
+refuse both initial reads and later artifact consumption; verification binds the
+original receipt hash as well as the body.
 The driver requires an explicit, externally justified provider contract
 (`version: 1`, `semantics: complete-below-row-cap`, `row_cap: 1..4000`, nonempty
 `basis`); it supplies no default. The public legacy endpoint has no cursor/total
 count/ceiling attestation, and matching two reads cannot invent one. Pass UUID,
-plan and contract bind immutable version-1 pass/proof tables in the private
-ledger; a new pass refuses existing unbound windows. Indexed next-open reads
+plan and contract bind immutable version-2 pass/proof tables in the private
+ledger; old version-1 evidence cannot resume or certify coverage, and a new pass
+refuses existing unbound windows. Preserve old artifacts; use a fresh authorized
+pass/ledger for new evidence. Indexed next-open reads
 avoid prefix-rescan starvation; a nonblocking owned-file lease serializes runs.
 Reopen and hash/scope-check both raw artifacts before consuming them. Equal
 multisets below the asserted cap conditionally seal; capped/unequal pairs split
@@ -2958,8 +2968,10 @@ release QA.
 - **Reminders/Todoist account/read consent (development branch):** the
   [task engine contract](packages/task-sync/README.md#collect-account-and-read-consent-development-branch)
   checks captured read consent in preview as well as live runs. Actual callers
-  use `CollectRecordSession` and inject shared Files HTTP into the task vault;
-  never restore a frozen bearer or selection-only guard. Retain task generations,
+  use `CollectRecordSession` and inject shared Files HTTP into the task vault.
+  [incomplete HTTP reads](packages/collect/README.md#files-read-completeness) remain
+  UNKNOWN and cannot authorize file or checkpoint writes.
+  Never restore a frozen bearer or selection-only guard. Retain task generations,
   completion journals and the final mutation leases. Todoist guards each HTTP
   request/chunk and observation checkpoint; Reminders guards each bounded bridge
   invocation. In-flight native calls can finish; revoked results are discarded.

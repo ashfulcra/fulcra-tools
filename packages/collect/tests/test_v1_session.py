@@ -158,16 +158,17 @@ def test_renamed_tag_reuses_its_saved_current_account_identity(tmp_path, monkeyp
     assert paths[-1] == "/user/v1alpha1/tag/id/" + tag_id
 
 
-def test_long_new_tag_uses_a_stable_short_name_without_losing_the_source_label(tmp_path, monkeypatch):
+@pytest.mark.parametrize("label", ["Synthetic source label that exceeds thirty characters", ".", ".."])
+def test_long_new_tag_uses_a_stable_short_name_without_losing_the_source_label(tmp_path, monkeypatch, label):
     from fulcra_collect.v1_session import CollectRecordSession
     ctx = context(tmp_path, monkeypatch)
-    label = "Synthetic source label that exceeds thirty characters"
     tag_id = "aaaaaaaa-bbbb-4ccc-8ddd-123456789abc"
     created = []
     exists = False
     def handler(request):
         nonlocal exists
         if request.method == "POST":
+            assert request.url.path == "/user/v1alpha1/tag"
             name = json.loads(request.content)["name"]
             assert len(name) <= 30 and name != label
             created.append(name)
@@ -177,6 +178,8 @@ def test_long_new_tag_uses_a_stable_short_name_without_losing_the_source_label(t
             return httpx.Response(200, json=[])
         if request.url.path == "/user/v1alpha1/tag/id/" + tag_id:
             return httpx.Response(200, json={"id": tag_id, "name": created[0]})
+        from fulcra_common.data_types import tag_create_name
+        assert request.url.path == "/user/v1alpha1/tag/name/" + tag_create_name(label)
         return httpx.Response(200, json={"id": tag_id, "name": created[0]}) if exists else httpx.Response(404)
     with CollectRecordSession(ctx, transport=httpx.MockTransport(handler)) as session:
         assert session.resolve_tag(label) == tag_id
@@ -185,10 +188,10 @@ def test_long_new_tag_uses_a_stable_short_name_without_losing_the_source_label(t
     assert len(created) == 1
 
 
-def test_old_long_tag_is_reused_instead_of_creating_a_short_replacement(tmp_path, monkeypatch):
+@pytest.mark.parametrize("label", ["Synthetic legacy label longer than thirty characters", ".", ".."])
+def test_old_long_tag_is_reused_instead_of_creating_a_short_replacement(tmp_path, monkeypatch, label):
     from fulcra_collect.v1_session import CollectRecordSession
     ctx = context(tmp_path, monkeypatch)
-    label = "Synthetic legacy label longer than thirty characters"
     tag_id = "aaaaaaaa-bbbb-4ccc-8ddd-123456789abc"
     def handler(request):
         assert request.method == "GET"

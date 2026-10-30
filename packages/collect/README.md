@@ -98,10 +98,12 @@ before schema proof; it does not authorize unknown tag UUID constraints.
 
 Tag resolution revalidates a saved current-account tag by UUID, so a renamed tag
 keeps its identity. For new source labels exceeding the API's 30-character tag
-limit (or containing a slash), it uses a stable short name with a digest while
-retaining the complete label in record enrichment. Existing long/slashed tags
+limit, containing a slash, or equal to `.`/`..`, it uses a stable short name with a digest while
+retaining the complete label in record enrichment. Existing unsafe-name tags
 are found through the current account's tag list first. Unresolved creation
 intents never authorize a replacement POST, and previews do not write bindings.
+
+### Collect authentication
 
 Both `RunContext.collect_token()` and its compatibility alias `fulcra_token()`
 read Collect's current sign-in without an environment/default-CLI fallback.
@@ -222,6 +224,16 @@ account can authorize Undo of an old-epoch verified original without rewriting
 that original. A changed record payload fails visibly. The versioned backend
 below and development native/web callers use this actor. Old-epoch pending
 reauthorization and packaged-release QA remain incomplete.
+
+### Files read completeness
+
+[`CollectFiles`](fulcra_collect/files_io.py), shared by Notes, Gmail/coord and
+bound task vaults, requires HTTP 200 for reads. HTTP 206, partial/pagination
+headers, malformed totals and listing totals unequal to the returned file count
+are UNKNOWN, never absence or a UTF-8 prefix. Consumers stop before follow-on
+file or checkpoint writes. Signed storage redirects still use the separate
+credential-free transport; successful upload statuses such as 201/204 remain
+supported.
 
 ### Observed outbox progress (development)
 
@@ -380,7 +392,10 @@ the plan's explicit account/type/range with redirects disabled. A pass UUID is
 immutably bound to the plan fingerprint. Each GET gets a new owner-only attempt
 directory: a fsynced request manifest precedes dispatch, raw response bytes
 are retained before parsing, and a hash/EOF receipt follows a fully flushed body.
-No credentials or response headers are saved. Failed or oversized reads retain
+No credentials or arbitrary header values are saved. Version-2 receipts retain
+only known partial-header names and bounded numeric total counts/content length
+(or an invalid marker). Pagination/range evidence, malformed counts, totals
+unequal to parsed rows or a length unequal to retained bytes reject the read. Failed or oversized reads retain
 their bounded partial body; orphan attempts are never reused as successful reads.
 The default body limit is 64 MiB; each request has a 30-second deadline
 and socket timeout (explicit limits may be tightened; at most 60 seconds).
@@ -397,6 +412,8 @@ Every result/receipt says `coverage_complete: false`: transport EOF does not
 prove provider completeness. `verify_result` reopens the scoped request/body/EOF
 artifacts before a later actor consumes them; the exact bytes must reproduce the
 immutable returned snapshot and match account/type/pass/range/order and hashes.
+Verification rechecks completeness metadata and the original receipt SHA-256;
+stripping or replacing response facts cannot turn an incomplete read into proof.
 
 [`ExportDriver`](fulcra_collect/migration_export_driver.py) adds a bounded,
 resumable library orchestrator. It requires an **explicit externally justified
@@ -406,9 +423,10 @@ The public legacy endpoint describes inclusive/exclusive bounds and sort order,
 but supplies no cursor, total count or ceiling attestation. Matching two reads
 cannot establish an undocumented completeness guarantee; do not invent a basis.
 
-The pass UUID/plan/contract are immutable in separate version-1 pass/proof tables
-inside the private migration ledger. A new pass cannot adopt preexisting unbound
-windows. Deterministic window UUIDs and a status/start index resume the next open
+The pass UUID/plan/contract are immutable in separate version-2 pass/proof tables
+inside the private migration ledger. Old version-1 artifacts/passes lack the
+required response evidence and cannot resume or certify coverage. Preserve them;
+a new authorized pass requires a fresh ledger rather than adopting old windows. Deterministic window UUIDs and a status/start index resume the next open
 window without rescanning completed prefixes. A nonblocking private file lease
 prevents simultaneous driver runs. Each step reads both sort directions and
 rechecks their saved artifacts. Equal canonical multisets below the asserted cap
@@ -419,7 +437,7 @@ malformed, oversized or failed responses also remain open with raw attempts inta
 
 Every successfully committed pair retains **all distinct observed raw versions**,
 including saturated/inconsistent parent versions absent from later children.
-Proof metadata binds their content-addressed entry IDs and both artifact hashes;
+Proof metadata binds their content-addressed entry IDs and both body and receipt hashes;
 the pair union caps at 32 MiB canonical JSON (at most 8,000 raw versions).
 Only complete leaves create ordered coverage observations. Proof, raw versions,
 leaf seal or child split share one transaction. `window_proof` hash/shape-checks

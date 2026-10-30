@@ -298,3 +298,64 @@ def test_row_scanner_preserves_arbitrary_nested_json_and_multiplicity():
              'unicode': '\u2028\u2029', 'empty': {}} for i in range(50)]
     rows += rows[:2]
     assert json.loads(_records(json.dumps(rows, ensure_ascii=False).encode())) == rows
+
+
+@pytest.mark.parametrize("headers", [
+    {"X-Next-Cursor": "synthetic-secret-cursor"}, {"Content-Range": "items 0-0/2"},
+    {"Link": "https://example.test/private?token=synthetic"}, {"X-Has-More": "false"},
+    {"X-Total-Count": "1"}, {"X-Total": "-1"}, {"X-Total-Count": "unknown"},
+    {"X-Total-Count": "0, 0"}, {"Content-Length": "3"},
+])
+def test_http_incompleteness_cannot_become_a_raw_export(tmp_path, headers):
+    export, _ = reader(tmp_path, lambda request: response(200, content=b"[]", headers=headers))
+    with pytest.raises(RuntimeError, match="complete|metadata|total"):
+        fetch(export)
+    assert next((tmp_path / "artifacts").rglob("body.json")).read_bytes() == b"[]"
+    receipt = next((tmp_path / "artifacts").rglob("receipt.json")).read_bytes()
+    assert len(receipt) <= 4096 and b"synthetic-secret" not in receipt and b"example.test" not in receipt
+
+
+def test_response_facts_are_bounded_nonsecret_and_bound_to_verification(tmp_path):
+    headers = {"X-Total-Count": "0", "X-Total": "0", "Content-Length": "2",
+               "Set-Cookie": "synthetic-secret", "X-Private": "synthetic-secret"}
+    export, _ = reader(tmp_path, lambda request: response(200, content=b"[]", headers=headers))
+    result = fetch(export)
+    receipt_bytes = result.receipt_path.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    assert receipt["response_metadata"] == {"partial_headers": [], "total_counts": [0, 0], "content_length": 2}
+    proof = export.verify_result(result, uid(10), start_time=START, end_time=END, order="asc")
+    assert proof["receipt_sha256"] == hashlib.sha256(receipt_bytes).hexdigest()
+    assert len(receipt_bytes) <= 4096 and b"synthetic-secret" not in receipt_bytes
+
+
+@pytest.mark.parametrize("mutation", ["strip", "replace", "legacy"])
+def test_response_metadata_cannot_be_removed_or_replaced_before_consumption(tmp_path, mutation):
+    export, _ = reader(tmp_path, lambda request: response(200, content=b"[]", headers={"X-Total-Count": "0"}))
+    result = fetch(export)
+    receipt = json.loads(result.receipt_path.read_bytes())
+    if mutation in {"strip", "legacy"}:
+        receipt.pop("response_metadata", None)
+    else:
+        receipt["response_metadata"] = {"partial_headers": [], "total_counts": [None, None], "content_length": None}
+    if mutation == "legacy":
+        receipt["version"] = 1
+    result.receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(RuntimeError, match="integrity|scope"):
+        export.verify_result(result, uid(10), start_time=START, end_time=END, order="asc")
+
+
+@pytest.mark.parametrize("metadata", [
+    {"partial_headers": ["x-next-page"], "total_counts": [None, None], "content_length": None},
+    {"partial_headers": [], "total_counts": [1, None], "content_length": None},
+    {"partial_headers": [], "total_counts": [None, None], "content_length": 3},
+])
+def test_artifact_verifier_rechecks_completeness_even_with_matching_receipt_hash(tmp_path, metadata):
+    from dataclasses import replace
+    export, _ = reader(tmp_path, lambda request: response(200, content=b"[]"))
+    result = fetch(export)
+    receipt = json.loads(result.receipt_path.read_bytes())
+    receipt["response_metadata"] = metadata
+    result.receipt_path.write_text(json.dumps(receipt))
+    rebound = replace(result, _receipt_sha256=hashlib.sha256(result.receipt_path.read_bytes()).hexdigest())
+    with pytest.raises(RuntimeError, match="integrity|scope"):
+        export.verify_result(rebound, uid(10), start_time=START, end_time=END, order="asc")

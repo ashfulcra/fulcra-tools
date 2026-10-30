@@ -256,3 +256,47 @@ def test_sealed_proof_recomputes_membership_and_multiset_from_observation_metada
         db.execute('UPDATE migration_window_reads SET document=?,fingerprint=?', (changed, _hash(changed)))
     with pytest.raises(ValueError, match='proof|corrupt'):
         driver.window_proof(driver.root_window_id)
+
+
+@pytest.mark.parametrize("rows", [[], [raw()]])
+@pytest.mark.parametrize("header", ["X-Next-Cursor", "X-Total-Count"])
+def test_real_reader_partial_pairs_cannot_seal_or_claim_coverage(tmp_path, rows, header):
+    calls = []
+    def handle(request):
+        calls.append(request.url.params["sort"])
+        value = "next" if header == "X-Next-Cursor" else str(len(rows) + 1)
+        return response(200, content=json.dumps(rows).encode(), headers={header: value})
+    driver = setup_driver(tmp_path, handle)
+    with pytest.raises(RuntimeError, match="complete|metadata|total"):
+        driver.run(max_windows=1, budget_seconds=10)
+    assert calls == ["asc"]
+    assert driver.ledger.window(driver.root_window_id)["status"] == "open"
+    assert driver.window_proof(driver.root_window_id) is None
+    assert driver.ledger.status()["coverage_complete"] is False
+    assert driver.ledger.status()["observations"] == 0
+
+
+def test_stripped_response_facts_cannot_back_a_pair_seal(tmp_path, monkeypatch):
+    driver = setup_driver(tmp_path, lambda request: response(200, content=b"[]"))
+    original = driver.reader.read
+    def strip(*args, **kwargs):
+        result = original(*args, **kwargs)
+        receipt = json.loads(result.receipt_path.read_bytes())
+        receipt.pop("response_metadata", None)
+        result.receipt_path.write_text(json.dumps(receipt))
+        return result
+    monkeypatch.setattr(driver.reader, "read", strip)
+    with pytest.raises(RuntimeError, match="integrity|scope"):
+        driver.run(max_windows=1, budget_seconds=10)
+    assert driver.ledger.window(driver.root_window_id)["status"] == "open"
+    assert driver.window_proof(driver.root_window_id) is None
+    assert driver.ledger.status()["coverage_complete"] is False
+
+
+def test_legacy_pass_cannot_resume_without_response_metadata_evidence(tmp_path):
+    driver = setup_driver(tmp_path, lambda request: response(200, content=b"[]"))
+    driver.run(max_windows=1, budget_seconds=10)
+    with driver.ledger.storage._db(write=True) as db:
+        db.execute("UPDATE migration_export_pass SET version=1")
+    with pytest.raises(ValueError, match="version|scope"):
+        setup_driver(tmp_path, lambda request: pytest.fail("legacy pass must not issue HTTP"))

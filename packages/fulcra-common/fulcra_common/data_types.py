@@ -38,7 +38,7 @@ def tag_create_name(label: str) -> str:
 
     The API accepts at most 30 characters. A label's original text remains in
     its record; this helper only chooses the name of a newly created tag.
-    Slashes cannot safely round-trip through the name lookup path.
+    Slashes and dot segments cannot safely round-trip through name lookup paths.
     """
     if (not isinstance(label, str) or not label.strip()
             or any(ord(char) < 32 or ord(char) == 127 for char in label)):
@@ -47,7 +47,7 @@ def tag_create_name(label: str) -> str:
         encoded = label.encode("utf-8")
     except UnicodeError:
         raise ValueError("tag label must contain valid Unicode") from None
-    if len(label) <= 30 and "/" not in label:
+    if len(label) <= 30 and "/" not in label and label not in {".", ".."}:
         return label
     prefix = re.sub(r"[^a-z0-9]+", "-", label.lower())[:9].strip("-") or "source"
     return prefix + "-" + hashlib.sha256(encoded).hexdigest()[:20]

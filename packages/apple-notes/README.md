@@ -53,7 +53,10 @@ account, source epoch and raw settings. It does not inherit the default CLI
 account or change process-wide credentials. API requests recheck the current
 Collect principal; same-account silent refresh is allowed. Signed storage URLs
 use a separate client without Fulcra credentials. Unknown/partial Files listings
-are errors, never evidence of missing state.
+are errors, never evidence of missing state. The shared
+[HTTP completeness checks](../collect/README.md#files-read-completeness) reject
+partial status/headers and malformed or contradictory totals before Notes can
+write follow-on files or checkpoints.
 
 Sync, reconciliation and experimental writeback pass this adapter explicitly.
 Source guards run around snapshots, between Notes/attachment reads, per note,

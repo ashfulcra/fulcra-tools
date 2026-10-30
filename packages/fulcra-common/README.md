@@ -551,6 +551,12 @@ The resolver, exclusion discovery and Collect destination picker share this
 reader. Full destination schemas still come from the catalog's explicit
 `/data/v1/catalog/{full-type}/v1/schema` endpoint and must pass validation.
 
+[`tag_create_name`](fulcra_common/data_types.py) preserves supported tag names
+and derives stable aliases for long labels, slashes, and `.`/`..` path segments.
+Collect resolves those labels through the account's tag list before using an
+alias, preserving existing tag UUIDs and original record labels without issuing
+a URL-normalized lookup at the wrong endpoint.
+
 Creation is opt-in (`allow_create=True`) and requires a private
 `CreationJournal(Path(...))`. The SQLite journal reserves the account/key/spec
 intent before the POST. A lost response or unverified creation remains pending;

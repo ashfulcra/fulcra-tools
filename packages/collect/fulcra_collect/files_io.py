@@ -1,11 +1,14 @@
 """Account-bound Files HTTP used by Collect plugins; no CLI auth fallback."""
 import json
+import re
 from datetime import datetime
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
+
+from fulcra_common.record_observations import _PARTIAL_HEADERS
 
 from .config_leases import task_mutation_scope
 
@@ -31,6 +34,16 @@ class CollectFiles:
         self.namespace = session.account_id
         self.storage = httpx.Client(transport=storage_transport, follow_redirects=False)
 
+    @staticmethod
+    def _complete_read_headers(headers, *, row_count=None):
+        if any(name in headers for name in _PARTIAL_HEADERS):
+            raise FilesIOError("Files response is partial; remote state is unknown")
+        for name in ("x-total-count", "x-total"):
+            total = headers.get(name)
+            if total is not None and (not re.fullmatch(r"[0-9]{1,10}", total)
+                    or (row_count is not None and int(total) != row_count)):
+                raise FilesIOError("Files response total is incomplete or unreadable")
+
     def _request(self, method, url, *, storage=False, timeout=30, limit=32 * 1024 * 1024, **kwargs):
         mutating = method not in {"GET", "HEAD"}
         with task_mutation_scope():
@@ -48,6 +61,10 @@ class CollectFiles:
                     if response.is_redirect:
                         return response.status_code, response.headers, b""
                     response.raise_for_status()
+                    if method in {"GET", "HEAD"}:
+                        if response.status_code != 200:
+                            raise FilesIOError("Files read is not a complete HTTP success")
+                        self._complete_read_headers(response.headers)
                     chunks, count = [], 0
                     for chunk in response.iter_bytes():
                         self.guard(mutating=mutating)
@@ -56,18 +73,31 @@ class CollectFiles:
                             raise FilesIOError("Files response exceeds the bounded read limit")
                         chunks.append(chunk)
                     self.guard(mutating=mutating)
-                    return response.status_code, response.headers, b"".join(chunks)
+                    body = b"".join(chunks)
+                    # Bound vault consumers use _request directly, so listing
+                    # completeness must hold before the transport releases bytes.
+                    if not storage and method == "GET" and urlparse(url).path == "/input/v1/file_upload":
+                        try:
+                            rows = json.loads(body)["files"]
+                            if not isinstance(rows, list):
+                                raise ValueError
+                        except (ValueError, TypeError, KeyError, UnicodeError):
+                            raise FilesIOError("Files listing is unreadable") from None
+                        self._complete_read_headers(response.headers, row_count=len(rows))
+                    return response.status_code, response.headers, body
             except httpx.HTTPError:
                 raise FilesIOError("Collect Files transport failed; remote state is unknown") from None
 
     def _json(self, method, path, *, timeout=30, **kwargs):
-        status, _, raw = self._request(method, path, timeout=timeout, **kwargs)
+        status, headers, raw = self._request(method, path, timeout=timeout, **kwargs)
         try:
-            if status >= 300:
+            if status >= 300 or (method == "GET" and status != 200):
                 raise ValueError
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise ValueError
+            if method == "GET" and isinstance(result.get("files"), list):
+                self._complete_read_headers(headers, row_count=len(result["files"]))
             return result
         except (ValueError, UnicodeError):
             raise FilesIOError("Files response is unreadable") from None

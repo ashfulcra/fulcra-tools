@@ -266,3 +266,18 @@ def test_attachment_mime_uses_content_as_the_previous_cli_did(tmp_path, monkeypa
             files.upload_file(str(source), REMOTE)
     assert types == ["image/png"]
     assert stored == [source.read_bytes()]
+
+
+@pytest.mark.parametrize("status,headers", [(206, {}), (200, {"X-Next-Cursor": "next"}),
+                                            (200, {"X-Total-Count": "1"})])
+def test_real_notes_sync_refuses_partial_state_without_upload_or_checkpoint(notes_db, tmp_path, monkeypatch, status, headers):
+    from fulcra_collect.files_io import FilesIOError
+    ctx, _ = context(tmp_path / "collect", monkeypatch, {"container": str(notes_db), "dry_run": False})
+    calls = []
+    def handle(request):
+        calls.append(request.method)
+        return httpx.Response(status, json={"files": []}, headers=headers)
+    monkeypatch.setattr(collect_plugin, "CollectRecordSession", lambda ctx: CollectRecordSession(ctx, transport=httpx.MockTransport(handle)))
+    with pytest.raises(FilesIOError):
+        collect_plugin.run(ctx)
+    assert calls and set(calls) == {"GET"}

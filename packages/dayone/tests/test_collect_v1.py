@@ -63,7 +63,8 @@ def test_auth_precedes_source_access_and_plugin_declares_a_v1_slot(tmp_path, mon
 
 @pytest.mark.parametrize("mode", ["visible", "delayed", "preview", "invalid", "edited", "excluded",
     "post_excluded", "post_account_change", "post_settings_change", "legacy_unmapped"])
-def test_real_worker_observes_v1_delivery_and_import_once(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("source_label", ["synthetic", ".", ".."])
+def test_real_worker_observes_v1_delivery_and_import_once(tmp_path, monkeypatch, mode, source_label):
     monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path))
     cfg = config.load()
     cfg.enable("dayone")
@@ -85,11 +86,12 @@ def test_real_worker_observes_v1_delivery_and_import_once(tmp_path, monkeypatch,
     auth = [token()]
     monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda _: auth[0])
     monkeypatch.setattr(credentials, "get_secret", lambda *_: None)
-    incoming = entry(text="Edited source entry") if mode == "edited" else entry()
+    incoming = entry(text="Edited source entry", tags=(source_label,)) if mode == "edited" else entry(tags=(source_label,))
     selected = [incoming, entry(uuid="BAD", word_count=True)] if mode == "invalid" else [incoming]
     reads = []
     monkeypatch.setattr(collect_plugin, "read", lambda *a, **kw: reads.append(True) or selected)
-    original = build_journal_record(entry(), DESTINATION, tags=[TAG])
+    original = build_journal_record(entry(tags=(source_label,)), DESTINATION, tags=[TAG])
+    assert original["dayone_tag_names"] == [source_label]
     rows, posts, paths, deletes = {}, [], [], []
     if mode == "edited":
         rows[DESTINATION, original["id"]] = {**original, "note": "Cloud version retained", "tags": []}
@@ -119,8 +121,12 @@ def test_real_worker_observes_v1_delivery_and_import_once(tmp_path, monkeypatch,
             return httpx.Response(200, json={"type": "object", "properties": {
                 **{k: {} for k in ("id", "sources", "tags", "start_time", "end_time")}, **spec.fields},
                 "required": list(spec.required_fields)})
+        if path == "/user/v1alpha1/tag":
+            assert request.method == "GET" and source_label in {".", ".."}
+            return httpx.Response(200, json=[{"id": TAG, "name": source_label, "fulcra_userid": ACCOUNT}])
         if path.startswith(("/user/v1alpha1/tag/name/", "/user/v1alpha1/tag/id/")):
-            return httpx.Response(200, json={"id": TAG, "name": "synthetic", "fulcra_userid": ACCOUNT})
+            assert path in {"/user/v1alpha1/tag/name/synthetic", "/user/v1alpha1/tag/id/" + TAG}
+            return httpx.Response(200, json={"id": TAG, "name": source_label, "fulcra_userid": ACCOUNT})
         if path == "/data/v1/records":
             assert request.url.params["fulcra_userid"] == ACCOUNT
             query = request.url.params["q"]

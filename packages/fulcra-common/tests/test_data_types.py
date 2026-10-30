@@ -690,3 +690,12 @@ def test_public_observed_schema_rejects_plain_context_before_credentials(monkeyp
         observe_served_schema(client=current, account_id=ACCOUNT, data_type=TYPE_ID,
             context={}, on_observation=lambda _: pytest.fail("plain context reached sink"),
             request_budget=None, request_guard=lambda **_: None)
+
+
+@pytest.mark.parametrize("label", [".", ".."])
+def test_dot_segment_tag_labels_get_stable_path_safe_aliases(label):
+    from fulcra_common.data_types import tag_create_name
+    alias = tag_create_name(label)
+    assert alias not in {".", ".."} and "/" not in alias and len(alias) <= 30
+    assert alias == tag_create_name(label)
+    assert tag_create_name(".") != tag_create_name("..")

@@ -220,7 +220,10 @@ through `FulcraVault(bound_files=files)`, so task sync uses the same guarded
 account and anonymous signed-storage path as Notes/Gmail. The task engine retains
 its independent explicit-token adapter for standalone integrations and does not
 import Collect at runtime. An injected Files object is owned by its caller;
-closing the vault does not close that shared transport.
+closing the vault does not close that shared transport. Its
+[HTTP completeness checks](../collect/README.md#files-read-completeness) reject
+partial status/headers and malformed or contradictory listing totals before the
+vault can interpret absence or authorize follow-on file/checkpoint writes.
 
 Bound version listings name the captured account and validate exact path/name,
 canonical version UUIDs, account ownership, aware timestamps and a single current

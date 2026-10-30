@@ -76,7 +76,7 @@ class ExportDriver:
                 if db.execute('SELECT 1 FROM migration_windows LIMIT 1').fetchone():
                     raise ValueError('historical export cannot adopt existing unbound windows')
                 db.execute('CREATE TABLE migration_export_pass(version INTEGER NOT NULL,document TEXT NOT NULL)')
-                db.execute('INSERT INTO migration_export_pass VALUES (1,?)', (self._scope,))
+                db.execute('INSERT INTO migration_export_pass VALUES (2,?)', (self._scope,))
                 db.execute('CREATE TABLE migration_window_reads(window_id TEXT PRIMARY KEY '
                     'REFERENCES migration_windows(window_id),document TEXT NOT NULL,fingerprint TEXT NOT NULL)')
                 ledger._open_window(db, self.root_window_id, document['start_time'], document['end_time'])
@@ -87,7 +87,7 @@ class ExportDriver:
         self.ledger._guard(db)
         try:
             rows = db.execute('SELECT version,document FROM migration_export_pass').fetchall()
-            if (len(rows) != 1 or type(rows[0]['version']) is not int or rows[0]['version'] != 1
+            if (len(rows) != 1 or type(rows[0]['version']) is not int or rows[0]['version'] != 2
                     or rows[0]['document'] != self._scope
                     or db.execute('SELECT 1 FROM migration_windows WHERE window_id=?',
                                   (self.root_window_id,)).fetchone() is None):
@@ -159,16 +159,16 @@ class ExportDriver:
     def _validate_proof(self, db, proof):
         fields = {'version', 'window_id', 'pass_scope_sha256', 'provider_contract', 'outcome',
                   'provider_count', 'asc', 'desc', 'multiset_sha256', 'entry_ids'}
-        if set(proof) != fields or type(proof['version']) is not int or proof['version'] != 1:
+        if set(proof) != fields or type(proof['version']) is not int or proof['version'] != 2:
             raise ValueError
         def digest(value):
             return isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value)
         counts = []
         for key in ('asc', 'desc'):
             read = proof[key]
-            if (not isinstance(read, dict) or set(read) != {'attempt_id', 'request_sha256', 'body_sha256', 'snapshot_sha256', 'count'}
+            if (not isinstance(read, dict) or set(read) != {'attempt_id', 'request_sha256', 'body_sha256', 'receipt_sha256', 'snapshot_sha256', 'count'}
                     or type(read['count']) is not int or not 0 <= read['count'] <= 4000
-                    or any(not digest(read[field]) for field in ('request_sha256', 'body_sha256', 'snapshot_sha256'))):
+                    or any(not digest(read[field]) for field in ('request_sha256', 'body_sha256', 'receipt_sha256', 'snapshot_sha256'))):
                 raise ValueError
             _canonical_uuid(read['attempt_id'])
             counts.append(read['count'])
@@ -298,7 +298,7 @@ class ExportDriver:
                 matched = fingerprints[0] == fingerprints[1]
                 children = self._children(window) if saturated or not matched else None
                 outcome = ('split-saturated' if saturated else 'split-inconsistent') if children else 'sealed-matched-below-cap'
-                proof = {'version': 1, 'window_id': window['window_id'], 'pass_scope_sha256': _hash(self._scope),
+                proof = {'version': 2, 'window_id': window['window_id'], 'pass_scope_sha256': _hash(self._scope),
                     'provider_contract': json.loads(self._contract_json), 'outcome': outcome,
                     'provider_count': len(left) if matched else None, 'asc': asc_proof, 'desc': desc_proof,
                     'entry_ids': sorted(retained),

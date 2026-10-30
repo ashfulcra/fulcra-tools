@@ -86,8 +86,9 @@ and replay-exclusion control to read.
 Setup uses `v1_destination_ids.journal` with a full owned `Event/<UUID>` target
 whose served schema is compatible with [`JOURNAL_SPEC`](fulcra_dayone/v1.py).
 An existing annotation selection requires an explicit v1 mapping; the old
-definition and watermark remain intact. Tag labels longer than 30 characters
-use the shared tag resolver without shortening their record enrichment.
+definition and watermark remain intact. Tag labels longer than 30 characters, containing slashes, or equal to `.`/`..`
+use the shared catalog/alias resolver without shortening their record enrichment.
+Dot labels never enter a URL path that would normalize to another endpoint.
 
 Records have equal UTC `start_time`/`end_time`, the original case-sensitive
 `com.fulcra.dayone.<hash>` source and the shared destination/source UUID mapping.
