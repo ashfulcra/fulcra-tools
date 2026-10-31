@@ -109,10 +109,11 @@ class NormalizedEvent:
     def to_duration_event(
         self, *, definition_id: str, tags: Sequence[str] = (),
     ) -> DurationEvent:
-        """Produce the pipeline-side typed event from this importer-side
-        intermediate. Used by FulcraClient.ingest_batch — the importer keeps
-        its own NormalizedEvent shape, but the wire-construction goes
-        through IngestPipeline."""
+        """Build a legacy DurationEvent for pure compatibility conversion.
+
+        This performs no I/O. The current native writer builds v1 Events
+        directly from NormalizedEvent rather than using this conversion.
+        """
         return DurationEvent(
             definition_id=definition_id,
             source_id=self.deterministic_id,

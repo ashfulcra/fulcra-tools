@@ -1,85 +1,70 @@
-"""Annotation write / delete + quick-record surface (definitions + favorites).
-
-These endpoints back the menubar quick-record popover and any direct web-UI
-callers that need to write a single annotation immediately to Fulcra.
-"""
+"""Scoped protocol2 quick record and authenticated obsolete-client refusal."""
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from ._deps import QuickRecordFavoritesBody, RecordAnnotationBody, RouteContext
+
+
+class QuickRecordV2Body(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: str = Field(min_length=1, max_length=64)
+    protocol_version: StrictInt | None = None
+    account_id: str | None = Field(default=None, max_length=36)
+    config_epoch: str | None = Field(default=None, max_length=256)
+    action_id: str | None = Field(default=None, max_length=36)
+    record_action_id: str | None = Field(default=None, max_length=36)
+    definition_id: str | None = Field(default=None, max_length=36)
+    choice_id: str | None = Field(default=None, max_length=36)
+    choice_digest: str | None = Field(default=None, max_length=64)
+    start_time: str | None = Field(default=None, max_length=128)
+    end_time: str | None = Field(default=None, max_length=128)
+    comment: str | None = Field(default=None, max_length=16384)
+    timer_id: str | None = Field(default=None, max_length=36)
+    pinned: StrictBool | None = None
+    expected_revision: StrictInt | None = None
+    action_kind: str | None = Field(default=None, max_length=16)
+    statuses: list[str] | None = Field(default=None, max_length=5)
+    limit: StrictInt | None = None
+    cursor: str | None = Field(default=None, max_length=2048)
+    include_finished: StrictBool | None = None
 
 
 def register(app: FastAPI, ctx: RouteContext) -> None:
     daemon = ctx.daemon
     require_token = ctx.require_token
 
-    # ------------------------------------------------------------------
-    # Quick-record surface — menubar popover Moment annotations
-    # ------------------------------------------------------------------
+    @app.get("/api/quick-record/v2", dependencies=[Depends(require_token)])
+    def quick_record_v2_handshake():
+        return daemon.handle_request({"cmd": "quick_record_v2", "operation": "quick_record_list"})
+
+    @app.post("/api/quick-record/v2", dependencies=[Depends(require_token)])
+    def quick_record_v2(body: QuickRecordV2Body):
+        return daemon.handle_request({"cmd": "quick_record_v2", **body.model_dump(exclude_unset=True)})
+
+    # Retain authenticated obsolete URLs only to give old clients a visible
+    # refresh error. These routes never inspect Collect credentials or state.
+    def obsolete():
+        return {"ok": False, "code": "refresh_required",
+                "error": "Quick record requires the current Collect app. Refresh or update it."}
 
     @app.get("/api/quick-record/definitions", dependencies=[Depends(require_token)])
-    def get_quick_record_definitions():
-        """Return the user's Moment annotation definitions for the menubar
-        quick-record surface. Delegates to the daemon's quick_record_list
-        handler which applies its own 60-second in-memory cache."""
-        return daemon.handle_request({"cmd": "quick_record_list"})
+    def old_definitions():
+        return obsolete()
+
+    @app.get("/api/quick-record/favorites", dependencies=[Depends(require_token)])
+    def old_favorites():
+        return obsolete()
+
+    @app.put("/api/quick-record/favorites", dependencies=[Depends(require_token)])
+    def old_pin_change(body: QuickRecordFavoritesBody):
+        return obsolete()
 
     @app.post("/api/annotations", dependencies=[Depends(require_token)])
-    def record_annotation(body: RecordAnnotationBody):
-        """Write one annotation immediately to Fulcra. Used by the
-        menubar quick-record buttons and any direct web UI callers.
+    def old_record(body: RecordAnnotationBody):
+        return obsolete()
 
-        Writes a Moment when ``start_time`` / ``end_time`` are absent;
-        writes a Duration when BOTH are present (Sprint B,
-        2026-05-26 — see daemon._record_annotation for the type-aware
-        wire shape).
-        """
-        return daemon.handle_request({
-            "cmd": "record_annotation",
-            "definition_id": body.definition_id,
-            "comment": body.comment,
-            "start_time": body.start_time,
-            "end_time": body.end_time,
-        })
-
-    # ------------------------------------------------------------------
-    # Quick-record favorites — the per-machine pin list (task #64).
-    # Two surfaces share these endpoints: the menubar popover's per-row
-    # star toggle (one-def diff) and the web UI Settings page's bulk
-    # multi-select. Both PUT the full list each time; the daemon's
-    # ``_set_quick_record_favorites`` busts the in-memory quick-record
-    # cache so the very next list call reflects the new order.
-    # ------------------------------------------------------------------
-
-    @app.get("/api/quick-record/favorites",
-             dependencies=[Depends(require_token)])
-    def get_quick_record_favorites():
-        return daemon.handle_request({"cmd": "get_quick_record_favorites"})
-
-    @app.put("/api/quick-record/favorites",
-             dependencies=[Depends(require_token)])
-    def put_quick_record_favorites(body: QuickRecordFavoritesBody):
-        return daemon.handle_request({
-            "cmd": "set_quick_record_favorites",
-            "favorites": body.favorites,
-        })
-
-    @app.delete("/api/annotations/{source_id}",
-                dependencies=[Depends(require_token)])
-    def delete_annotation(source_id: str):
-        """Soft-delete an annotation by writing a tombstone marker.
-
-        Caveat: Fulcra has no per-event delete primitive. This endpoint
-        writes a separate sentinel annotation referencing ``source_id``
-        in its data payload — the menubar uses it for the "Undo"
-        affordance on the Recently-recorded list. The original record
-        remains visible on the user's Fulcra timeline.
-        See ``daemon._delete_annotation`` for the full rationale and the
-        probe evidence it cites (repo history, #439-era cleanup) for the
-        survey of why this is the best we can do.
-        """
-        return daemon.handle_request({
-            "cmd": "delete_annotation",
-            "source_id": source_id,
-        })
+    @app.delete("/api/annotations/{source_id}", dependencies=[Depends(require_token)])
+    def old_undo(source_id: str):
+        return obsolete()

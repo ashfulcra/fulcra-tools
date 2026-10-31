@@ -1,10 +1,15 @@
 """The runner — spawns a worker subprocess for one run, records outcome."""
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from fulcra_collect import runner, state
 
@@ -76,6 +81,209 @@ def test_bounded_capture_keeps_result_tail_without_unbounded_memory():
     assert len(captured.stderr) <= runner.MAX_STDERR_CAPTURE_BYTES
     assert captured.stdout.endswith(result)
     assert captured.stderr.endswith(b"useful stderr tail\n")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Owned process-group contract is POSIX")
+@pytest.mark.parametrize("held_pipes", ["stdout", "stderr", "both"])
+@pytest.mark.parametrize("escaped", [False, True])
+def test_exited_worker_descendant_cannot_hold_pipe_past_deadline(
+    tmp_path, monkeypatch, held_pipes, escaped,
+):
+    # A finite descendant makes the old thread-join bug fail instead of
+    # hanging pytest. It inherits exactly the pipe(s) under test.
+    monkeypatch.setattr(runner, "MAX_STDOUT_CAPTURE_BYTES", 256)
+    monkeypatch.setattr(runner, "MAX_STDERR_CAPTURE_BYTES", 128)
+    child_pid_file = tmp_path / "descendant.pid"
+    child_script = (
+        "import os,time;"
+        "os.write(1,b'x'*1024+b'OUT-TAIL');"
+        "os.write(2,b'e'*1024+b'ERR-TAIL');"
+        "time.sleep(1.5)"
+    )
+    leader_script = (
+        "import subprocess,sys;from pathlib import Path;"
+        f"child=subprocess.Popen([sys.executable,'-c',{child_script!r}],"
+        f"start_new_session={escaped!r},"
+        f"stdout={'None' if held_pipes != 'stderr' else 'subprocess.DEVNULL'},"
+        f"stderr={'None' if held_pipes != 'stdout' else 'subprocess.DEVNULL'});"
+        f"Path({str(child_pid_file)!r}).write_text(str(child.pid))"
+    )
+    proc = subprocess.Popen(
+        _python_worker(leader_script), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
+    unrelated = subprocess.Popen(
+        _python_worker("import time;time.sleep(30)"), start_new_session=True,
+    )
+    try:
+        proc.wait(timeout=2)  # Leader is demonstrably dead before the drain.
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired) as caught:
+            runner._bounded_communicate(proc, timeout_s=.2)
+        assert time.monotonic() - started < 1.0
+        if held_pipes != "stderr":
+            assert len(caught.value.output) == 256
+            assert caught.value.output.endswith(b"OUT-TAIL")
+        if held_pipes != "stdout":
+            assert len(caught.value.stderr) == 128
+            assert caught.value.stderr.endswith(b"ERR-TAIL")
+        assert unrelated.poll() is None  # Cleanup targets only the owned group.
+        # A killed orphan may briefly be a zombie while its new parent reaps
+        # it. Either absent or zombie proves it cannot keep doing work.
+        status = subprocess.run(
+            ["ps", "-o", "stat=", "-p", child_pid_file.read_text()],
+            capture_output=True, text=True, check=False,
+        )
+        alive = status.returncode == 0 and not status.stdout.lstrip().startswith("Z")
+        assert alive is escaped  # Never chase a pipe holder into another group.
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if escaped and child_pid_file.exists():
+            # This second session was created by the TEST, not owned by the
+            # runner. The test alone cleans it up after verifying isolation.
+            try:
+                os.killpg(int(child_pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=2)
+        unrelated.kill()
+        unrelated.wait(timeout=2)
+        for stream in (proc.stdout, proc.stderr):
+            if stream and not stream.closed:
+                stream.close()
+
+
+def test_closed_worker_pipes_do_not_end_the_process_deadline():
+    script = "import os,time;os.close(1);os.close(2);time.sleep(30)"
+    proc = subprocess.Popen(
+        _python_worker(script), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=(os.name == "posix"),
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            runner._bounded_communicate(proc, timeout_s=.2)
+        assert time.monotonic() - started < 1.0
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=2)
+
+
+def test_child_wait_spends_remaining_budget_after_pipe_eof(monkeypatch):
+    from types import SimpleNamespace
+
+    read_out, write_out = os.pipe()
+    read_err, write_err = os.pipe()
+    os.close(write_out)
+    os.close(write_err)
+    # Popen-compatible double with real pipe descriptors: EOF consumes part
+    # of the clock, so giving wait() a fresh full second would be incorrect.
+    waits = []
+    ticks = iter([10.0, 10.2, 10.6, 10.7])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    proc = SimpleNamespace(
+        stdout=os.fdopen(read_out, "rb"), stderr=os.fdopen(read_err, "rb"),
+        wait=lambda *, timeout: waits.append(timeout),
+    )
+
+    captured = runner._bounded_communicate(proc, timeout_s=1.0)
+
+    assert waits == [pytest.approx(.4)]
+    assert captured.stdout == captured.stderr == b""
+    assert captured.stdout_truncated is captured.stderr_truncated is False
+    assert proc.stdout.closed and proc.stderr.closed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Owned process-group contract is POSIX")
+@pytest.mark.parametrize("operation", ["register", "select", "read", "wait"])
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+def test_abnormal_drain_reaps_worker_and_preserves_original_exception(
+    monkeypatch, operation, error_type,
+):
+    error = error_type("synthetic drain failure")
+    real_selector = runner.selectors.DefaultSelector
+
+    class BrokenSelector(real_selector):
+        def register(self, *args, **kwargs):
+            if operation == "register":
+                raise error
+            return super().register(*args, **kwargs)
+
+        def select(self, *args, **kwargs):
+            if operation == "select":
+                raise error
+            return super().select(*args, **kwargs)
+
+    script = (
+        "import os,time;os.close(1);os.close(2);time.sleep(5)"
+        if operation == "wait" else
+        "import os,time;os.write(1,b'prefix');time.sleep(5)"
+    )
+    proc = subprocess.Popen(
+        _python_worker(script), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
+    real_wait = proc.wait
+    monkeypatch.setattr(runner.selectors, "DefaultSelector", BrokenSelector)
+    if operation == "read":
+        def fail_read(*args):
+            raise error
+        monkeypatch.setattr(runner.os, "read", fail_read)
+    if operation == "wait":
+        waits = []
+
+        def fail_first_wait(*, timeout):
+            waits.append(timeout)
+            if len(waits) == 1:
+                raise error
+            return real_wait(timeout=timeout)
+        monkeypatch.setattr(proc, "wait", fail_first_wait)
+    try:
+        with pytest.raises(error_type) as caught:
+            runner._bounded_communicate(proc, timeout_s=.5)
+        assert caught.value is error
+        assert proc.poll() is not None
+        assert proc.stdout.closed and proc.stderr.closed
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        real_wait(timeout=2)
+        for stream in (proc.stdout, proc.stderr):
+            if not stream.closed:
+                stream.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Owned process-group contract is POSIX")
+def test_runner_records_timeout_when_result_precedes_descendant_pipe_eof(collect_home):
+    script = (
+        "import subprocess,sys;"
+        "subprocess.Popen([sys.executable,'-c','import time;time.sleep(1.5)']);"
+        "print('{\"type\":\"result\",\"outcome\":\"done\",\"error\":null}',flush=True)"
+    )
+    spawned = []
+    try:
+        outcome = runner.run(
+            "p", _python_worker(script),
+            now=datetime(2026, 10, 24, tzinfo=timezone.utc),
+            timeout_s=.2, on_spawn=spawned.append,
+        )
+        assert outcome == "timeout"
+        assert state.load("p").last_outcome == "timeout"
+        assert len(spawned) == 1 and spawned[0].poll() is not None
+    finally:
+        for proc in spawned:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=2)
 
 
 def test_runner_reads_a_final_result_after_noisy_output(collect_home: Path):

@@ -3,10 +3,35 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from click.testing import CliRunner
 
 from fulcra_collect import config as config_mod
 from fulcra_collect.cli import cli
+
+
+@pytest.mark.parametrize("args,expected_launch", [
+    (["daemon"], True),
+    (["daemon", "--no-menubar"], False),
+])
+def test_daemon_routes_menubar_startup_option(monkeypatch, args, expected_launch):
+    launches = []
+
+    class StartupDaemon:
+        def __init__(self, *, launch_menubar):
+            self.launch_menubar = launch_menubar
+
+        def serve(self):
+            launches.append(self.launch_menubar)
+
+    monkeypatch.setattr("fulcra_collect.cli.Daemon", StartupDaemon)
+    monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: False)
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert launches == [expected_launch]
 
 
 def test_daemon_foreground_prints_durability_hint_on_tty(monkeypatch):
@@ -18,6 +43,9 @@ def test_daemon_foreground_prints_durability_hint_on_tty(monkeypatch):
 
     # Stub Daemon().serve() so we don't actually start a server.
     class _StubDaemon:
+        def __init__(self, *, launch_menubar):
+            pass
+
         def serve(self):  # noqa: D401 — mirrors real Daemon.serve
             return None
 
@@ -38,6 +66,9 @@ def test_daemon_under_launchd_stays_quiet(monkeypatch):
     monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: False)
 
     class _StubDaemon:
+        def __init__(self, *, launch_menubar):
+            pass
+
         def serve(self):
             return None
     monkeypatch.setattr("fulcra_collect.cli.Daemon", _StubDaemon)
@@ -102,3 +133,57 @@ def test_reset_definition_clears_cache(collect_home: Path, monkeypatch):
 
     after = state.load("lastfm")
     assert after.definition_id is None
+
+
+@pytest.mark.parametrize("error,code,message", [
+    ("DaemonAlreadyRunning", 75, "daemon startup refused: profile lease busy"),
+    ("DaemonLeaseUnavailable", 1, "daemon startup refused: profile lease unavailable"),
+])
+def test_daemon_lease_refusal_is_static_and_has_distinct_exit(monkeypatch, error, code, message):
+    from fulcra_collect import daemon_lease
+    class RefusedDaemon:
+        def __init__(self, *, launch_menubar):
+            pass
+
+        def serve(self):
+            raise getattr(daemon_lease, error)("sensitive internal path")
+    monkeypatch.setattr("fulcra_collect.cli.Daemon", RefusedDaemon)
+    monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: False)
+    result = CliRunner().invoke(cli, ["daemon"])
+    assert result.exit_code == code
+    assert result.stderr == message + "\n"
+    assert "sensitive" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_daemon_cleanup_failure_has_static_unavailable_cli(collect_home, monkeypatch):
+    import errno
+    import os
+    import stat
+    from fulcra_collect import daemon_lease
+    real_close = os.close
+    collect_home.chmod(0o700)
+    class LeaseOnlyDaemon:
+        def __init__(self, *, launch_menubar):
+            pass
+
+        def serve(self):
+            daemon_lease.acquire_daemon_lease(collect_home)
+    def failed_acquisition(*args):
+        raise OSError(errno.EIO, "sensitive acquisition detail")
+    def failed_close(fd):
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+        real_close(fd)
+        if regular:
+            raise OSError(errno.EIO, "sensitive cleanup detail")
+    monkeypatch.setattr("fulcra_collect.cli.Daemon", LeaseOnlyDaemon)
+    monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: False)
+    monkeypatch.setattr(daemon_lease.fcntl, "flock", failed_acquisition)
+    with monkeypatch.context() as patch:
+        patch.setattr(daemon_lease.os, "close", failed_close)
+        result = CliRunner().invoke(cli, ["daemon"])
+    assert result.exit_code == 1
+    assert result.stderr == "daemon startup refused: profile lease unavailable\n"
+    assert "sensitive" not in result.output
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, OSError)

@@ -1,10 +1,11 @@
 """Project selection and Keychain connection for Todoist completion sync."""
 from datetime import timedelta
-from functools import partial
 import hmac
 
-from fulcra_collect import config as collect_config, credentials as collect_credentials
+from fulcra_collect import credentials as collect_credentials
 from fulcra_collect.config_leases import task_mutation_scope
+from fulcra_collect.files_io import CollectFiles
+from fulcra_collect.v1_session import CollectRecordSession
 from fulcra_collect.plugin import Credential, Plugin, Setting, SetupStep
 from fulcra_task_sync.engine import run_sync
 from fulcra_task_sync.vault import FulcraVault
@@ -19,19 +20,6 @@ def selected_projects(value):
             or len(value) != len(set(value))):
         raise ValueError('Choose valid Todoist projects in Collect settings.')
     return set(value)
-
-
-def current_selection(token, epoch=None):
-    config = collect_config.load()
-    settings = config.plugin_settings.get(PLUGIN_ID, {})
-    if (getattr(config, 'account_transition', False)
-            or PLUGIN_ID not in config.enabled or settings.get('dry_run', True) is not False
-            or (epoch is not None and config.plugin_epochs.get(PLUGIN_ID, '') != epoch)):
-        return set()
-    current = collect_credentials.get_secret(PLUGIN_ID, 'api_token')
-    if not current or not hmac.compare_digest(current, token):
-        return set()
-    return selected_projects(settings.get('selected_projects', []))
 
 
 def _token(ctx):
@@ -60,19 +48,32 @@ def run(ctx):
     if type(preview) is not bool:
         raise ValueError('Preview only must be on or off.')
     token = _token(ctx)
-    epoch = getattr(ctx, 'config_epoch', '')
-    provider = TodoistProvider(token, load_state=ctx.kv_get, save_state=ctx.kv_set, dry_run=preview)
-    try:
-        vault = FulcraVault(ctx.fulcra_token())
+    with CollectRecordSession(ctx) as session:
+        def selected_now():
+            session.guard()
+            current = collect_credentials.get_secret(PLUGIN_ID, 'api_token')
+            if not current or not hmac.compare_digest(current, token):
+                raise RuntimeError('Todoist source authorization changed; retry the selected account')
+            return set(selected)
+        def io_guard(**kwargs):
+            session.guard(**kwargs)
+            selected_now()
+        selected_now()
+        provider = TodoistProvider(token, load_state=ctx.kv_get, save_state=ctx.kv_set,
+                                  dry_run=preview, still_allowed=selected_now)
         try:
-            result = run_sync(provider=provider, selected_ids=selected, vault=vault,
-                load_state=ctx.kv_get, save_state=ctx.kv_set, dry_run=preview,
-                still_selected=partial(current_selection, token, epoch=epoch),
-                selection_epoch=epoch, deadline_s=600, mutation_scope=task_mutation_scope)
+            with CollectFiles(session, guard=io_guard) as files:
+                vault = FulcraVault(bound_files=files)
+                try:
+                    result = run_sync(provider=provider, selected_ids=selected, vault=vault,
+                        load_state=ctx.kv_get, save_state=ctx.kv_set, dry_run=preview,
+                        still_selected=selected_now, selection_epoch=session.epoch,
+                        deadline_s=600, mutation_scope=task_mutation_scope)
+                    selected_now()
+                finally:
+                    vault.close()
         finally:
-            vault.close()
-    finally:
-        provider.close()
+            provider.close()
     ctx.progress(stage='partial' if result.partial else 'done',
                  remaining=result.remaining, errors=len(result.errors), **result.counts)
     if result.errors:

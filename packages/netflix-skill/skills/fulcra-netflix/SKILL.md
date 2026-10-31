@@ -1,156 +1,169 @@
 ---
 name: fulcra-netflix
-description: "Walk a user from zero to their Netflix viewing history stored in their own Fulcra account as a Watched annotation, then shared to a group the user chooses. Auth (device flow) → export walkthrough → import via the bundled script → share."
+description: "Use when a user wants to obtain or import their Netflix viewing-history export into their own Fulcra account, or resume a saved Netflix import."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🍿" } }
 ---
 
-# fulcra-netflix — Netflix history into the user's own Fulcra account
+# Netflix history in the user's own Fulcra account
 
-This skill walks a brand-new user from "I just messaged this skill to my bot" to "my Netflix viewing history lives in my own Fulcra account as a Watched annotation, shared (if they choose) with a group the user chooses." You — the agent — drive the whole thing over chat: authenticate the user with Fulcra's device flow, walk them through downloading their viewing history from Netflix, import it with the bundled `scripts/netflix_import.py`, and offer the pool share at the end.
+Guide the user through **HELLO → AUTH → EXPORT → IMPORT → SHARE**. Personal native
+import can finish at IMPORT; SHARE is an optional, explicitly legacy annotation
+workflow only. The development importer writes owned v1 **Event** records to
+Watched. Native Event share propagation/group-pool discovery is UNKNOWN here.
+Never promise that an annotation browser share exposes these native records.
 
-**Runtime-agnostic.** The only contract is: (1) you can run a shell subprocess, and (2) you can relay messages to and from a human. Everything else is plain shell I/O — no Claude-Code-specific tools. This skill works identically in Claude Code, OpenClaw, Hermes, Codex, or any other runtime that can execute a subprocess and hold a conversation.
+Use the installed `fulcra-netflix` console or the same canonical script under the
+matching pinned checkout's `.venv/bin/python`. Live upload requires installed
+Netflix/common/Collect/media siblings; a skill-folder copy alone supports only
+stdlib local check-only. No PEP 723 `uv run script.py` upload promise, dynamic
+package install or annotation fallback. Installation/authority details:
+[package guide](../../README.md); [auth](references/auth.md);
+[export](references/netflix-export.md); [native fields/IDs](references/record-schema.md).
 
-The skill is a five-state conversation machine: **HELLO → AUTH → EXPORT → IMPORT → SHARE**. Every state is safely re-enterable — a returning user resumes wherever they left off, and re-running any state's commands never corrupts anything (the importer's record IDs are deterministic, so re-imports are server-side no-ops).
+## Where to start — state and recovery probes
 
-Details live in `references/`: [auth.md](references/auth.md) (device-flow specifics and failure modes), [netflix-export.md](references/netflix-export.md) (full slim + GDPR export walkthroughs), [record-schema.md](references/record-schema.md) (exact wire shapes, det-id formulas, and the namespace-marker contract).
+Use the intended installed checkout interpreter and preserve the runtime profile.
+Default `FULCRA_COLLECT_HOME` is `~/.config/fulcra-collect`; `cli-netflix` is a
+separate CLI namespace and uses CLI auth independently of the daemon account.
 
----
+| Situation | Probe/action | Evidence and next step |
+|---|---|---|
+| Matching runtime installed? | `.venv/bin/python -c "from fulcra_netflix.native import require_runtime; require_runtime()"` from its checkout | Exit 0 proves versioned installed capability, without auth/profile/source. Failure needs matching installation; it does not authorize fallback. |
+| CLI account usable? | `fulcra-api user-info` | Successful identity is preliminary account evidence. Nonzero/network error is UNKNOWN; diagnose before reauth. Real import freshly proves captured principal/target. |
+| Source available and understood? | `fulcra-netflix viewing-history.csv --check-only --json` | Local parse/count only. No target/runtime/httpx/auth/profile/DB/recovery; failure is not empty history. |
+| Saved work or interrupted import? | Re-run live `fulcra-netflix viewing-history.csv --json` with the SAME account/profile/explicit target | Original pending targets are proven/drained before opening new source, even if missing/empty/bad. UNKNOWN holds original payload; never erase journals/outboxes or blindly retry POST. |
+| Optional sharing? | No CLI probe establishes native Event sharing | Finish personal import independently. Only explain the legacy broad annotation flow if the user chooses it and confirms a recipient. |
 
-## Where to start — the re-entrancy probe
-
-Before sending anything, probe how far this user already got. Enter at the **first state whose probe fails**:
-
-| Probe (run in order) | Command | Passes when | If it fails, enter at |
-|---|---|---|---|
-| Authed? | `fulcra-api user-info` | exits 0 and prints valid JSON | **AUTH** (send HELLO first if this user has never seen the pitch/consent message) |
-| Watched def exists? | `fulcra-api catalog -n Watched` | some line's `description` is exactly `com.fulcradynamics.annotation.media.watched` | **EXPORT** (they're authed but never imported) |
-| Records exist? | `fulcra-api get-records "DurationAnnotation/<def-uuid>" "2007-01-01T00:00:00Z" "2035-01-01T00:00:00Z" \| head -1` (def-uuid from the catalog line above) | non-empty output | **IMPORT** (def exists but empty — ask for the CSV again) |
-| Optional share resolved? | no CLI probe | no recipient was selected, or the user confirmed completion or skipped sharing | **SHARE**, only for a user-selected recipient |
-
-All four pass → done; congratulate them and point at [Context Web](https://context.fulcradynamics.com) to browse their data. A brand-new user fails the first probe: send HELLO, then proceed through the states in order.
-
----
+Stable pending authority includes codec/spec and explicit target or null; paths,
+variants/new rows/discovered targets do not rebind it. Account/profile/pin/spec
+changes hold pending. All actual pending destinations get fresh owned watched-spec
+proof before drain; kernel payload/schema/dispatch validation stays per recovered
+group. Later-group failure may retain partial complete-group evidence. Do not
+claim a clean slate from an unreadable read or a local count.
 
 ## State 1 — HELLO
 
-Sharing has no default recipient. Only offer a group share if the user wants one;
-obtain and confirm the intended recipient's Fulcra ID with the user before giving
-recipient-specific instructions. Replace `<recipient-fulcra-id>` with that confirmed
-value. If no recipient is selected, finish after import and skip SHARE.
-
-The first message the user sees. It must contain the pitch, the **full share disclosure** (consent comes *before* auth, so the user knows what they're signing up for), and the step list. Send this, adapted naturally to the conversation but keeping every substantive element:
-
-> Hi! I can import your Netflix viewing history into your own Fulcra account — a personal data store that you control — and, if you want, share it into a group the user chooses so group-recommendation agents can find things everyone would enjoy. The whole thing takes about 5 minutes of your time, and at the end your complete watch history is queryable data you own.
->
-> One thing to know up front, so you can decide with eyes open: at the end I'll invite you to share your data with the recipient you choose (Fulcra ID confirmed with you). Fulcra's sharing page currently shares **all of your annotation data, not just the Netflix history** — it has no way to share only one kind of annotation yet.
-> <!-- The bolded all-annotations sentence above must survive verbatim or near-verbatim in whatever adaptation you send — it is the load-bearing consent line. Paraphrase the pitch freely; never soften this sentence. -->
-> If that's more than you're comfortable with, you can simply skip the share and still keep your imported history for yourself. Nothing gets shared unless you do it yourself, in your own browser, at `https://context.fulcradynamics.com/sharing?type=sending` at the end.
->
-> Here's the plan:
-> 1. **Sign in** to Fulcra (or create a free account) — I'll send you a link.
-> 2. **Download** your viewing history from Netflix — about 2 minutes, I'll walk you through it.
-> 3. **Import** — I run a small bundled script that writes the history into *your* account.
-> 4. **Share** (optional) — you decide whether to share with a group the user chooses.
->
-> Ready?
-
-Do not water down the disclosure, move it after auth, or imply the share is Netflix-only. When the user assents, move to AUTH.
+Explain that their export goes into their own Fulcra account as native Watched
+Events. Slim has date-only estimates; rich has real times/profile information.
+Check-only and a review come first. Sharing is optional. Native sharing support is
+unverified; the separately retained legacy share is all annotation data, broader
+than Netflix. Do not pitch that legacy share as native onboarding completion.
+Honor existing import/install authorization; surface a specific missing choice or
+prerequisite rather than generic permission-to-continue questions.
 
 ## State 2 — AUTH
 
-Goal: `fulcra-api user-info` returns valid JSON. Full detail and failure modes in [references/auth.md](references/auth.md); the short version:
+Reuse the intended CLI account when usable. If auth is needed, use the installed
+CLI's split browser flow from [auth.md](references/auth.md):
 
-1. **Probe first**: run `fulcra-api user-info`. Valid JSON → already authenticated; skip straight to EXPORT. (If the `fulcra-api` binary is missing, install it once with `uv tool install fulcra-api`; if `uv` itself is missing, ask the user for consent to install it: `curl -LsSf https://astral.sh/uv/install.sh | sh` on macOS/Linux.)
+```sh
+fulcra-api auth login --get-auth-url
+fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
+```
 
-2. **Mint the login URL** — always the two-step, non-interactive form:
-
-   ```bash
-   fulcra-api auth login --get-auth-url
-   ```
-
-   **CRITICAL: never run bare `fulcra-api auth login`** — interactive mode blocks your shell for up to two minutes waiting on a browser flow you can't see, and typically times out before the user finishes. Always use `--get-auth-url`.
-
-   The output contains three items: a **web auth URL**, a **web auth code** (also embedded in the URL), and a **device code**. Message the user the URL as a clickable markdown link plus the web auth code so they can confirm it matches what the page shows. **The device code stays private** — it appears in the CLI output you read, and it must never appear in a message to the human (anyone holding it can claim the session).
-
-3. **Poll for completion** — roughly every 15 seconds, run:
-
-   ```bash
-   fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
-   ```
-
-   While the user hasn't finished, this reports the authorization as pending; keep polling. On success it persists credentials to `~/.config/fulcra/credentials.json` — confirm with `fulcra-api user-info` and announce success immediately ("You're in! I can see your Fulcra account now."). If the device code expires before they finish (about 10 minutes), don't treat it as failure: mint a fresh URL with `--get-auth-url` and re-message it. But don't re-loop silently forever: if you've re-minted more than once, or a full ~10-minute cycle passed with no progress, check in with the user in chat before continuing to poll.
-
-4. **Sandbox bailout**: if the CLI can't reach the network at all (connection errors to `fulcra.us.auth0.com` or `api.fulcradynamics.com`, not auth errors), this runtime is network-restricted and cannot do CLI auth. Tell the user plainly and stop — don't loop retrying.
+Relay the web URL/code; keep device code and bearer tokens private. Bounded polls,
+one active flow, respect returned expiry/interval. A network/read failure is not
+proof that credentials are absent. Never change accounts or clear pending state
+to bypass a recovery hold. Do not invoke/relay `auth print-access-token` as a
+manual diagnostic step; the shared runtime owns authentication.
 
 ## State 3 — EXPORT
 
-Walk the user through Netflix's in-app **slim CSV** download — it's instant, which makes it the demo path. Message them these steps (full version, plus the richer GDPR route, in [references/netflix-export.md](references/netflix-export.md)):
+Use [the current export guide](references/netflix-export.md) and the user's
+chosen profile/export. Netflix's official pages describe profile Viewing activity
+CSV download and a personal-information request that may take up to 30 days after
+verification. Follow actual download/expiry instructions; no promised typical
+turnaround, link lifetime or complete history coverage from a parse success.
 
-> 1. Open [netflix.com/account](https://www.netflix.com/account) in a browser.
-> 2. Select **Profiles**, then choose the profile whose history you want.
-> 3. Open **Viewing activity**.
-> 4. Click **Show More** at the bottom until everything is loaded (long histories take a few clicks).
-> 5. Click **Download all** — you'll get a file, usually named `NetflixViewingHistory.csv`.
-> 6. Send that file back to me here (or, if we're on the same machine, just tell me the file path).
-
-When the file arrives as a chat attachment, save it locally so the import script can read it. Mention as an optional aside — don't push it — that Netflix's full GDPR export (`netflix.com/account/getmyinfo`) has real watch times, durations, and every profile, and they can re-run this skill with it later; it just takes Netflix days to deliver, so it's the upgrade, not the starting point.
+Slim uses synthetic noon UTC and a one-second interval, marked low confidence.
+Within-file identical date/title rows have distinct occurrence IDs, but slim has
+no profile identity: identical tuples across profiles/files can collide, and
+partial overlap cannot prove correspondence of same-day rewatches. Rich retains
+profile/real timestamps/durations and filters existing supplemental rows. Inspect
+represented profiles before importing a household export. Rich and slim coexist;
+one does not delete or upgrade the other's records automatically.
 
 ## State 4 — IMPORT
 
-From the skill folder (the directory containing this SKILL.md), run:
+From the installed checkout, `--check-only` sanity-checks locally first:
 
-```bash
-uv run scripts/netflix_import.py <csv-path> --json
+```sh
+fulcra-netflix viewing-history.csv --check-only --json
 ```
 
-The script is self-contained (PEP 723 — `uv run` fetches its one dependency automatically). It auto-detects the CSV variant (slim vs GDPR) from the header, resolves-or-creates the Watched annotation definition idempotently, builds deterministic record IDs, POSTs in batches, and does a best-effort readback verification. Optional preflight: add `--check-only` to parse and count without posting anything (no auth needed) — useful for a quick "is this file right?" check. Add `--no-verify` to skip the post-import readback sampling (rarely needed; the verification is cheap and worth keeping on).
+Review parse intent and source/target choice using the user's existing authorization.
+Then invoke the actual native importer:
 
-It prints exactly one line of JSON. **Interpret the envelope; never parse human-mode output:**
+```sh
+fulcra-netflix viewing-history.csv --json
+# Optional explicit owned destination (replace illustrative UUID):
+fulcra-netflix viewing-history.csv --data-type Event/00000000-0000-4000-8000-000000000001 --json
+```
 
-| Envelope signal | Meaning | What you do |
-|---|---|---|
-| `ok: true`, exit 0 | Import succeeded | Narrate the result (guidance below), move to SHARE |
-| `errors[0].stage` = `args` or `parse` | Wrong or unreadable path, or the file isn't a Netflix export (bad header / malformed row — the message includes row context) | Tell the user what was wrong with the file and go back to **EXPORT** for the right one |
-| `errors[0].stage` = `auth` | Token mint failed or the server rejected it (401/403) | Go back to **AUTH**; if the message says the `fulcra-api` CLI wasn't found, `uv tool install fulcra-api` first |
-| `errors[0].stage` = `post` | HTTP failure while posting; `posted` reflects the chunks that actually landed before the failure | Retry once by re-running the same command — already-posted records dedup server-side, so a re-run only fills the gap. If it fails again, surface the error to the user |
-| `verified: 0` (with `ok: true`) | Readback checked and didn't find the sample yet — almost always ingest-to-query indexing lag, **not** a failure | Mention data may take a few minutes to appear in queries |
-| `verified: null` | Readback couldn't run (CLI unavailable), distinct from "checked and found nothing" | Nothing — it's informational |
-| `skipped_existing` | Currently **always `null`** — the batch endpoint gives no dedup feedback | Never promise duplicate/rewatch counts from it |
+`--data-type` is optional. Default uses the full owned compatible Watched resolver;
+explicit full Event/UUID pins cannot silently replace a prior shared media binding.
+The profile/account spec journal preserves renames; a missing/deprecated/incompatible
+bound type holds. Old annotation markers/UUIDs are not native identity. Repeat
+explicit target selection unchanged on recovery; no target is needed for check-only.
+`--no-verify` is refused before auth/source, including check-only; exact readback
+cannot be skipped.
 
-**Narrating results**: report `posted` out of `total`, conversationally — "Imported 412 titles from your Netflix history!" Keep in mind that `posted` counts POST *attempts*, not novel records: on a re-run of the same file the server silently drops every record as a duplicate while `posted` still reports the full count. So for a re-import say something like "Re-posted 412 records — Fulcra deduplicates these server-side, so nothing was double-counted," never "imported 412 *new* titles." Re-running the importer on the same or an overlapping CSV is always safe.
+Main opens one source/reader after original recovery. All new input is materialized,
+locally checked and finalized against the served schema/current primary IDs before
+current record mutation. Existing incoming fields must match: extra unrelated
+top-level cloud fields may remain, but nested/source/tag/time/note differences hold
+the whole new input. No fingerprint/alias authorizes a skip or overwrite.
+Already-staged recovery keeps its immutable payload/shared kernel behavior;
+preflight is locally serialized, not provider CAS or cross-host edit atomicity.
 
-## State 5 — SHARE
+New data uses serial chunks of at most 500, after whole-input proof. Only the
+in-flight chunk is durable; unstarted remainder needs the original CSV again.
+Do not promise an atomic or whole-file durable queue. Unknown issued work waits
+for exact readback rather than another POST. Never reset private state or re-run
+old token/annotation helpers to clear it.
 
-After a verified import, if the user selected and confirmed a recipient, offer the share — restating the disclosure, because consent given ten minutes ago at HELLO is not a substitute for informed action now:
+Only `--json` is a machine contract. Original keys remain, with explicit
+`counts_semantics="native-v1-complete-groups"` and native `status`:
 
-> Last step, and it's optional. To join a group the user chooses, you'd share your Fulcra annotation data with the recipient you choose. Heads-up again: Fulcra's sharing page shares **all of your annotation data, not just the Netflix history** — there's no narrower option yet. Totally fine to skip; your imported history stays yours either way.
->
-> If you're in:
-> 1. Open [context.fulcradynamics.com/sharing?type=sending](https://context.fulcradynamics.com/sharing?type=sending).
-> 2. Log in with the same account you just signed in with.
-> 3. Create a share to the confirmed recipient Fulcra ID, making sure annotations are included.
-> 4. Tell me when it's done (or that you're skipping).
+- `posted` and `verified`: known current completed-group verified lower bounds,
+  including exact already-visible records. They are not new-record counts, HTTP
+  attempts or sampled rows. A fully matching replay can issue zero POST.
+- `excluded`: separate from verified; `duplicate_input`: distinct input dedup.
+  `skipped_existing` remains null; do not invent remote skip counts.
+- `would_post`: check-only intent. `total` describes the current parsed events.
+- `recovery`: separate verified/excluded evidence, never added to current counts
+  or summed across retries. Original recovery may succeed before new-source error.
+- A failed/partly visible chunk may add zero lower bound until its complete group
+  is proven. Earlier completed chunks survive stage/receipt/clear/close failures.
+  Nonzero/UNKNOWN is a hold, not empty or proven rejected provider state.
 
-When they confirm the share, congratulate them and point them at [Context Web](https://context.fulcradynamics.com) to browse their own imported history. If they skip, respect it without pushback — they're fully onboarded either way, and they can share later by re-running this state.
+Final success follows runtime cleanup and exact readback. Report actual current
+versus recovered evidence and limits. Do not say every rerun/overlapping CSV is a
+server-side no-op or claim cross-tool equality from matching source hashes.
 
-<!-- TODO(share-cli): when fulcra-api-python PR #47 (share create / list-outgoing / …)
-     merges, replace the four manual steps above with the agent running
-     `fulcra-api share create` itself — scoped to the Watched definition if the API
-     supports per-definition scoping — and verifying via `fulcra-api share
-     list-outgoing`. At that point (and ONLY at that point) the all-annotations
-     disclosure wording here and in HELLO tightens to Netflix-only. Until then the
-     manual flow and the honest all-annotations disclosure are the contract. -->
+## State 5 — SHARE (optional legacy annotation workflow)
 
----
+Personal native import is complete without sharing. Native Event propagation and
+pool discovery remain UNKNOWN/unsupported by this skill until independently
+proved; this legacy workflow is not a native share.
 
-## Don't
+If the user specifically chooses to share legacy annotation data, obtain and
+confirm their chosen recipient's Fulcra ID. No default recipient. Explain that
+the browser workflow includes **all annotation data, not just Netflix**. The user
+performs the share in their own browser at
+[Context Web sharing](https://context.fulcradynamics.com/sharing?type=sending),
+using the intended account and confirmed recipient. Ask them to confirm completion
+or skipping; no CLI probe here verifies either legacy scope or native propagation.
+Do not create/change permissions automatically or tighten the disclosure based
+on an old TODO/upstream PR assumption. Skipping is valid.
 
-- **Don't run bare `auth login`** — interactive mode hangs your shell waiting on a browser you can't see. Always `--get-auth-url`, then poll with `--device-code`.
-- **Don't parse human-mode importer output** — only the `--json` envelope is a stable contract (keys are append-only; they never get removed or repurposed).
-- **Don't echo tokens or the device code into chat.** The device code is printed in CLI output *you* see; it must never reach a message to the human — the web auth URL and web auth code are the only things they need. Never run or relay `auth print-access-token` output into the conversation.
-- **Don't promise Netflix-only sharing.** The Context Web share covers all of the user's annotation data. Say so plainly, every time sharing comes up, until the TODO(share-cli) swap lands.
-- **Don't run interactive commands** — nothing in this skill needs a TTY; if you find yourself waiting on a prompt, you took a wrong turn.
-- **Don't soft-delete annotation definitions.** Fulcra has no per-event delete; events under deleted defs stay visible in queries forever. Def cleanup is a user decision, not yours.
+## Boundaries
+
+Keep original legacy records/shares/permissions. Native historical wrapped-reader
+mapping/conversion needs separate evidence; no source test proves it complete.
+Installed app, clean pinned install, wheel acceptance and live-account QA remain
+separate release gates. Use [the native record reference](references/record-schema.md)
+for source/UUID fields; fingerprints are provenance, not observation identity.

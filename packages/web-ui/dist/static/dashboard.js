@@ -79,6 +79,9 @@ function shortDate(isoString) {
 // ---------------------------------------------------------------------------
 
 function pillFor(plugin) {
+  if (plugin.service_status === "unknown") {
+    return { label: "Failure status UNKNOWN", cls: "bg-amber-100 text-amber-800" };
+  }
   // Consistent schema: the badge represents the plugin's STATE only — never
   // its kind. Kind (manual / scheduled / service) lives in the metadata
   // line below the description ("Manual", "Every 6 hours", "Continuous
@@ -253,6 +256,18 @@ function dashboard() {
 
     // Hand control back to the parent app() so it can switch the route to the
     // per-plugin setup wizard. Triggered by the Configure button on each row.
+    credentialRecoveryLabel(plugin) {
+      const detail = plugin.credential_error;
+      if (!detail) return "";
+      return detail.recovery === "settings" ? "Check saved Collect sign-in access in Fulcra Settings"
+        : detail.recovery === "configure" ? "Check this source's saved credential in Configure" : "";
+    },
+
+    recoverCredential(plugin) {
+      if (plugin.credential_error?.recovery === "settings") this.$dispatch("go-to-settings");
+      else if (plugin.credential_error?.recovery === "configure") this.configurePlugin(plugin);
+    },
+
     configurePlugin(plugin) {
       this.$dispatch("configure-plugin", { id: plugin.id });
     },

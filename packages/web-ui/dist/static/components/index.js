@@ -15,11 +15,11 @@
 import "./step.js";                      // the <fulcra-step> dispatcher
 import "./step-intro.js";
 import "./step-external_action.js";
-import "./step-input.js";
+import "./step-input.js?v=20261024d";
 import "./step-oauth.js";
 import "./step-file_upload.js";
 import "./step-folder_picker.js";
 import "./step-permission_request.js";
 import "./step-test_connection.js";
-import "./step-definition_picker.js";
+import "./step-definition_picker.js?v=20261024c";
 import "./step-done.js";

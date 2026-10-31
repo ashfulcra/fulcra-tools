@@ -3,26 +3,25 @@ from __future__ import annotations
 
 from fulcra_collect.plugin import Plugin, RunContext, SetupStep
 
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers import apple_podcasts as ap
 from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ._common import (
     DURATION_SPEC,
     consult_twin_cache,
-    ensure_media_def,
     record_twins_after_post,
+    report_import,
 )
 from .apple_podcasts import _FULL_DISK_ACCESS_PERMISSION
 
 
-# Identical structure to APPLE_PODCASTS_LISTENED_SPEC — both plugins produce
-# "Listened" Duration annotations from Apple Podcasts data against the same
-# shared definition.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     """Walk all Time Machine snapshots and import Apple Podcasts history from each.
 
@@ -35,16 +34,7 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     mounted).  A SnapshotError on an individual snapshot is logged and skipped
     so a single bad backup does not abort the whole recovery walk.
     """
-    # Ensure the "Listened" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # listened_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Listened" definition
-    # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="listened_definition_id",
-                     spec=APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC,
-                     canonical_name="Listened",
-                     state_save=_state_save)
 
     snapshots = ap.find_timemachine_snapshots()
     if not snapshots:
@@ -70,22 +60,14 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     # same twin seam by hand. See _common.consult_twin_cache.
     all_events = consult_twin_cache(ctx, all_events)
 
-    client = FulcraClient()
-    client.ensure_tag("apple-podcasts", media_state)
+    client = FulcraClient(collect_context=ctx)
     result = client.run_import(all_events, media_state, claim=ctx.claim_dedup_keys,
                                unclaim=ctx.unclaim_dedup_keys)
-    ctx.progress(stage="imported", posted=result.posted,
-                 skipped=result.skipped_existing)
-    if result.posted > 0:
-        ctx.annotation(
-            f"Apple-podcasts: {result.posted} new annotation"
-            + ("s" if result.posted != 1 else ""),
-            ok=True,
-        )
+    report_import(ctx, result, "Apple Podcasts")
 
     # Populate the twin cache with this run's high-conf events (after a
     # successful POST only), so a future low-conf twin can defer to them.
-    record_twins_after_post(all_events, posted=result.posted)
+    record_twins_after_post(all_events, posted=result.posted, ctx=ctx)
     # No watermark advance — this is a manual, one-shot recovery run.
 
 
@@ -95,6 +77,8 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_apple_podcasts_timemachine,
+    record_data_types=media_destinations("listened"),
+    record_pending=media_pending,
     description=(
         "One-shot recovery: walks every Time Machine backup on the "
         "mounted backup volume, reads the Apple Podcasts SQLite "
@@ -138,7 +122,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write recovered listens?",
             body_md=(
-                "We can write to your existing 'Listened' annotation or "
+                "We can write to your existing 'Listened' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

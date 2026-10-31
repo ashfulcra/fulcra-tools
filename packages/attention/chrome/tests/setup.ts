@@ -2,7 +2,13 @@
 // Minimal chrome.* API stub for Vitest + jsdom. Individual tests
 // override pieces via vi.stubGlobal / vi.fn() as needed.
 
-import { vi } from "vitest";
+import { beforeEach, vi } from "vitest";
+
+// Deny global fetch before caller imports and at every case boundary, including
+// after unstubAllGlobals. Later per-case fixtures may install synthetic fetch.
+const denyFetch = () => { throw new Error("External network forbidden in browser unit tests"); };
+vi.stubGlobal("fetch", denyFetch);
+beforeEach(() => { vi.stubGlobal("fetch", denyFetch); });
 
 function makeArea() {
   // Each area gets its own independent backing store.

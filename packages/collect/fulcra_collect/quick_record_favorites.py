@@ -1,30 +1,16 @@
-"""Quick-record favorites storage — which annotation defs surface
-prominently in the menubar's quick-record popover.
+"""Legacy unscoped quick-record favorites compatibility storage.
 
-Per-machine, local file at ``<config_dir>/quick_record_favorites.json``.
+The released pre-protocol2 app stores annotation-definition pins at
+``<config_dir>/quick_record_favorites.json`` as
+``{"version": 1, "favorites": ["<def-uuid>", ...]}``.
 
-Storage shape::
+Current development web/native clients use account-scoped revisioned favorites
+in ``quick-record-actions.sqlite`` instead. They do not adopt this file, and
+legacy definition metadata deletion leaves it untouched. Preserve its original
+bytes until explicit source-account/mapping proof authorizes migration.
 
-    {
-      "version": 1,
-      "favorites": ["<def-uuid>", ...]
-    }
-
-Cross-machine sync is deferred to a separate task (#65) — Fulcra doesn't
-yet expose the right primitive to attach this preference to the user's
-account. For v1, favorites are local to the machine the daemon runs on.
-
-Surfaces that read this file:
-
-* ``Daemon._quick_record_list`` — pinned defs sort first and the cap is
-  relaxed when any favorites are set.
-* The web UI Settings page — bulk multi-select editor.
-* The menubar popover — per-row star toggle.
-
-All three call the daemon command pair
-``get_quick_record_favorites`` / ``set_quick_record_favorites`` so the
-file is opened in exactly one process; the writes are atomic (tempfile
-+ ``os.replace``) and protected by 0600 permissions.
+The retained compatibility helpers write atomically with 0600 permissions;
+this module is not the current UI's favorites store.
 """
 from __future__ import annotations
 

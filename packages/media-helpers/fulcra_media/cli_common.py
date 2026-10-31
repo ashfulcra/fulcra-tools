@@ -12,9 +12,10 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
 
 import click
+
+from .fulcra import ImportResult
 
 
 # Auth-bearing query params that must be scrubbed before exception strings
@@ -40,7 +41,6 @@ def safe_exc_message(exc: BaseException) -> str:
     """
     return _SECRET_RE.sub(lambda m: f"{m.group(1)}=REDACTED", str(exc))
 
-from .fulcra import ImportResult
 
 
 @dataclass
@@ -61,6 +61,7 @@ class ImportEnvelope:
     # Set on --check-only runs: how many events would post if we did run.
     would_post: int | None = None
     errors: list[dict[str, str]] = field(default_factory=list)
+    cursor: dict[str, str] | None = None
 
 
 def import_result_to_dict(
@@ -70,6 +71,7 @@ def import_result_to_dict(
     since_watermark: str | None,
     new_watermark: str | None,
     would_post: int | None = None,
+    cursor: dict[str, str] | None = None,
 ) -> ImportEnvelope:
     """Adapter — turn a FulcraClient ImportResult into an ImportEnvelope."""
     return ImportEnvelope(
@@ -82,6 +84,37 @@ def import_result_to_dict(
         since_watermark=since_watermark,
         new_watermark=new_watermark,
         would_post=would_post,
+        cursor=cursor,
+    )
+
+
+def media_failure_envelope(
+    importer: str, *, stage: str, message: str, run=None,
+    result: ImportResult | None = None, check_only: bool = False,
+) -> ImportEnvelope:
+    """Copy current invocation evidence after ordinary context cleanup.
+
+    A returned result survives later context-exit failure. Otherwise only the
+    local invocation snapshot is evidence; recovery/outbox counts aren't.
+    Malformed internal evidence raises instead of manufacturing valid counters.
+    """
+    observed = result if result is not None else (run.progress if run is not None else None)
+    values = {}
+    if observed is not None:
+        for key in ('total', 'skipped_existing', 'posted', 'verified'):
+            value = getattr(observed, key)
+            if type(value) is not int or value < 0:
+                raise ValueError(f'invalid media progress {key}')
+            values[key] = value
+        if (values['skipped_existing'] + values['posted'] > values['total']
+                or values['verified'] > values['posted']):
+            raise ValueError('inconsistent media progress counters')
+        if check_only and values['verified'] != 0:
+            raise ValueError('preview progress cannot be verified')
+    return ImportEnvelope(
+        importer=importer, ok=False, **values,
+        would_post=values['posted'] if check_only and observed is not None else None,
+        errors=[{'stage': stage, 'message': message}],
     )
 
 
@@ -106,53 +139,6 @@ def resolve_or_emit(
         return None
 
 
-def run_and_emit(
-    importer_name: str,
-    events: list,
-    state: Any,
-    *,
-    tag_name: str | None,
-    check_only: bool,
-    json_mode: bool,
-    since_watermark: str | None = None,
-    new_watermark: str | None = None,
-) -> None:
-    """Standard ingest pipeline + envelope emission. Used by every importer.
-
-    tag_name: which tag to ensure for the events. None to skip (e.g. when the
-        events are tagged per-row via fulcra-csv).
-    """
-    from .state import save as save_state
-    from .fulcra import FulcraClient
-    from .cli import STATE_PATH  # local import to avoid cycle at module top
-
-    client = FulcraClient()
-    if tag_name and not check_only:
-        client.ensure_tag(tag_name, state)
-    save_state(state, STATE_PATH)
-    result = client.run_import(events, state, check_only=check_only)
-    save_state(state, STATE_PATH)
-
-    # Populate the cross-batch twin cache with this run's high-confidence
-    # events. Skip on check-only since nothing was actually posted.
-    if not check_only and result.posted > 0:
-        try:
-            from . import twin_cache
-            twin_cache.record_imported_events(events)
-        except Exception:
-            # Cache failures must not break the import — log to stderr.
-            import click as _click
-            _click.echo("warning: twin cache write failed", err=True)
-
-    envelope = import_result_to_dict(
-        importer_name, result,
-        since_watermark=since_watermark,
-        new_watermark=new_watermark,
-        would_post=result.posted if check_only else None,
-    )
-    emit_result(envelope, json_mode=json_mode)
-
-
 def emit_result(envelope: ImportEnvelope, *, json_mode: bool) -> None:
     """Print the envelope (JSON or human) and exit non-zero on failure.
 
@@ -169,7 +155,10 @@ def emit_result(envelope: ImportEnvelope, *, json_mode: bool) -> None:
                 continue
             if v is None or v == [] or v == {}:
                 continue
-            fields.append(f"{k}={v}")
+            if k == "cursor":
+                fields.append(f"cursor={v['state']} reason={v['reason']}")
+            else:
+                fields.append(f"{k}={v}")
         click.echo(" ".join(fields))
         for err in envelope.errors:
             click.echo(

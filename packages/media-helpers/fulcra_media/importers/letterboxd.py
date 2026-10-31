@@ -85,6 +85,8 @@ def fetch_diary(
     username: str,
     *,
     transport: httpx.BaseTransport | None = None,
+    scan_report=None,
+    strict_scan=False,
 ) -> Iterator[NormalizedEvent]:
     """Yield NormalizedEvents for `username`'s public Letterboxd diary entries.
 
@@ -94,12 +96,17 @@ def fetch_diary(
     fingerprint that lets a Letterboxd entry dedup against the same
     movie watched via Trakt or Apple TV+).
     """
+    if strict_scan:
+        import re
+        from .poll_scan import fail
+        if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", username):
+            fail()
     yield from generic_rss.normalize_feed(
         feed_url_for(username),
         service="letterboxd",
         category="watched",
         importer_name="letterboxd",
-        transport=transport,
+        transport=transport, scan_report=scan_report, strict_scan=strict_scan,
         extract_fingerprint=_extract_fingerprint,
         extra_external_ids=_extra_external_ids,
         extract_extra_source_ids=_extract_extra_source_ids,

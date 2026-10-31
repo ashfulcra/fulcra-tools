@@ -125,8 +125,12 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
     )
 
 
-def normalize_history(tracks: Iterable[dict]) -> Iterator[NormalizedEvent]:
+def normalize_history(tracks: Iterable[dict], *, scan_report=None, strict_scan=False) -> Iterator[NormalizedEvent]:
     """Filter + normalize a raw track list. Drops nowplaying / malformed rows."""
+    if strict_scan:
+        from .poll_scan import normalize_api
+        yield from normalize_api(tracks, report=scan_report, source="lastfm", normalizer=normalize_track)
+        return
     for t in tracks:
         ev = normalize_track(t)
         if ev is not None:
@@ -148,6 +152,8 @@ def fetch_recent_tracks(
     max_pages: int | None = None,
     sleep_between_pages: float = 0.25,
     transport: httpx.BaseTransport | None = None,
+    scan_report=None,
+    strict_scan=False,
 ) -> Iterator[dict]:
     """Yield raw Last.fm scrobble dicts (newest first), paginating until done.
 
@@ -158,6 +164,10 @@ def fetch_recent_tracks(
     sleep_between_pages: rate-limit hedge (Last.fm allows ~5 req/sec)
     transport: httpx transport override for tests
     """
+    if strict_scan:
+        from .poll_scan import lastfm_rows
+        yield from lastfm_rows(creds, report=scan_report, since=since, until=until, limit=limit, max_pages=max_pages, sleep=sleep_between_pages, transport=transport)
+        return
     with httpx.Client(transport=transport, timeout=30.0,
                       follow_redirects=True) as client:
         page = 1

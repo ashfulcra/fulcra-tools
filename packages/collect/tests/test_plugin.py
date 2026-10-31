@@ -782,6 +782,11 @@ def test_plugin_kv_methods_fail_loudly_without_backend(method, args):
 # RunContext.fulcra_token() — user-level credential store (B9)
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def isolated_plugin_credentials(_in_memory_keyring):
+    """Credential regressions must never query the operator's Keychain."""
+    pass
+
 def _make_bare_ctx() -> RunContext:
     """Minimal RunContext for fulcra_token() tests."""
     return RunContext(
@@ -799,7 +804,7 @@ def test_fulcra_token_reads_from_user_level_store(monkeypatch):
     credentials.get_user_secret("bearer-token") without invoking the
     fulcra CLI or reading any env var."""
     from fulcra_collect import credentials
-    monkeypatch.setattr(credentials, "get_user_secret",
+    monkeypatch.setattr(credentials, "get_user_secret_fresh",
                         lambda key: "the-real-token" if key == "bearer-token" else None)
     ctx = _make_bare_ctx()
     assert ctx.fulcra_token() == "the-real-token"
@@ -809,7 +814,7 @@ def test_fulcra_token_returns_none_when_unset(monkeypatch):
     """When no user-level token is stored and the CLI is unavailable,
     fulcra_token() returns None rather than raising."""
     from fulcra_collect import credentials
-    monkeypatch.setattr(credentials, "get_user_secret", lambda key: None)
+    monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda key: None)
     # Simulate CLI unavailable (BaseFulcraClient.get_token raises RuntimeError).
     import fulcra_common
     monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
@@ -823,7 +828,7 @@ def test_fulcra_token_prefers_user_level_over_cli(monkeypatch):
     """User-level store takes priority; the CLI subprocess is never called
     when a keychain token is already present."""
     from fulcra_collect import credentials
-    monkeypatch.setattr(credentials, "get_user_secret",
+    monkeypatch.setattr(credentials, "get_user_secret_fresh",
                         lambda key: "keychain-token" if key == "bearer-token" else None)
     cli_called = []
     import fulcra_common
@@ -881,16 +886,15 @@ def test_annotation_method_accepts_ok_false():
     assert emitted == [{"type": "annotation", "summary": "Write failed", "ok": False}]
 
 
-def test_fulcra_token_falls_back_to_cli_when_no_keychain_token(monkeypatch):
-    """When the user-level store is empty, fulcra_token() falls back to
-    BaseFulcraClient.get_token() (env var + CLI subprocess path)."""
+def test_fulcra_token_rejects_cli_fallback_when_no_collect_sign_in(monkeypatch):
+    """A daemon source cannot adopt an independently signed-in CLI account."""
     from fulcra_collect import credentials
-    monkeypatch.setattr(credentials, "get_user_secret", lambda key: None)
+    monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda key: None)
     import fulcra_common
     monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
                         lambda self: "cli-fallback-token")
     ctx = _make_bare_ctx()
-    assert ctx.fulcra_token() == "cli-fallback-token"
+    assert ctx.fulcra_token() is None
 
 
 # ---------------------------------------------------------------------------
@@ -941,10 +945,10 @@ def test_fulcra_token_refreshes_expired_stored_token(monkeypatch):
     import time
     from fulcra_collect import credentials
     expired = _fake_jwt(time.time() - 3600)
-    monkeypatch.setattr(credentials, "get_user_secret",
+    monkeypatch.setattr(credentials, "get_user_secret_fresh",
                         lambda key: expired if key == "bearer-token" else None)
     monkeypatch.setattr(credentials, "refresh_fulcra_access_token",
-                        lambda: "fresh-token")
+                        lambda **kwargs: "fresh-token")
     ctx = _make_bare_ctx()
     assert ctx.fulcra_token() == "fresh-token"
 
@@ -953,28 +957,28 @@ def test_fulcra_token_keeps_valid_stored_token(monkeypatch):
     import time
     from fulcra_collect import credentials
     valid = _fake_jwt(time.time() + 7200)
-    monkeypatch.setattr(credentials, "get_user_secret",
+    monkeypatch.setattr(credentials, "get_user_secret_fresh",
                         lambda key: valid if key == "bearer-token" else None)
     refreshed = []
     monkeypatch.setattr(credentials, "refresh_fulcra_access_token",
-                        lambda: refreshed.append(1) or "nope")
+                        lambda **kwargs: refreshed.append(1) or "nope")
     ctx = _make_bare_ctx()
     assert ctx.fulcra_token() == valid
     assert not refreshed
 
 
-def test_fulcra_token_expired_with_failed_refresh_falls_back_to_cli(monkeypatch):
+def test_fulcra_token_expired_with_failed_refresh_requires_collect_sign_in(monkeypatch):
     import time
     from fulcra_collect import credentials
     expired = _fake_jwt(time.time() - 10)
-    monkeypatch.setattr(credentials, "get_user_secret",
+    monkeypatch.setattr(credentials, "get_user_secret_fresh",
                         lambda key: expired if key == "bearer-token" else None)
-    monkeypatch.setattr(credentials, "refresh_fulcra_access_token", lambda: None)
+    monkeypatch.setattr(credentials, "refresh_fulcra_access_token", lambda **kwargs: None)
     import fulcra_common
     monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
                         lambda self: "cli-token")
     ctx = _make_bare_ctx()
-    assert ctx.fulcra_token() == "cli-token"
+    assert ctx.fulcra_token() is None
 
 
 @pytest.mark.parametrize("stored", [None, "expired-token", "collect-token"])
@@ -984,8 +988,8 @@ def test_collect_token_never_uses_an_independent_account(monkeypatch, stored):
     monkeypatch.setattr(credentials, "get_user_secret_fresh", lambda key: stored)
     monkeypatch.setattr(plugin, "_jwt_expired", lambda token: token == "expired-token")
     def forbidden(*args):
-        pytest.fail("selected-source credentials must not use CLI refresh or fallback")
-    monkeypatch.setattr(credentials, "refresh_fulcra_access_token", forbidden)
+        pytest.fail("selected-source credentials must not use independent fallback")
+    monkeypatch.setattr(credentials, "refresh_fulcra_access_token", lambda **kwargs: None)
     monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token", forbidden)
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "different-account")
     assert _make_bare_ctx().collect_token() == ("collect-token" if stored == "collect-token" else None)

@@ -48,6 +48,11 @@ what they need from us is surfaces that are durable.
 baseline. Reconciliation reads tracked vault bodies so edits near a sync are not
 missed; retain the complete internal change list and cap only report presentation.
 Partial AppleScript write failures must produce a failed report and failed run.
+Shared Collect Files text reads must validate a supplied exact-version size as
+a strict nonnegative integer and compare complete downloaded bytes before UTF-8
+decoding, on both direct and signed-storage legs. A short 200/Content-Length
+prefix must not authorize Notes merge/write/checkpoint; absent metadata is not
+an independent size proof.
 
 **Selected-list task sync:** Reminders uses EventKit, with separate read-only
 permission checks and explicit permission requests. No lists are selected by
@@ -56,6 +61,12 @@ state, and preview mode before each write. Task status is `open` or `resolved`;
 identity and generation fields bind a completion to the source task. Normalize task paths to absolute Fulcra paths at the Files adapter boundary
 for both history lookup and upload; the API rejects relative upload paths. Read all
 unseen Fulcra file versions so a concurrent bot edit survives an importer write.
+Task `read_version` requires metadata from the latest complete history snapshot;
+invalidate it before every listing attempt. Retain each exact version's supplied
+strict nonnegative byte size and compare direct/signed HTTP200 body bytes before
+decoding or task parse/render/checkpoint. Archive reads remain by ID; never borrow
+the current path or another version's size. Size-less older metadata supplies no
+independent length proof.
 Missing source tasks are never completion evidence. Todoist task-detail lookup
 can return `checked: true` after completion; accept it only with valid explicit
 completion evidence. Keep active-list validation separate: a checked task there
@@ -80,14 +91,24 @@ clearing the gate on success. Task callbacks reject the gate as well as stale
 epochs. Failure leaves the gate closed until an interactive retry succeeds; normal
 configuration saves and automatic token refresh must never clear it.
 
+Automatic Collect token renewal must publish only the closed shared keys
+`bearer-token` and `oauth-credentials` through `set_user_secret_quiet`, never
+ordinary `set_user_secret`/`keyring.set_password`. The disposable mutation child
+suppresses legacy interaction and per-query UI, uses bounded private-pipe I/O,
+and requires an exact acknowledgement. Keep final account/revision checks and
+the consumed-grant no-replay journal; denial/timeout/ambiguous publication
+requires reconnecting. Explicit interactive sign-in remains separate. Tests
+must inject an isolated quiet backend or fence the native child, and must not
+interpret a synthetic quiet-write pass as signed-app Keychain acceptance.
+
 ## Public repository privacy
 
 **Selected local-source uploads:** use Collect's captured Fulcra token, never
 the CLI's independently stored account. Use `RunContext.collect_token()` for
 selected-source uploads; its missing/expired token requires reconnecting in Collect.
-The legacy `fulcra_token()` helper still supports independent CLI/env fallback
-and is unsuitable for account-bound sources. Capture and compare the stored
-token as well as the epoch before uploading. Use the bounded
+`fulcra_token()` is a compatibility alias with the same Collect-only behavior;
+see the canonical [strict authentication contract](packages/collect/README.md#collect-authentication).
+Capture and compare the stored token as well as the epoch before uploading. Use the bounded
 `credentials.get_user_secret_fresh()` read for capture and final upload guards;
 the ordinary cached reader cannot detect another process changing the token. Do not re-canonicalize a selected
 folder path on subsequent scans: substituted ancestor/root links must fail closed.
@@ -132,6 +153,13 @@ remain private even in retired-channel fixtures. Adoption claims must use the
 authority-checked bus sender; a failed send must not fall back to a hard-coded
 channel or write its success marker. Passing a pattern scan is not proof that
 all personal information has been removed.
+
+Credential scans use [`.gitleaks.toml`](.gitleaks.toml) with the default rules and
+version pinned in [privacy CI](.github/workflows/privacy.yml). Exemptions require
+an exact public identifier AND an enumerated source path; never ignore a whole
+path, rule, fingerprint or line. Configured controls must still detect neighboring
+synthetic keys, wrong-path and prefix/suffix candidates, and other-rule fixtures;
+malformed configuration must fail rather than report a clean scan.
 
 **Answers bridge configuration:** account IDs and project URLs stay private,
 just like credentials. Ship only synthetic examples; the privacy guard rejects
@@ -195,10 +223,10 @@ under `skills/`, each package with its own README, build, and tests.
   read it before touching the relay.
 - **`packages/purpleair`** (`fulcra-purpleair`) — a `scheduled`/`live_polled`
   Collect plugin polling PurpleAir air-quality sensors (cloud API or a sensor
-  on the LAN), fanning each reading out to per-measure **NumericAnnotation**
-  tracks with EPA AQI derived locally from PM2.5; idempotency is per-reading
-  via the daemon's `claim_dedup_keys`. Details:
-  [`packages/purpleair`](packages/purpleair).
+  on the LAN). On this development branch it writes per-measure v1 **Metric**
+  tracks with declared units, guarded pending samples and exact readback. AQI is
+  derived locally using the existing formula; see its limits and rollout status
+  in the [PurpleAir guide](packages/purpleair/README.md#what-lands-in-fulcra).
 - **Shipping the Safari app to TestFlight** — `packages/attention/safari/scripts/release_testflight.sh`
   does the whole mechanical path (both JS bundles → archive → payload check →
   export → validate → upload) and refuses to start without three things a
@@ -361,8 +389,35 @@ under `skills/`, each package with its own README, build, and tests.
     "exists", and the next thing to run is a test that cannot import anything.
     Measured here on 2026-09-05 — the macOS line above was followed on a Linux
     container and produced exactly that.
-- Run tests: `uv run pytest packages/ -q` (a couple of minutes,
-  and must NOT hit the network — a network-bound run is the bug, not slowness).
+- Run tests: `uv run pytest packages/ -q` (must NOT hit external services).
+  For targeted package/test runs, use `uv run pytest -c pyproject.toml <paths> -q`:
+  package-local configs otherwise exclude root fixtures. Root fixtures supply a
+  dummy token, disable native Collect Keychain selection and install the
+  [test-only Python network guard](_pytest_network_guard.py). Ordinary external
+  DNS/TCP/UDP calls fail before I/O with a static error; numeric loopback, exact
+  `localhost`, Unix IPC and MockTransport remain available for fixtures. This is
+  a function-scoped Python patch, **not an OS or subprocess/native sandbox**:
+  collection-time/earlier-fixture I/O, imported aliases and already connected
+  descriptors are outside its scope. Tests replacing guarded calls must install
+  hermetic substitutes. Never run a regression's RED against real credentials
+  or an unmocked external client. Trace the PRE-migration auth path as well as
+  its replacement before actual-caller RED: a legacy token subprocess can escape
+  the parent Python network guard and `uv --offline`. Fence subprocess/OS shell,
+  network and saved-auth fallbacks before loading the caller, with function-scoped
+  synthetic fixtures restored after each test; never infer historical absence of
+  child credential effects from a blocked parent request. Native integration probes run separately with
+  explicit isolated fixtures. Root fixtures also isolate the OS-user Trakt owner
+  journal and refuse quiet Trakt writes or explicit Trakt authorization unless
+  the test supplies a synthetic backend. They do not make generic `keyring`
+  getters/setters safe. Keep private
+  profile/config paths and early child/auth/network tripwires in actual-caller
+  tests, including imported path aliases before any directory/lease mutation.
+  Process tests that may run after threads start must use fresh `spawn` children,
+  rather than inheriting a threaded parent with `fork`. Re-establish private paths
+  and auth/native/network guards in the child before application imports; parent
+  monkeypatches are not inherited. The [Trakt process helper](packages/media-helpers/tests/_trakt_process_child.py)
+  demonstrates this test-only containment, which is not an OS sandbox.
+  See the [guard tests](packages/collect/tests/test_suite_network_guard.py).
 - Editable install: the `.venv` imports the live workspace source, so a code
   change is picked up by **restarting the daemon**, not re-syncing.
 - **A pass/fail count is a property of (sha, interpreter, cwd) — never of the
@@ -1861,7 +1916,12 @@ Upstream reports must be understandable without reading this repository.
   itself, and the dependency manifests (`pyproject.toml`, `uv.lock`) — see
   [`.github/workflows/macos.yml`](.github/workflows/macos.yml);
   `test_ci_trigger_coverage.py` fails if trigger and coverage drift apart.
-  Everything on Linux (`uv-workspace.yml`) runs on every push/PR to `main`.
+  Everything on Linux ([`uv-workspace.yml`](.github/workflows/uv-workspace.yml))
+  runs on every push/PR to `main`. Both gates retain their full selections and
+  report interpreter/cwd/module paths, test nodes and slow setup/call/teardown
+  phases. Their finite job bounds and completed-run evidence live in the workflows.
+  These measurements do not guarantee future runtimes. A timeout is an incomplete
+  run, never a passing gate; investigate it before changing coverage or the bound.
   The upshot: for anything outside the macOS trigger set (docs, most skills),
   the **local run is the only pre-merge macOS check** — run the relevant suite
   before you push.
@@ -1874,6 +1934,252 @@ Upstream reports must be understandable without reading this repository.
   (a frontend, no `pyproject.toml`) is excluded for this reason.
 
 ## Fulcra platform surface & records
+
+**Collect v1 migration (in progress, 2026-10-23).** Actual v1 custom types are
+`Event/<UUID>` and `Metric/<UUID>`; an `/ingest/v1` endpoint writing annotations
+is still a legacy datatype path. New opt-in shared builders/transport live in
+[`fulcra_common.v1`](packages/fulcra-common/fulcra_common/v1.py), documented in
+the [shared library README](packages/fulcra-common/README.md#v1-datatype-migration-boundary).
+The SDK floor is 0.1.54 (workspace lock 0.1.56). Validate served custom schemas,
+use explicit v1 destination IDs/version, preserve primary source identity and
+verify readback before claiming an import landed. Do not blindly retry an
+uncertain POST or silently fall back to legacy annotations. Caller migration
+is tracked by the [implementation plan](docs/superpowers/plans/2026-10-23-collect-v1-migration.md);
+do not claim all Collect/browser writers have switched yet. Unrelated
+coordination/prefs/vault streams are not implicitly converted through this
+shared library change.
+V1 destination creation uses the account-bound resolver and durable
+`CreationJournal` in [`data_types.py`](packages/fulcra-common/fulcra_common/data_types.py).
+Keep its private SQLite file across process/host changes: a pending creation
+with no response is reconciled by owned type/schema readback, never by
+repeating the POST because the next listing looks empty. New schema versions
+and destination changes require an explicit reconciled mapping. Base-only types
+omit the optional custom schema fragment (empty fragments are rejected by the
+live API). An explicit HTTP 422 permits a corrected specification, while an
+identical rejected request or an uncertain outcome is never automatically retried.
+Creation now captures a durable reservation nonce and retains a known full UUID
+from JSON or a same-origin 303 Location before later proof; never follow its
+alias redirect or substitute a different type after failed readback. Keep the
+format-1 journal’s binding provenance, reservations and receipt audit together;
+missing/conflicting evidence holds. Stop older writers before upgrading it.
+Legacy readonly inspection and writable migration rules live in the
+[shared creation boundary](packages/fulcra-common/README.md#v1-datatype-migration-boundary)
+and its [receipt regressions](packages/fulcra-common/tests/test_creation_receipts.py).
+Owned custom-type resolution, exclusion discovery and the Collect picker use
+the shared direct input-service reader, including retired types. Do not replace
+it with aggregate catalog emptiness/uniqueness: that aggregate can silently omit
+backend failures. Exact endpoint, account proof, bounds and failure rules live
+in [fulcra-common's v1 boundary](packages/fulcra-common/README.md#v1-datatype-migration-boundary).
+Collect-side v1 writers use [`CollectRecordSession`](packages/collect/fulcra_collect/v1_session.py)
+for strict Collect-only auth, captured settings/epoch checks, request-time token
+rechecks and leased progress commits. PurpleAir is the first migrated family:
+its account/epoch-bound pending outbox is reconciled before fetching new samples,
+and exact v1 readback precedes receipts/cursors. Retain legacy state for historical
+mapping and both private state journals during host cutover. The reusable
+[`V1RecordOutbox`](packages/collect/fulcra_collect/v1_outbox.py) retains immutable
+batches in the dedicated `record_outboxes` table until exact visibility. Schema
+v8 keeps this 16 MiB-per-batch store separate from 64 KiB cursor KV; workers bind
+`outbox_get`/`outbox_set` to the plugin namespace. Preserve pre-upgrade backups
+and subsequent pending payloads when rolling back to older binaries. Drain before
+fetching a new sample and never overwrite pending data. New shared and PurpleAir
+pending envelopes carry `dispatch_version=1`: an immutable scope/payload binding,
+exact issued source subset/body hash, and retained exact positive IDs. The
+[source dispatch controller](packages/fulcra-common/fulcra_common/record_delivery.py)
+checkpoints `prepared` to `issued` through the actual `before_submit` seam after
+validation/serialization. An issued missing/partial payload is UNKNOWN, never
+permission for another source POST. Later exact visibility reconciles without
+resubmission. Existing newly prepared same-ID correction behavior is retained;
+issued/legacy mismatches cannot overwrite. Positive source evidence persists
+before native repair can erase it. An issued excluded ID without that evidence
+cannot complete from absence. Legacy envelopes are preserved without adoption;
+missing evidence holds, while exact allowed rows can reconcile without POST.
+The lease covers pending read through guarded clear, including checkpoints.
+Collect source delivery requires this durable controller; no direct untracked
+source ingestion is permitted. Native repair remains a separate durability gate.
+DB version9 is a protocol marker that makes restarted version8 binaries refuse
+the upgraded state. **Stop every older daemon/worker before upgrade:** a process
+with an existing cached DB connection is not retroactively fenced. Never roll
+an older app onto versioned pending state. A consistent pre-upgrade backup and
+subsequent original pending evidence are necessary for rollback, but restoring
+that backup can erase issued evidence and permit replay. Reconcile unresolved
+source effects and establish a safe writer disposition before any downgrade;
+never strip the marker or treat a backup alone as proof replay is safe.
+Batched v1 ID/source readers use bounded matcher groups
+inside one selector (binary vector OR is unsupported). Tag creation intents
+are shared by account/name across plugins in the same private journal; a lost
+receipt requires current-account lookup before recovery. A saturated source read
+is unknown coverage, not an empty/matching-complete result. All 16 bundled media
+plugins and the retained Spotify IFTTT backfill entrypoint now use the guarded
+v1 media runtime on this branch. All fourteen standalone media import routes listed in the package guide now
+use guarded v1 Events; the standalone webhook server now shares that authority.
+The [vendored Netflix importer](packages/netflix-skill/README.md) now uses the
+installed canonical console/script adapter with a versioned shared capability
+check before auth/source. Skill-folder-only copies support stdlib check-only;
+no PEP 723 live upload/install or annotation fallback remains. Its `cli-netflix`
+authority uses independent CLI auth, optional Event pin and the shared Watched
+spec/journal; account/profile/pin/spec changes hold pending. All original targets
+are proved before recovery, which precedes source access. Whole new input gets
+local/schema/current-primary conflict proof before serial <=500-record chunks;
+only the in-flight chunk is durable. Exact complete-group current counts remain
+separate from recovery/exclusions, and `--no-verify` is refused. Slim source IDs
+lack profile identity and cannot prove arbitrary overlap correspondence. Personal
+import finishes independently of optional legacy all-annotation sharing; native
+share propagation and historical conversion are UNKNOWN. See the
+[Netflix agent guide](packages/netflix-skill/skills/fulcra-netflix/SKILL.md).
+The released app has not switched. The guarded media runtime
+requires explicit v1 mappings for existing annotation selections, preserves user
+tags/provenance/declared enrichment on source corrections, and refuses primary
+identity collisions. Preview does not create destinations/tags or drain queues.
+Daemon media cursors live in account/epoch/raw-settings-scoped KV envelopes; legacy
+watermarks remain untouched and cannot prove v1 delivery. The private
+`v1-media-twins.sqlite` stores account/destination-scoped high-confidence record
+IDs, and each hint needs matching current-account record readback before an
+`auto-discard` skip. The old global JSON cache cannot authorize a v1 skip.
+Retain the new index during host cutover. Threaded webhook requests serialize
+on their shared writer/outbox; preview reports `would_post`, and only the
+outbox visibility commit emits a v1 receipt. The webhook proves its owned
+destination before listening, reports typed destination/verified/preview counts,
+and closes the server on loop exit. Its bearer credential is optional only for
+loopback binding. The daemon rereads configuration each tick and retires service
+workers on epoch/raw-settings revision changes; replacement waits for confirmed
+exit, with an owned-group forced stop after a 10-second monotonic grace checked
+on ticks. Unknown configuration/account transitions pause new scheduled work and
+retire services. Host cutover and real source QA gates remain. See the
+[media contract](packages/media-helpers/README.md#v1-migration-boundary-development-branch)
+and [service policy](packages/collect/README.md#what-it-does).
+The [standalone media configuration and adapter](packages/media-helpers/README.md#standalone-v1-adapter-development-branch)
+now route those fourteen commands through fixed `cli-media` profile-local
+authority with separate CLI/env authentication, never Collect sign-in fallback. Bootstrap atomically saves
+`cli-media-v1.json`; every retained legacy category needs an explicit Event/UUID
+mapping before metadata creation. Saved account proof precedes original pending
+recovery, which precedes configuration changes and migrated source resolution,
+discovery and parsing. Preserve creation receipts, pending evidence and legacy selections on every hold; reset is
+retired for every flag combination. Status is cached read-only inspection of `v1`,
+`retained_legacy` and `pending`, exposing retained payload size/digest only. UNKNOWN
+is never all clear. Detached preview cannot drain pending work or prove caught-up
+coverage. Standalone webhook routing now uses the owner described below; this intermediate source
+branch is not rollout. See the [configuration tests](packages/media-helpers/tests/test_media_config.py)
+and [adapter tests](packages/media-helpers/tests/test_standalone_v1.py).
+The five [standalone v1 poll commands](packages/media-helpers/README.md#standalone-v1-polling-development-branch)
+now select strict scans and private scoped cursors. The five daemon polls have
+a [separate strict progress contract](packages/media-helpers/README.md#daemon-v1-polling-development-branch):
+fresh v2 scopes never adopt annotation or pre-strict v1 cursors, and final quiet
+credential checks precede a second authority guard and exact KV readback.
+Standalone recovery precedes bounded source-credential reads. Current verified
+delivery precedes cursor commit; configured caps, malformed skips and source
+changes withhold advancement. Legacy watermarks never seed v1 cursors. Public
+envelopes append a closed `cursor` state/reason or null; withheld success is not
+caught-up proof. The [observed import progress seam](packages/media-helpers/README.md#observed-import-progress-development-branch)
+lets all fourteen migrated CLI routes retain known counts after cleanup.
+It is a last serialized
+invocation's lower-bound snapshot, never a receipt or authority; shared concurrent
+handlers cannot use it for caller attribution. A helper test is not evidence
+that a route or installed app switched.
+The [standalone CSV contract](packages/csv-importer/README.md) now uses explicit
+owned full Event/Metric targets, strict CLI parsing and a dedicated `cli-csv`
+namespace. Recover original pending rows before opening new input; preview is
+local and does not recover. Preserve primary-source identity and compatible
+cloud enrichment; Metric units are exact destination metadata. Bootstrap's
+same-name durable intent cannot be bypassed by changing parameters. Known
+complete-group progress survives later failures; UNKNOWN is not empty. Legacy
+export/admin remain separate, and old client record methods refuse before auth.
+Pure parser/media consumers retain defaults. The [CSV skill](packages/csv-importer/skills/fulcra-csv/SKILL.md)
+describes setup/recovery probes; helper tests do not establish installed rollout.
+The [labs importer](packages/labs/README.md) now uses actual v1 Metric records
+through dedicated `cli-labs` authority, with existing clinical validation and
+source hashes unchanged. Selected retained legacy markers require explicit
+`--marker-target MARKER=Metric/UUID` pins. Recover original pending before new
+JSON/PDF access; prove all actual pending targets from private exact marker/spec
+witnesses, then retain per-group kernel recovery validation. Whole new batches
+get full schema and existing-primary conflict proof before staging. Optional
+record `unit` is omitted; exact immutable Metric metadata owns canonical unit,
+while nullable `raw_unit` preserves source spelling. Counts are complete-group
+lower bounds; current completed evidence and recovery remain separate, and
+unsupported marker attribution is UNKNOWN. Cached status is local evidence,
+never remote series counts. Original legacy cache/PDFs remain; old write seams
+refuse. The [labs skill](skills/fulcra-lab-results/SKILL.md) teaches stateful
+recovery and unchanged two-pass/operator-review gates. Source tests do not prove
+installed app acceptance, real reports or historical conversion.
+The [standalone webhook contract](packages/media-helpers/README.md#standalone-webhook-development-branch)
+uses `fulcra-media webhook --port 8766 --json`, preserving default 8765 and explicit
+selection without fallback. Startup recovers pending work and prepares all three
+categories before bind. One private thread opens, uses and closes CLI authority;
+profile leases last through cleanup. HTTP handlers submit defensive snapshots and
+receive their own settled results. Closing rejects new jobs, drains accepted work
+and joins cleanup; late parsers cannot access released authority. Health is cached
+liveness, not fresh ownership proof. Ready follows signal installation and the
+real-loop health handshake; successful shutdown follows cleanup. These actual
+synthetic HTTP/lifecycle tests do not establish an installed receiver or sender
+reachability. Keep the daemon's service lifecycle separate.
+The [unbound media writer retirement](packages/media-helpers/README.md#retired-legacy-media-writers-development-branch)
+removes the obsolete annotation/wrapped/typed pipeline and orphan CLI helper.
+Four public writer seams refuse before auth/input/empty/cache/preview effects;
+construction, read/admin and tag compatibility remain. Keep the captured Collect
+bridge and native namespace classification; do not restore legacy record fallback.
+The [standalone Trakt policy contract](packages/media-helpers/README.md#standalone-trakt-policy-development-branch)
+uses read-only prompt inspection and immutable exact offered pairs intersected
+with fresh shared proof. Existing hints require owned readback/exclusions;
+excluded current-input highs cannot justify skips. Choices never mutate saved
+authority. Explicit ask is rejected in JSON/non-TTY before source; omitted twins
+keep and warn only for candidates there. Post-cluster totals include policy skips;
+Trakt has no cursor. Default `None` preserves Collect config/default precedence.
+The actual Trakt CLI and ordinary Keychain-backed daemon worker now require a
+[complete bounded source scan](packages/media-helpers/README.md#trakt-history-completeness-development-branch)
+before current-input delivery. All four pagination headers, effective clamped
+limit, exact page cardinality and unique integer history IDs must agree; missing
+evidence fails instead of implying one page or empty history. One private
+cooperative budget spans auth and the single keychain 401 restart, with rotated
+tokens persisted before a late deadline refusal. Other five poll interfaces and
+Trakt source IDs/normalization/cluster/twin policies remain. Original pending
+recovery may already precede a failed current source. This proves self-consistent
+returned pagination, not an immutable account snapshot. The
+[Trakt source owner](packages/media-helpers/README.md#trakt-source-ownership-development-branch)
+adds exact local credential/consent generations, one shared OS-user consumed-grant
+journal and recoverable secret receipts. Ordinary workers never implicitly select
+the legacy CLI file on missing/partial/UNKNOWN/disconnected Keychain state; a
+direct wrapped-plugin file fixture is not worker selection proof. Preserve the
+source journal/receipt lineage across profiles and never remove claims to retry.
+Manual pair edits credit only verified exact supplied values, not failed intent;
+refresh/recovery binds only its own exact consent-preserving successor. Explicit
+Keychain authorization runs outside short control locks; bounded quiet mutation
+then rechecks its still-current edit/profile. Stale OAuth results cannot overwrite
+newer setup. The wrapper registers current
+source guards only after original recovery and retains them through final cursor
+handling, with local-only checks at nested mutation boundaries. Background Trakt
+receipt/mirror writes use the [quiet child](packages/collect/README.md#credentials),
+not generic interactive setters. The [current provider-identity contract](packages/media-helpers/README.md#trakt-provider-identity-development-branch)
+adds exact selected-credential probes before/after history and a terminal proof
+before normalization, policy, writes and progress. A selection-keyed durable pin
+survives credential/profile changes; a mismatch stays held without automatic reset.
+Source journal version 2 preserves valid v1 entries on upgrade; older v1 readers
+fail closed. Fence older participating writers before upgrade and preserve the
+whole journal/receipts. First pinning gives no historical attribution. Installed/
+signed access, live-provider acceptance and old-writer/copied-grant retirement
+across hosts remain gates. No hard interruption of an in-flight grant is promised.
+Migrated producers expose `Plugin.record_data_types(settings)` and destination
+steps name `SetupStep.record_slot` (single-slot producers may omit it). Their
+authenticated setup uses the owned v1 catalog/schema and saves full IDs in
+`v1_destination_ids`; legacy annotation binding routes reject these producers.
+Rebinding checks pending uploads both before resolution and under the account/
+settings commit fence, rotates the source epoch and retains old annotation state.
+A producer with a custom pending format must provide `Plugin.record_pending`;
+otherwise setup checks the shared `v1_pending_records` outbox. Raw saved-settings
+fingerprints fence pending batches even across manual TOML edits. The picker
+shows one latest entry within 30 days, not complete history. See the
+[setup contract](packages/collect/README.md#v1-writer-migration-development-branch).
+Same-account silent token refresh is accepted with request-time auth replacement;
+account/epoch changes cancel work and cross-origin redirects are rejected. See its
+[delivery contract](packages/purpleair/README.md#limits-and-storage).
+`RunContext.fulcra_token()` is now a compatibility alias for Collect-only
+`collect_token()`, including file-producing plugins: neither adopts environment
+or default CLI credentials. Silent renewal checks the existing/candidate/final
+keychain principal and fresh expiry, holds an account-shared lease through its
+final write and yields to a newer interactive sign-in. Missing identity or a
+durable account-transition gate cannot be repaired by automatic CLI sign-in.
+401 retries pass their original request token to prevent an old operation from
+retrying under a newly selected account. Gmail/Reminders/Todoist reject missing
+Collect auth before source/writer construction. The [auth contract](packages/collect/README.md#v1-writer-migration-development-branch)
+is shared by these plugin paths; standalone CLI authentication remains separate.
 
 [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) is the field guide to the whole
 platform surface (auth, files, annotations, queries, MCP), organized by agent
@@ -1896,39 +2202,942 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   `DataRecordV1` legacy path; the unpublished `/batch`) are still first-class
   when you need them — the primitives doc covers all three and the custom-type
   `sources` caveat.
-- **Records are still append-only. `delete` is a tombstone, not an erasure** —
+- **`delete` is a tombstone, not an erasure** —
   the CLI implements it by recording a `DeletedRecord` through the same ingest
   path, and there is no record-delete lib method. There is no hard delete and no
-  update/replace verb, so corrections are modeled as new records, not edits:
-  write a superseding record, or delete-then-re-record. What 0.1.37 changed is
-  availability, not semantics.
+  dedicated update/replace verb. True-v1 Event same-ID timestamp/content updates,
+  Metric same-ID value updates, Event/Metric deletion visibility and Event
+  post-delete replay revival were separately verified
+  2026-10-23: see the [mutation contract](FULCRA-PRIMITIVES.md#true-v1-custom-record-mutations).
+  Replays can revive deleted records, and native tombstones are not queryable;
+  keep an independent durable disposition/audit and check it before replay.
+  The shared [`V1DataClient`](packages/fulcra-common/fulcra_common/v1.py) requires
+  explicit canonical record UUIDs and offers native `delete_records` with a
+  durably captured action UUID; its receipt is submission evidence only. Prove
+  replay exclusions and target absence before claiming deletion. Media copied-
+  record source aliases count as existing data; opaque source IDs alone do not
+  prove a different-importer fingerprint twin.
+  [`RecordExclusions`](packages/fulcra-common/fulcra_common/record_exclusions.py)
+  adds an opt-in owned Event policy keyed by full target type/UUID. It verifies
+  policy visibility, retains a visible prior exclusion and fails closed on
+  malformed/unknown reads. No restore or cross-host write lock is implied;
+  callers keep durable action audits and check policy before/after source writes.
+  Media/PurpleAir now check this policy before duplicate shortcuts and around
+  queued writes on the development branch. Observed revivals need native
+  deletion and absence proof before progress; excluded rows never count as
+  posted/verified or seed media twin hints. Media chunk planning through
+  delivery shares the local per-account record lease across processes and
+  threads. Browser hosts are outside that lock; historical replay floors,
+  controlled cutoff, other writers and durable Undo actions remain rollout gates.
+  The catalog does not retain our datatype creation metadata key/schema fragment.
+  Preserve the private account/key creation journal through host migration;
+  unbound control lookup discovers owned served schemas (64 candidates/10s scan,
+  up to 8s per schema HTTP request). A missing bound control, unknown schema or
+  ambiguous match fails closed. Setup proves/binds the control before saving a
+  source destination; previews cannot create or repair control state.
+  [`ActionJournal`](packages/collect/fulcra_collect/record_actions.py) adds opt-in
+  private, immutable interactive intents plus transition evidence. Global action
+  IDs cannot be reassigned to another account/epoch/request; submitted is not
+  verified. Account-only old-epoch inspection and bounded, filter-bound recovery
+  pages grant no mutation authority; unfiltered reads fail on unknown statuses.
+  [`QuickRecordActor`](packages/collect/fulcra_collect/quick_record_actor.py)
+  captures dispatch intent after schema validation, never resubmits an uncertain
+  create, and requires a verified original for a new native Undo action with
+  permanent exclusion and absence proof. An uncertain original remains submitted.
+  Shared v1 record/native-tombstone POSTs reject redirects to prevent automatic
+  body resubmission after a 307/308 response.
+  [`QuickRecordSession`](packages/collect/fulcra_collect/quick_record_v1.py)
+  registers a separate interactive epoch and requires the captured account/epoch
+  without enabling a plugin. Registered contexts use shared leases; initial
+  registration releases SH before acquiring EX and re-proves identity. Generic
+  setup ingestion stays gated. The opt-in `quick_record_v2` daemon envelope and
+  authenticated `/api/quick-record/v2` expose the
+  [protocol2 contract](packages/collect/README.md#quick-record-protocol-2-development):
+  captured scope/action identity, owned per-track Event bindings, account-scoped
+  revisioned pin diffs, durable first timer stops, native Undo, paginated action /
+  timer discovery, and snapshot-based stop reconciliation after a crash. Receipt
+  failures under valid authority return saved pending metadata, not auth refresh.
+  Legacy favorites remain unadopted and untouched, including during legacy
+  definition metadata deletion. Preserve scoped pins and v1 destination bindings
+  too; [definition management](packages/collect/README.md#quick-record-protocol-2-development)
+  is separate from native record Undo. The
+  [native client workflow](packages/menubar/README.md#quick-record-client-development)
+  captures immutable bounded requests before socket IO in a separate private
+  client journal. Timeout/restart retries keep the original body and scope;
+  response proofs must match the original action/timer and first stop time.
+  One global timer-to-stop binding preserves the first local stop across later
+  clicks; pending replies cannot change an observed record ID or datatype.
+  Protocol2 socket replies are bounded at 8 MiB; requests and legacy replies stay
+  at 64 KiB. Development native popover/preferences and web favorites now use
+  protocol2 by default; released 0.1.4 remains legacy until reviewed publication.
+  Unversioned commands/old authenticated HTTP routes return refresh-required
+  before Collect auth or effects; their legacy serializers/sentinel Undo are
+  removed. Native checks validate saved/observed action and timer proofs; local
+  saved intents reuse their exact request. Bounded pending-action pages discover
+  work beyond recent 20, including old-epoch rows that grant no replay authority.
+  Drafts survive rerenders within their account/epoch/choice/timer scope; only a
+  durably captured row clears. Busy refresh invalidates queued stale-account
+  results and schedules a new handshake. Pin edits are additive CAS diffs from
+  one complete scoped choice/revision view; logical/scope failures never count
+  as success. Cached Preferences refreshes on reopen and Annotations selection,
+  with deferred fresh reads after busy loads. Hidden and legacy pins stay intact. Client schema1 fails on
+  incomplete/unversioned/future state instead of healing empty.
+  New GUI imports stay lazy. The [refresh host](packages/menubar/fulcra_menubar/_refresh_view.py)
+  uses a Python AppKit subclass because plain NSView cannot carry its callback.
+  Dynamic native rows must call [detach_view](packages/menubar/fulcra_menubar/_objc_targets.py)
+  before removal, releasing only our targets so retained callbacks/snapshots do
+  not grow per rerender. Explicit old-epoch reauthorization and packaged QA
+  remain release gates.
+  Tag names are limited to 30 characters on creation. Collect reuses saved owned
+  tag UUIDs through renames; new long/slashed or dot-segment source labels get stable short tag
+  names without shortening record enrichment. Unknown creation remains fenced.
+  Media validates raw declared fields before notes/metadata, reuses a codec
+  validator, and compares UTC instants for durations, order, windows and receipts
+  across DST changes. Full media nullable/nested/Unicode/multiple-tag parity and
+  same-ID Metric timestamp updates are live-verified; see the [mutation evidence](FULCRA-PRIMITIVES.md#true-v1-custom-record-mutations).
+  [`snapshot_json`](packages/fulcra-common/fulcra_common/json_values.py) rejects
+  non-string object keys at every depth, invalid Unicode and non-finite values
+  before v1 metadata, action/outbox storage or transport. Do not rely on a bare
+  JSON round-trip: Python can stringify nested keys and silently merge them.
+  Valid zero/false/null values and Unicode content remain unchanged.
 - **Projection is the sole timeline-annotation writer.** Use the heartbeat
   projection fold (`coord-engine annotate resolution <team> transitions`). Its
   deterministic ids converge because typed ingest upserts matching explicit
   ids (live-verified 2026-07-14). The retired first-generation writer minted
   different ids and was removed after causing duplicate-record proliferation.
 
+## Attention v1 contract (development)
+
+Attention's [opt-in v1 contract and encoders](packages/attention/README.md#v1-contract-development)
+have shared Python/TypeScript/Swift synthetic vectors; installed/default browser
+senders still use legacy transport. Preserve the existing v3 primary source and
+use the common UUID5 full-destination mapping. New URL inputs are already-scrubbed
+JS capture keys within the linked shared boundary; hold unsupported inputs instead
+of applying a second native URL normalization. New capture payloads retain
+milliseconds; history retains its stored precision. Reject malformed or nonzero
+submillisecond bounds, not silent rounding. The schema permits historical null
+device identity, but new contexts require an installation slug. The initial
+owned spec fingerprint is pinned; semantic changes need a new version. Pure
+codec checks grant no account/destination/replay authority. Complete the linked
+owned-resolver, immutable-queue, readback/exclusion, native-protocol, active-visit
+and installed-state transition gates before changing default browser writers.
+
+Attention's opt-in [browser journal](packages/attention/chrome/src/relayless/v1Journal.ts)
+uses IndexedDB compare-and-set for account/generation transitions and publishes
+Event creation intents durably before a future POST. Unknown creation remains
+pending across restart; never reset it to create again. Reconcile the original
+intent under fresh same-account authority. Journal state is not API-principal
+proof or upload permission. Existing auth/default senders are not wired to it;
+actual browser persistence and Safari sharing remain rollout gates.
+
+Its IndexedDB v2 upgrade retains the v1 gate, generation history and Event
+intents, and adds account/label tag intents with unique account/create-name
+reservation. [Tag resolution](packages/attention/chrome/src/relayless/v1Tags.ts)
+uses the same bounded alias naming as Python, records intent before POST and
+explicitly refuses `.` and `..` labels before lookup path normalization. It
+records a returned UUID as submitted before name readback. A submitted UUID
+cannot be substituted; an unknown attempt never authorizes another create.
+Only a target lookup's positive 404 permits creation: identity-endpoint failures
+carry a separate HTTP error code. Resolved tag UUIDs survive cloud renames as
+historical ownership bindings, not live-tag or upload proof. Name collisions,
+unreadable state, unsupported strict durability and full journals refuse; never
+evict pending work. Defaults remain unchanged. See the
+[synthetic migration/race tests](packages/attention/chrome/tests/relayless/v1Tags.test.ts).
+
+The opt-in [v1 HTTP boundary](packages/attention/chrome/src/relayless/v1Http.ts)
+captures one account/generation and request JSON before awaiting. A fresh token's
+candidate UUID must agree with that gate AND `/user/v1alpha1/info`; JWT/display
+claims alone cannot authorize a request. Every provider/body await is followed
+by current token/gate checks; a late result cannot acknowledge a changed scope.
+Same-account token renewal is allowed, while this helper performs no credential
+writes or refresh. Its caller must publish generation changes before changing
+capture account. Only allowlisted production routes, no redirects/cookies,
+bounded fetch/body waits (abort timer plus absolute monotonic checks) and finite
+Unicode JSON are accepted; mutations are
+never blindly retried. Disabled capture cannot ingest. Browser fetch supplies
+DECODED bytes: its retained-body cap is **not** a raw-wire/decompression bound.
+This transport grants no schema/creation/queue/exclusion proof and is not called
+by default senders yet. Keep account/schema/durable-delivery rollout gates.
+The opt-in [browser owned-type inventory](packages/attention/chrome/src/relayless/v1OwnedTypes.ts)
+uses the direct caller-owned input endpoint and rejects a partial, redirected,
+paged or malformed whole list. Identity/proof fetches request no browser cache;
+wrong-scope 404s cannot become tag-creation permission. Frozen inventory entries
+are not schema proof or destination bindings. The shared
+[authority contract](packages/fulcra-common/README.md#v1-datatype-migration-boundary)
+and [browser tests](packages/attention/chrome/tests/relayless/v1OwnedTypes.test.ts)
+describe the bounds; actual browser auth/CORS/upgrade gates stay open.
+The pure [Attention schema proof](packages/attention/chrome/src/relayless/v1AttentionSpec.ts)
+requires the closed supported Event/Attention schema family, rejecting unknown
+assertions/references instead of assuming a matching field subset is sufficient.
+It freezes the parsed schema before hashing and retains the exact serialized
+text whose UTF-8 digest is checked. Keep that text with its digest; do not call
+it raw-wire proof or assume arbitrary JSON serializers reproduce it. The
+[development contract](packages/attention/README.md#v1-contract-development)
+defines supported shapes/bounds. This pure check grants no owned binding or
+upload authority; defaults remain unchanged.
+The opt-in [Attention destination binder](packages/attention/chrome/src/relayless/v1Destination.ts)
+requires fresh direct ownership, BOTH authoritative input/served-schema proof,
+and a final unchanged-input/active-type check before its journal commit. It is
+explicit setup with local effects, not a preview. Keep transport and effects on
+the identical journal handle per operation. Pins survive renames; unknown type
+creation never authorizes another POST, and known returned UUIDs persist as
+submitted before further network work. Older binaries that cannot read that
+state must hold it, never clear it. Exact proof/known immutable base-transform
+handling and [tests](packages/attention/chrome/tests/relayless/v1Destination.test.ts)
+live in the [development contract](packages/attention/README.md#v1-contract-development).
+No default UI/sender, capture, queue or exclusion authority is enabled by it.
+
+The Attention binder also exposes `verifyAttentionV1`: read-only fresh proof of
+an already resolved original local destination. It checks complete owned input,
+closed input/served schemas, unchanged final input, then the exact original
+reservation generation via `requireCreation`; missing/submitted/pending or changed
+intent never heals. Verification returns the original reservation generation;
+setup's existing result shape stays compatible with queued captures. First
+binding still requires a unique canonical candidate: a submitted UUID receipt
+alone does not disambiguate siblings, while explicit/prior-resolved pins retain
+rename semantics. Setup and verification share one <=10s monotonic/timer budget,
+<=8s/remaining HTTP reads and a terminal cancellation flag. Setup passes an
+AbortSignal through creation transactions: check resumed callbacks and abort an
+active uncommitted transaction on cancellation; detach listeners on settlement.
+A verified receipt already returned by HTTP may still be retained historically
+after outer expiry/account change. A response rejected inside HTTP remains
+UNKNOWN; do not claim its UUID was retained. The
+[binder tests](packages/attention/chrome/tests/relayless/v1Destination.test.ts)
+cover ambiguity, readonly tuples, same-account gate rotation, cancellation after
+actual add/put and returned-receipt retention. This grants no delivery authority.
+
+The opt-in [Attention outbox](packages/attention/chrome/src/relayless/v1Outbox.ts)
+is local pending capture only. Its IndexedDB v3 upgrade retains v1/v2 stores.
+Capture freezes account/generation, full destination/specification, both schema
+texts/digests, installation, original event, primary, flat record/tags and exact
+serialized payload before strict commit. The transaction requires the enabled
+current gate and resolved local datatype/tag bindings; every read reproves the
+stored envelope and rechecks the gate after hashing. Same identity with different
+content or generation is held, never overwritten or implicitly rebound. The
+5,000-entry/32 MiB aggregate envelope limit and quota failures reject without
+eviction. No POST/settlement/deletion API, legacy adoption, active-visit checkpoint
+or default wiring is supplied. Digests are local integrity/reproduction evidence,
+not provider receipts. Bounds and
+[synthetic queue tests](packages/attention/chrome/tests/relayless/v1Outbox.test.ts)
+live with the [development contract](packages/attention/README.md#v1-contract-development);
+actual browser persistence, quota, upgrade and Safari sharing remain gates.
+
+The network-free [browser mutation journal](packages/attention/chrome/src/relayless/v1Journal.ts)
+adds atomic IndexedDB v4 ownership for one pending logical operation per account.
+Upgrade preserves v1/v2/v3 data and rejects malformed old structures. Retain both
+history and the terminal current pointer: their count/byte frontier detects lost
+metadata; expiry never releases uncertain work. Current/requested rows receive digest reproof; older unrequested history is
+covered by count/frontier checks, not a fresh content audit. Request hashes bind original
+account, generation, action, operation and exact request bytes. Prepared/issued
+work cannot move to a new consent generation. Issue is a single-winner CAS;
+reopening an issued intent grants no second issue. Verification stores immutable
+**caller evidence**, not independently checked remote truth. It cannot authorize
+HTTP, native deletion or queue removal. Future actors need issued-once phases for
+each physical effect under continuous ownership and exact, atomically bound queue
+settlement. Legacy requests and all proofs are limited to64 KiB; phased request limits
+are described below. History permits100,000 total actions and32 MiB retained
+request/proof bytes per account, with proof headroom reserved beforehand.
+Capacity/quota failures preserve all work; there is no eviction/reset/release API.
+[Ownership tests](packages/attention/chrome/tests/relayless/v1Mutations.test.ts)
+cover upgrades, corruption, deadlines, races and restart. The
+[development contract](packages/attention/README.md#v1-contract-development)
+records the remaining actor, native browser and default rollout gates.
+
+The same [journal](packages/attention/chrome/src/relayless/v1Journal.ts) now uses
+an IndexedDB v5 version fence while preserving existing v4 payload rows/pointers
+byte for byte. Legacy intent format1 stays network-free and cannot acquire
+phases implicitly. New closed format2 captures a fixed complete manifest before
+reservation: `deliver` then `repair`, or `policy` then `delete`. Old manifest1
+retains its64 KiB cap; manifest2 bounds and references are described below.
+Inline JSONL has at most32 records per body. Phase CAS has
+one issue winner; prior phases must be proven before later phases advance.
+Immutable phase caller-proof hashes bind original request, role/index and body.
+Separate final logical proof retains the owner until every phase is verified.
+Reserve headroom for both phase proofs plus final proof, count actual bytes once,
+and deep-detach/freeze nested states. Explicit preexisting/not-needed evidence
+avoids inventing a dispatch. This is storage only: phase plans receive finite
+JSON/route shape checks, not served-schema, policy or provider validation. A
+typed HTTP transport itself wins `issueGuardedEffect` immediately before its one
+fetch, categorically refuses legacy rows, and holds uncertain POSTs without reissue.
+[Phase tests](packages/attention/chrome/tests/relayless/v1Effects.test.ts) cover
+legacy byte preservation, phase order, corruption, asynchronous input races,
+capacity headroom, quota and deadlines. No sender/default/queue removal follows.
+All mutation APIs accept optional cancellation after the absolute deadline;
+active uncommitted writes abort, while a committed issued phase never resets.
+The guarded CAS requires exact original resolved creation/tag tuples retained
+before reservation in `details.dispatchAuthority`, then rechecks those tuples
+inside the same strict gate/owner/history/body transaction. A fresh replacement
+cannot substitute for original authority. Exact code-unit sorting preserves
+Unicode labels and allows property/array reordering. Original reservation
+generations can predate the action. Legacy guardless requests refuse guarded
+issue; plain `issueEffect` is storage-only compatibility and forbidden to HTTP
+actors. `verifyGuardedEffect` similarly checks the exact original tuples in the
+same transaction before phase-proof publication or reuse, and requires the
+original nonterminal logical owner still held. Terminal old actions refuse
+guarded reuse; plain `verifyEffect` remains storage-only historical compatibility.
+See the [proof tests](packages/attention/chrome/tests/relayless/v1GuardedProof.test.ts).
+These remain caller evidence and local predicates, never provider truth or
+queue settlement. Typed submission adds fresh schema/type/tag proof;
+replay policy and sufficient action guards remain actor duties. The64 KiB details cap can hold
+large guard sets even when the queued record fits; full admitted-row delivery
+coverage remains a rollout gate. See the
+[dispatch tests](packages/attention/chrome/tests/relayless/v1DispatchGuard.test.ts).
+
+The opt-in [action actor](packages/attention/chrome/src/relayless/v1ActionActor.ts)
+reconciles only an original retained delivery/exclusion intent. Fresh owned
+target/control/tag/native-schema checks bracket exact source and canonical policy
+reads, including zero-POST reuse. Closed immutable phase evidence binds original
+account/generation/action/body/authority and schema hashes. Issued source absence
+stays UNKNOWN without another application submission; a later policy permits
+prepared repair only after positive original source evidence. A consumed
+`not-needed` repair cannot become a deletion, and native revival holds. Results
+are frozen as-of-read observations: success retains the owner and queue; UNKNOWN
+asserts no current ownership. Default integration is still pending.
+`V1Http.withReadCancellation` preserves the original transport configuration and
+all inherited cancellation signals for nested reads. The actor has one 30-second
+maximum budget; repeated authority GETs can exhaust it on a slow service and need
+real-service acceptance before rollout. One guarded CAS/application `fetch` is
+**not** a one-wire-attempt guarantee: isolated Chrome repeated an HTTP POST after
+an empty response without a second application `fetch`. Never infer backend job
+quiescence from the local phase, receipt or an absence read. See the
+[actor tests](packages/attention/chrome/tests/relayless/v1ActionActor.test.ts).
+
+The opt-in [decision authority contract](packages/attention/README.md#decision-authority)
+now shares one closed target/control/schema/tag/native inventory pair per
+snapshot, with fresh A → exact policy/source → fresh B observations. Opaque
+capabilities remain bound to the exact journal/HTTP root, bearer, original
+request/dispatch and cancellation/deadline. Public helpers stay independently
+safe. Standalone callers must publish a new gate generation before every bearer
+replacement. The source-only [Chrome worker auth owner](packages/attention/README.md#worker-auth-owner-development)
+adds a bounded same-account renewal exception with exact predecessor/successor,
+retained response, fresh API principal proof and exclusive owned lifetimes.
+Unannounced token-only replacement remains unsupported. In `v1-held` both drains
+stay disabled; versioned worker commands own settings/auth, with noncredential
+settings atomically stored in broker IndexedDB. Read-only page settings commands
+wait for local worker initialization without online recovery or direct page
+authority creation; controls wait for settings and surface failed reads as held.
+The canonical contract also requires the separate once-only initialization
+witness: missing database/witness stays UNKNOWN, without reimport/reset. Local
+revocation/display cannot wait on online recovery. Pause retains selected auth
+with action admission closed; resume uses fresh consent/generation and sign-out
+clears selection. Legacy state stays original evidence. Source-only
+[held capture ingress](packages/attention/README.md#held-capture-ingress-development)
+retains actual visits/backfill with strict atomic serialized-row accounting and
+no eviction. Null positive descriptors keep actual input unattributed; durable
+local evidence is never an uploaded count. Preserve category privacy, original
+scrubbed keys, restart/scope gaps and legacy old/new observations; missing input
+or unreadable accounting stays UNKNOWN. Completed setup publication, actual
+draining, installed sender fencing and Safari native integration remain gates.
+The guarded issue CAS stays the last authority await before application fetch;
+no cached proof bypasses journal predicates. Actual isolated synthetic Chrome
+checks are separate from provider latency, installed auth and default activation.
+
+The source-only [explicit browser protection command](packages/attention/README.md#explicit-protection-setup-source)
+installs the concrete fixed DNR policy only on null-payload `protection-setup`
+under an already admitted worker-owned lease. Do not install on boot, start
+online admission or supply a protector/ready flag from a page. Preserve original
+state/credential/gate and lifetime checks, including a synchronous cancellation
+check immediately before native update. A timed-out/revoked native promise retains
+its installer reservation until actual settlement; effects remain UNKNOWN and
+must not trigger compensating cleanup. Its as-of-read result leaves capture and
+drains held. Task 4 permits source preparation; actual native procedure, original
+C0/browser obligations, real account/destination and Safari gates remain separate.
+
+The inert [browser candidate presentation adapter](packages/attention/README.md#candidate-presentation-preparation)
+can display bounded, strictly shaped full Event ID/name candidates through the
+Wizard's versioned page seam. Account matching is presentation scoping only.
+The actual worker still reports `SETUP_HELD`; no protected production listing,
+selection/setup write, descriptor publication or drain activation is added.
+Candidates have no default choice and late/unmounted results are discarded.
+Preserve Task 4/C0/native sequencing, installed evidence and Safari gates; synthetic
+message/Chrome/IndexedDB tests do not certify production listing. Shared Chrome
+test setup denies global fetch before imports and each case, reestablishing it
+after global restoration while permitting later synthetic fixture overrides.
+This is a JavaScript fetch-seam guard, not an OS/socket/native-browser sandbox;
+follow the linked fixture-reset limits. Candidate labels, IDs and raw response
+errors must not enter logs.
+
+The unused [bounded local evidence APIs](packages/attention/README.md#bounded-local-evidence-development)
+keep read cancellation separate from writer completion and use noncreating exact-version
+handles with shared monotonic/record/byte budgets. Raw capture records and original
+owner snapshots grant no setup, origin or action authority. Preserve private credentials,
+full original-input validation and strict writer predicates; native QA and later
+activation remain gates.
+
+`settleV1Action` adds opt-in atomic settlement with one maximum30-second budget
+from history through actual actor and local commit. A private observation
+capability binds fresh evidence to the exact journal and original budget. Its
+strict transaction rechecks original authority/generations/history/phase proofs
+and exact referenced queue bytes, then commits terminal receipt/pointer and
+removes only that original row together. Inline exclusion performs zero queue
+writes; inline delivery holds. Historical receipt lookup precedes body/provider
+access: `already-settled` leaves newer owners/requeued same-ID rows untouched and
+asserts no current provider freshness. Lost completion is UNKNOWN with
+`localCommit: unknown`, not a promise all local data remains. Precommit aborts
+roll back; confirmed commit survives late cancellation. See the
+[settlement tests](packages/attention/chrome/tests/relayless/v1ActionSettlement.test.ts).
+Default draining, bounded terminal archival and installed-browser acceptance
+remain gates. Chrome `npm test`/watch use two workers to prevent measured host
+oversubscription from exhausting operation deadlines; tests retain their limits.
+
+New phase manifest2 uses a256 KiB total request/128 KiB inline-body cap; legacy
+logical requests and old phase manifest1 remain64 KiB, with all proofs64 KiB.
+`reserveReferencedMutation` binds exactly one original Attention outbox row in
+phase0 (`deliver`), keeping repair inline. Account/generation/full type/record
+physical key and envelope hash/bytes are distinct from exact transmitted UTF8
+JSONL hash/bytes. The existing4 MiB queue-envelope limit bounds its body without
+duplicating it in operation history. The [body helper](packages/attention/chrome/src/relayless/v1EffectBodies.ts)
+and outbox reuse one pure [queue codec](packages/attention/chrome/src/relayless/v1QueueCodec.ts)
+for complete original scope/schema/source/record reproduction. Outer metadata
+alone cannot relabel a hashed payload to a new account/generation. Reference
+rows share the owner/gate transaction snapshot, reproof outside IDB, then exact
+final state recheck; missing/replaced unfinished bodies hold. Only fully verified
+logical/phase proofs permit terminal metadata reads without the old body;
+`readEffect` refuses terminal operations. Missing queue data is never itself a
+settlement receipt. A later sameUUID/newpayload cannot acknowledge an old body.
+New reserve APIs emit manifest2; recover manifest1 through original stored reads
+and phase CAS, never reserialize it or change its nonce. The
+[reference tests](packages/attention/chrome/tests/relayless/v1EffectReferences.test.ts)
+cover admitted large events, large policy encoding, restart, both scope relabels,
+body replacement/loss, version bounds, quota and deadlines. Default sender
+integration and bounded terminal archival remain integration gates.
+
+The opt-in [typed JSONL receipt transport](packages/attention/chrome/src/relayless/v1Http.ts)
+seals generic `json()` ingest and itself materializes original body, fresh-proves
+owned target/control schemas and original bindings, and requires live UUID tags
+with matching owner metadata. Missing tag ownership holds; UUID liveness alone
+is insufficient. [Typed preflight](packages/attention/chrome/src/relayless/v1TypedEffect.ts)
+reproduces referenced Attention/canonical policy records and the complete fixed
+native action plan; unknown native served-schema assertions hold. Arbitrary inline
+source records cannot bypass capture reproduction. Pin and API-prove the exact
+POST bearer before guarded CAS; that CAS is the last authority await before one
+fetch. Use exact original JSONL, canonical Event/DeletedRecord path, sole
+`api_version=v1`, no redirects or retry. Recheck current gate/JWT, same pinned
+API principal and native protection after complete receipt parsing. A whole
+monotonic/timer deadline and cancellation prevent late issuance.200/201/202 with
+bounded string upload_id returns a receipt only; loss/ambiguity retains
+issued/UNKNOWN. It never verifies phases or removes queue rows.
+
+Native receipt DNR protects Event hex/hyphen suffixes as a deliberate superset
+under the exact HTTPS API/literalroute/POST/owninitiator/query; full UUID regexes
+exceeded Chrome's compiled-memory bound. Strict canonical UUID authority remains
+in transport/journal. Require all four native rules; no unprotected fallback.
+Synthetic temporary-extension reload cleared dynamic rules and required explicit
+fixture setup, so production installation persistence is unproven. Native QA
+must include a protected-vs-unprotected identical encoded-response differential,
+not only fake fetch headers or rule readback. The
+[typed tests](packages/attention/chrome/tests/relayless/v1TypedDispatch.test.ts)
+cover identity, exact large bodies, once-only issue, native identity/schema,
+receipt ambiguity and timeout. **Policy permission/reuse, before/after policy
+checks, exact readback, atomic settlement, backend quiescence and default/Safari
+integration remain separate gates.** A receipt never proves delivery/absence.
+
+Exact browser row-level `userid`/`fulcra_userid`, when exposed, must each match
+the captured account. A contradiction is UNKNOWN, never silently dropped into
+absence. Submitted-field matching uses the admitted payload's 4 MiB UTF-8 bound.
+
+The opt-in [exact browser record reader](packages/attention/chrome/src/relayless/v1Records.ts)
+uses full Event/Metric plus exact UUID instant selectors, at most 32 IDs per
+operation, under V1Http's captured account and current API-principal checks.
+Only a complete successful JSONL 200 can return absence. Partial/paged responses,
+conflicting exposed owner/totals, malformed suffixes, duplicate keys or identities,
+unrequested rows and stream errors fail closed. Keep decoded-body/deadline
+bounds and static errors; never expose parser payload fragments. Frozen results
+and submitted-field/time comparison are one-read evidence only. No queue clear,
+POST, replay policy or historical coverage follows from them. The
+[development contract](packages/attention/README.md#v1-contract-development) and
+[synthetic tests](packages/attention/chrome/tests/relayless/v1Records.test.ts)
+carry bounds and supported semantics; default writers remain unchanged.
+
+The permanent exclusion specification has one packaged
+[contract](packages/fulcra-common/fulcra_common/record_exclusions_contract.json)
+shared by [Python](packages/fulcra-common/fulcra_common/record_exclusions.py) and
+[browser pure helpers](packages/attention/chrome/src/relayless/v1ExclusionSpec.ts).
+Preserve its existing creation fingerprint and required-field order. Attention
+and exclusions use the same [closed Event proof](packages/attention/chrome/src/relayless/v1EventSchema.ts)
+with only those two static families; the exact exclusion-reason string set is
+order-independent but cannot gain a restore state. Pure schema/spec checks
+create no policy, owned binding, exclusion/absence evidence or upload authority.
+Run both contract/schema suites when changing this resource or shared proof;
+verify the Python wheel includes the JSON before packaging the app.
+
+The [pure browser exclusion codec](packages/attention/chrome/src/relayless/v1Exclusions.ts)
+shares Python's stable target primary, UUID5 and flat point-record fields.
+It permits canonical Event/Metric targets, forbids self-control/restore, and
+captures action/time/evidence before hashing. Encoding grants no current policy
+or durable-action proof. The [development contract](packages/attention/README.md#v1-contract-development)
+defines evidence/JSON limits and the shared synthetic Python/browser vectors.
+The [lossless instant helper](packages/attention/chrome/src/relayless/v1Time.ts)
+supports Python microsecond timestamps for control records and generic readback;
+Attention capture retains its millisecond-only fence. Never round an existing
+control timestamp or reject it merely because Python retained microseconds.
+
+The opt-in [browser control binder](packages/attention/chrome/src/relayless/v1ExclusionDestination.ts)
+discovers renamed policies from the complete input inventory and closed input
+schemas, never a name-only catalog miss. Unpinned discovery scans at most64
+Event schemas including retired rows; unreadable/plausible incompatible policy
+or ambiguity holds creation. Explicit/private original full UUID pins retain
+fresh ownership, input/served proof and final unchanged-input checks. New
+bindings repeat discovery before publication. Use one <=10s monotonic budget
+and <=8s/remaining HTTP reads; overrides cannot extend the HTTP instance budget.
+An overall timer bounds local waits; deadline checks inside journal callbacks
+guard local creation writes. A submitted receipt retains identity but cannot
+bypass first-binding discovery on retry. Preserve
+known receipts and unresolved intents; never retry a possibly dispatched create
+or replace a known UUID with a new empty policy. The
+[binding tests](packages/attention/chrome/tests/relayless/v1ExclusionDestination.test.ts)
+define recovery and race behavior. This grants no current replay permission,
+native absence proof or default sender authority.
+
+Both browser binders retain verified creation receipts against their original
+durable reservation even after an account transition. This historical write
+never creates an intent or resolves authority. It requires the original account,
+specification fingerprint and reservation generation. A contradictory known
+UUID commits a durable conflict retaining both identities before returning an
+error; ordinary reads/resolution/replay refuse it and no reset is provided.
+
+The opt-in [browser policy reader](packages/attention/chrome/src/relayless/v1ExclusionPolicy.ts)
+requires already resolved original authority and uses read-only
+`verifyExclusionV1` before and after protected exact policy reads. It never calls
+setup to repair missing/downgraded intent. The journal's `requireCreation`
+predicate checks account/gate/key/fingerprint/control/original generation inside
+one read transaction. Reconstruct every returned policy row, reject supplied
+owner contradictions, and require unchanged schema/reservation context. The
+[development contract](packages/attention/README.md#v1-contract-development) and
+[tests](packages/attention/chrome/tests/relayless/v1ExclusionPolicy.test.ts)
+define limits and late-callback behavior. Results are one-read evidence; writers
+still require before/after-write policy checks and a mutation lease. No deletion,
+queue settlement or default sender integration follows from this helper.
+
+Python's shared [v1 record reader](packages/fulcra-common/fulcra_common/v1.py)
+uses the same response-completeness gate for exact IDs, source windows and
+latest previews: require exact requested scope and unambiguous 200; reject
+redirects/history, partial/paging markers and conflicting exposed owner/totals.
+Request identity encoding and reject encoded replies; eager gzip decoding may
+return empty or complete-looking data without a valid trailer. Never turn a degraded read into absence or replay permission. Strict JSONL
+parsing rejects duplicate keys, malformed suffixes, nonfinite values and invalid
+Unicode; only ASCII blank framing is ignored. The
+[buffered parsing contract](packages/fulcra-common/README.md#v1-datatype-migration-boundary)
+explains the limits: eager HTTP loading/decompression has already happened, so
+these checks are not a raw-wire/allocation/deadline bound. Run the
+[shared reader tests](packages/fulcra-common/tests/test_v1.py) and source/policy
+integration suites when changing this gate.
+
+Python's [permanent policy helper](packages/fulcra-common/fulcra_common/record_exclusions.py)
+captures an exposed canonical `store.account_id` and checks it around lookups,
+including empty results. Supplied policy-row owner metadata must match that
+known scope; unknown scope or contradictions hold. Generic record enrichment
+comparison elsewhere remains separate. The
+[creation journal](packages/fulcra-common/fulcra_common/data_types.py) validates
+intent states/full destinations and atomically prevents concurrent resolution
+from replacing an original UUID or healing malformed state. The
+[shared contract](packages/fulcra-common/README.md#v1-datatype-migration-boundary)
+and its linked policy/journal tests define this setup behavior.
+[Collect policy transport](packages/collect/fulcra_collect/v1_session.py) now
+uses a separate read-only verifier around each policy GET/POST, including
+checks after source uploads: existing resolved fingerprint/full UUID, current
+owned/served proof, final owned/account/local-binding recheck and unchanged
+schema hash across transport. A cached string alone never proves absence;
+reads never run setup/adoption or recreate a lost journal. Run the
+[authority integration tests](packages/collect/tests/test_v1_policy_authority.py)
+when changing this boundary. Writer mutation leases and controlled old-writer
+cutoff remain separate requirements.
+Owned-list and served-schema proofs share strict identity-only, no-redirect
+JSON reads with exact endpoint/owner/partial checks. Duplicate keys, nonfinite
+values, numeric assertions changed by parsing and malformed supplied input
+schema hold; a supplied `userid` must
+agree with the captured account too. The
+[canonical contract](packages/fulcra-common/README.md#v1-datatype-migration-boundary)
+documents the decoded parsing caps and remaining limits. These schema reads
+must not fall back to a generic `response.json()` or a redirected alias.
+
+The shared [v1 client](packages/fulcra-common/fulcra_common/v1.py) has an optional
+`expected_schema` keyword on `validate_records` and `ingest`. A supplied full
+schema requires an explicit nonempty captured `account_id`; `None` keeps the
+default behavior and ignores that account argument. The public
+[strict served-schema reader](packages/fulcra-common/fulcra_common/data_types.py)
+owns token-account proof. Each nonempty pinned call compares and validates one
+fresh full served snapshot; locally checked empty calls perform no I/O and
+prove no remote equality. The
+[canonical contract](packages/fulcra-common/README.md#v1-datatype-migration-boundary)
+defines bounded input capture, full JSON equality, representation version and
+remaining limits. No production caller is activated and no historical replay
+authority is granted. Run the [shared seam tests](packages/fulcra-common/tests/test_v1.py),
+[public proof-reader tests](packages/fulcra-common/tests/test_data_types.py) and
+[Collect session](packages/collect/tests/test_v1_session.py)/[policy authority](packages/collect/tests/test_v1_policy_authority.py)
+integration suites when changing this seam.
+
+The opt-in Python [transport observers](packages/fulcra-common/fulcra_common/record_observations.py)
+retain actual strict record/schema/receipt facts through the shared
+[v1](packages/fulcra-common/fulcra_common/v1.py) and
+[schema](packages/fulcra-common/fulcra_common/data_types.py) boundaries. They require
+explicit original/account/ID context, the same guard and budget at every SDK/HTTP
+leaf, exact sink acknowledgement and a retained-attempt event allowance of at most
+128 slots across reopen. Receipt and issued-checkpoint capacity are separate;
+complete buffered responses retain their pre-reserved audit slot after expiry
+without a fresh authority/token/network guard. No later action follows from that
+retention. Canonical bytes, inert policy/assessment/history types and stored
+retention modes grant no coverage, ownership or production replay authority.
+**Production SDK hidden refresh/retry accounting, real retained persistence,
+B1p owned-policy producers, production historical reconciliation and Collect wrappers remain
+held; this component activates no production caller.** The
+[canonical contract](packages/fulcra-common/README.md#retained-transport-observations-development)
+documents exact call shapes, context projections, body/schema hash distinctions,
+header allowlist, strict observed receipts and buffered/outer-envelope limits.
+Run the [observation tests](packages/fulcra-common/tests/test_record_observations.py),
+[reader/default tests](packages/fulcra-common/tests/test_v1.py),
+[schema/import tests](packages/fulcra-common/tests/test_data_types.py) and existing
+[session](packages/collect/tests/test_v1_session.py)/[policy](packages/collect/tests/test_v1_policy_authority.py)
+integration suites when changing this unused surface. Preserve ordinary/default
+and Task A pin behavior, one final served-schema snapshot and one POST/no retry.
+
+The [inactive historical verifier capture](packages/fulcra-common/README.md#inactive-historical-verifier-capture-development)
+now shares the existing read-only verifier and actual observed HTTP leaves.
+Its private transport constructors unconditionally refuse; tests alone compose
+synthetic storage/admission/gates. Runtime capture/inspection returns untrusted
+bytes and facts, never an owned-policy issuer. Preserve the exact7+2+7 charges,
+same served schema and retained attempt allowance; transcript attachments occupy
+the started proof slot and uncertain writes never refund it. Whole-chain bytes
+are checked before each fixture storage mutation, and staged linkage compares
+exact canonical bytes. The canonical README owns raw-byte/linkage/limit details
+and H1–H5 production holds, including
+the still-unqualified original journal opener and auth revision/gate. Run the new
+[transport](packages/fulcra-common/tests/test_historical_observed_transport.py)/[transcript](packages/fulcra-common/tests/test_historical_owned_transcript.py)
+regressions and common/Collect suites when changing these seams. No Collect
+constructor/caller, production namespace, real auth gate or historical apply is
+activated; ordinary/default methods stay supported.
+
+The unused [synthetic historical reconciler](packages/fulcra-common/README.md#synthetic-historical-reconciliation-development)
+now consumes B1a observations and re-exports the same existing `HistoricalDelivery`.
+It is singleton-only, defaults to no submission, retains separate control/target
+assessments and checks the same guard/budget through every nested request. Matching
+original-payload positives remain disqualifying across attempts, terminal outcomes,
+audit retention and later deletion; a mismatch is retained conflict evidence.
+Every normal return requires one outcome callback with fresh retained history,
+atomic fixture CAS and independent event/slot/state readback. Issued/outcome,
+assessment and observation events share the retained maximum 128-slot allowance;
+uncertain persistence propagates without retry, refund or a clean result.
+All owned binding factories/resolvers, authority, external history, fencing and
+lifecycle persistence implementations remain solely in the
+[test fixture](packages/fulcra-common/tests/test_record_delivery.py). The fixture-only
+`exclusions.binding_proof` capability is required at entry; production
+`RecordExclusions` does not implement it. Its full-row validator is the one private
+pure core shared with the unchanged live policy read. **No production caller,
+authority issuer, policy observer, real persistence/CAS (C), driver (D) or actual
+historical apply is activated.** The canonical linked contract owns exact signatures,
+classification, hash domains and limitations. Run the historical/policy tests plus
+the existing common and Collect session/policy/outbox suites before shipping a
+change to this seam; ordinary live repair and replay behavior must stay unchanged.
+
+Chrome v1 record reads require verified
+[identity/encoded-response protection](packages/attention/chrome/src/relayless/v1ReadProtection.ts).
+Fetch accepts some truncated gzip streams, so decoded EOF cannot prove absence.
+Explicit setup owns fixed rule IDs1002/1003 for this extension's production
+record GETs and1004/1005 for typed ingest POST receipts. Reads and writes assert
+the complete four-rule state without installing it.
+Only the exact Auth0 rule 1001 may coexist; unknown/session/static rules refuse.
+Never silently clear other policy or downgrade on unsupported Chrome response
+conditions. Keep protection checks inside the HTTP deadline and around body
+consumption; a late or encoded result cannot acknowledge queued work. Before
+records can be read, the typed reader must select this protected JSONL leg;
+generic JSON permits only canonical catalog paths under `/data/v1/` and refuses
+encoded path aliases before fetching. Before
+setup changes, publish the caller's new account/config generation. Safari needs
+its own native transport proof. The
+[development contract](packages/attention/README.md#v1-contract-development) and
+[tests](packages/attention/chrome/tests/relayless/v1ReadProtection.test.ts)
+define the API support and bounds; default senders remain unchanged.
+
+## Historical Collect migration (development)
+
+The [offline foundation](packages/collect/README.md#offline-historical-migration-foundation-development)
+binds an immutable account/source/target/schema/codec/range plan to a separate
+private ledger. A separate [read-only raw HTTP reader](packages/collect/fulcra_collect/migration_export.py)
+now retains bounded private response artifacts. A separate
+[paired export driver](packages/collect/fulcra_collect/migration_export_driver.py)
+adds bounded library orchestration; production export/apply/CLI and runtime
+account authority remain separate work. Supply a captured
+client and fresh consent/origin guard returning the expected account UUID; never
+instantiate an ambient fallback client. Reads enforce the production HTTPS API,
+explicit account/type/range, no redirects, a 64 MiB raw-body cap and default
+30-second request deadline/socket timeout. A pass UUID cannot change plan scope.
+Each request gets a new private attempt with a fsynced manifest before HTTP,
+raw bytes before parsing, and a hash/EOF receipt only after full flush. Request
+identity encoding; retain encoded responses without decompressing and refuse
+them. Check deadlines on raw chunks, including compressed empty-output blocks.
+Recheck retained size/hash against the EOF digest before parsing the same bytes.
+Scan each raw object before JSON allocation (1 MiB, 64 container levels), and
+bound parsed snapshots to 4,000 rows/16 MiB canonical row JSON. Larger responses
+stay raw artifacts needing a narrower read, never silently discarded rows.
+Preserve failed/partial attempts; never reuse an orphan body as a complete read.
+JSON wrappers, duplicate keys, lossy/non-finite numbers or invalid Unicode fail
+visibly. A receipt/result always has `coverage_complete: false`; EOF is not
+provider coverage. No credentials or arbitrary header values enter artifacts.
+Version-3 receipts retain known partial-header names, bounded total/length
+counts, and the optional canonical response account UUID (or absence/invalid
+marker). An explicit malformed, duplicate or other-account response header
+refuses body access; retain its incomplete receipt with no transport EOF or
+decoded-body claim. Absence preserves request/guard authority and adds no account
+proof. Explicit partial/pagination evidence or malformed/contradictory counts
+refuse initial reads and later artifact consumption; verification rechecks the
+account fact and binds the original receipt hash as well as the body.
+The driver requires an explicit, externally justified provider contract
+(`version: 1`, `semantics: complete-below-row-cap`, `row_cap: 1..4000`, nonempty
+`basis`); it supplies no default. The public legacy endpoint has no cursor/total
+count/ceiling attestation, and matching two reads cannot invent one. Pass UUID,
+plan, contract and export protocol bind immutable version-3 pass/proof tables in
+the private ledger. Old v1/v2 evidence may have discarded response-account facts
+and cannot resume or certify current-format coverage; a new pass
+refuses existing unbound windows. Preserve old artifacts; use a fresh authorized
+pass/ledger for new evidence. Indexed next-open reads
+avoid prefix-rescan starvation; a nonblocking owned-file lease serializes runs.
+Reopen and hash/scope-check both raw artifacts before consuming them. Equal
+multisets below the asserted cap conditionally seal; capped/unequal pairs split
+with overlap, minimum saturated/unstable or failed reads stay open. Retain all
+distinct versions from successfully committed pairs, including parent versions
+missing from later children (at most 8,000 versions/32 MiB canonical JSON per
+pair). Pair proof + raw versions + seal/split are one transaction. Metadata proof
+reads do not audit artifacts afresh. Runs reserve both request timeouts, cap at
+64 windows/300 seconds and report queue progress, never final coverage. The
+ledger coverage fold is conditional on the supplied provider assertion. Its
+lower-level status can still summarize old stored windows; that metadata is not
+current-format proof or raw-account/integrity verification. The versioned driver
+guard is mandatory before reuse. Final raw audit, cutoff/queue/late-delta and
+disposition gates remain mandatory.
+Raw variants and overlapping observations are retained; missing IDs quarantine.
+Never treat an HTTP 200, capped read or observation count alone as coverage:
+sealed windows bind the exact integer ordinal sequence `0, 1, …, count−1` and
+ordered observation/raw hashes (fractional ordinals fail sealing and resume);
+explicit narrower children replace saturated parents, and complete leaves must
+cover the whole range without open reads. One-row capture does not scan all
+windows; the coverage fold has a 100,000-window limit. Whole-window capture/seal
+is atomic (1 MiB per row, 16 MiB total), as is child creation plus parent split.
+Raw response artifacts must be retained first; a caller assertion is not provider
+proof. Split operations read only the parent/children; `window(id)` gives scoped
+resume metadata with no raw-audit claim. Unknown schemas/statuses
+fail visibly, not empty. Canonical raw rows cap at 1 MiB; oversized input fails
+without sealing, so export orchestration must preserve its raw artifact.
+`historical_complete` stays false until actual conversion, cutoff/queue and late
+sweep gates are implemented and verified. Original remote records remain intact.
+Status says `raw_integrity: "not-scanned"`; coverage receipts do not certify a
+fresh raw-content audit. `entry()` hash-verifies raw content before consumption.
+Window bounds reject inexpressible submicrosecond instants and invalid timezone
+offsets; shared v1 readback compares fractional RFC3339 instants exactly without
+datetime truncation. Media codec v1 supports flat typed DurationAnnotation;
+v2 supports the API reader DTO with strict account/definition/prefixed-source
+proofs and declared `legacy_record` provenance. Default media specs stay frozen;
+`media_history_spec` is a separate opt-in key/name, not a silent schema edit.
+Both preserve declared fields and the shared live/history UUID mapping. Unknown
+envelopes/markers, ambiguous identities and lossy output quarantine; unfrozen
+schema references fail without network retrieval.
+Schema 2 retains converted proposals with recomputable codec proofs; conflicting
+payloads for one target atomically quarantine every prepared variant (group
+bound 1,000 rows/4 MiB), while identical proposals converge. Every peer is
+codec-verified before equality decisions; converted reads recheck conflicts. A prior returned proposal is
+never upload authority: later variants can invalidate it. See the linked
+README for supported codecs, boundaries and remaining completion gates.
+
+The [static codec registry](packages/collect/fulcra_collect/migration_codecs.py)
+retains the eight media IDs and lazily loads the optional
+[Journal reader codec](packages/dayone/README.md#opt-in-historical-journal-contract-development-branch).
+Unknown/unavailable codecs fail before conversion row work; raw-only export and
+reopen remain possible. The new `UNIFIED_JOURNAL_SPEC` is opt-in local revision 2,
+still an API v1 Event: existing `JOURNAL_SPEC`, writer defaults, creation
+fingerprint, pins and pending recovery remain unchanged. Do not activate it by
+relabeling cached destinations or use nullable historical enrichment to weaken
+live-source validation. Its complete raw provenance, independent payload bound
+and all-branch reference rejection are documented in the canonical Day One
+guide. Pure conversion grants no schema creation, apply or completeness claim.
+
 ## The daemon (Collect)
 
+- **Foreground without native menu auto-launch:** use
+  `fulcra-collect daemon --no-menubar` for source/server QA, following the
+  [source invocation](packages/collect/README.md#running-from-source) for workspace
+  dependencies. Ordinary `daemon` keeps auto-launch enabled. This invocation-only
+  option skips the native menu startup hook; profile ownership, control socket,
+  web server, quiet authentication preflight, scheduler/worker config and consent
+  checks, and shutdown continue normally. **It is not an offline, no-auth, or
+  no-network mode.**
+
+- **Single cooperating daemon per effective profile (development branch):**
+  [profile ownership](packages/collect/README.md#per-profile-daemon-ownership-development-branch)
+  uses the persistent private `daemon.lock` before migration/control/auth/dispatch.
+  A busy lease exits 75 with a static diagnostic; unavailable ownership exits 1.
+  Busy is not holder-health proof. Ownership lasts until process exit even if
+  `serve()` unwinds; do not restart in-process or delete/truncate the lock file
+  for recovery. No stale PID authorizes takeover. Stop/reconcile older unleased
+  daemons and workers before adoption. The local cooperative guarantee excludes
+  direct/legacy writers, detached orphans and cross-host writes; it neither
+  proves quiescence nor retires workers. Launchd KeepAlive/systemd Restart remain
+  unchanged and can retry a duplicate. Source verification is separate from
+  signed-app/runtime acceptance.
+
+- **Persistent service failure status (development branch):** the
+  [cached-status contract](packages/collect/README.md#service-failure-status-development-branch)
+  records owned nonzero exits through `ServiceSupervisor.tick(on_exit=...)` and
+  OS launch failures through original-revision local fences. Use the atomic
+  status-only writer; never retry an uncertain increment, infer provider health
+  from an exit, or expose unscoped old-account state after dropping an UNKNOWN
+  overlay. The overlay is volatile; restart is not durable reconciliation.
+  Status/observer paths must stay free of credential and provider reads.
+
+Trakt's current setup separates developer API apps from Connected Apps. See the
+[canonical media guide](packages/media-helpers/README.md#trakt-connections-and-api-apps)
+for current and legacy links, Client-ID-only PKCE at `auth.trakt.tv`, retained
+legacy refresh credentials and exact saved callbacks. Choose a Development
+app for Collect's exact local HTTP callback; Production requires HTTPS.
+Deployed form support is verified; actual new/legacy account sign-in remains
+release QA.
+
+- **Day One v1 (development branch):** the [Journal writer](packages/dayone/README.md#collect-v1-writer-development-branch)
+  uses `v1_destination_ids.journal`, strict Collect auth, immutable pending
+  batches and replay exclusions. It preserves import-once behavior and the
+  case-sensitive legacy source hash; reruns do not overwrite cloud edits.
+  Old annotation selections need explicit mapping. Preview creates no metadata
+  or receipts. Attachments remain unuploaded; signed app publication and historical
+  conversion remain pending. The [standalone CLI](packages/dayone/README.md#standalone-v1-authority-and-recovery-development-branch)
+  now shares the v1 writer with explicit CLI/env auth and fresh API account proof;
+  Collect authentication remains strict and separate. `--destination Event/<UUID>`
+  selects an owned compatible target; legacy bare IDs require explicit mapping.
+  Real invocations use fixed profile-local `cli-dayone` state, a bounded invocation
+  lease and shared task/account-record leases. Resume original pending work before
+  reading/discovering sources, empty returns or metadata. Changed account/options
+  hold without discarding pending evidence; issued absence never permits resend.
+  Default `--local-db` binds a selector, discovers the current default only after
+  recovery, and may select another DB later; explicit `--db-path` binds an absolute
+  path. Dry-run reads local input only, without auth/profile/DB/provider work.
+  The annotation-definition/GenericEvent Python API raises migration errors; use
+  `DayOneFulcraClient.open(settings)` and `JournalWriter.resume()`/`run_import()`
+  with original entries. The [explicit runtime](packages/collect/fulcra_collect/standalone_v1.py)
+  pins the profile before state access and uses the same DB9 rollback protocol;
+  its serialization does not extend across profiles/hosts. Ordinary Day One tests
+  deny external HTTP and use synthetic transports.
+- **Gmail account/delivery (development branch):** [the captured transport](packages/gmail/README.md#account-and-delivery-development-branch)
+  binds Google reads, Files, canonical coord companions and local receipts to
+  fresh Collect/source consent. The app bundles `coord-engine`; never restore
+  default CLI credentials or a subprocess relay. Exact directive-file readback
+  precedes relay-done; an empty search envelope is not delivery evidence.
+  Ledgers/cursors include the destination principal and actual action target;
+  old source-only state is retained, never adopted as proof for a new target.
+- **Reminders/Todoist account/read consent (development branch):** the
+  [task engine contract](packages/task-sync/README.md#collect-account-and-read-consent-development-branch)
+  checks captured read consent in preview as well as live runs. Actual callers
+  use `CollectRecordSession` and inject shared Files HTTP into the task vault.
+  [incomplete HTTP reads](packages/collect/README.md#files-read-completeness) remain
+  UNKNOWN and cannot authorize file or checkpoint writes.
+  Never restore a frozen bearer or selection-only guard. Retain task generations,
+  completion journals and the final mutation leases. Todoist guards each HTTP
+  request/chunk and observation checkpoint; Reminders guards each bounded bridge
+  invocation. In-flight native calls can finish; revoked results are discarded.
 - **Apple Notes:** included in the macOS bundle and registry fallback. Use the
   [wizard](packages/apple-notes/README.md) for Full Disk Access verification and
   one-way import. Snapshots use a bounded SQLite online-backup subprocess;
   entity IDs are resolved from Z_PRIMARYKEY. Preserve unowned Markdown and
   refuse missing/ambiguous fences. Keep real library metrics and source data
   out of public code, tests, commits, and reports.
+  On the development branch, [account/consent binding](packages/apple-notes/README.md#account-and-consent-development-branch)
+  uses an explicitly injected Collect Files adapter in sync/reconcile/writeback,
+  never default CLI credentials. Guards cover source reads, each Files request
+  and final leased writes (including native writeback); reconciliation caches
+  include destination account. Local-only sync preview stays cloud-free;
+  reconciliation reads require Collect sign-in. It remains Files-only.
 - **Bundled runtime:** the Briefcase app supports --collect and --fulcra CLI
   dispatch plus an internal --notes-snapshot worker. Build-generated sibling
   launchers supply fulcra-collect, fulcra, and fulcra-api without a developer
   venv. Workers must use the bundled launcher, never Python -m flags on the
-  native app executable. The build installs these before signing.
+  native app executable. The build installs these before signing. Before any
+  bundled dispatch, the [entry point](packages/menubar/fulcra_menubar/__main__.py)
+  sets `SSL_CERT_FILE` to the included `certifi` roots only when neither CA-file
+  nor CA-directory override is present. Embedded Python may lack OpenSSL default
+  roots; urllib/Auth0 needs this explicit default. Preserve operator trust
+  overrides and TLS/hostname verification; never work around this with disabled
+  verification. Missing roots fail before auth. Source/venv trust is unchanged.
+- **Public-input bundle QA:** follow the [invocation-bound stages](packages/menubar/README.md#invocation-bound-public-input-qa)
+  and [stage helper](packages/menubar/scripts/bundle_provenance_stages.py), with
+  [canonical sanitizer](packages/menubar/scripts/sanitize_bundle.py) at the existing
+  raw/postbuild/check-only positions. Prepare BEFORE CREATE; local launchers retain
+  the exact legacy tuple, while cloud uses the closed source-owned
+  `cloud-xcode16.4-arm64-v1` qualifier and `controlled-install-and-bind` for
+  PREPARED generation1 → BOUND generation2 before raw sanitize. Profile/tool
+  cross-binding is mandatory at start/context/current/native entries. The cloud
+  ownership bootstrap consumes a durable attempt before full recipe validation;
+  any later UNKNOWN requires a fresh nonce/run directory/app namespace after
+  inactive-lock recovery, never retry or saved-proof adoption. First admission
+  needs the live one-use witness; descendants use their independently owned
+  digest chain. The typed observer alone allows256MiB/file, with544MiB/60s for
+  two OS passes plus six ordinary128MiB tool passes; actual toolsets that cannot
+  fit fail before producer effects. One original300s deadline starts before
+  ownership bootstrap and spans all reads, sweeps, publication and final admission;
+  nested operations never renew it, and commands reserve kill/reap time within it.
+  Every presented live witness is revoked even on early source/selector failure.
+  The exact source-owned Python b10 linker-data requirement stays outside the
+  unchanged privacy catalog: owned expected alias selection requires its presence,
+  regular type, mode and bytes at local/cloud binding and full verification, plus
+  exact support-member consumption before the config skip. Only the additional
+  canonical Collect outer alias activates the two fixed PyObjC debug companions:
+  their complete wheel/member/fixed-slice origin and current bytes stay exact,
+  including full-hash signing snapshots before native parsing. Only these selected
+  exact data leaves leave the native target set; full inventories, privacy and framework/app
+  verification remain. See the linked package contract and
+  [pure source-data record](packages/menubar/scripts/bundle_native_proof.py).
+  Exact limits, pinned environment/installer,
+  SDK scope and local compatibility live in the linked package contract.
+  Actual cloud app/N1 qualification remains required; pure tests do not grant it.
+  Preserve the stage ordering; only the controlled BUILD/sign wrappers can mint a
+  signed generation. Current I/H live in trusted entry/completion plumbing
+  (`COLLECT_PROVENANCE_CONTEXT`), never candidate receipts or saved old contexts.
+  Its schema2 envelope is capped at 32 KiB and independently binds immutable
+  metadata (0600/write-once/8 MiB/no head); remaining head growth through gen64
+  and current environment/argv capacity are checked before receipt publication.
+  The build uses a fresh external private run directory and parent-owned private
+  completion FD (`COLLECT_PROVENANCE_RUN_DIR`, `COLLECT_PROVENANCE_COMPLETION_FD`)
+  when `COLLECT_PROVENANCE_REQUEST` selects the constrained path. It must be a
+  writable pipe, concurrently drained through bounded length framing and EOF;
+  regular files/partial frames fail, and old full contexts require fresh entry.
+  Lost authority restarts fresh; no receipt adoption or scope-lock stealing. Preserve strict
+  no-provenance fallback, source/wheel/support/inventory gates, and independent
+  review. Exact current app inventories precede broader transform comparisons;
+  only whole unchanged public intervals receive marker permission.
+  [Framework parent-file aliases](packages/menubar/README.md#framework-parent-file-aliases)
+  require component-by-component ordinary-inventory proof inside the same
+  framework before complete inventory emission; canceled links/missing paths,
+  temporary escapes, non-file leaves or changed identities remain UNKNOWN.
+  Qualification grants no content exception or actual-app acceptance. Source-derived
+  ad-hoc per-target policy and fresh absolute codesign observations are required.
+  Bind framework/nested-app executable aliases to pinned origin Info.plist and
+  exact scoped paths/version links; all final alias policy fields agree in both
+  BUILD/sign sets. Unknown geometry stops before mutation; unknown compiler/tool/
+  entitlement forms stop UNKNOWN. Runtime/help/cache
+  boundaries mark mutations DIRTY and require controlled re-sign/fresh final
+  signed checks. Receipts/inventories are 0600 write-once, capped at 256 KiB/8 MiB;
+  native verification 30s/command,300s total,1 MiB/command; BUILD900s/16 MiB;
+  timeout/cap kills and reaps the whole group. Actual cloud N1 remains UNKNOWN:
+  pure/fake-tool GREEN is neither native qualification nor release permission.
 - **AppleScript writeback is experimental:** it additionally requires explicit
   writeback_enabled = true and refuses all attachment types. Do not enable it
   as part of ordinary Notes setup.
+- **Plex/Jellyfin receiver port:** setup exposes `port` as a typed port setting
+  (default `8765`) on the common topology step; both local and LAN URL examples
+  instruct the user to substitute their selected port. Preserve the LAN token
+  guard. See the [receiver plugin](packages/media-helpers/fulcra_media/plugins/media_webhook.py).
 - **Setup does not imply sync consent:** entering the final wizard step must
   never enable or run a plugin. Use its explicit start action, persist the
   displayed preview mode before enabling, and fail closed if settings cannot
   be saved. Run `node --test packages/web-ui/tests/*.test.cjs` when changing
-  wizard navigation or first-run behavior.
+  wizard navigation or first-run behavior. Next displays Saving… and coalesces
+  duplicate clicks while a save is pending; navigation releases Next on the new
+  step and invalidates late advancement and subsequent Enable/Run requests.
+  Preserve both onboarding/Configure bindings and the [navigation regressions](packages/web-ui/tests/wizard-v1-destinations.test.cjs)
+  when changing the [wizard controller](packages/web-ui/dist/static/wizard.js).
+
+- **Worker deadlines cover process exit and both pipe EOFs.** The
+  [runner](packages/collect/fulcra_collect/runner.py) uses one monotonic budget,
+  bounded output tails and no drain threads. On timeout or failed draining it
+  stops the owned process group even if its leader exited, with at most 0.5s
+  direct-child reaping. Escaped separate-session helpers are not chased; their
+  pipe handles cannot extend the deadline. Keep the
+  [real descendant regressions](packages/collect/tests/test_runner.py).
 
 - Run it durably as a **launchd** agent, NOT a backgrounded shell process — a
   foreground/`&` daemon dies when its terminal or session ends. Install + load:
@@ -1948,6 +3157,13 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
 - Config dir `~/.config/fulcra-collect/`: `control.sock` (the UDS the menu-bar
   + CLI use), `web-url` (default `http://127.0.0.1:9292`), `web-token` (Bearer
   for the web API).
+- [Control socket paths](packages/collect/README.md#control-socket-paths) are
+  bounded to 104 filesystem-encoded bytes including the terminator. Long or
+  multibyte profile paths retain a `control.sock` symlink to a private per-UID
+  socket. The completed system-temp candidate must fit; otherwise `/tmp` is
+  used. The selected per-UID child must be an ordinary current-user-owned
+  directory before chmod/socket replacement; aliases and foreign owners fail
+  visibly. Keep directory mode 0700/socket mode 0600 and client indirection.
 - Plugin authors needing independent durable cursors/state use RunContext's
   `kv_get` / `kv_set` / `kv_update` / `kv_delete` API. It is isolated by
   plugin ID and backed by `state.db`; values must be JSON (64 KiB maximum,
@@ -1987,23 +3203,54 @@ to an absolute path is not enough if that binary shells out further —
 `coord-engine` itself execs `fulcra-api` by bare name, so under the daemon's
 PATH every relay emit silently no-oped for five days. When you shell out to a
 tool that itself shells out, pass an `env` whose `PATH` includes the install
-dirs (`relay._subprocess_env`) AND set `EnvironmentVariables.PATH` in the
-daemon's launchd plist; keep both so a plist regeneration can't silently
-reintroduce the outage.
+dirs AND set `EnvironmentVariables.PATH` in the daemon's launchd plist.
+The development Gmail relay removes that subprocess chain: it embeds the
+bundled engine with an explicit Collect transport; see its
+[account/delivery contract](packages/gmail/README.md#account-and-delivery-development-branch).
 
 ### Keychain
 
-- User secrets (the Fulcra `bearer-token`) live in the OS keychain via
-  `keyring`, service `fulcra-collect:user`. A read can block on a macOS ACL
-  confirmation dialog; `credentials._keyring_get` times out after 5s and the
-  daemon degrades to "Fulcra not authenticated".
-- Sign in **through the daemon's web wizard** (`open "$(cat
-  ~/.config/fulcra-collect/web-url)"`) so the daemon — not a one-off script —
-  owns the keychain item. If the "Python wants to use your confidential
-  information" prompt repeats, click **Always Allow** (not "Allow"). If it still
-  repeats, the item is owned by a stale binary: `security
-  delete-generic-password -s "fulcra-collect:user" -a "bearer-token"`, restart
-  the daemon, re-sign-in.
+- User secrets live in service `fulcra-collect:user`; plugin secrets use
+  `fulcra-collect:<plugin-id>`. Native macOS background reads use
+  [`macos_keychain.py`](packages/collect/fulcra_collect/macos_keychain.py)
+  in a disposable child using the same executable/signing identity. Modern
+  per-query flags alone do not suppress legacy file-Keychain ACL prompts: the
+  child also disables interaction for its own lifetime. The daemon/UI process's
+  setting stays unchanged. Only item-not-found is absent;
+  denied, locked, pending and unreadable items remain UNKNOWN. Configured
+  non-native `keyring` backends retain their own behavior.
+- [`credentials.py`](packages/collect/fulcra_collect/credentials.py) bounds
+  reads to 3 seconds, one pending OS call per item and 16 per process. Timed-out
+  calls retain their slots until completion; fresh auth guards never reuse a
+  late result. Local writes/cache invalidation fence older reads. Optional
+  source credentials stay optional for modes that do not use them.
+- An authenticated explicit `POST /api/plugin/<id>/credential/<key>/authorize`
+  (control command `authorize_credential`) validates declared key/scope and
+  requests access to the existing item. Configure shows **Allow Keychain
+  access** for unknown credentials. A subsequent quiet read must succeed;
+  one-time **Allow** alone does not prove background access. **Always Allow**
+  remembers the current app identity. No secret value is returned or replaced.
+- Core sign-in access recovery uses the separate authenticated explicit
+  `POST /api/fulcra/auth/keychain_access`, restricted to `bearer-token` and
+  `oauth-credentials`. Unknown auth status routes to Settings for access
+  recovery; it must not imply expired or missing credentials. Reinstallation
+  or a changed signing identity may require another explicit grant. Preserve
+  existing items rather than deleting them to repair an access problem.
+
+### Collect distribution resources
+
+Collect distribution builds require complete prebuilt SPA/docs inputs. The
+[canonical package contract](packages/collect/README.md#distribution-resources-development-branch)
+and [build hook](packages/collect/hatch_build.py) define the archive-only
+`_build_resources` snapshot, existing wheel `_bundled` layout, lexical archive
+markers and fail-closed missing/symlink/special-file handling. Never temporarily
+stage assets under `fulcra_collect/_bundled`: its presence changes running resource
+selection. Build tools may reject/read malformed `PKG-INFO` before this hook, so
+backend errors are not hook-execution evidence. Use the
+[disposable packaging tests](packages/collect/tests/test_packaging.py) for build
+parity/failure proofs; do not delete/chmod/rename live assets to make a negative
+case. Input immutability, cached offline backend, frontend preparation and later
+signed-app/installed acceptance remain distinct prerequisites/gates.
 
 ### Menu-bar app
 
@@ -2024,6 +3271,10 @@ reintroduce the outage.
 
 Full first-run walkthrough + troubleshooting: [`docs/TESTING.md`](docs/TESTING.md).
 Diagnose a live install with `uv run fulcra-collect doctor`.
+Its [coverage contract](packages/collect/README.md#doctor-diagnostic-coverage)
+includes a static WARN for unchecked v1 destination schemas and delivery;
+configured writers own that validation/readback. Exit 0 means no diagnostic
+FAIL, not acceptance of a source's schema or records.
 
 ## coord-fold — the coord-on-annotations fold engine (packages/coord-fold)
 
@@ -2118,3 +3369,58 @@ acts on today.
 - **Forge projection cost (ruling 30be1f8e, 2026-09-05).** `build_forge_projection` lists the parent `_coord/forge/feedback/` ONCE and lists per PR only the PRs that appear there; measured on the live store 125 responsible PRs cost ~77 s of per-PR listings that almost all returned empty, against a sub-second parent listing naming two directories. An EMPTY or FAILED parent listing proves nothing (a listing answers identically for a real empty dir and a bad path) and falls back to the per-PR loop unchanged: the pruning only removes work it has positive evidence for. `COORD_FORGE_BUILD_BUDGET` (default 300 s, raised from 60 on 2026-09-07) is then a ceiling, not a requirement; the reconciling host carries 180 in its launchd plist.
 - **Activity classification.** `obligations` is MIXED: `--export-open`, `--repair-unknown` and `--seed-checkpoint`
   each write (two of those already did while the verb classified as a read).
+
+
+## Collect browser reconnect
+
+Collect's [current availability contract](packages/collect/README.md#current-availability-and-scoped-recovery-development-branch)
+uses a bounded fresh quiet bearer read, never cached positive readiness. Local
+readability is separate from server/principal/provider/worker success; unknown,
+pending, missing and transition are distinct and preserve saved credentials.
+Only explicit authenticated, closed-scope recovery may request UI, followed by
+quiet confirmation. A missing optional refresh item is compatible with a manual
+bearer; never promise automatic refresh from it. Pending reads must not spawn
+duplicate prompts. Keep the existing executable/helper identity and quiet
+no-fallback policy; native denial causes and grants require their own evidence.
+Worker scope metadata comes from declared read sites, is checked against the
+original/current configuration and auth revision, and routes hydration errors to
+Configure versus shared bearer errors to Fulcra Settings. After restart/stale
+scope, report UNKNOWN; do not infer authority from traceback wording. Recovery
+navigation must not enable/run a source or overwrite/delete credentials.
+
+
+Onboarding and Settings share the [browser-link helper](packages/web-ui/dist/static/browser-signin.js)
+and [Collect-owned SDK actor](packages/collect/fulcra_collect/owned_auth.py).
+The historical `cli_login_start`/`cli_login_poll` route names now speak protocol
+2: a durable attempt UUID and captured device-code hash authorize one bounded
+SDK grant request per poll. No CLI execution, output parsing, or terminal
+credential adoption occurs. Old unscoped completion/classic requests return
+409 before effects; a CLI rc 0 never proves approval. Availability is independent
+of PATH. Keep authorization-origin/code checks and explicit protocol/success
+checks together; pending replies alone cannot advance onboarding or reconnect.
+
+Preserve the private [auth-attempt journal](packages/collect/fulcra_collect/auth_attempts.py)
+through restart. It contains hashes/order metadata, never device codes or
+credentials. New start, paste, signout and cancellation fence stale callbacks;
+credential commits rotate source epochs under the account-transition gate, which
+opens only after credentials AND the journal revision commit. Incomplete
+transitions report unauthenticated/reconnect required. Renewal status updates
+compare current auth revision/token, so stale failures cannot relabel a newer
+successful sign-in. A claimed device grant or rotating refresh grant with an unknown outcome
+requires a fresh sign-in, never an automatic replay. Access/refresh credentials
+live in Collect's OS Keychain service. Same-account renewal preserves source
+epochs; manual tokens have no implicit CLI renewal. The prior principal-checked
+CLI renewal path remains only for pre-upgrade credentials with no committed
+owned-auth revision, and a newer interactive revision revokes it. Do not remove
+that compatibility path without a documented fresh-sign-in migration.
+
+Interactive auth journal lease precedes account-transition/config leases.
+Refresh may already run inside an account-shared caller scope: it MUST use the
+journal's SQLite-only revision/claim methods, never the interactive auth lease
+(which may be waiting for account EX). Committed auth revision changes inside
+account EX; final refresh commit holds account SH plus its SQL transaction.
+Network requests run outside newly acquired account/config leases; the separate
+cross-process refresh lease serializes rotating grants. SDK polling loops are
+not used. Run the auth suites and `node --test packages/web-ui/tests/*.test.cjs`
+when changing these paths. Packaged, signed Keychain/restart QA is still required
+before release; source tests do not establish that evidence.

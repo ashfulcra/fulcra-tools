@@ -1,7 +1,6 @@
 /* Options page — shares the same brand palette as popup.css but for
- * a wider, single-column document. Imports Rubik from Google Fonts. */
+ * a wider, single-column document. Uses local fonts and platform fallbacks. */
 
-@import url("https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
 
 :root {
   color-scheme: light;

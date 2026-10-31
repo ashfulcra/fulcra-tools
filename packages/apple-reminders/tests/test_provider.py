@@ -149,3 +149,19 @@ def test_complete_and_permission_dispatch():
     )
     assert provider.permission_check(request=True)["granted"]
     assert json.loads(calls[0][1]["input"])["operation"] == "authorize"
+
+
+def test_native_read_rechecks_consent_before_returning_snapshot():
+    allowed = [True]
+    calls = []
+    def guard():
+        if not allowed[0]:
+            raise RuntimeError("synthetic selection revoked")
+    def runner(*args, **kwargs):
+        calls.append(args)
+        allowed[0] = False
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "result": []}))
+    provider = AppleRemindersProvider(runner=runner, still_allowed=guard)
+    with pytest.raises(RuntimeError, match="revoked"):
+        provider.collections()
+    assert len(calls) == 1

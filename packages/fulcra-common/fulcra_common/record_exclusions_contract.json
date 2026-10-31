@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "key": "collect.record-exclusions.v1",
+  "base_type": "Event",
+  "name": "Collect Record Exclusions",
+  "description": "Permanent replay exclusions for Collect records; native deletion is verified separately.",
+  "fields": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "target_data_type": {
+      "type": "string",
+      "pattern": "^(Event|Metric)/[0-9a-f-]{36}$"
+    },
+    "target_record_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "action_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "undo",
+        "migration",
+        "operator"
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required_fields": [
+    "schema_version",
+    "target_data_type",
+    "target_record_id",
+    "action_id",
+    "reason",
+    "evidence"
+  ]
+}

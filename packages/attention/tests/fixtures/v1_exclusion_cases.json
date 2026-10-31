@@ -1,0 +1,329 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "synthetic-exclusion-0",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Event/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2026-01-02T00:00:00Z",
+        "reason": "undo",
+        "evidence": []
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Event/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "undo",
+        "evidence": [],
+        "id": "130ae121-da93-578b-987b-57977d068786",
+        "start_time": "2026-01-02T00:00:00Z",
+        "end_time": "2026-01-02T00:00:00Z",
+        "sources": [
+          "collect:v1:excluded:Event/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-1",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Metric/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2026-01-02T00:00:00.123Z",
+        "reason": "migration",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Metric/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "migration",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "b640184f-40a8-5059-b05c-bdf7d61b47ad",
+        "start_time": "2026-01-02T00:00:00.123000Z",
+        "end_time": "2026-01-02T00:00:00.123000Z",
+        "sources": [
+          "collect:v1:excluded:Metric/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-2",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Event/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2026-01-02T00:00:00.123456Z",
+        "reason": "operator",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Event/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "operator",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "130ae121-da93-578b-987b-57977d068786",
+        "start_time": "2026-01-02T00:00:00.123456Z",
+        "end_time": "2026-01-02T00:00:00.123456Z",
+        "sources": [
+          "collect:v1:excluded:Event/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-3",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Metric/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2026-01-02T00:00:00.000001Z",
+        "reason": "undo",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Metric/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "undo",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "b640184f-40a8-5059-b05c-bdf7d61b47ad",
+        "start_time": "2026-01-02T00:00:00.000001Z",
+        "end_time": "2026-01-02T00:00:00.000001Z",
+        "sources": [
+          "collect:v1:excluded:Metric/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-4",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Event/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "1969-12-31T23:59:59.999999Z",
+        "reason": "migration",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Event/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "migration",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "130ae121-da93-578b-987b-57977d068786",
+        "start_time": "1969-12-31T23:59:59.999999Z",
+        "end_time": "1969-12-31T23:59:59.999999Z",
+        "sources": [
+          "collect:v1:excluded:Event/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-5",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Metric/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "0001-01-01T00:00:00.000001Z",
+        "reason": "operator",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Metric/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "operator",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "b640184f-40a8-5059-b05c-bdf7d61b47ad",
+        "start_time": "0001-01-01T00:00:00.000001Z",
+        "end_time": "0001-01-01T00:00:00.000001Z",
+        "sources": [
+          "collect:v1:excluded:Metric/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-6",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Event/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "9999-12-31T23:59:59.999999Z",
+        "reason": "undo",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Event/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "undo",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "130ae121-da93-578b-987b-57977d068786",
+        "start_time": "9999-12-31T23:59:59.999999Z",
+        "end_time": "9999-12-31T23:59:59.999999Z",
+        "sources": [
+          "collect:v1:excluded:Event/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-7",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Metric/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2026-01-02T01:15:45.123456+01:15",
+        "reason": "migration",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Metric/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "migration",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "b640184f-40a8-5059-b05c-bdf7d61b47ad",
+        "start_time": "2026-01-02T00:00:45.123456Z",
+        "end_time": "2026-01-02T00:00:45.123456Z",
+        "sources": [
+          "collect:v1:excluded:Metric/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-8",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Event/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2025-12-31T23:45:00.654321-00:30",
+        "reason": "operator",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Event/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "operator",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "130ae121-da93-578b-987b-57977d068786",
+        "start_time": "2026-01-01T00:15:00.654321Z",
+        "end_time": "2026-01-01T00:15:00.654321Z",
+        "sources": [
+          "collect:v1:excluded:Event/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    },
+    {
+      "name": "synthetic-exclusion-9",
+      "input": {
+        "controlType": "Event/aaaaaaaa-2222-4333-8444-555555555555",
+        "targetDataType": "Metric/11111111-2222-4333-8444-555555555555",
+        "targetRecordId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "actionId": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "requestedAt": "2000-02-29T23:59:59.123456Z",
+        "reason": "undo",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ]
+      },
+      "record": {
+        "schema_version": 1,
+        "target_data_type": "Metric/11111111-2222-4333-8444-555555555555",
+        "target_record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "action_id": "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "reason": "undo",
+        "evidence": [
+          "synthetic:audit-reference",
+          "synthetic:source-window"
+        ],
+        "id": "b640184f-40a8-5059-b05c-bdf7d61b47ad",
+        "start_time": "2000-02-29T23:59:59.123456Z",
+        "end_time": "2000-02-29T23:59:59.123456Z",
+        "sources": [
+          "collect:v1:excluded:Metric/11111111-2222-4333-8444-555555555555:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ],
+        "tags": []
+      }
+    }
+  ]
+}

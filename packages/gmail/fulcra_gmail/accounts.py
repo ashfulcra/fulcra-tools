@@ -297,6 +297,20 @@ class AccountRegistry:
             with self._lock:
                 yield
 
+    @contextlib.contextmanager
+    def delivery_scope(self, account_id: str, added_at: str):
+        """Order a delivery barrier against account removal and re-authorization.
+
+        Provider reads stay outside this short effect lease. Their final guard
+        discards a response after removal; exported effects and local receipts
+        hold the registry transaction so removal cannot split the barrier.
+        """
+        with self._locked():
+            account = self.get_account(account_id)
+            if account is None or account.status != STATUS_ACTIVE or account.added_at != added_at:
+                raise RuntimeError("Gmail source authorization changed; retry the selected account")
+            yield
+
     # -- doc helpers --------------------------------------------------------
 
     def _load(self) -> dict:

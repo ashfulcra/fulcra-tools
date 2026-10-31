@@ -19,8 +19,7 @@ The writer talks to Fulcra Files through an injectable ``api`` object exposing
 ``upload_file(data, file_type, file_size, filepath)`` (the
 ``fulcra_api.core.FulcraAPI`` surface — the same one
 :class:`fulcra_prefs.store.FulcraStore` uses). Tests inject a dict-backed fake;
-production builds one from the daemon's Fulcra token (see
-:func:`build_files_writer`).
+Collect injects its guarded Files transport, bound to the captured account.
 """
 from __future__ import annotations
 
@@ -95,28 +94,3 @@ class FilesWriter:
         path = files_path(account_id, message_id, internal_date_ms)
         self._api.upload_file(io.BytesIO(body), "application/json", len(body), path)
         return FileWriteResult(path=path, sha256=hashlib.sha256(body).hexdigest())
-
-
-def build_files_writer(token: str | None = None) -> FilesWriter:
-    """Construct a production :class:`FilesWriter` from a Fulcra access token.
-
-    Mirrors ``fulcra_common.client.BaseFulcraClient._lib`` — a
-    ``FulcraAPI`` built from an explicit far-future-expiry credential so the lib
-    never tries to refresh a token it doesn't own. Imported lazily so the unit
-    suite (which injects a fake api) never needs ``fulcra_api`` installed.
-    """
-    from datetime import timedelta
-
-    from fulcra_api.core import FulcraAPI
-    from fulcra_api.credentials import FulcraCredentials
-
-    if token is None:
-        from fulcra_common import BaseFulcraClient
-
-        token = BaseFulcraClient().get_token()
-    creds = FulcraCredentials(
-        access_token=token,
-        # Naive datetime on purpose — the lib compares against datetime.now().
-        access_token_expiration=datetime.now() + timedelta(days=3650),
-    )
-    return FilesWriter(FulcraAPI(credentials=creds))

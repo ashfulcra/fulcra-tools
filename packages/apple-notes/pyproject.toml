@@ -9,6 +9,8 @@ description = "Sync Apple Notes into a Fulcra vault as markdown, with attachment
 requires-python = ">=3.11"
 dependencies = [
     "fulcra-collect",
+    "httpx>=0.27",
+    "puremagic>=2.2",
 ]
 
 [project.entry-points."fulcra_collect.plugins"]

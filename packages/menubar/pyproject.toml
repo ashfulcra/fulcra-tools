@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fulcra-menubar"
-version = "0.1.4"
+version = "0.1.5"
 description = "macOS menubar UI for fulcra-collect (Python v1, pre-Swift)."
 requires-python = ">=3.12"
 dependencies = [
     "fulcra-collect",
     "tomlkit>=0.12",
+    "certifi>=2024.2.2",
 ]
 
 [project.optional-dependencies]
@@ -52,7 +53,7 @@ packages = ["fulcra_menubar"]
 [tool.briefcase]
 project_name = "Fulcra Collect"
 bundle = "com.fulcradynamics"
-version = "0.1.4"
+version = "0.1.5"
 author = "Fulcra Dynamics"
 author_email = "support@fulcradynamics.com"
 
@@ -79,10 +80,12 @@ requires = [
     "fulcra-attention",
     "fulcra-csv-importer",
     "fulcra-gmail",
+    "coord-engine>=2.0.6",  # Gmail embeds the engine with Collect-bound auth.
     "fulcra-local-sources",
     "fulcra-notion",
     "fulcra-purpleair",
     "tomlkit>=0.12",
+    "certifi>=2024.2.2",
     # macOS GUI stack.
     "rumps>=0.4",
     "pyobjc-core>=10",

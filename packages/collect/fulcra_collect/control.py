@@ -2,10 +2,10 @@
 JSON request/response protocol. Filesystem-permissioned; no TCP port.
 The `fulcra-collect` CLI (and later the menubar UI) are its clients.
 
-macOS caps AF_UNIX paths at 104 characters. When the requested socket path
-is longer, `serve_forever` binds to a short hash-named file in the system
-temp directory and leaves a symlink at the original path so callers that
-just resolve the path (including `send_request`) transparently reach it.
+macOS caps AF_UNIX paths at 104 encoded bytes including the terminator.
+When the requested path is longer, `serve_forever` binds to a short private
+temp path (using /tmp if the configured temp root cannot fit) and leaves a
+symlink at the original path so `send_request` transparently reaches it.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import socket
+import stat
 import tempfile
 import threading
 from collections.abc import Callable
@@ -23,28 +24,44 @@ Handler = Callable[[dict], dict]
 
 _log = logging.getLogger("fulcra_collect.control")
 
-# macOS hard-caps AF_UNIX paths at 104 bytes; Linux allows 108.
+# sockaddr_un capacity including its NUL: macOS has 104 bytes; Linux has 108.
 _MAX_SOCK_PATH = 104
 
 
 def _short_bind_path(long_path: Path) -> Path:
     """Return a short substitute path in a per-user temp directory.
 
-    The socket file lives in `<system-temp>/fulcra-collect-<uid>/`, a
-    directory owned by and accessible only to the current user (0700).
+    Prefer the system temp root, falling back to /tmp only when the final
+    encoded path cannot fit. The per-UID child must be an ordinary directory
+    owned by and accessible only to the current user (0700).
     Using a per-uid dir — never the shared temp root — keeps another
     local user from pre-creating or replacing the socket path (a TOCTOU
     on the unlink-then-bind sequence below).
     """
-    user_dir = Path(tempfile.gettempdir()) / f"fulcra-collect-{os.getuid()}"
-    user_dir.mkdir(mode=0o700, exist_ok=True)
-    # Tighten even a pre-existing, loosely-permissioned dir on every call.
-    user_dir.chmod(0o700)
-    digest = hashlib.sha1(str(long_path).encode()).hexdigest()[:16]
-    return user_dir / f"fc_{digest}.sock"
+    uid = os.getuid()
+    digest = hashlib.sha1(os.fsencode(long_path)).hexdigest()[:16]
+    for root in (tempfile.gettempdir(), "/tmp"):
+        # Clients resolve the profile symlink; size the canonical root too.
+        user_dir = Path(root).resolve() / f"fulcra-collect-{uid}"
+        candidate = user_dir / f"fc_{digest}.sock"
+        if len(os.fsencode(candidate)) + 1 > _MAX_SOCK_PATH:
+            continue
+        user_dir.mkdir(mode=0o700, exist_ok=True)
+        # Refuse a child symlink, including a replacement racing mkdir/open.
+        # Validate ownership before changing permissions on the opened inode.
+        fd = os.open(user_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:
+                raise PermissionError("control socket directory must be owned by the current user")
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
+        return candidate
+    raise ValueError("control socket path cannot fit any temporary root")
 
 
-def _read_line(conn: socket.socket, max_bytes: int = 65536) -> bytes:
+def _read_line(conn: socket.socket, max_bytes: int = 65536, *, direction: str = "request") -> bytes:
     """Read a single newline-delimited message. Bounded by `max_bytes`
     (control messages are tiny JSON objects — 64 KiB is huge headroom)
     so a peer that streams bytes without a newline can't grow the buffer
@@ -58,7 +75,7 @@ def _read_line(conn: socket.socket, max_bytes: int = 65536) -> bytes:
         chunks.append(b)
         total += len(b)
         if total > max_bytes:
-            raise ValueError("control request too large")
+            raise ValueError(f"control {direction} too large")
         if b.endswith(b"\n"):
             break
     return b"".join(chunks)
@@ -83,7 +100,7 @@ class ControlServer:
     def serve_forever(self) -> None:
         # Determine the actual filesystem path we'll bind to. AF_UNIX on
         # macOS has a 104-byte limit; fall back to a short temp path + symlink.
-        if len(str(self._path)) <= _MAX_SOCK_PATH:
+        if len(os.fsencode(self._path)) + 1 <= _MAX_SOCK_PATH:
             bind_path = self._path
             symlink_needed = False
         else:
@@ -156,8 +173,15 @@ class ControlServer:
         self._stop.set()
 
 
-def send_request(socket_path: Path, request: dict, *, timeout: float = 5.0) -> dict:
-    """Connect to a ControlServer, send one request, return its reply."""
+def send_request(socket_path: Path, request: dict, *, timeout: float = 5.0,
+                 max_response_bytes: int = 65536) -> dict:
+    """Connect and read one bounded reply; request limits remain 64 KiB.
+
+    Protocol2 clients opt into larger choice/recovery responses. The bound is
+    validated before connecting and cannot exceed 8 MiB; no transport retries.
+    """
+    if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 8 * 1024 * 1024:
+        raise ValueError("control response bound must be between 1 byte and 8 MiB")
     # Resolve symlinks so the connect path is always within the AF_UNIX limit.
     resolved = Path(os.path.realpath(socket_path))
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -168,6 +192,6 @@ def send_request(socket_path: Path, request: dict, *, timeout: float = 5.0) -> d
         raise ConnectionError(f"fulcra-collect daemon not reachable at {socket_path}") from exc
     try:
         conn.sendall(json.dumps(request).encode() + b"\n")
-        return json.loads(_read_line(conn).decode())
+        return json.loads(_read_line(conn, max_bytes=max_response_bytes, direction="response").decode())
     finally:
         conn.close()

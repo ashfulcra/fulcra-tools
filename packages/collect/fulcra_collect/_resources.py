@@ -4,9 +4,8 @@ The daemon serves bundled data files (the web-ui SPA, the in-app docs).
 In a dev checkout those live in the workspace tree; in a frozen app
 (Briefcase/py2app/pip-installed wheel) they ride *inside* the
 ``fulcra_collect`` package as force-included package data under
-``_bundled/`` (see the collect pyproject's
-``[tool.hatch.build.targets.wheel.force-include]``). This module is the
-single place that knows the difference, so the rest of the daemon never
+``_bundled/`` (see Collect's ``hatch_build.py`` custom build hook). This
+module is the single place that knows the difference, so the rest of the daemon never
 has to care whether it's running frozen — and the bundled location is
 relative to the installed package, so it works under any packager
 rather than depending on a bundler-specific ``Resources/`` layout.

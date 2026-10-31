@@ -1,117 +1,56 @@
-# Fulcra device-flow auth — the full detail
+# Fulcra authentication for native Netflix imports
 
-How the agent gets the user authenticated with Fulcra using the `fulcra-api` CLI's
-OAuth Device Authorization Flow, without ever handling a password and without any
-interactive terminal session.
+The importer uses installed standalone-runtime CLI authentication, independently
+of Collect's saved daemon account. It does not ask for passwords or print bearer
+tokens. Required installed sibling capabilities are checked before live auth or
+source acquisition; local check-only needs neither authentication nor runtime.
+Use the [package installation guide](../../../README.md#install-and-invocation).
 
-> **Provenance:** adapted from the `fulcra-onboarding` skill in
-> [fulcradynamics/agent-skills](https://github.com/fulcradynamics/agent-skills) (MIT),
-> reworked for the two-step `--get-auth-url` / `--device-code` form so no
-> background process has to be babysat.
+## Reuse or authenticate
 
-## Preconditions
+Use the installed `fulcra-api user-info` command to inspect the CLI account.
+A successful identity response is useful evidence; a nonzero/network failure is
+UNKNOWN, not proof that the user needs a different account. Diagnose connectivity
+or expired auth before starting another login. An actual import re-proves its
+captured principal and destination authority; this preliminary CLI read is not
+permission to substitute accounts during recovery.
 
-- `uv` is installed (`uv --version` succeeds). If not, ask the user for consent
-  first, then install: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-  (macOS/Linux) or `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows).
-- Install the CLI once — `uv tool install fulcra-api` — and invoke the
-  installed `fulcra-api` binary directly (repo rule: fulcra tools run as
-  installed binaries, never via `uv tool run`/`uvx`, which resolve
-  ephemerally). If a spawned subshell can't find it, invoke it by absolute
-  path (`uv tool dir --bin` names the directory) rather than falling back to
-  `uv tool run`.
+When login is needed, the installed CLI supports the split browser flow:
 
-## Step 0 — check whether auth is even needed
-
-```bash
-fulcra-api user-info
-```
-
-Exit 0 with valid JSON means the user is already authenticated — stop here, say
-nothing about logging in, and move on. Any non-zero exit means proceed with the
-device flow below.
-
-## Step 1 — mint the auth URL (non-interactive)
-
-```bash
+```sh
 fulcra-api auth login --get-auth-url
-```
-
-This returns immediately (no polling, no hang) with three items:
-
-```
-Web auth URL: https://fulcra.us.auth0.com/activate?user_code=XXXX-YYYY
-- Web auth code: XXXX-YYYY
-- Device code: <24-char opaque string>
-```
-
-Handling rules:
-
-- **Relay to the human**: the web auth URL (as a clickable markdown link) and the
-  web auth code, so they can confirm the code on the page matches. The URL
-  already embeds the code as a query parameter, so the Auth0 page pre-fills it —
-  the user just confirms and signs in (or creates an account; same flow).
-- **Keep private**: the **device code**. It is the credential the CLI uses to
-  claim the completed session — anyone holding it during the validity window can
-  finish the login as this user. It appears in CLI output the agent reads; it
-  must never appear in a chat message, log excerpt, or error report shown to the
-  human.
-- In a public or group channel, also warn the user to treat the auth URL itself
-  as sensitive — it shouldn't be pasted onward or shared.
-
-**Never run bare `fulcra-api auth login`** (no flags). Interactive
-mode blocks the shell polling for up to two minutes, can't show you the URL
-until it's too late in some runtimes, and typically times out before a human
-finishes a browser sign-in. The two-step form exists precisely so agents don't
-have to manage a hanging foreground process.
-
-## Step 2 — poll for completion
-
-Roughly every 15 seconds, run:
-
-```bash
 fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
 ```
 
-Each invocation polls for up to 5 seconds and returns. The CLI enforces that bound itself (`--poll-timeout=5`), so a single poll cannot hang your shell even on a wedged network — if an invocation somehow exceeds ~60s, kill it and treat the tick as pending. Three outcomes:
+The split-flow flags are `--get-auth-url`, `--device-code` and `--poll-timeout`.
+Relay the returned web URL/code to the user; keep the device code private.
+Use the CLI's returned expiry and polling instructions, bounded polls, and one
+active flow. Do not print tokens, credential-file contents or device codes into
+chat/log excerpts, run an interactive foreground login that cannot be completed,
+or start repeated auth flows merely because a provider read failed. Existing
+user authorization to install/authenticate still applies; explain a specific
+missing prerequisite rather than asking generic permission to continue.
 
-1. **Pending** — the user hasn't finished the browser flow yet. Not an error;
-   wait ~15 seconds and poll again. Don't nag the user on every tick.
-2. **Success** — credentials are persisted to
-   `~/.config/fulcra/credentials.json` (mode-restricted; never print its
-   contents). Confirm with `fulcra-api user-info` and announce
-   success to the user immediately — the "your bot noticed you signed in" beat
-   is the point of watching.
-3. **Expired** — device codes are valid for roughly **10 minutes**. If the code
-   expires before the user finishes, this is routine, not a failure: go back to
-   Step 1, mint a fresh URL + codes, and re-message the new link with a light
-   "that link timed out — here's a fresh one." Never re-send the old URL; its
-   code is dead.
+After success, recheck user-info and use the intended same CLI account/profile
+for import/recovery. The default profile is `~/.config/fulcra-collect`;
+`FULCRA_COLLECT_HOME` can select a different one explicitly. Preserve its journals
+and pending records. Changed account/pin/spec/profile holds pending work; never
+clear it by swapping credentials, deleting state or retyping legacy definitions.
 
-Do **not** start a second `--get-auth-url` while a live code is still pending —
-each mint invalidates nothing server-side, but messaging the user two different
-codes guarantees confusion about which page to trust. One live code at a time.
+## Importer boundary
 
-And don't re-loop silently: if you have re-minted more than once, or a full
-~10-minute code lifetime has elapsed with the user never completing the flow,
-stop polling and check in with them in chat ("still want to do this? here's a
-fresh link when you're ready") instead of grinding through mint cycles.
+The old per-run `get_token` subprocess loop and sampled-readback token helpers
+are retired from the Netflix script. The installed shared client/runtime owns
+authentication and same-principal freshness checks. No script fallback installs
+a CLI, prints/mints a bearer for an agent to handle, or retries through a legacy
+annotation endpoint. Do not paste `auth print-access-token` output into a
+conversation as a setup/debug step. Credential storage/refresh behavior belongs
+to the installed CLI/runtime, not a promise that authentication is side-effect
+free or always writes a particular file.
 
-## Failure modes
-
-| Symptom | Diagnosis | Action |
-|---|---|---|
-| `user-info` keeps failing right after a successful-looking poll | Credentials write raced the check | Wait ~3 s, retry `user-info` up to 3 times before concluding anything |
-| Poll reports expired | Code TTL (~10 min) elapsed | Mint a fresh URL (Step 1), re-message it |
-| Connection errors to `fulcra.us.auth0.com` or `api.fulcradynamics.com` (DNS failure, connect timeout — *not* 4xx auth errors) | The runtime's sandbox blocks outbound network | Tell the user plainly that this runtime can't do CLI auth, and stop — don't retry-loop against a wall |
-| `uv: command not found` | No `uv` on the host | Consent-gated install (see Preconditions) |
-
-## After auth
-
-- Tokens are minted on demand by downstream tooling (`fulcra-api auth
-  print-access-token`); the import script shells out for one per run and never
-  writes it to disk or output. The agent never needs to see, store, or relay a
-  bearer token.
-- Re-auth is rarely needed — credentials refresh from
-  `~/.config/fulcra/credentials.json`. If a later command returns 401/403,
-  re-run this flow from Step 0.
+For synthetic actual-caller tests, fence both the pre-migration auth path and the
+replacement before loading/executing the canonical script. The root Python
+network guard is not subprocess isolation. The Netflix package's function-scoped
+fixture blocks external execution/network/saved-auth fallbacks, injects fake
+credentials/MockTransport, and restores patches after each test. See the package
+guide for scope limits; no test is authority to reset real credentials.

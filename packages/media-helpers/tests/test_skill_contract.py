@@ -35,23 +35,23 @@ FOREIGN_FLAGS = {"--help"}
 #: rather than documenting inline. Adding a new CLI flag makes this test fail
 #: until you either document it in SKILL.md or add it here on purpose.
 #:
-#: These are NOT all per-importer flags. 6 of them belong to the two
-#: non-importer commands: the `webhook` server (`--bearer-token`, `--host`,
-#: `--port`) and the `reset` command (`--keep-listened`, `--keep-read`,
-#: `--keep-watched`). The remaining entries are per-importer flags (mostly
+#: These are NOT all per-importer flags. Three belong to the non-importer
+#: `reset` command (`--keep-listened`, `--keep-read`, `--keep-watched`).
+#: Webhook server flags are documented in the skill. The remaining entries
+#: are per-importer flags (mostly
 #: `generic-csv`/`generic-rss` column-mapping + the API-poll pagination/since
 #: knobs) that the SKILL delegates to `--help`.
 UNDOCUMENTED_OK = {
-    "--bearer-token", "--category", "--confidence", "--db", "--duration-col",
-    "--end-col", "--fingerprint", "--host", "--id-col", "--keep-listened",
-    "--keep-read", "--keep-watched", "--max-entries", "--max-pages", "--port",
-    "--service", "--since", "--subtitle-col", "--title-col", "--ts-col",
-    "--tz", "--watermark-overlap-hours",
+    "--category", "--confidence", "--db", "--duration-col",
+    "--end-col", "--fingerprint", "--id-col", "--keep-listened",
+    "--keep-read", "--keep-watched",
+    "--service", "--subtitle-col", "--title-col", "--ts-col",
+    "--tz", "--confirm", "--cluster-threshold", "--username", "--user-id",
 }
 
 
 def _cli_flags() -> set[str]:
-    return set(re.findall(r'click\.option\(\s*"(--[a-z0-9-]+)"', CLI_SRC))
+    return set(re.findall(r"click\.option\(\s*['\"](--[a-z0-9-]+)['\"]", CLI_SRC))
 
 
 def _doc_flags() -> set[str]:
@@ -144,17 +144,44 @@ def test_all_real_importers_appear_in_the_skill():
             f"mentioned (backticked) in the SKILL.md")
 
 
-def test_state_keys_match_status_output():
-    """The 'Quick orientation' + credential-file sections name state.json keys;
-    pin them against what `status` actually emits."""
-    status_keys = set(re.findall(r'"([a-z_]+)":\s*s\.[a-z_]+', CLI_SRC))
-    # the definition-id + watermarks keys the SKILL relies on for probes.
-    for key in ("watched_definition_id", "listened_definition_id",
-                "read_definition_id", "tag_ids", "watermarks"):
-        assert key in status_keys, (
-            f"status no longer emits {key!r} — the SKILL's probe/orientation "
-            f"prose references it")
-        assert key in SKILL, f"SKILL.md stopped documenting the state key {key!r}"
+def test_state_keys_match_status_output(tmp_path, monkeypatch):
+    """Exercise cached status, not the old State-to-CLI source spelling."""
+    import json
+    from fulcra_media import media_config
+    from fulcra_collect import config
+
+    profile = tmp_path / "profile"
+    monkeypatch.setattr(config, "profile_path", lambda: profile)
+    status = media_config.cached_status(tmp_path / "legacy.json")
+    assert set(status) == {"verification", "profile", "v1", "retained_legacy", "pending"}
+    assert status["v1"] is None
+    assert status["retained_legacy"] == dict.fromkeys(media_config.CATEGORIES)
+    assert status["pending"] == {"state": "absent"}
+    assert status["verification"] == "cached only; not live verified"
+    assert not profile.exists(), "status initialized a profile"
+    profile.mkdir()
+    (profile / media_config.FILENAME).write_text("null")
+    (profile / "state.db").write_bytes(b"not a database")
+    unknown = media_config.cached_status(tmp_path / "legacy.json")
+    assert unknown["v1"] == {"state": "UNKNOWN"}
+    assert unknown["pending"]["state"] == "UNKNOWN"
+    for key in status:
+        assert f"`{key}`" in SKILL
+    assert "UNKNOWN is never all clear" in SKILL
+    assert "not live verified" in json.dumps(status)
+
+
+def test_skill_recovery_and_scheduler_contract():
+    assert "reset is retired" in SKILL.lower() or "`reset` is retired" in SKILL.lower()
+    assert not re.search(r"fulcra-media reset[^\n]*--confirm", SKILL)
+    assert not re.search(r"\.watermarks\s*\|\s*keys|state\.watermarks", SKILL)
+    assert "explicit list of user-authorized, configured sources" in SKILL
+    assert "never drains/adopts pending work" in SKILL
+    assert "Saved account validation precedes automatic original pending recovery" in SKILL
+    assert "--watched Event/UUID" in SKILL and "--listened Event/UUID" in SKILL
+    assert "--read Event/UUID" in SKILL
+    assert "print-access-token >/dev/null" in SKILL
+    assert "~/Developer/" not in SKILL
 
 
 def test_reset_and_bootstrap_are_real_commands():
@@ -181,13 +208,17 @@ def _import_path_src() -> str:
     server, not part of the import envelope contract."""
     m = re.search(r'@cli\.command\(\s*"webhook"', CLI_SRC)
     assert m, "expected a `@cli.command(\"webhook\")` boundary in cli.py"
-    return CLI_SRC[: m.start()]
+    poll_source = (PKG / "fulcra_media" / "poll_cli.py").read_text(encoding="utf-8")
+    return CLI_SRC[: m.start()] + "\n" + poll_source
 
 
 def _import_path_stages() -> set[str]:
     """Every `stage` value the import path emits (webhook stages excluded by
     construction — they live after the boundary)."""
-    stages = set(re.findall(r'"stage":\s*"([a-z]+)"', _import_path_src()))
+    stages = set(re.findall(r"['\"]stage['\"]:\s*['\"]([a-z]+)['\"]", _import_path_src()))
+    # Configured file adapters track source stages until context cleanup, then
+    # emit one envelope with the selected stage. Include literal assignments.
+    stages.update(re.findall(r"\bstage\s*=\s*['\"]([a-z]+)['\"]", _import_path_src()))
     # Belt-and-suspenders: a webhook-only stage must never leak in here.
     assert not (stages & WEBHOOK_ONLY_STAGES), (
         f"webhook-only stage(s) found on the import path: "
@@ -212,7 +243,7 @@ def test_envelope_stages_documented_match_cli():
     cli_stages = _import_path_stages()
     doc_stages = _skill_documented_stages()
     # sanity: the union of import stages we expect today.
-    assert cli_stages == {"setup", "auth", "args", "fetch", "snapshot"}, (
+    assert cli_stages == {"setup", "auth", "args", "fetch", "snapshot", "import"}, (
         f"import-path stage set changed: {sorted(cli_stages)} — update the SKILL "
         f"enumeration and this expectation together")
     missing_from_doc = cli_stages - doc_stages

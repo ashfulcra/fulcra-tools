@@ -95,6 +95,10 @@ route on 2026-09-30, while visibility of the deleted source record was not teste
 
 ## Package index
 
+Collect's migration to v1 Event/Metric datatypes is in progress. The shared
+validation boundary is implemented; plugin conversion and the replacement
+installer are not yet released. See the [migration status](docs/collect-v1.md).
+
 Every directory under `packages/` is listed here. Each README covers that
 package’s setup, behavior, and limits. Install the pieces you need; the repository
 is not a requirement to run every piece together.
@@ -212,6 +216,13 @@ For a full Mac development checkout, `bash scripts/setup.sh` installs the
 workspace dependencies and runs the tests. It does not start Collect for you.
 See [`docs/TESTING.md`](docs/TESTING.md) for the development setup and platform
 requirements.
+
+The always-on [Linux selected-suite gate](.github/workflows/uv-workspace.yml)
+and [full macOS gate](.github/workflows/macos.yml) retain their test coverage and
+report interpreter/import paths plus per-test and slow-phase timings. Their
+finite budgets have completed-run evidence, without guaranteeing future runtime.
+A timed-out run is incomplete. See the
+[CI conventions](AGENTS.md#ci-and-workspace-membership).
 
 Every repository change must update the relevant READMEs in the same PR. Keep
 this package and skill index complete, and distinguish released behavior from
