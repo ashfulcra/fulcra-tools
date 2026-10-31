@@ -23,7 +23,7 @@ For a source build, see the [Chrome README](chrome/README.md).
 This package holds:
 
 - **`fulcra_attention/`** — the Fulcra Collect pointer plugin (`collect_plugin.py`). It does no collection: its description and Run Now receipt give installer users the steps for loading the extension folder from the disk image and signing in through the browser. No credentials, setup wizard, or definition binding.
-- **`chrome/`** — Chrome MV3 extension. Foreground-only capture, optional sharper-AFK content script, onboarding wizard, right-click context menu, branded UI. This is where all the real work happens — sign-in, definition resolution, and direct-to-Fulcra ingest. See [chrome/README.md](chrome/README.md) for build + load instructions.
+- **`chrome/`** — Chrome MV3 extension. Foreground-only capture, optional sharper-AFK content script, onboarding wizard, right-click context menu, branded UI. This is where all the real work happens — sign-in, definition resolution, and direct-to-Fulcra ingest. See [chrome/README.md](chrome/README.md) for build + load instructions and [local style resources](chrome/README.md#local-style-resources-development).
 - **[`safari/`](safari/)** — macOS and iOS containing apps and Safari extensions,
   sharing the browser capture code with native authentication and device identity.
 

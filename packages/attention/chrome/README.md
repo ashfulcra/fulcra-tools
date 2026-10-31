@@ -104,6 +104,18 @@ request caller. See the [safe consecutive-case regression](tests/fetch-guard.tes
 Synthetic UI messages and fake Chrome/IndexedDB are not installed-browser or
 provider acceptance.
 
+## Local style resources (development)
+
+The popup, options and onboarding styles use locally installed fonts with
+platform fallbacks. They do not download fonts or stylesheets from a CDN;
+opening extension pages needs no external styling service. This is a source
+change and does not update an already installed extension; load a newly built
+folder or a later release.
+
+[Style resource tests](tests/style-resources.test.ts) check the three page
+stylesheets for remote resource URLs. Build checks remain separate from actual
+browser, authentication, record delivery and signed-app acceptance.
+
 ## Cutting a release
 
 Bump the version in [package.json](package.json) and the Chrome/Safari manifest
