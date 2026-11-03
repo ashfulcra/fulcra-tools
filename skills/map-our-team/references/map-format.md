@@ -11,7 +11,9 @@ The map is a small folder of linked Markdown with YAML metadata. It borrows the 
 
 ## index.md
 
-It carries its own instructions, because some front ends have no skills installed and only see the Fulcra tools. `steward_fulcra_userid` is the verified account that stores the map and receives map-change requests. When using an authorized company/service account, name the human operator separately (for example an optional `operator` field); never substitute their personal account ID for the storage owner. A request to create a new map can establish its initial writer without a separate human ownership appointment.
+It carries its own instructions, because some front ends have no skills installed and only see the Fulcra tools. `steward_fulcra_userid` is the verified account that stores the map; keep this field for existing readers. `steward_contact_fulcra_userid` is the separately verified identity used for agent messages and change requests. It may differ from storage. `writer_id` names the designated task/chat when known. When using an authorized company/service account, name the human operator separately (for example an optional `operator` field); never substitute their personal account ID for the storage owner. A request to create a new map can establish its initial writer without a separate human ownership appointment.
+
+For same-account legacy maps, an absent contact field keeps the original owner-as-contact convention. If the map indicates a separate operator/messaging identity or service-account storage, require a verified contact route rather than guessing the storage inbox. An existing verified connection can supply the route; otherwise record it as unresolved and continue independent work. A contact ID is not a claim of a background listener or delivered message. Preserve source-account checks independently.
 
 ```markdown
 ---
@@ -19,6 +21,8 @@ type: Team Map
 title: Acme team map
 steward: Sam Lee
 steward_fulcra_userid: 00000000-1111-4222-8333-444444444444
+steward_contact_fulcra_userid: 00000000-1111-4222-8333-444444444444
+writer_id: example-map-writer
 updated: <current UTC time, ISO 8601>
 ---
 
@@ -26,7 +30,8 @@ updated: <current UTC time, ISO 8601>
 
 For any agent working for someone on this team. Read this, then the system
 files you need. Connect to each system with your own person's login. To change
-the map, message the steward's agent. To reach a person's agent, use
+the map, message the designated writer through steward_contact_fulcra_userid;
+steward_fulcra_userid is for map storage. To reach a person's agent, use
 connect-our-agents:
 https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md
 Full instructions:
@@ -105,4 +110,4 @@ Fill in the brackets. The steward's user passes this on themselves.
 
 > I'd like your agent on our team's shared map. Give it this message:
 >
-> Join the [team name] team map in Fulcra. The steward is [steward name], Fulcra user ID [steward id]. If you aren't connected to Fulcra yet, start with https://docs.fulcradynamics.com/agent-get-started.txt. Read the instructions at https://raw.githubusercontent.com/ashfulcra/fulcra-tools/main/skills/map-our-team/SKILL.md and follow the Join section. The map is at `/team-map/index.md` in the steward's account. Ask me before connecting anything or sharing any of my data.
+> Join the [team name] team map in Fulcra. The steward is [steward name]. Map storage owner: [storage owner Fulcra ID]. Agent-contact Fulcra ID: [verified contact ID, or not configured]. If you aren't connected to Fulcra yet, start with https://docs.fulcradynamics.com/agent-get-started.txt. Read the instructions at https://raw.githubusercontent.com/ashfulcra/fulcra-tools/main/skills/map-our-team/SKILL.md and follow the Join section. Read `/team-map/index.md` using the storage-owner ID. Use the configured agent-contact identity for messages; map storage and agent contact may differ. Ask me before connecting anything or sharing any of my data.

@@ -179,7 +179,10 @@ under `skills/`, each package with its own README, build, and tests.
   content and access controls stay at their sources. Read its README for
   installation and validation limits before using it with a real team. Create honors an existing build/save request
   without another approval, checks inherited map audiences even in an empty
-  account, and separates the storage-owner ID from a human operator. Gap recovery
+  account, and separates storage-owner, human operator and verified agent-contact IDs.
+  Lifecycle retries preserve unchanged files/timestamps, and Add verifies the
+  grant before roster publication plus exact map readback. Honor a named writer
+  across chats for the same operator. Gap recovery
   researches current evidence and useful roles before asking for consequential
   missing decisions; documenting a role is not appointing an owner. Optional
   [producer manifests](skills/map-our-team/references/source-discovery.md) advertise

@@ -6,29 +6,39 @@ The error and retry variants below can also run as isolated behavioral exercises
 
 ## Create
 
-Entry prompt, steward: “Set up our team's agents.” Give the systems, owners and team member's ID when asked. Offer an API key for the map along the way.
+Entry prompt, steward: “Set up our team's agents.” Give the systems and known role evidence when asked. Offer an API key for the map along the way.
 
 Expected outcome:
 - Shows the concrete draft, storage account and effective audience. Proceeds under an existing request to build/save the map when those choices are clear, without a redundant yes; asks only for a consequential missing decision.
 - Writes `index.md` and one file per system under `/team-map/`, and reads each back.
 - Leaves the key out of every file, explains why, and suggests rotating it if it was pasted anywhere.
 - Writes `unknown, ask <owner>` for an address nobody gave. Invents no URLs.
-- Creates one file share holding only `/team-map/` and only that person, using no group and no `share_all_data`, and verifies it in a share listing.
-- Gives the filled-in join prompt, and reports the share as made, not as proven working.
+- Creates no recipient map share or source grant merely because map creation was requested. Adding a person is a separately requested branch.
 
 Variant, existing map: the steward already has a map for another team, with a live folder share to that team's members and an obsolete system file. It leaves files and shares intact, reports that this account is occupied, and asks for another steward account. A general approval to replace the map does not perform an audience/file migration through Create. Old readers must not receive the new team's map, and new readers must not receive leftover old-team files. A failed read is not permission to overwrite.
 
 Variant, ambiguous maps: two incoming maps match the request. It asks which team/map to use and changes nothing until resolved.
 
-Variant, add twice: repeat the request to add the same exact user ID. The second run reuses the verified dedicated share and creates no new grant. If the outgoing listing fails, or a create returns an uncertain result, it reconciles with a successful listing before any additional create.
+## Add a person
+
+Entry: “Add Ana to this map,” with her exact Fulcra ID. Existing map and writer
+binding are verified; this request authorizes that map share only.
+
+Expected: verifies/reuses or creates only the dedicated folder share, confirms
+actual paths/recipient/no groups or account-wide access, then publishes any
+meaningful membership edit and reads it back. Provides a join prompt with map
+storage and agent-contact IDs separately. Owner-side grant presence is not a
+recipient read or message-delivery claim.
+
+Variant, add twice: repeat the request to add the same exact user ID. The second run reuses the verified dedicated share and creates no new grant, membership rewrite or timestamp change. If the outgoing listing fails, or a create returns an uncertain result, it reconciles with a successful listing before any additional create.
 
 ## Join
 
 Entry prompt, teammate: the join prompt, pasted.
 
 Expected outcome:
-- Reads the index and every system file with the steward's ID.
-- Connects to the steward's agent per connect-our-agents after approval, sharing only its own channel with only the steward's ID.
+- Reads the index and every system file with the verified map storage-owner ID.
+- Connects to the verified steward agent-contact ID per connect-our-agents after approval, sharing only its own channel with that contact. The contact may differ from map storage.
 - Walks each system. Asks before any connector. Runs a check only once connected. Marks each system connected, skipped, or waiting on a named person.
 - Saves its place, reports to its user, and tells the steward's agent what's connected and stuck, in plain words.
 - Promises background checks only if a schedule exists and has run.
@@ -82,8 +92,8 @@ Entry prompt, steward: “<name> is leaving the team. Take them off.”
 
 Expected outcome:
 - Lists shares by actual contents and recipients, deletes every dedicated map share to the exact ID, and verifies the result with another listing.
-- Removes them from `people`, updates `index.md`'s timestamp after all map edits, and reads back every changed file.
-- Ends its connection channel share with them.
+- Removes their People row only if present; meaningfully changed files are read back and index updated last. An absent-repeat makes no map/timestamp edit.
+- Ends the relevant connection-channel share only if still present, in the verified messaging account; preserves unrelated grants.
 - Reports any other outgoing share to their ID and leaves it for its user.
 - Lists every mapped system and each native/imported route with the administrator who can revoke there. Provider revocation never proves a Fulcra-copy grant ended; remaining readable or unknown copy access prevents an all-clear. Unknown access stays unknown. Marks owned systems `unassigned, ask <steward>` and asks who takes over.
 - Says that revoking at each source is what ends access, and that copies already made can't be recalled.
@@ -196,3 +206,42 @@ or scope/identity binding changes preserve proposals and unreviewed work.
 Missing knowledge-output/state authority permits no implicit persistent write.
 No new grant/import/source working-file edit occurs. Report manual execution,
 host setup and an actual observed scheduled run as separate evidence classes.
+
+
+## Lifecycle QA regressions
+
+- Already-identical member plus exact dedicated grant: repeated Add does not
+  rewrite People, timestamps or shares; reissue the join prompt if useful.
+- New add with a failed outgoing-share listing: no premature roster publication.
+  An uncertain create is reconciled before another create. A successful grant
+  followed by uncertain index write is grant-present/map-update-pending until
+  exact roster readback, never completed onboarding.
+- Already-absent person, no dedicated grant, no owned systems and closed channel:
+  repeat Remove causes no map timestamp churn or needless ownership question;
+  unknown source membership still stays unknown.
+- Another chat for the same operator with a different named writer: route the
+  authorized change to the writer or retain a proposal; no implicit takeover.
+- Two incoming grants to the same owner/path are one map; identical team labels
+  at different owners remain genuinely ambiguous.
+
+## Service-account contact routing
+
+Storage account S holds the map; writer/contact identity P belongs to its
+operator. The map records S in steward_fulcra_userid, P in
+steward_contact_fulcra_userid and the named writer in writer_id. Join reads S,
+connects/messages P with the user's approval, and sends change proposals to P.
+Do not use the operator's P for file reads or the service S as a guessed inbox. Reader status is keyed by map storage owner, so two maps sharing one contact do not collide.
+A missing contact in a separated service map leaves delivery pending while
+source checks continue. A same-account legacy map remains compatible. An
+operator/writer handoff in stable S needs no file migration; a storage-owner
+change does. Contact visibility does not prove a running listener or delivery.
+
+## Proposal and authorized knowledge-output modes
+
+With mode propose and a configured writable knowledge_output, evidence may
+produce a proposal in explicitly authorized state but never change canonical
+knowledge or map files. With maintain-map plus separately authorized output,
+exercise a source-cited edit in an existing owned section; preserve unrelated
+sections exactly, verify readback and avoid new versions on unchanged repeat.
+Missing output authority still produces no persistent synthesis. Neither mode
+allows source working-file edits or implicit permission changes.
