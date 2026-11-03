@@ -55,8 +55,8 @@ dedicated share, removal of duplicate dedicated shares, and denied reads after
 revocation. Test files were soft-deleted and unrelated shares were preserved.
 This verifies the storage/sharing operations, not the full two-agent workflow.
 
-Muse, Town, real third-party connections, CLI writes and recurring execution
-remain untested. Simulated checks do not establish those live capabilities.
+Muse/Town onboarding, newly connecting third-party sources, CLI writes and
+actual recurring execution remain untested by these exercises. Simulated checks do not establish those live capabilities.
 
 Version 0.1.2 adds gap recovery and optional producer-manifest adoption.
 On 2026-11-03 it passed official skill validation, fresh-agent behavioral
@@ -66,3 +66,25 @@ Those exercises use synthetic supplied observations, not live provider sync.
 The [acceptance plan](references/acceptance.md) covers repeat/failure variants.
 Live adapter publication and combined operation must be verified against the
 specific app release before advertising that integration as working.
+
+Version 0.1.3 fixes a redundant Create approval exposed by an actual company-map
+build. A clear request to build/save a map authorizes its writes; the skill
+still checks inherited audiences and asks for consequential missing choices.
+An authorized company/service account can store the map, with its account ID
+kept separate from the human operator's personal ID. This changes no source
+permissions and authorizes no additional sharing.
+
+For recurring upkeep, the [scheduled-maintenance recipe](references/scheduled-maintenance.md)
+provides one agent-neutral setup/run prompt and per-installation source, writer,
+mode, state and bounds contract. Use it manually or in a native agent scheduler;
+no background worker or personal schedule is installed. Native-only operation,
+partial coverage, uncertain writes, unchanged repeats and independent knowledge
+output authorization remain explicit. A saved host task is not observed
+scheduled execution.
+
+On 2026-11-03, v0.1.3 passed official skill validation, cold authorization/audience
+exercises, actual company-map write/readback and fresh-agent source-routing
+checks. The recurring prompt was manually executed in a local synthetic sandbox,
+including unchanged repeat, uncertain writes, conflicting writer, missing state
+permission and changed source scope. These are not observed scheduled runs;
+no personal automation was created. Real evidence remains private.

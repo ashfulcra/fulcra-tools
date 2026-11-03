@@ -1,10 +1,10 @@
 ---
 name: map-our-team
-description: "Give every agent on a team one shared map, stored in Fulcra, of where the team's work lives, how to reach it, and whose agent to ask, whichever AI each person uses. Nothing moves: content stays in Notion, Drive, a CRM or any other tool. Use when the user says set up our team's agents, map our tools, onboard a teammate's agent, add this to the map, where does X live, who owns X, check my agent's connections, or remove someone from the team."
+description: "Give every agent on a team one shared map, stored in Fulcra, of where the team's work lives, how to reach it, and whose agent to ask, whichever AI each person uses. Nothing moves: content stays in Notion, Drive, a CRM or any other tool. Use when the user says set up our team's agents, map our tools, onboard a teammate's agent, add this to the map, where does X live, who owns X, check my agent's connections, remove someone from the team, or set up recurring company-knowledge maintenance (dreaming)."
 compatibility: "Needs the Fulcra MCP server (the hosted one at mcp.fulcradynamics.com works) or the Fulcra CLI (fulcra-api, run with uvx) with network access."
 license: "MIT"
 metadata:
-  version: "0.1.2"
+  version: "0.1.3"
   openclaw:
     emoji: "🗺️"
 ---
@@ -14,10 +14,10 @@ metadata:
 A team's agents run on different front ends and hold different logins. This skill gives them one **map**: a read-only folder in Fulcra saying what the team uses, where it lives, how an agent connects, and who is in charge of it. Each agent connects to each tool with its own person's permissions, and agents reach each other through [connect-our-agents](https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md).
 
 - **Map:** the folder `/team-map/` in the **steward's** Fulcra account. Format: [references/map-format.md](references/map-format.md). Commands: [references/commands.md](references/commands.md).
-- **Steward:** the one person whose agent writes the map. Everyone else reads it and sends changes to the steward's agent. One writer keeps one version of the truth.
+- **Steward:** the responsible operator and their one map-writing agent. The map may live in their personal account or an authorized company/service account; its verified storage owner ID determines where readers go. Everyone else reads it and sends changes to that writer.
 - **Source:** the tool that holds the content. The source decides who may see what, so access is granted and revoked there.
 
-Pick the branch that matches the request. If you don't yet know whether a map exists, look: your own `/team-map/index.md`, then incoming file shares for a `/team-map/` folder. Match the team and steward before writing or sharing. If several maps match, ask which one; an unreadable map is not an absent map. This layout holds one team per steward account. If another team's map or old map grants already occupy that account, leave its files and shares intact and ask for another steward account. Cross-team migration needs its own plan for existing readers and files; this Create flow does not perform it.
+Pick the branch that matches the request. If you don't yet know whether a map exists, look: your own `/team-map/index.md`, then incoming file shares for a `/team-map/` folder. Match the team and steward before writing or sharing. If several maps match, ask which one; an unreadable map is not an absent map. This layout holds one team per steward account. If another team's map or old map grants already occupy that account, leave its files and shares intact. Use another already authorized suitable account when available, or ask for a different destination. Cross-team migration needs its own plan for existing readers and files; this Create flow does not perform it.
 
 | The user wants to | Branch |
 |---|---|
@@ -27,13 +27,14 @@ Pick the branch that matches the request. If you don't yet know whether a map ex
 | Find something, or know who owns it | [Find something](#find-something) |
 | Change an entry | [Change the map](#change-the-map) |
 | Know whether their connections still work | [Check connections](#check-connections) |
+| Maintain company knowledge repeatedly (dreaming) | [Scheduled maintenance](#scheduled-maintenance) |
 | Take someone off the team | [Remove a person](#remove-a-person) |
 
 ## Create the map
 
-1. **Take stock.** Confirm which Fulcra account you are on. Before any map write, list existing `/team-map/` files and outgoing shares that cover the folder, including parent-folder, account-wide and group grants. Apply the team-identity rule above; an unreadable listing leaves the account's map slot unverified. Discover sources through existing platform connections and optional [connector manifests](references/source-discovery.md); neither route requires the other. Research useful owner/maintainer/access roles before asking. Done when each system has a purpose, a verified location or explicit gap, and a role that can take the next action; an unconfirmed human assignment need not block the map.
+1. **Take stock.** Confirm which Fulcra account you are on. Before any map write, list existing `/team-map/` files and outgoing shares that cover the folder, including parent-folder, account-wide and group grants. Apply the team-identity rule above; an unreadable listing leaves the account's map slot unverified. Check the audience inherited from parent/account/group grants even when no map exists. An existing all-files share would also expose a new map. Preserve unrelated grants; use another already authorized suitable account when available, or ask the specific audience/destination question before publishing to an unverified audience. Discover sources through existing platform connections and optional [connector manifests](references/source-discovery.md); neither route requires the other. Research useful owner/maintainer/access roles before asking. Done when each system has a purpose, a verified location or explicit gap, and a role that can take the next action; an unconfirmed human assignment need not block the map.
 2. **Fill in what you can by looking.** For each system you can reach, start with a read-only call to learn the workspace name, top-level locations and any observed connector limits. Follow relevant source links when needed to resolve a gap using [Resolve gaps](references/resolve-gaps.md). Record links to the places people actually use, and leave untested capabilities unknown. Ask only for missing information or authority that changes the next action. Unresolved facts get a named role and next step (or `unknown, ask <steward>` when no role is known); an address you haven't seen stays out of the map.
-3. **Show the draft** in chat: one line per system, the people, and who is steward. Ask for one yes. Leave out passwords, tokens, API keys and the content itself. If your user offers a credential for the map, explain that each agent signs in with its own login, and suggest they rotate it if it was pasted anywhere. Note that restricted areas exist without naming what's in them.
+3. **Show the draft** in chat: one line per system, the people, steward, storage account and effective audience. A request to build/save this map already authorizes the map writes when those choices are clear and within scope; proceed without another yes. For a new map, the requesting user's agent can be its initial writer in the chosen authorized account. Ask only for a missing consequential choice, such as an ambiguous team, an unexpected audience or an actual stewardship transfer. Keep the human operator distinct from the map's storage-account identity. Leave out passwords, tokens, API keys and the content itself. If your user offers a credential for the map, explain that each agent signs in with its own login, and suggest they rotate it if it was pasted anywhere. Note that restricted areas exist without naming what's in them.
 4. **Write it**, following the format, `index.md` last. Read every file back. Done when each read-back matches.
 5. **Offer the next step:** [add the first person](#add-a-person).
 
@@ -92,6 +93,16 @@ Run on request, or on a schedule your user agreed to. Agree on the schedule as [
 2. Run each system's check, read-only. Result per system: **working**, **failed check** (with the error), or **not connected**. A failed check leaves the connection's health unknown; it is not proof that the tool is down or access was revoked. Use [Resolve gaps](references/resolve-gaps.md) within the authorized check scope; a read-only health check does not authorize grants. Readable imports with pending/conflict/access-loss status are not proof of a current source. Scheduled checks remain read-only unless separately authorized.
 3. Compare with the saved results, then save the new map timestamp, per-system outcomes, errors and check time in your own memory or `/team-map-status/<steward-id>.md` in your own account. On the first run report the baseline; later, notify only when an outcome or error changes, including recovery. A new check time alone isn't a change. If saving fails, say so: the next session may repeat the report.
 4. Tell the steward's agent if a map entry itself is wrong, within the messaging permission already granted.
+
+## Scheduled maintenance
+
+For recurring map upkeep or optional knowledge consolidation, use the reusable
+[setup and run prompt](references/scheduled-maintenance.md). It works manually
+or in the user's native scheduled-task host, with native sources alone or
+optional imports. Default to proposals; a designated writer with explicit
+`maintain-map` authorization may update factual routing without another yes.
+Check connections remains a read-only health check. Installing this skill does
+not create a schedule, grant or knowledge output.
 
 ## Remove a person
 
