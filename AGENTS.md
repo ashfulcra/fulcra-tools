@@ -177,7 +177,15 @@ under `skills/`, each package with its own README, build, and tests.
   Files and the external
   [connect-our-agents skill](https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md);
   content and access controls stay at their sources. Read its README for
-  installation and validation limits before using it with a real team.
+  installation and validation limits before using it with a real team. Gap recovery
+  researches current evidence and useful roles before asking for consequential
+  missing decisions; documenting a role is not appointing an owner. Optional
+  [producer manifests](skills/map-our-team/references/source-discovery.md) advertise
+  connector-owned sources under `/knowledge-sources/v1/`; the skill works without
+  them. Preserve the steward's map writer and producer's source/index writers.
+  Never put synthesized knowledge into two-way sync working files or infer a
+  source grant from a map/manifest. Check reader access and source freshness
+  separately from producer publication; unknown provider namespaces stay unknown.
 
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS
