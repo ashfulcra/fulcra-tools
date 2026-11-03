@@ -11,7 +11,7 @@ The map is a small folder of linked Markdown with YAML metadata. It borrows the 
 
 ## index.md
 
-It carries its own instructions, because some front ends have no skills installed and only see the Fulcra tools.
+It carries its own instructions, because some front ends have no skills installed and only see the Fulcra tools. `steward_fulcra_userid` is the verified account that stores the map and receives map-change requests. When using an authorized company/service account, name the human operator separately (for example an optional `operator` field); never substitute their personal account ID for the storage owner. A request to create a new map can establish its initial writer without a separate human ownership appointment.
 
 ```markdown
 ---
