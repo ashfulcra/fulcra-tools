@@ -170,6 +170,15 @@ touching. First failing probe is where your setup gap is.
 uv-workspace monorepo, macOS-first. Packages under `packages/`, agent skills
 under `skills/`, each package with its own README, build, and tests.
 
+- **Map Our Team** — [`skills/map-our-team`](skills/map-our-team/README.md)
+  provides a shared index of a team's knowledge sources, owners and connection
+  instructions. Its [skill](skills/map-our-team/SKILL.md) covers the steward's
+  map and each teammate's onboarding, checks and offboarding. It uses Fulcra
+  Files and the external
+  [connect-our-agents skill](https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md);
+  content and access controls stay at their sources. Read its README for
+  installation and validation limits before using it with a real team.
+
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest

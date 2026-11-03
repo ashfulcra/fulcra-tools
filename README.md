@@ -47,6 +47,8 @@ extensively. None of that makes this a supported Fulcra product.
   and its [agent skill](skills/fulcra-agent-continuity/SKILL.md).
 - **Keep shared knowledge or preferences:** [Vault](packages/fulcra-vault/README.md)
   and [Prefs](packages/fulcra-prefs/README.md).
+- **Find your team's knowledge across tools:** [Map Our Team](skills/map-our-team/README.md)
+  keeps a shared guide to locations, owners and agent connections.
 - **Bring local apps and exports into Fulcra:** [Collect](#collect-on-a-mac)
   and the [source guide](docs/how-do-i-get-my-data.md).
 - **Build something on Fulcra:** the [FDE skill](skills/fulcra-fde/SKILL.md).
@@ -174,6 +176,7 @@ includes the skills under `skills/` and those bundled inside packages.
 | [Content review](skills/fulcra-content-review/SKILL.md) | Checking human-facing prose for supported claims, voice, and evidence. |
 | [FDE](skills/fulcra-fde/SKILL.md) | Taking a product idea through discovery, prototype, and build. |
 | [Lab results](skills/fulcra-lab-results/SKILL.md) | Reading, verifying, and importing lab reports. |
+| [Map Our Team](skills/map-our-team/SKILL.md) | Finding team knowledge, connecting agents to its sources, and onboarding or removing teammates. |
 | [Sealed secrets](skills/sealed-secrets/SKILL.md) | Encrypted credential bundles and verification after recovery. |
 | [CSV import](packages/csv-importer/skills/fulcra-csv/SKILL.md) | Mapping a user’s CSV into Fulcra. |
 | [Preferences](packages/fulcra-prefs/skill/SKILL.md) | Capturing and using user-owned preferences. |
