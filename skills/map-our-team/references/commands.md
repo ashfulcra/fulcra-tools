@@ -1,6 +1,6 @@
 # Commands
 
-Use whichever you have. `<steward>` is the steward's Fulcra user ID.
+Use whichever you have. In file commands, `<steward>` is the map storage-owner Fulcra ID, not a possibly different agent-contact ID. Use the contact field only for agent connections/messages.
 
 CLI syntax below was checked against `fulcra-api` 0.1.57 on 2026-11-03. MCP calls use the connected account selected by the host; any account-selection argument is host-specific. Verify that account before writes. Command help checks do not establish that a live share or onboarding flow works.
 

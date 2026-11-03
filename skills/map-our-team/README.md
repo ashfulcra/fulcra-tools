@@ -6,7 +6,7 @@ Teams rarely use one AI. One person works in Claude, another in Muse, another in
 
 When an agent can't reach something, the map says who owns it, and [connect-our-agents](https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md) reaches that person's agent. Agents send links rather than content, so each route applies its own permissions. Imported Fulcra copies have separate grants: offboarding checks both provider access and any mapped copies.
 
-The map holds pointers only: no content and no credentials. Everyone it's shared with can read all of it, and only the steward's agent can change it. The map lives in the steward's Fulcra account, so moving stewards means copying it over and re-sharing.
+The map holds pointers only: no content and no credentials. Everyone it's shared with can read all of it, and its designated steward agent maintains it. Owner-account agents must honor that single-writer convention; it is not an enforced cross-agent lock. The storage-owner account and steward's agent-contact identity may differ. A writer/operator handoff can keep company storage in place; moving storage to another account needs a separate copy/share migration.
 
 Works with the Fulcra CLI or the Fulcra MCP and accounts already connected in
 your agent's platform. Built on Fulcra file shares and connect-our-agents. No
@@ -88,3 +88,22 @@ checks. The recurring prompt was manually executed in a local synthetic sandbox,
 including unchanged repeat, uncertain writes, conflicting writer, missing state
 permission and changed source scope. These are not observed scheduled runs;
 no personal automation was created. Real evidence remains private.
+
+Version 0.1.4 separates map storage from the verified steward message route,
+and records an optional named writer binding. Repeated add/remove operations
+leave unchanged map files/timestamps alone. Add verifies the grant before roster
+publication and reads the membership edit back; uncertain writes stay pending.
+Service-account joining and lifecycle retries are explicit acceptance cases.
+
+Proposal mode now leaves both the map and canonical knowledge output unchanged,
+even when the output is writable. Authorized state may retain proposals;
+publication requires maintain-map mode and the separate output authorization.
+
+The 0.1.4 QA pass checked service-account Join and add/remove retry traces,
+and manually executed the exact canonical maintenance recipe with synthetic
+knowledge-output fixtures. Proposal mode produced zero canonical writes;
+authorized apply preserved unrelated owned sections, and unchanged repeat
+produced zero versions/writes. Missing authority and source-instruction cases
+remained bounded. These are simulated/manual tests, not live membership changes
+or observed scheduled execution. Live map/source read checks are recorded
+separately; no new grant or connection was created by this QA pass.

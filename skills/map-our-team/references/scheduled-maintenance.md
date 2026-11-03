@@ -61,8 +61,11 @@ the authorized location/query scope; a manifest may advertise only a subset.
 }
 ```
 
-Modes are `propose` (default) and `maintain-map` (explicitly authorized map
-updates). Classifications are `company`, `demo`, `personal`, `unknown`; verify
+Modes are `propose` (default, no canonical map or knowledge-output writes) and
+`maintain-map` (authorized map repairs and separately authorized knowledge output).
+State/checkpoint permission is independent: proposal mode may save proposals only
+in its explicitly authorized state destination. A destination's write permission
+is not a request to apply during a proposal run. Classifications are `company`, `demo`, `personal`, `unknown`; verify
 actual provenance rather than trusting labels or `ready`. Bounds are starting
 examples: limit the items examined and elapsed work, use provider page limits,
 and retain unfinished scope. The host cadence/timezone sits outside this run
@@ -70,11 +73,11 @@ configuration. Do not create a personal task to demonstrate a reusable recipe.
 
 Optional `knowledge_output` has `account_context`, `path`, `owned_section` and
 `authorization`. Omit it unless a persistent knowledge destination and writer
-scope were actually chosen. State-write authority must be captured in the installation instructions or
+scope were actually chosen. State-write authority must be captured in the
+installation instructions or
 `state.authorization`; a path alone is not permission. With `none` or unresolved
 authority, return the checkpoint/proposals in chat without persisting them.
-Its path and state path must be outside producer
-manifests, indexes, working files and operational folders; state also stays
+The knowledge-output path and state path must be outside producer manifests, indexes, working files and operational folders; state also stays
 outside the map. Persistent synthesis is never saved in `/team-map/`. Existing
 vault sections keep their writer rules; don't create a vault implicitly.
 
@@ -87,7 +90,9 @@ link here rather than fork the protocol.
 ```text
 Read the installed map-our-team skill and its references/scheduled-maintenance.md
 with the filled configuration below. Published entry if needed:
-https://raw.githubusercontent.com/ashfulcra/fulcra-tools/main/skills/map-our-team/SKILL.md Follow the scheduled-maintenance procedure; Check
+https://raw.githubusercontent.com/ashfulcra/fulcra-tools/main/skills/map-our-team/SKILL.md
+
+Follow the scheduled-maintenance procedure; Check
 connections alone is a read-only health check, not this maintenance task.
 
 Verify the configured map-owner identity, team/root and named writer binding.
@@ -116,7 +121,9 @@ search, retain the exact pending page/range/item; never advance past unreviewed
 work or treat missing/failed reads as deletion. Don't trawl unrelated data to
 fill the map. Report the actual checked scope, not complete-company coverage.
 
-In propose mode, return source-cited routing repairs without changing the map.
+In propose mode, return source-cited routing and knowledge proposals without
+changing the map or canonical knowledge_output, even when output write permission
+exists. Only an explicitly authorized state/checkpoint may persist proposals.
 In maintain-map mode, apply only authorized, evidence-backed factual repairs
 through the single steward writer. An unexpected map edit by another writer
 means preserve proposals and stop overwriting. Re-read affected files before
@@ -128,7 +135,8 @@ by actual readback before retrying; do not duplicate an effect or checkpoint a
 proposed/failed write as published.
 
 Answer/summarize in chat as requested. Persistent source-cited knowledge updates
-require the configured authorized knowledge_output and its owned-section rules.
+require maintain-map mode plus the configured authorized knowledge_output and
+its owned-section rules. A proposal run never publishes canonical knowledge.
 Without that, keep synthesis as a proposal/chat answer. Never write summaries
 into producer manifests, indexes, source working files or operational state.
 
