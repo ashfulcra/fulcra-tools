@@ -69,11 +69,18 @@ Company wiki and deal memos. Notion is the system of record.
 ## Where
 - Wiki: https://www.notion.so/acme/Wiki-0123456789abcdef0123456789abcdef
 - Deal memos: https://www.notion.so/acme/Memos-fedcba9876543210fedcba9876543210
-- Read-only copy for agents without Notion: /notion/ in Sam's Fulcra account
+- Optional imported copy: use its verified owner-account/path, mode and status below; provider access does not grant access to that copy.
 
 ## Connect
 Add Notion's connector in your front end and sign in with your own account:
 https://mcp.notion.com/mcp
+
+## Source routes
+Native Notion connection in the verified Acme workspace. Optional producer
+manifest/index links go here, including the Fulcra owner-account context,
+producer/instance, provider namespace (unknown if not established), mode and
+observed scope/status. Cite the source of role/routing facts. Keep factual/source
+dates separate from import and verification dates. Leave absent imports as none.
 
 ## Get access
 Sam grants access per page in Notion. Ask Sam, or Sam's agent. If the owner cannot grant access, name the actual administrator here, or write `unknown, ask <owner>`.
@@ -88,7 +95,9 @@ Page reads checked; other capabilities untested. No limits observed in that chec
 Some pages are restricted in Notion. Links only.
 ```
 
-Change `updated` in `index.md` on every edit to any map file, because that's what agents watch. Keep every heading; write "none" where one doesn't apply, and `unknown, ask <owner>` where nobody knows yet. A **check** is one read-only call with a pass condition anyone can apply, so it never needs to create, change or delete anything. Record observed connector limits; one successful read does not establish that there are no other limits. **Limits** is where hard-won knowledge goes, such as what a connector can't do, so each agent doesn't rediscover it.
+For older entries, add **Source routes** when adopting an imported route or documenting provenance; existing maps remain readable without it. See [source-discovery.md](source-discovery.md) for the optional manifest contract. An `owner` may be a documented role; use a human Fulcra ID only when established. Keep maintainer/producer/access roles distinct instead of forcing a human assignment.
+
+Change `updated` in `index.md` on every meaningful edit to any map file, because that's what agents watch. An identical repeat leaves files and timestamps alone. Keep every heading; write "none" where one doesn't apply, and `unknown, ask <owner>` where nobody knows yet. A **check** is one read-only call with a pass condition anyone can apply, so it never needs to create, change or delete anything. Record observed connector limits; one successful read does not establish that there are no other limits. **Limits** is where hard-won knowledge goes, such as what a connector can't do, so each agent doesn't rediscover it.
 
 ## Join prompt
 

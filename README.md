@@ -48,7 +48,8 @@ extensively. None of that makes this a supported Fulcra product.
 - **Keep shared knowledge or preferences:** [Vault](packages/fulcra-vault/README.md)
   and [Prefs](packages/fulcra-prefs/README.md).
 - **Find your team's knowledge across tools:** [Map Our Team](skills/map-our-team/README.md)
-  keeps a shared guide to locations, owners and agent connections.
+  keeps a shared guide to locations, roles and agent connections, researches gaps,
+  and can link optional sync-app indexes without requiring a sync app.
 - **Bring local apps and exports into Fulcra:** [Collect](#collect-on-a-mac)
   and the [source guide](docs/how-do-i-get-my-data.md).
 - **Build something on Fulcra:** the [FDE skill](skills/fulcra-fde/SKILL.md).
