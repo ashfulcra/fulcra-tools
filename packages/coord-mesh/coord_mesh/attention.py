@@ -27,7 +27,8 @@ def reply_identity(peer, record_id, incoming):
 
 def legacy_receipt(peer, incoming, actual):
     mid = incoming.get('mid')
-    return (isinstance(actual, dict) and actual.get('v') == 1 and bool(mid) and
+    return (isinstance(actual, dict) and 'in_reply_to' not in actual and
+            actual.get('v') == 1 and bool(mid) and
             actual.get('kind') == 'response' and bool(actual.get('mid')) and
             actual.get('to_user') == peer and
             actual.get('slug') == incoming.get('slug', '') + '-ack' and

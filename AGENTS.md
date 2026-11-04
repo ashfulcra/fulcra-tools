@@ -32,7 +32,8 @@ never retry automatically. This adds no grants, native listener or authority to
 execute peer text. New mesh envelopes carry stable per-send `mid` identities;
 attention entries expose `reply_to` for original IDs and source-qualified historical
 mid-less records without changing source envelopes. Schema-v2 legacy ACK reconciliation
-records receipt only; upgrading v1 reopens matching ACK dispositions while preserving
+records receipt only when `in_reply_to` is absent; upgrading v1 reopens matching
+ACK dispositions while preserving
 the source evidence and uncertain claims. Read the coord-mesh README before upgrading
 host consumers; stop old writers first, because the version fence applies on open.
 

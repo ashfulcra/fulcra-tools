@@ -138,6 +138,7 @@ def test_legacy_ack_cannot_overwrite_an_uncertain_send(tmp_path):
         s.prepare_reply('synthetic-peer','synthetic-record',reply)
         s.claim_reply('synthetic-peer','synthetic-record')
         actual={**reply,'mid':'legacy-mid','body':'In reply to synthetic-message: Received.'}
+        del actual['in_reply_to']
         with pytest.raises(ValueError,match='uncertain'):
             s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','source readback')
         assert s.pending()[0]['reply_state']=='claimed'
@@ -179,3 +180,45 @@ def test_v1_legacy_receipt_disposition_reopens_without_losing_source_evidence(tm
         assert evidence['envelope']==actual
         assert evidence['record_id']=='legacy-record'
         assert evidence['evidence']=='old-source-readback'
+
+
+@pytest.mark.parametrize('anchor', ['synthetic-message', '', None])
+def test_v1_migration_does_not_reclassify_explicitly_anchored_modern_answers(tmp_path, anchor):
+    import json
+    p=tmp_path/'attention.db'
+    # prepare_reply permits any slug/body: an -ack suffix is not receipt provenance.
+    actual={'v':1,'mid':'answer-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','in_reply_to':anchor,'body':'In reply to synthetic-message: Here is the requested directory.'}
+    with AttentionStore(p) as s:
+        s.ingest('synthetic-peer','synthetic-record',note('request'),'synthetic-recipient')
+        if anchor == 'synthetic-message':
+            s.prepare_reply('synthetic-peer','synthetic-record',actual)
+            s.claim_reply('synthetic-peer','synthetic-record')
+            s.verify_reply('synthetic-peer','synthetic-record',actual,'answer-record')
+        else:
+            # Even malformed explicit anchors are not evidence of the legacy path.
+            s.db.execute("UPDATE attention SET state='responded',reply_json=?,reply_state='verified',reply_record_id='answer-record'", (json.dumps(actual),))
+        s.db.execute('PRAGMA user_version=1')
+        s.db.commit()
+    with AttentionStore(p) as s:
+        assert s.pending()==[]
+        assert s.snapshot()['entries'][0]['reply']==actual
+        assert s.snapshot()['entries'][0]['reply_record_id']=='answer-record'
+
+
+@pytest.mark.parametrize('version',[1,2])
+def test_schema_upgrade_and_reopen_keep_pending_and_claimed_answers_unchanged(tmp_path,version):
+    p=tmp_path/'attention.db'
+    with AttentionStore(p) as s:
+        s.ingest('synthetic-peer','synthetic-record',note('request'),'synthetic-recipient')
+        reply={'v':1,'mid':'answer-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','in_reply_to':'synthetic-message','body':'In reply to synthetic-message: An answer.'}
+        s.prepare_reply('synthetic-peer','synthetic-record',reply)
+        s.claim_reply('synthetic-peer','synthetic-record')
+        s.ingest('synthetic-peer','pending-record',note('query'),'synthetic-recipient')
+        s.db.execute(f'PRAGMA user_version={version}')
+        s.db.commit()
+        before=s.snapshot()
+    for _ in range(2):
+        with AttentionStore(p) as s:
+            assert s.snapshot()==before
+            with pytest.raises(ValueError,match='reconciliation'):
+                s.claim_reply('synthetic-peer','synthetic-record')

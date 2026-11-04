@@ -181,7 +181,9 @@ peer consumption distinct.
 
 Legacy acknowledgments may be source-reconciled without sending again through
 `verify_legacy_reply`: exact source recipient, v1 response kind, incoming slug plus
-`-ack`, and body prefix `In reply to <original mid>:` must all match. The caller
+`-ack`, and body prefix `In reply to <original mid>:` must all match. The
+`in_reply_to` key must be absent; its presence, even empty/null, distinguishes
+explicitly anchored or malformed modern evidence from the legacy receipt path. The caller
 supplies the independently read reply record ID and receipt evidence. The full
 ACK and readback stay in `receiver_evidence`; an ACK such as "Received" leaves the
 answer obligation pending and does not reserve the answer's reply slot. No
