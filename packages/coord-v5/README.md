@@ -500,7 +500,10 @@ requires verified source receipts, exact actor grants, scope and observation evi
 an event/package cannot grant itself trust. No distributed lock, rollout or exactly-once
 external execution is claimed.
 
-Run `npm ci --ignore-scripts` and `npm test`. Tests use synthetic fixtures and real
+Run `npm ci --ignore-scripts`, `npm audit --audit-level=low` and `npm test`.
+The development lockfile uses Vitest 4.1.12 and patched Vite/source-map-js
+dependencies; these are test tools, not dependencies of the packed runtime.
+Tests use synthetic fixtures and real
 local SQLite, never live network. `node --test test/*.test.mjs` packs/installs offline
 into empty directories, exercises installed commands and audits tarball contents.
 Tests/fixtures are excluded from the tarball. See [PROVENANCE.md](PROVENANCE.md).
