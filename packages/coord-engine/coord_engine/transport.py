@@ -89,8 +89,9 @@ def run_bounded(
     put the child in its own session/process group and, on timeout, SIGKILL the
     whole group, then drain under a short grace; if even the grace drain won't
     complete we abandon the pipes rather than block. Raises the original
-    ``TimeoutExpired`` on timeout and ``OSError`` if the binary can't be spawned
-    — callers convert both to their documented failure mode."""
+    ``TimeoutExpired`` on timeout, ``OSError`` if the binary can't be spawned,
+    and ``UnicodeDecodeError`` if its output is not valid text — callers convert
+    these to their documented failure mode."""
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE if stdin_data is not None else None,
@@ -632,7 +633,8 @@ class FulcraFileTransport:
         that bypasses the ``except TransportError`` guards in the folds and crashes
         never-crash surfaces (briefing/needs-me). Likewise a missing/unrunnable
         binary raises ``OSError`` (e.g. ``FileNotFoundError``) from ``subprocess``.
-        Both are normalized to ``TransportError`` so the public contract holds:
+        Undecodable stdout or stderr raises ``UnicodeDecodeError`` during the
+        drain. These are normalized to ``TransportError`` so the public contract holds:
         transport methods raise ``TransportError`` or honor their documented
         soft-failure return, and nothing else escapes.
         """
@@ -651,6 +653,11 @@ class FulcraFileTransport:
             # binary missing / not executable / other exec-level failure
             raise TransportError(
                 f"exec failed: file {' '.join(args)}: {exc}"
+            ) from exc
+        except UnicodeDecodeError as exc:
+            # Corrupt output is unreadable, never replacement text or absence.
+            raise TransportError(
+                f"decode failed: file {' '.join(args)}: {exc}"
             ) from exc
         return subprocess.CompletedProcess(argv, rc, out, err)
 

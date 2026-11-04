@@ -10,9 +10,8 @@
  * The plugin_contract is the JSON from GET /api/plugin/{id}/contract.
  * on_complete() is called when the "done" step is reached and confirmed.
  *
- * Supports step kinds: intro, external_action, input, file_upload,
- * permission_request, browser_extension, test_connection,
- * definition_picker, oauth, done.
+ * Supports step kinds: intro, external_action, input, file_upload, folder_picker,
+ * permission_request, test_connection, definition_picker, oauth, done.
  */
 
 // ---------------------------------------------------------------------------
@@ -122,6 +121,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     uploadedFileName: "",
     uploadProgress: 0,
     uploadInFlight: false,
+    // Native macOS folder-picker state. The picker response contains only the
+    // display name; the daemon stores the absolute path in private local
+    // configuration. The authenticated settings API still returns saved path
+    // settings when this local dashboard reopens configuration.
+    folderPicking: false,
+    selectedFolderName: "",
     // Health check state
     healthResult: null,
     healthChecking: false,
@@ -308,7 +313,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           next[key] = Array.isArray(def.default) ? [...def.default] : [];
           changed = true;
         } else if (def && def.default !== null && def.default !== undefined) {
-          next[key] = String(def.default);
+          next[key] = def.default;
           changed = true;
         }
       }
@@ -369,7 +374,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           _kind: def._kind || "setting",
           value: this.inputValues[key] ?? (def.kind === "multiselect"
             ? (Array.isArray(def.default) ? [...def.default] : [])
-            : (def.default !== null && def.default !== undefined ? String(def.default) : "")),
+            : (def.default !== null && def.default !== undefined ? def.default : "")),
           ...(def.kind === "multiselect" ? this._selectionOptions(key) : {}),
         };
       });
@@ -698,9 +703,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       if (this.current_step.kind === "test_connection") {
         this.runHealthCheck();
       }
-      if (this.current_step.kind === "browser_extension") {
-        this.nextBlocked = true;
-      }
       if (this.current_step.kind === "definition_picker") {
         // Block Next until the user has made a choice (or explicitly clicked
         // "Create new instead"). _loadDefinitions will auto-unblock when
@@ -724,6 +726,18 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.checkPermission();
         } else {
           this.nextBlocked = false;
+        }
+      }
+      if (this.current_step.kind === "folder_picker") {
+        const key = (this.current_step.settings_keys || [])[0];
+        const existing = key ? this.inputValues[key] : "";
+        if (typeof existing === "string" && existing) {
+          const parts = existing.split(/[\\/]/).filter(Boolean);
+          this.selectedFolderName = parts.at(-1) || "Selected folder";
+          this.nextBlocked = false;
+        } else {
+          this.selectedFolderName = "";
+          this.nextBlocked = true;
         }
       }
       // Reaching the final screen is navigation, not permission to upload.
@@ -1221,6 +1235,37 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         return false;
       } finally {
         this.uploadInFlight = false;
+      }
+    },
+
+    async chooseFolder() {
+      if (this.current_step.kind !== "folder_picker" || this.folderPicking) return;
+      const settingKey = (this.current_step.settings_keys || [])[0];
+      if (!settingKey) {
+        this.stepError = "This folder step is missing its setting.";
+        this.nextBlocked = true;
+        return;
+      }
+      this.folderPicking = true;
+      this.stepError = "";
+      this.nextBlocked = true;
+      try {
+        const result = await api(
+          `/api/plugin/${this.plugin_id}/choose-folder?key=${encodeURIComponent(settingKey)}`,
+          {method: "POST"},
+        );
+        if (!result.ok || !result.name) throw new Error("No folder was selected.");
+        this.selectedFolderName = result.name;
+        // The absolute path remains in the daemon's private settings. This
+        // display value only lets Back/Next preserve the chosen state.
+        this.inputValues[settingKey] = result.name;
+        this.nextBlocked = false;
+      } catch (error) {
+        this.selectedFolderName = "";
+        this.stepError = error.message || "Could not choose a folder.";
+        this.nextBlocked = true;
+      } finally {
+        this.folderPicking = false;
       }
     },
   };

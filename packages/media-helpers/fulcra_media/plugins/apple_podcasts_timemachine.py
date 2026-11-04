@@ -129,8 +129,9 @@ PLUGIN = Plugin(
                 "before running. macOS may also require Full Disk "
                 "Access for the daemon to read backup snapshots — open "
                 "**System Settings -> Privacy & Security -> Full Disk "
-                "Access** and add the terminal running the daemon if "
-                "the import fails."
+                "Access** and add **Fulcra Collect** from Applications. If "
+                "you run Collect from source, add the terminal app that "
+                "starts the daemon instead."
             ),
         ),
         SetupStep(

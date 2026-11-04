@@ -8,12 +8,120 @@ a plugin never reaches for those itself.
 from __future__ import annotations
 
 import logging
+import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from .freshness import FreshnessExpectation
+
+
+_SETTING_STRING_KINDS = {"text", "long_text", "path", "url", "secret"}
+_MAX_INTERVAL_SECONDS = 2**63 - 1  # TOML signed-integer ceiling
+_ISO8601_DURATION = re.compile(
+    r"^P"
+    r"(?:(?P<days>\d+(?:\.\d+)?)D)?"
+    r"(?:T"
+    r"(?:(?P<hours>\d+(?:\.\d+)?)H)?"
+    r"(?:(?P<minutes>\d+(?:\.\d+)?)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?"
+    r")?$"
+)
+
+
+def validate_setting_value(setting: "Setting", value: object) -> None:
+    """Validate one JSON/TOML value against a declared setting contract.
+
+    The caller owns presentation of the error. Keeping the type rules here
+    gives the HTTP API and any future config writers one definition of what a
+    plugin can safely receive. ``bool`` checks use ``type(...)`` because it is
+    an ``int`` subclass in Python and must never pass as a port or duration.
+    """
+    kind = setting.kind
+    if kind in _SETTING_STRING_KINDS:
+        if not isinstance(value, str):
+            raise ValueError("expected a string")
+        return
+    if kind == "enum":
+        if not isinstance(value, str):
+            raise ValueError("expected a string")
+        allowed = setting.enum_values or ()
+        if value not in allowed:
+            raise ValueError(f"value {value!r} not in {allowed}")
+        return
+    if kind == "toggle":
+        if type(value) is not bool:
+            raise ValueError("expected a JSON boolean")
+        return
+    if kind == "port":
+        if type(value) is not int or not 1 <= value <= 65535:
+            raise ValueError("expected an integer from 1 through 65535")
+        return
+    if kind == "multiselect":
+        if (not isinstance(value, list)
+                or any(not isinstance(item, str) or not item.strip() for item in value)
+                or len(set(value)) != len(value)):
+            raise ValueError("expected unique nonempty string IDs in an array")
+        return
+    if kind == "interval":
+        if type(value) is int:
+            if 0 < value <= _MAX_INTERVAL_SECONDS:
+                return
+            raise ValueError("expected a positive duration")
+        if type(value) is float:
+            if math.isfinite(value) and 0 < value <= _MAX_INTERVAL_SECONDS:
+                return
+            raise ValueError("expected a positive duration")
+        if isinstance(value, str):
+            match = _ISO8601_DURATION.fullmatch(value)
+            if match:
+                parts = {key: float(part or 0) for key, part in match.groupdict().items()}
+                seconds = (
+                    parts["days"] * 86400
+                    + parts["hours"] * 3600
+                    + parts["minutes"] * 60
+                    + parts["seconds"]
+                )
+                if math.isfinite(seconds) and 0 < seconds <= _MAX_INTERVAL_SECONDS:
+                    return
+        raise ValueError("expected positive seconds or an ISO 8601 duration")
+    raise ValueError(f"unknown setting kind {kind!r}")
+
+
+def normalize_legacy_plugin_settings(
+    plugin: "Plugin", values: dict[str, object],
+) -> dict[str, object]:
+    """Return a runtime-safe copy of settings saved by older web wizards.
+
+    Releases before the typed settings boundary wrote checkbox and number
+    inputs as strings. Convert only the exact shapes that UI emitted; leave
+    every other value untouched so malformed hand-written config still fails
+    visibly in the plugin instead of being guessed into a different value.
+    """
+    normalized = dict(values)
+    declared = {setting.key: setting for setting in plugin.required_settings}
+    for key, raw in tuple(normalized.items()):
+        setting = declared.get(key)
+        if setting is None or not isinstance(raw, str):
+            continue
+        if setting.kind == "toggle" and raw in {"true", "false"}:
+            normalized[key] = raw == "true"
+            continue
+        if setting.kind == "port" and raw.isdecimal():
+            converted = int(raw)
+            if 1 <= converted <= 65535:
+                normalized[key] = converted
+            continue
+        if setting.kind == "interval":
+            try:
+                converted = float(raw)
+            except ValueError:
+                continue
+            if math.isfinite(converted) and converted > 0:
+                normalized[key] = int(converted) if converted.is_integer() else converted
+    return normalized
 
 # How long a successful definition_exists validation is trusted before the
 # cached definition id must be re-validated against the live catalog.
@@ -146,6 +254,7 @@ class SetupStep:
       input              — collect values for the keys in settings_keys
       oauth              — OAuth flow; the UI drives the redirect/callback cycle
       file_upload        — ask the user to choose a file (path Setting)
+      folder_picker      — ask macOS to choose a local folder (path Setting)
       permission_request — prompt the user to grant an OS permission
       test_connection    — invoke Plugin.health_check and show the result
       definition_picker  — let the user choose (or confirm) a Fulcra annotation
@@ -153,7 +262,7 @@ class SetupStep:
       done               — final confirmation / success screen
     """
     kind: Literal[
-        "intro", "external_action", "input", "oauth", "file_upload",
+        "intro", "external_action", "input", "oauth", "file_upload", "folder_picker",
         "permission_request",
         "test_connection", "definition_picker", "done",
     ]
@@ -514,6 +623,16 @@ class RunContext:
         if observed_at is not None:
             event["observed_at"] = observed_at
         self._emit(event)
+
+    def collect_token(self) -> str | None:
+        """Use only Collect's sign-in; never refresh through another account.
+
+        Selected-source uploads fail closed if this token is missing or expired.
+        Reconnect in Collect until refresh can verify the same principal.
+        """
+        from . import credentials
+        token = credentials.get_user_secret_fresh("bearer-token")
+        return token if token and not _jwt_expired(token) else None
 
     def fulcra_token(self) -> str | None:
         """Return the Fulcra access token.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.metadata as _im
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -112,12 +113,28 @@ class _QuickRecordClient(BaseFulcraClient):
 
 
 def is_online(*, timeout: float = 2.0) -> bool:
-    """Best-effort connectivity probe — can a TCP connection to a
-    well-known host be opened? Used to defer (not fail) network-requiring
-    scheduled plugins while the machine is offline."""
+    """Best-effort connectivity probe on ports normal networks permit.
+
+    Used to defer (not fail) network-requiring scheduled plugins while the
+    machine is offline. Probe the configured Fulcra endpoint first, then an
+    ordinary HTTPS host. Direct TCP to public DNS resolvers produced false
+    "offline" results on managed networks that correctly block port 53 while
+    allowing HTTPS.
+    """
     import socket
-    # Well-known anycast DNS resolvers, used only as reachability probes.
-    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):  # guard-ok: public-ip
+    from urllib.parse import urlsplit
+
+    from fulcra_common import DEFAULT_BASE_URL
+
+    parts = urlsplit(DEFAULT_BASE_URL)
+    targets: list[tuple[str, int]] = []
+    if parts.hostname:
+        default_port = 443 if parts.scheme == "https" else 80
+        targets.append((parts.hostname, parts.port or default_port))
+    fallback = ("example.com", 443)
+    if fallback not in targets:
+        targets.append(fallback)
+    for host, port in targets:
         try:
             with socket.create_connection((host, port), timeout=timeout):
                 return True
@@ -1428,7 +1445,38 @@ class Daemon:
     def _spawn_service(self, plugin_id: str):
         """Spawn a service plugin's worker subprocess (kept alive by the
         ServiceSupervisor)."""
-        return subprocess.Popen(runner.worker_command(plugin_id))
+        return subprocess.Popen(
+            runner.worker_command(plugin_id),
+            start_new_session=(os.name == "posix"),
+        )
+
+    def _record_service_launch_failure(
+        self, plugin_id: str, exc: OSError, *, when: datetime,
+    ) -> None:
+        """Persist a service spawn failure without taking down the daemon."""
+        from .worker import _scrub_secrets
+
+        error = _scrub_secrets(
+            f"service worker launch failed: {type(exc).__name__}: {exc}"
+        )
+        plugin_state = state.load(plugin_id)
+        plugin_state.record_finish(outcome="error", when=when, error=error)
+        state.save(plugin_state)
+
+        first_line = error.splitlines()[0]
+        if len(first_line) > 200:
+            first_line = first_line[:200].rstrip() + "…"
+        self.activity.add(
+            plugin_id=plugin_id,
+            summary=first_line,
+            ok=False,
+            timestamp=when,
+        )
+        logging.getLogger("fulcra_collect").error(
+            "service worker launch failed for plugin=%s: %s",
+            plugin_id,
+            error,
+        )
 
     # ---- the run loop --------------------------------------------------
 
@@ -1513,8 +1561,16 @@ class Daemon:
                     if pid in self.registry.plugins
                     and self.registry.plugins[pid].kind == "service"
                 }
-                supervisor.tick(now=now, enabled_ids=service_ids,
-                                spawn=self._spawn_service)
+                supervisor.tick(
+                    now=now,
+                    enabled_ids=service_ids,
+                    spawn=self._spawn_service,
+                    on_spawn_error=lambda plugin_id, exc: (
+                        self._record_service_launch_failure(
+                            plugin_id, exc, when=now,
+                        )
+                    ),
+                )
                 states = {pid: state.load(pid) for pid in self.registry.plugins}
                 online = is_online()
                 for pid in due_plugins(self.registry.plugins, self.config,

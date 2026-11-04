@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime
 import errno
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -127,6 +129,11 @@ def test_browser_security_headers_block_remote_code(collect_home):
     assert "default-src 'self'" in csp
     assert "object-src 'none'" in csp
     assert "https:" not in csp
+    script_policy = next(
+        part.strip() for part in csp.split(";")
+        if part.strip().startswith("script-src ")
+    )
+    assert script_policy == "script-src 'self' 'unsafe-eval'"
 
 
 def test_web_bind_permission_error_is_not_reported_as_port_collision(
@@ -442,6 +449,33 @@ def test_get_settings_empty_initially(collect_home):
     assert r.json() == {}
 
 
+def test_get_settings_normalizes_values_written_by_older_wizards(collect_home):
+    from fulcra_collect.plugin import Plugin, Setting
+
+    plugin = Plugin(
+        id="legacy", name="Legacy", kind="manual", collect_mode="historical",
+        run=lambda c: None,
+        required_settings=(
+            Setting("dry_run", "Preview", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+    cfg = _config.load()
+    cfg.update_plugin_settings("legacy", {
+        "dry_run": "true", "listen_port": "9292", "poll_every": "300",
+    })
+    _config.save(cfg)
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+
+    response = _client(daemon).get("/api/plugin/legacy/settings")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "dry_run": True, "listen_port": 9292, "poll_every": 300,
+    }
+
+
 def test_plugin_settings_put_validates_against_required_settings(collect_home):
     from fulcra_collect.plugin import Plugin, Setting
     plugin = Plugin(
@@ -479,6 +513,93 @@ def test_plugin_settings_put_validates_against_required_settings(collect_home):
     body = r.json()
     assert body["feed_url"] == "https://example.com/feed.xml"
     assert body["category"] == "watched"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("title", 123),
+        ("notes", ["not", "text"]),
+        ("source_path", {"path": "/tmp/file"}),
+        ("callback_secret", False),
+        ("category", 1),
+        ("enabled", "false"),
+        ("enabled", 0),
+        ("listen_port", "9292"),
+        ("listen_port", True),
+        ("listen_port", 0),
+        ("listen_port", 65536),
+        ("poll_every", True),
+        ("poll_every", 0),
+        ("poll_every", 10**1000),
+        ("poll_every", "five minutes"),
+    ],
+)
+def test_plugin_settings_put_rejects_wrong_declared_types(collect_home, key, value):
+    from fulcra_collect.plugin import Plugin, Setting
+
+    plugin = Plugin(
+        id="typed",
+        name="Typed",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda c: None,
+        required_settings=(
+            Setting("title", "Title", "text"),
+            Setting("notes", "Notes", "long_text"),
+            Setting("source_path", "Source", "path"),
+            Setting("callback_secret", "Callback secret", "secret"),
+            Setting("category", "Category", "enum", enum_values=("one", "two")),
+            Setting("enabled", "Enabled", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+    response = _client(daemon).put(
+        f"/api/plugin/{plugin.id}/settings", json={key: value},
+    )
+
+    assert response.status_code == 400
+
+
+def test_plugin_settings_put_accepts_native_declared_types(collect_home):
+    from fulcra_collect.plugin import Plugin, Setting
+
+    plugin = Plugin(
+        id="typed",
+        name="Typed",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda c: None,
+        required_settings=(
+            Setting("title", "Title", "text"),
+            Setting("notes", "Notes", "long_text"),
+            Setting("source_path", "Source", "path"),
+            Setting("callback_secret", "Callback secret", "secret"),
+            Setting("category", "Category", "enum", enum_values=("one", "two")),
+            Setting("enabled", "Enabled", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+    body = {
+        "title": "Example",
+        "notes": "Line one\nLine two",
+        "source_path": "/tmp/example",
+        "callback_secret": "short-lived",
+        "category": "one",
+        "enabled": False,
+        "listen_port": 9292,
+        "poll_every": "PT5M",
+    }
+    client = _client(daemon)
+
+    response = client.put(f"/api/plugin/{plugin.id}/settings", json=body)
+
+    assert response.status_code == 200, response.text
+    assert client.get(f"/api/plugin/{plugin.id}/settings").json() == body
 
 
 def test_plugin_settings_put_unknown_plugin(collect_home):
@@ -930,6 +1051,34 @@ def test_new_routes_require_auth(collect_home):
     for method, path in paths:
         r = client.request(method, path)
         assert r.status_code == 401, f"{method} {path} should require auth"
+
+
+def test_every_api_route_requires_auth_except_oauth_callbacks(collect_home):
+    """Plugin-mounted routes must not slip around the local API boundary.
+
+    Third-party OAuth callbacks cannot carry Collect's cookie on the
+    cross-site redirect, so those two landing paths are the whole allowlist.
+    Every other /api route must declare the shared require_token dependency.
+    """
+    from fastapi.routing import APIRoute
+
+    app = build_app(_build_test_daemon(collect_home))
+    public_callbacks = {
+        "/api/oauth/{plugin_id}/callback",
+        "/api/oauth/callback",
+    }
+    missing = []
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.path.startswith("/api/"):
+            continue
+        guarded = any(
+            getattr(dependency.call, "__name__", "") == "require_token"
+            for dependency in route.dependant.dependencies
+        )
+        if not guarded and route.path not in public_callbacks:
+            missing.append((route.path, sorted(route.methods)))
+
+    assert missing == []
 
 
 # ---------------------------------------------------------------------------
@@ -2418,6 +2567,47 @@ def test_upload_happy_path_writes_file_and_updates_setting(collect_home):
     r2 = client.get(f"/api/plugin/{plugin.id}/settings")
     assert r2.status_code == 200
     assert r2.json()["path"] == str(target.resolve())
+
+
+def test_concurrent_same_name_uploads_use_private_temp_files(
+    collect_home, monkeypatch,
+):
+    """Two requests may choose the same source filename.
+
+    Hold both at publication so the temporary files overlap. Each request
+    must still finish from its own complete file; a shared ``name.tmp`` makes
+    one replace consume the other request's source and leaves a 500 behind.
+    """
+    from fulcra_collect.routes import plugins as plugin_routes
+
+    plugin = _upload_plugin()
+    daemon = _build_test_daemon(collect_home, plugins={plugin.id: plugin})
+    clients = (_client(daemon), _client(daemon))
+    publish = threading.Barrier(2)
+    real_replace = plugin_routes.os.replace
+    filename = "same-name.csv"
+
+    def synchronized_replace(source, target):
+        if Path(target).name == filename:
+            publish.wait(timeout=5)
+        return real_replace(source, target)
+
+    monkeypatch.setattr(plugin_routes.os, "replace", synchronized_replace)
+    bodies = (b"first request\n", b"second request with other bytes\n")
+
+    def upload(client, body):
+        return client.post(
+            f"/api/plugin/{plugin.id}/upload?key=path",
+            files={"file": (filename, body, "text/csv")},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(upload, clients, bodies))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    target_dir = collect_home / "uploads" / plugin.id
+    assert (target_dir / filename).read_bytes() in bodies
+    assert list(target_dir.glob("*.tmp")) == []
 
 
 # ---------------------------------------------------------------------------

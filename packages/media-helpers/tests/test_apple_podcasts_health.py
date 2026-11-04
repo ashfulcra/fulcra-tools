@@ -130,3 +130,22 @@ def test_health_check_db_missing(tmp_path, monkeypatch):
 
     assert result.ok is False
     assert "Podcasts" in result.summary
+
+
+def test_health_check_permission_failure_names_installed_app(tmp_path, monkeypatch):
+    db = tmp_path / "MTLibrary.sqlite"
+    db.touch()
+
+    def deny_access(*args, **kwargs):
+        raise sqlite3.OperationalError("authorization denied")
+
+    monkeypatch.setattr(
+        "fulcra_media.apple_podcasts_health.sqlite3.connect",
+        deny_access,
+    )
+
+    result = apple_podcasts_health_check(_Ctx(config={"db_path": str(db)}))
+
+    assert result.ok is False
+    assert "Fulcra Collect" in result.summary
+    assert "source install" in result.summary

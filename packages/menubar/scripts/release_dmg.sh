@@ -26,7 +26,9 @@
 #      for distribution.)
 #   * A stored notarytool credential profile. Create once:
 #       xcrun notarytool store-credentials "$FULCRA_NOTARY_PROFILE" \
-#         --apple-id <apple-id> --team-id <TEAMID> --password <app-specific-pw>
+#         --apple-id <apple-id> --team-id <TEAMID>
+#     Paste the app-specific password at the secure prompt; do not put it in
+#     the command line or shell history.
 #
 # USAGE:
 #   FULCRA_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
@@ -123,9 +125,7 @@ if [ "${FULCRA_SKIP_NOTARIZE:-0}" = "1" ]; then
 fi
 
 echo "=== 7/7  notarize + staple (profile: $NOTARY_PROFILE) ==="
-xcrun notarytool submit "$OUT_DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-xcrun stapler staple "$OUT_DMG"
-xcrun stapler validate "$OUT_DMG"
+bash "$MENUBAR/scripts/notarize_dmg.sh" "$OUT_DMG" "$NOTARY_PROFILE"
 
 # The release gate. A rejected dmg is a build failure AND must not be left at
 # the canonical release path — see gatekeeper_gate.sh for the retention rule.

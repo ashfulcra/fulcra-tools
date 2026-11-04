@@ -26,10 +26,15 @@ web UI on `127.0.0.1:9292`, and stores per-plugin state in a single
 SQLite database at `~/.config/fulcra-collect/state.db`.
 
 The [menubar app](../menubar/README.md) and [web UI](../web-ui/README.md)
-control this daemon. Packages such as [media-helpers](../media-helpers/README.md)
-and [Day One](../dayone/README.md) expose plugin entry points for it; some also
+control this daemon. Packages such as [media-helpers](../media-helpers/README.md),
+[local-sources](../local-sources/README.md), and [notion](../notion/README.md) expose plugin entry points for it; some also
 have standalone CLIs. A connector can adopt the plugin contract to reuse
 scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
+
+The local-source plugins bind uploads to Collect's signed-in account. They check
+live configuration before each upload and copy verified regular-file snapshots;
+changing a selection or disabling a source stops its pending work. Their
+[README](../local-sources/README.md) explains the limits and source-install setup.
 
 ## What it does
 
@@ -38,7 +43,17 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   picked up at startup. A plugin declares one of three kinds:
   `scheduled` (an importer fired on a default interval), `service`
   (a long-running process the daemon supervises with restart-back-off),
-  or `manual` (only fires when the user clicks Run).
+  or `manual` (only fires when the user clicks Run). A service worker that
+  cannot launch is recorded as a failed run, shown in Recently, and folded
+  into the same back-off / degraded policy as a crashed worker; it cannot
+  terminate the daemon loop or stop unrelated plugins. Service workers also
+  run in their own process groups, so disabling Collect or shutting it down
+  terminates helper commands started by the service.
+* **Lets setup choose a local folder without copying its path into the browser.**
+  A plugin can declare a `folder_picker` step for a `path` setting. The explicit
+  **Choose folder** action opens a fixed macOS chooser; the daemon validates and
+  stores the path in private local configuration, while the UI receives only the
+  display name. Choosing a folder does not enable the plugin or upload data.
 * **Runs them in worker subprocesses.** Each scheduled or manual run
   spawns a fresh `fulcra-collect _worker <id>` process, isolating ordinary
   importer crashes from the daemon. The worker streams structured
@@ -46,8 +61,18 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   parent records them in the unified state store and in an in-memory
   ring buffer that powers the dashboard's "Recently" feed. Each run gets
   its own process group, so a timeout also stops helper commands started by
-  the plugin. If a worker dies before it can emit a structured result, Collect
-  keeps a bounded, secret-scrubbed copy of stderr as the diagnostic.
+  the plugin. If a worker cannot start, Collect records a failed run and shows
+  it in Recently. If it dies before emitting a structured result, Collect keeps
+  a bounded, secret-scrubbed copy of stderr as the diagnostic. The parent drains
+  stdout and stderr concurrently while retaining only a 4 MiB stdout tail and a
+  512 KiB stderr tail, so a noisy or stuck plugin cannot grow the daemon's memory
+  until the 15-minute timeout. The structured result event belongs at the end of
+  stdout and remains visible when earlier output is discarded.
+* **Defers network work while the Mac is offline.** The scheduler probes the
+  configured Fulcra API endpoint and an ordinary HTTPS fallback before firing a
+  network-required plugin. Both probes use normal web-service ports, which keeps
+  managed networks that block direct public DNS traffic from being mistaken for
+  an offline Mac. Local-only scheduled plugins still run while offline.
 * **Stores secrets in the OS keychain.** Per-plugin credentials live
   under a `fulcra-collect:<plugin-id>` service name; the user-level
   Fulcra bearer token shares one namespace (`fulcra-collect:user`)
@@ -61,7 +86,8 @@ scheduling, credential storage, the dashboard, wizard, and OAuth plumbing.
   Requests must also carry a loopback Host header. The browser receives the
   local control token in an HttpOnly, SameSite cookie; JavaScript cannot read
   it. Browser libraries are packaged with Collect rather than loaded from a
-  CDN, and the server sends a policy that blocks remote scripts.
+  CDN. The server's content policy allows local scripts and Alpine's expression
+  evaluator, but blocks remote and inline script execution.
 * **Auto-launches the macOS menubar app** on startup when one is
   installed, so the user always has a visible status indicator
   without remembering a second command.
@@ -133,8 +159,11 @@ convenience: secrets go to the OS keychain, everything else to a plaintext
 as a `Credential` and points you at `set-credential` instead. It also
 validates against the plugin's declared contract — unknown plugin id,
 unknown setting key, a value outside an `enum`'s declared values, or a
-non-numeric `port` are all rejected rather than written, because every one
-of those writes succeeds silently and then is never read by anything.
+`port` outside 1–65535 are all rejected rather than written. Toggles accept
+the usual true/false words and are stored as booleans. Intervals accept
+positive seconds or an ISO 8601 duration such as `PT5M`. Every one of these
+bad writes otherwise succeeds silently and is only discovered when a plugin
+runs.
 
 ```console
 $ fulcra-collect set-credential purpleair api_key   # prompts, hidden
@@ -181,7 +210,7 @@ fulcra_collect/
         status.py           /api/status, /api/version, /api/reload
         plugins.py          /api/plugin/{id}/{run,enable,disable,credentials,settings,
                             contract,setting_options/{key},health_check,check_permission,
-                            request_permission,upload}
+                            request_permission,upload,choose-folder}
         definitions.py      /api/definitions, /api/plugin/{id}/definition (bind/clear)
         fulcra_auth.py      /api/fulcra/auth/{status,token,cli_status,cli_login}
         oauth.py            /api/oauth/{plugin_id}/{start,callback}
@@ -252,12 +281,13 @@ The contract exposes `permission_request_available`. The authenticated
 Unsupported actions return 404; provider, credential-access, or malformed-result
 failures return `granted: false` with a generic hint, without exception details.
 Full Disk Access continues to use **Open System Settings** and **Verify access**
-when no native request callback is declared. This contract is in the 0.1.2 app.
+when no native request callback is declared. This contract ships in Collect
+0.1.3 and later.
 
 ### Discovered multiselect settings
 
 Collect supports a reusable list picker through `Setting(kind="multiselect")`
-and `Plugin.setting_options`. This is in the 0.1.2 app.
+and `Plugin.setting_options`. It ships in Collect 0.1.3 and later.
 
 Declare a setting and include its key in an `input` setup step:
 
@@ -304,14 +334,24 @@ JSON settings API for these arrays; the text-oriented CLI is not an array editor
 The shared wizard preserves selected IDs, displays missing selections for
 removal, and requires an explicit Enable action after configuration.
 
+The same endpoint checks every other declared kind before writing: toggles are
+JSON booleans, ports are integers from 1 through 65535, text/path/URL/secret
+fields are strings, enums are declared string values, and intervals are
+positive numeric seconds or ISO 8601 duration strings. Collect still reads the
+exact `"true"` / `"false"` and numeric strings written by older setup wizards
+as their native types, so upgrading does not leave an existing preview switch
+stuck on.
+
 ## HTTP API surface
 
-Protected JSON routes require the local token from
-`~/.config/fulcra-collect/web-token`. The browser uses the HttpOnly cookie set
-by the HTML root; native and command-line clients can send the same value as a
-Bearer token. It is separate from the Fulcra account token. HTML/static resources and OAuth
-callbacks have their own access paths; see [web.py](fulcra_collect/web.py) and
-[routes/](fulcra_collect/routes/) for exact guards and request shapes.
+Every `/api` route requires the local token from
+`~/.config/fulcra-collect/web-token` except the two OAuth callback landing
+paths. The browser uses the HttpOnly cookie set by the HTML root; native and
+command-line clients can send the same value as a Bearer token. It is separate
+from the Fulcra account token. The root and static assets are public on the
+loopback server. OAuth callbacks validate their single-use state instead of a
+cookie because the provider redirects from another site. A route-inventory test
+enforces this allowlist for core and plugin-mounted routes.
 
 * **Status / version** (`routes/status.py`) — `GET /api/status`,
   `GET /api/version`, `POST /api/reload`.
@@ -363,6 +403,7 @@ Everything lives under `~/.config/fulcra-collect/` (override via
 | `web-url`                      | The currently-bound web URL — read by the menubar and ad-hoc tools. |
 | `auth-fingerprint`             | SHA-256 prefix of the stable account identity (JWT `sub`; token-based fallback for opaque tokens). Detects account changes and invalidates cached definition IDs without treating routine token refresh as an account switch. |
 | `quick_record_favorites.json`  | The user's pinned annotation defs for the menubar popover. |
+| `uploads/<plugin-id>/`         | Source files submitted through a wizard `file_upload` step. Files are owner-only; each request streams through a private temporary file and publishes atomically. Concurrent uploads with the same name cannot mix bytes; the last completed upload becomes the saved file. |
 | `state/<plugin-id>.json.migrated` | Leftovers from the JSON → SQLite migration in `db.py:_migration_002`. Safe to delete once the soak period is over. |
 
 Plugin credentials managed by Collect go to the OS keychain via
@@ -432,3 +473,23 @@ The CLI accepts multiselect values as JSON arrays of unique, nonempty string IDs
 `fulcra-collect set-setting apple-reminders selected_lists '["example-list-id"]'`.
 Use `[]` to clear the selection; a required empty selection cannot be enabled.
 The dashboard discovers IDs and labels for you, so it is the easier setup path.
+
+OAuth completion uses a packaged same-origin script and inert escaped plugin data, so the strict browser CSP allows the wizard to advance after sign-in. Failed or expired callbacks do not signal completion.
+
+Selected local-source uploads require Collect's own current sign-in. If it is
+missing or expired, reconnect to Fulcra in Collect; these sources do not fall
+back to the CLI's account or refresh through it. Replacing a selected folder or
+its parent with a symbolic link stops the scan; choose the folder again.
+
+Upload consent checks re-read the stored account token with a bounded Keychain
+read, so a worker cannot miss a token replacement made by another process.
+
+The bundled **Notion pages** plugin copies explicitly selected pages as
+Markdown, with preview on by default. It needs a read-only internal Notion
+connection; setup currently requires a workspace owner. Linked pages,
+databases and attachments are marked as omitted. It ships in the 0.1.4
+Mac installer; live Notion verification remains pending. See [setup and limits](../notion/README.md).
+
+Notion setup probes check the live page selection and credentials before each
+request, including while the plugin is disabled. A selection change cancels the
+probe; malformed page content is never saved as an empty successful copy.

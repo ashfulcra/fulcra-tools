@@ -1,6 +1,7 @@
 """The runner — spawns a worker subprocess for one run, records outcome."""
 from __future__ import annotations
 
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,11 +50,96 @@ def test_runner_times_out_a_hung_worker(collect_home: Path):
     assert state.load("p").last_outcome == "timeout"
 
 
+def test_bounded_capture_keeps_result_tail_without_unbounded_memory():
+    result = b'\n{"type":"result","outcome":"done","error":null}\n'
+    script = (
+        "import sys;"
+        f"sys.stdout.buffer.write(b'x'*{runner.MAX_STDOUT_CAPTURE_BYTES + 4096});"
+        f"sys.stdout.buffer.write({result!r});"
+        "sys.stdout.flush();"
+        f"sys.stderr.buffer.write(b'e'*{runner.MAX_STDERR_CAPTURE_BYTES + 4096});"
+        "sys.stderr.buffer.write(b'\\nuseful stderr tail\\n');"
+        "sys.stderr.flush()"
+    )
+    proc = subprocess.Popen(
+        _python_worker(script),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    captured = runner._bounded_communicate(proc, timeout_s=10)
+
+    assert captured.stdout_truncated is True
+    assert captured.stderr_truncated is True
+    assert len(captured.stdout) <= runner.MAX_STDOUT_CAPTURE_BYTES
+    assert len(captured.stderr) <= runner.MAX_STDERR_CAPTURE_BYTES
+    assert captured.stdout.endswith(result)
+    assert captured.stderr.endswith(b"useful stderr tail\n")
+
+
+def test_runner_reads_a_final_result_after_noisy_output(collect_home: Path):
+    script = (
+        "import json,sys;"
+        f"sys.stdout.write('noise'*{runner.MAX_STDOUT_CAPTURE_BYTES // 5 + 2048});"
+        "sys.stdout.write(chr(10));"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done','error':None})+chr(10));"
+        "sys.stdout.flush()"
+    )
+
+    outcome = runner.run(
+        "p",
+        _python_worker(script),
+        now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+    )
+
+    assert outcome == "done"
+
+
 def test_runner_treats_a_worker_that_emits_no_result_as_error(collect_home: Path):
     script = "pass"  # exits cleanly but emits nothing
     outcome = runner.run("p", _python_worker(script),
                          now=datetime(2026, 5, 22, tzinfo=timezone.utc))
     assert outcome == "error"
+
+
+def test_runner_records_worker_launch_failure(collect_home: Path, monkeypatch):
+    """A missing/broken worker executable must become visible state.
+
+    The daemon reports a run as started before its background thread calls
+    Popen. If Popen then raises and the runner lets that exception escape, the
+    user gets neither a failed run nor a dashboard receipt.
+    """
+    from fulcra_collect.activity import RecentActivity
+
+    def fail_to_start(*args, **kwargs):
+        raise FileNotFoundError("synthetic worker executable is missing")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", fail_to_start)
+    activity = RecentActivity()
+
+    class MockDaemon:
+        pass
+
+    daemon = MockDaemon()
+    daemon.activity = activity
+
+    outcome = runner.run(
+        "p",
+        ["missing-worker", "_worker", "p"],
+        now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+        daemon=daemon,
+    )
+
+    assert outcome == "error"
+    saved = state.load("p")
+    assert saved.last_outcome == "error"
+    assert "worker launch failed" in saved.last_error
+    assert "FileNotFoundError" in saved.last_error
+    entries = activity.recent()
+    assert len(entries) == 1
+    assert entries[0].ok is False
+    assert "worker launch failed" in entries[0].summary
 
 
 def test_runner_keeps_scrubbed_stderr_when_worker_crashes(collect_home: Path):

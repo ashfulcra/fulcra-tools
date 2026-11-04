@@ -8,6 +8,9 @@ sleeping; this module owns only the policy.
 """
 from __future__ import annotations
 
+import logging
+import os
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -43,6 +46,17 @@ def decide_restart(recent_exits: list[datetime], now: datetime) -> RestartDecisi
 
 def _terminate(proc: object) -> None:
     """Best-effort terminate of a service worker process."""
+    pid = getattr(proc, "pid", None)
+    if os.name == "posix" and isinstance(pid, int):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            # A process that was not started as a session leader has no
+            # matching group. Fall back to terminating the direct child.
+            pass
     try:
         proc.terminate()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — cleanup must never raise
@@ -65,8 +79,41 @@ class ServiceSupervisor:
         self._backoff_until: dict[str, datetime] = {}
         self.degraded: set[str] = set()
 
+    def _spawn(
+        self,
+        plugin_id: str,
+        *,
+        now: datetime,
+        spawn: Callable[[str], object],
+        on_spawn_error: Callable[[str, OSError], None] | None,
+    ) -> None:
+        """Start one worker or fold an OS launch error into crash policy."""
+        try:
+            self._procs[plugin_id] = spawn(plugin_id)
+            return
+        except OSError as exc:
+            if on_spawn_error is not None:
+                try:
+                    on_spawn_error(plugin_id, exc)
+                except Exception:  # noqa: BLE001 — observer cannot kill supervision
+                    logging.getLogger("fulcra_collect.supervisor").exception(
+                        "service launch-error observer failed for plugin=%s",
+                        plugin_id,
+                    )
+
+        self._exits.setdefault(plugin_id, []).append(now)
+        decision = decide_restart(self._exits[plugin_id], now)
+        if not decision.should_restart:
+            self.degraded.add(plugin_id)
+            self._backoff_until.pop(plugin_id, None)
+            return
+        self._backoff_until[plugin_id] = now + timedelta(
+            seconds=decision.backoff_seconds,
+        )
+
     def tick(self, *, now: datetime, enabled_ids: set[str],
-             spawn: Callable[[str], object]) -> None:
+             spawn: Callable[[str], object],
+             on_spawn_error: Callable[[str, OSError], None] | None = None) -> None:
         """Bring the running service set in line with `enabled_ids`:
         spawn the missing, leave the healthy, restart the exited (after a
         backoff), and stop a crash-looping one (marking it degraded).
@@ -103,8 +150,12 @@ class ServiceSupervisor:
                 if rc == 0:
                     # Clean, deliberate exit — not a crash. Respawn now;
                     # do not record an exit or set a backoff. The ~30s
-                    # tick rate already bounds the respawn rate.
-                    self._procs[pid] = spawn(pid)
+                    # tick rate already bounds successful respawns. A launch
+                    # failure is still a crash and gets normal backoff.
+                    self._spawn(
+                        pid, now=now, spawn=spawn,
+                        on_spawn_error=on_spawn_error,
+                    )
                     continue
                 # Non-zero exit — a crash. Record it and apply policy.
                 self._exits.setdefault(pid, []).append(now)
@@ -115,7 +166,10 @@ class ServiceSupervisor:
                 self._backoff_until[pid] = now + timedelta(
                     seconds=decision.backoff_seconds)
             if now >= self._backoff_until.get(pid, now):
-                self._procs[pid] = spawn(pid)
+                self._spawn(
+                    pid, now=now, spawn=spawn,
+                    on_spawn_error=on_spawn_error,
+                )
 
     def shutdown_all(self) -> None:
         """Terminate every supervised process (called on daemon shutdown)."""

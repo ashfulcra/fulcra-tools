@@ -130,3 +130,72 @@ def test_check_only_cannot_delete_new_build_scripts(tmp_path):
     with pytest.raises(RuntimeError):
         _module().sanitize(app, check_only=True)
     assert scripts.exists()
+
+
+def test_removes_dependency_test_payloads_but_preserves_runtime_packages(tmp_path):
+    app = _app(tmp_path)
+    packages = app / 'Contents/Resources/app_packages'
+    test_payloads = [
+        packages / 'PyObjCTest/case.py',
+        packages / '_pytest/main.py',
+        packages / 'pytest/__init__.py',
+        packages / 'pytest-7.4.4.dist-info/METADATA',
+        packages / 'pandas/tests/test_frame.py',
+        packages / 'numpy/lib/tests/test_shape.py',
+        packages / 'pyarrow/_pyarrow_cpp_tests.cpython-313-darwin.so',
+    ]
+    for path in test_payloads:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('test-only')
+    runtime = packages / 'numpy/testing/__init__.py'
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text('public runtime helper')
+
+    _module().sanitize(app, home=Path('/Users/tester'))
+
+    assert all(not path.exists() for path in test_payloads)
+    assert runtime.read_text() == 'public runtime helper'
+
+
+def test_check_only_rejects_dependency_test_payloads_without_deleting_them(tmp_path):
+    app = _app(tmp_path)
+    test_module = app / 'Contents/Resources/app_packages/pandas/tests/test_frame.py'
+    test_module.parent.mkdir(parents=True)
+    test_module.write_text('test-only')
+
+    with pytest.raises(RuntimeError, match='Test-only payloads remain'):
+        _module().sanitize(app, check_only=True)
+
+    assert test_module.exists()
+
+
+def test_refuses_symlinked_test_payload_before_deleting_anything(tmp_path):
+    app = _app(tmp_path)
+    packages = app / 'Contents/Resources/app_packages'
+    ordinary = packages / 'PyObjCTest/case.py'
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text('test-only')
+    outside = tmp_path / 'outside-tests'
+    outside.mkdir()
+    (outside / 'keep').write_text('keep')
+    (packages / 'example').mkdir()
+    (packages / 'example/tests').symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match='symlinked test-only payload'):
+        _module().sanitize(app, home=Path('/Users/tester'))
+
+    assert ordinary.exists()
+    assert (outside / 'keep').read_text() == 'keep'
+
+@pytest.mark.parametrize('check_only', [False, True])
+def test_refuses_symlinked_pyarrow_parent_without_touching_outside(tmp_path, check_only):
+    app = _app(tmp_path)
+    packages = app / 'Contents/Resources/app_packages'
+    outside = tmp_path / 'outside-arrow'
+    outside.mkdir()
+    payload = outside / '_pyarrow_cpp_tests.synthetic.so'
+    payload.write_text('must survive')
+    (packages / 'pyarrow').symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match='symlinked test-only payload'):
+        _module().sanitize(app, home=Path('/Users/tester'), check_only=check_only)
+    assert payload.read_text() == 'must survive'

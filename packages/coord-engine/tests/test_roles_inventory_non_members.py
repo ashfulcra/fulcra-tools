@@ -158,7 +158,9 @@ def _roles_section(files):
     from coord_engine import reconcile
     return reconcile._tree_section(
         _Store(files), "team/acme/roles/", section="roles",
-        deadline=reconcile.Deadline(1e6))
+        # This fixture tests inventory membership, not deadline expiry. A fixed
+        # absolute monotonic instant expires when the host has enough uptime.
+        deadline=reconcile.Deadline(None))
 
 
 def test_the_real_store_shape_now_completes():

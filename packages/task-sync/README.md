@@ -1,7 +1,7 @@
 # Fulcra task sync
 
 The engine behind the Reminders and Todoist plugins in
-[Collect 0.1.2](../../docs/collect.md#get-started-new-user).
+[Collect 0.1.3](../../docs/collect.md#get-started-new-user).
 It is not required by the coordination or continuity tools.
 
 Shared completion engine for Collect task providers. Source lists must be selected

@@ -282,9 +282,32 @@ test("packed install runs independently and ships only the public runtime", () =
       if (contract.parseWorkNote('not-json').ok !== false || validateWorkEvent({}).ok !== false) process.exit(2);
       const view = replay.replayWorkEvents({events:[]});
       if (view.observation.coverage !== 'unavailable' || view.work.length !== 0) process.exit(3);
-      for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener','work-view','work-presence','work-roles','enrollment']) await import('@fulcra/coord-v5/' + module);
+      for (const module of ['work-digest','checkpoint','handoff','protocol','projection','listener','work-transport-config','work-transport-read','work-transport-updates','work-transport-store','work-transport-publish','listener-validation','listener-store','listener-runtime','work-listener','work-view','work-presence','work-roles','enrollment']) await import('@fulcra/coord-v5/' + module);
       const assert = (await import('node:assert/strict')).default;
       const { resolve } = await import('node:path');
+      const { readWorkUpdates } = await import('@fulcra/coord-v5/work-transport-updates');
+      const { openWorkTransportStore } = await import('@fulcra/coord-v5/work-transport-store');
+      const config = ${JSON.stringify(config)};
+      const transport = openWorkTransportStore({ config, dbPath:resolve('installed-updates.sqlite') });
+      let reads = 0;
+      const fetch = async url => {
+        reads++;
+        const path = new URL(url).pathname;
+        const stream = config.channel.split('/')[1];
+        const value = path.endsWith('/info') ? { userid:config.principalId }
+          : path.endsWith('/updates') ? { data_types:{}, file_changes:[] }
+          : path.endsWith('/catalog') ? [{ id:config.channel, api_version:'v1alpha1', recordable:true, queryable:true, record_spec:{type:'event'}, fulcra_userid:config.principalId }]
+          : path.endsWith('/annotation') ? [{ id:stream, fulcra_userid:config.principalId, annotation_type:'moment', fulcra_source_id:'com.fulcradynamics.annotation.'+stream, deleted_at:null }] : [];
+        return new Response(JSON.stringify(value));
+      };
+      try {
+        const input = { config, store:transport, fetch, token:'synthetic', start:'2026-09-26T00:00:00Z', end:'2026-09-27T00:00:00Z', updatesStart:'2026-09-26T00:00:00Z', mode:'gated', now:() => Date.parse('2026-09-27T00:05:00Z') };
+        assert.equal((await readWorkUpdates(input)).status, 'stored');
+        reads = 0;
+        assert.equal((await readWorkUpdates({ ...input, end:'2026-09-27T00:05:00Z' })).status, 'unchanged_hint');
+        assert.equal(reads, 2);
+        assert.equal(transport.inspect().observation_count, 1);
+      } finally { transport.close(); }
       const { openListenerStore } = await import('@fulcra/coord-v5/listener-store');
       const { configureRoutes, prepareWake, dispatchCodexWake } = await import('@fulcra/coord-v5/listener-runtime');
       const scope = { principalId:'synthetic', workspaceId:'synthetic', environmentId:'test', harness:'codex' };

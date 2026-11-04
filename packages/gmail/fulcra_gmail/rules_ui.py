@@ -18,10 +18,10 @@ RULES_UI_HTML = r"""<!doctype html>
 <h1>Gmail rule builder</h1>
 <div class="row m"><label>Account</label><select id="acct"></select></div>
 <div class="row m"><input id="q" placeholder="Gmail search e.g. from:amazon receipt" style="flex:1">
- <button onclick="search()">Search</button></div>
+ <button data-action="search">Search</button></div>
 <div id="results" class="m"></div>
-<div class="row m"><button class="sec" onclick="derive()">Derive rule from ✓/✗</button>
- <button class="sec" onclick="aiSuggest()">Suggest with AI (opt-in)</button></div>
+<div class="row m"><button class="sec" data-action="derive">Derive rule from ✓/✗</button>
+ <button class="sec" data-action="aiSuggest">Suggest with AI (opt-in)</button></div>
 <div id="chips" class="m"></div>
 <div id="preview" class="m"></div>
 <div class="m"><label>Actions</label>
@@ -30,11 +30,12 @@ RULES_UI_HTML = r"""<!doctype html>
  <input id="relay_to" placeholder="relay to (agent)">
  <input id="relay_priority" placeholder="P2" size="3"></div>
 <div class="row m"><input id="name" placeholder="rule name"><input id="rid" placeholder="rule id">
- <button onclick="save()">Save rule</button></div>
+ <button data-action="save">Save rule</button></div>
 <div id="status" class="m" style="display:none;font-weight:600"></div>
 <hr><h1>Rules</h1><div id="rules"></div>
-<script>
-async function ensureToken(){
+<script src="/api/gmail/rules/ui.js" defer></script></body></html>"""
+
+RULES_UI_JS = r"""async function ensureToken(){
   // GET / installs the daemon's HttpOnly auth cookie. JavaScript never reads
   // or copies the token; same-origin fetches send the cookie themselves.
   try{await fetch('/', {credentials:'same-origin', cache:'no-store'});}catch(e){}
@@ -59,8 +60,8 @@ async function search(){const q=document.getElementById('q').value;
   }catch(e){box.innerHTML='<em>Search failed: '+esc(e.message)+'</em>';}}
 function render(){document.getElementById('results').innerHTML=RESULTS.map(m=>`
   <div class="msg"><div class="sub">${esc(m.subject)}</div><div class="frm">${esc(m.from)} · ${esc(m.date)}</div>
-  <div class="row"><button class="sec" onclick="mark(${jsonArg(m.message_id)},'pos')">✓ match</button>
-  <button class="sec" onclick="mark(${jsonArg(m.message_id)},'neg')">✗ not</button>
+  <div class="row"><button class="sec" data-action="mark" data-id="${esc(m.message_id)}" data-value="pos">✓ match</button>
+  <button class="sec" data-action="mark" data-id="${esc(m.message_id)}" data-value="neg">✗ not</button>
   <span id="lbl-${esc(m.message_id)}"></span></div></div>`).join('');}
 function mark(id,v){LABEL[id]=LABEL[id]===v?undefined:v;
   document.getElementById('lbl-'+id).textContent=LABEL[id]==='pos'?'✓':LABEL[id]==='neg'?'✗':'';}
@@ -69,7 +70,7 @@ async function derive(){EDITING=null;EDIT_RULE=null;
   const d=await api('/api/gmail/rules/derive',
   {account_id:acct(),positives:ids('pos'),negatives:ids('neg')});CHIPS=d.chips;drawChips();preview();}
 function drawChips(){document.getElementById('chips').innerHTML=CHIPS.map((c,i)=>
-  `<span class="chip ${c.on?'on':''}" onclick="toggle(${i})">${esc(c.label)}</span>`).join('');}
+  `<span class="chip ${c.on?'on':''}" data-action="toggle" data-index="${i}">${esc(c.label)}</span>`).join('');}
 function toggle(i){CHIPS[i].on=!CHIPS[i].on;drawChips();preview();}
 function draft(){const m=CHIPS.filter(c=>c.on&&c.field==='match').map(c=>c.value).join(' ');
   const r={id:val('rid')||'rule',version:1,name:val('name')||'rule',match:m,actions:actions()};
@@ -131,13 +132,25 @@ async function editRule(id){const r=await api('/api/gmail/rules/'+encodeURICompo
 async function loadRules(){const d=await api('/api/gmail/rules');
   document.getElementById('rules').innerHTML=d.rules.map(r=>`<div class="msg">
    <b>${esc(r.name)}</b> <span class="frm">${esc(r.summary)}</span>
-   <button class="sec" onclick="editRule(${jsonArg(r.id)})">edit</button>
-   <button class="sec" onclick="toggleRule(${jsonArg(r.id)},${!r.enabled})">${r.enabled?'disable':'enable'}</button>
-   <button class="sec" onclick="delRule(${jsonArg(r.id)})">delete</button></div>`).join('');}
+   <button class="sec" data-action="editRule" data-id="${esc(r.id)}">edit</button>
+   <button class="sec" data-action="toggleRule" data-id="${esc(r.id)}" data-enabled="${!r.enabled}">${r.enabled?'disable':'enable'}</button>
+   <button class="sec" data-action="delRule" data-id="${esc(r.id)}">delete</button></div>`).join('');}
 async function toggleRule(id,en){await api('/api/gmail/rules/'+encodeURIComponent(id)+'/enabled',{enabled:en});loadRules();}
 async function delRule(id){if(confirm('Delete '+id+'?')){await api('/api/gmail/rules/'+encodeURIComponent(id),null,'DELETE');loadRules();}}
 function val(id){return document.getElementById(id).value.trim();}
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function jsonArg(s){return esc(JSON.stringify(String(s)));}
+// A fixed dispatch table keeps user-supplied IDs inert and supports rebuilt rows.
+document.getElementById('gmail-rule-builder').addEventListener('click', event => {
+  const el=event.target.closest('[data-action]');
+  if(!el)return;
+  const d=el.dataset;
+  const handlers={search,derive,aiSuggest,save,
+    mark:()=>mark(d.id,d.value), toggle:()=>toggle(Number(d.index)),
+    editRule:()=>editRule(d.id), toggleRule:()=>toggleRule(d.id,d.enabled==='true'),
+    delRule:()=>delRule(d.id)};
+  if(Object.hasOwn(handlers,d.action)) {
+    Promise.resolve().then(handlers[d.action]).catch(e=>setStatus(e.message));
+  }
+});
 (async()=>{await ensureToken();loadAccounts();loadRules();})();
-</script></body></html>"""
+"""

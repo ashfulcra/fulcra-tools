@@ -20,22 +20,19 @@ from __future__ import annotations
 
 from fulcra_collect.plugin import Plugin, RunContext
 
-# Where the browser extension lives in this repo, and the built unpacked
-# output the user loads into their browser. Single-sourced here so the
-# run() message and the description can't drift.
-_EXTENSION_SOURCE_DIR = "packages/attention/chrome"
-_EXTENSION_BUILD_DIR = "packages/attention/chrome/dist"
+_RELEASE_DMG = "Fulcra-Collect-macOS-arm64.dmg"
+_RELEASE_EXTENSION_DIR = "Fulcra Attention Extension"
 
 _POINTER_MESSAGE = (
     "Attention is captured by the Fulcra Attention browser extension, which "
     "signs in through your browser and sends data directly to Fulcra — there "
     "is nothing to configure here in Fulcra Collect.\n\n"
     "To start collecting attention data:\n"
-    f"1. Build the extension from {_EXTENSION_SOURCE_DIR} (the built, "
-    f"unpacked extension lands in {_EXTENSION_BUILD_DIR}).\n"
-    f"2. Load {_EXTENSION_BUILD_DIR} as an unpacked extension in a Chromium "
-    "browser (chrome://extensions → Developer mode → Load unpacked).\n"
-    "3. Open the extension and sign in via your browser.\n\n"
+    f"1. Reopen {_RELEASE_DMG}.\n"
+    "2. In Chrome, open chrome://extensions and turn on Developer mode.\n"
+    f"3. Choose Load unpacked and select the {_RELEASE_EXTENSION_DIR} "
+    "folder in the disk image.\n"
+    "4. Open the extension and sign in via your browser.\n\n"
     "The extension handles authentication and ingest on its own; the Fulcra "
     "Collect daemon is not involved."
 )
@@ -70,9 +67,9 @@ PLUGIN = Plugin(
     description=(
         "Attention is collected by the Fulcra Attention browser extension, "
         "which signs in through your browser and sends data directly to "
-        "Fulcra. Install the extension (built from "
-        f"{_EXTENSION_SOURCE_DIR}, loaded unpacked from {_EXTENSION_BUILD_DIR}) "
-        "and sign in via the browser. Nothing to configure in Fulcra Collect."
+        "Fulcra. Load the included extension folder from the Collect disk "
+        "image and sign in through the browser. Nothing to configure in "
+        "Fulcra Collect."
     ),
     category="activity",
 )
