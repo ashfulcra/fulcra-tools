@@ -81,7 +81,10 @@ def daemon(request, tmp_path, monkeypatch):
                 content = (text[:text.rfind('  <entry>')] + '</feed>').encode()
             content = info.get('feed', content)
         info.get('after_source', lambda: None)()
-        return httpx.Response(200, stream=httpx.ByteStream(content))
+        partial = len(info['requests']) > info.get('response_after', 0)
+        return httpx.Response(info.get('response_status', 200) if partial else 200,
+            headers=info.get('response_headers', {}) if partial else {},
+            stream=httpx.ByteStream(content))
     method = {'lastfm': 'fetch_recent_tracks', 'deezer': 'fetch_history', 'generic_rss': 'normalize_feed', 'letterboxd': 'fetch_diary', 'goodreads': 'fetch_diary'}[name]
     original = getattr(importer, method)
     def forwarded(*a, **kw):
@@ -201,6 +204,43 @@ def test_daemon_materializes_before_any_current_delivery(daemon, mode):
     assert not daemon.info['posts'] and not cursors(daemon)
     assert all(r.url.host != 'hostile.invalid' for r in daemon.info['requests'])
     assert daemon.ctx.state.watermark == '2020-01-01T00:00:00Z'
+    assert cursor_status(daemon)['cursor_state'] == 'unknown'
+
+
+@pytest.mark.parametrize('seeded', [False, True])
+@pytest.mark.parametrize('status,headers', [
+    (206, {'Content-Range': 'bytes 0-9/10000'}),
+    (206, {}),
+    (200, {'Content-Range': 'bytes 0-9/10000'}),
+    (200, {'Content-Range': ''}),
+    (200, {'Content-Type': 'multipart/byteranges; boundary=synthetic'}),
+    (203, {}),
+    (200, {'Content-Length': '1'}),
+    (200, {'Content-Length': '1000000'}),
+])
+def test_daemon_incomplete_http_never_delivers_or_advances(daemon, seeded, status, headers):
+    if seeded:
+        daemon.invoke()
+    prior = cursors(daemon)
+    posts = list(daemon.info['posts'])
+    daemon.info.update(response_status=status, response_headers=headers)
+    with pytest.raises(RuntimeError, match='^source scan failed$'):
+        daemon.invoke()
+    assert daemon.info['posts'] == posts
+    assert cursors(daemon) == prior
+    assert daemon.ctx.state.watermark == '2020-01-01T00:00:00Z'
+    assert cursor_status(daemon)['cursor_state'] == 'unknown'
+
+
+def test_daemon_partial_later_page_never_delivers_earlier_page(daemon):
+    if daemon.name not in ('lastfm', 'deezer'):
+        pytest.skip('API pagination only')
+    daemon.info.update(response_after=1, response_status=206,
+        response_headers={'Content-Range': 'bytes 0-9/10000'})
+    with pytest.raises(RuntimeError, match='^source scan failed$'):
+        daemon.invoke()
+    assert len(daemon.info['requests']) == 2
+    assert not daemon.info['posts'] and not cursors(daemon)
     assert cursor_status(daemon)['cursor_state'] == 'unknown'
 
 

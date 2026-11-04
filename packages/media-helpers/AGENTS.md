@@ -22,7 +22,12 @@ now select strict scans. The same five daemon routes use their
 [separate v2 scope and progress contract](README.md#daemon-v1-polling-development-branch),
 with no annotation/pre-strict cursor adoption. Keep scan completion, actual
 current delivery and cursor decisions together; recovered pending data is not
-current-source progress. [Immutable observed progress](README.md#observed-import-progress-development-branch)
+current-source progress. Their shared source HTTP reader accepts only status 200,
+refuses any `Content-Range` or multipart byte-range response, and checks any
+declared length against identity-encoded raw bytes before parsing. Duplicate or
+comma-coalesced content types are ambiguous and refused. A parseable
+partial body never authorizes delivery, cursor advancement or history success.
+[Immutable observed progress](README.md#observed-import-progress-development-branch)
 now survives later errors and all fourteen CLI routes preserve known counts
 after cleanup. Public `cursor` is a closed state/reason or null; successful
 withheld delivery does not prove caught up. Shared last-invocation snapshots are not

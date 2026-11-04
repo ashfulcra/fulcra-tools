@@ -76,6 +76,9 @@ def route(request, configured, monkeypatch):
         path = configured.tmp / (module.__name__.rsplit('.', 1)[-1] + '.json')
         path.write_text(json.dumps(values))
         monkeypatch.setattr(module, 'CREDS_PATH', path)
+    def source_response(content, headers=None):
+        return httpx.Response(state.get('response_status', 200),
+            stream=httpx.ByteStream(content), headers={**(headers or {}), **state.get('response_headers', {})})
     def source(req):
         state['requests'].append(req)
         if state['mode'] == 'fail':
@@ -106,7 +109,7 @@ def route(request, configured, monkeypatch):
                     payload = {'data': []}
             if name == 'deezer':
                 state['deezer_responses'].append((int(req.url.params['index']), 200))
-            return httpx.Response(200, stream=httpx.ByteStream(json.dumps(payload).encode()))
+            return source_response(json.dumps(payload).encode())
         file = {'generic-rss': 'generic_atom_sample.xml', 'letterboxd': 'letterboxd_sample.xml',
                 'goodreads': 'goodreads_sample.xml'}[name]
         content = (root / file).read_text()
@@ -116,7 +119,7 @@ def route(request, configured, monkeypatch):
         if state['mode'] == 'empty':
             content = '<?xml version="1.0"?><rss version="2.0"><channel><title>Empty</title></channel></rss>'
         content = state.get('feed_override', content)
-        return httpx.Response(200, stream=httpx.ByteStream(content.encode()), headers={'content-type': 'application/xml'})
+        return source_response(content.encode(), {'content-type': 'application/xml'})
     transport = httpx.MockTransport(source)
     module, method = {'lastfm': (lastfm, 'fetch_recent_tracks'), 'deezer': (deezer, 'fetch_history'),
                       'generic-rss': (generic_rss, 'normalize_feed'), 'letterboxd': (letterboxd, 'fetch_diary'),
@@ -204,6 +207,33 @@ def test_actual_success_replay_preview_and_wire_parity(route):
         assert requests[0].url.path == '/synthetic/rss/'
     elif route.name == 'goodreads':
         assert '/123' in requests[0].url.path
+
+
+@pytest.mark.parametrize('seeded', [False, True])
+@pytest.mark.parametrize('status,headers', [
+    (206, {'Content-Range': 'bytes 0-9/10000'}),
+    (200, {'Content-Range': 'bytes 0-9/10000'}),
+    (200, {'Content-Length': '1000000'}),
+])
+def test_actual_incomplete_http_fails_without_delivery_or_history_success(route, seeded, status, headers):
+    if seeded:
+        result, data = route.invoke()
+        assert result.exit_code == 0, data
+    posts = list(route.configured.posts)
+    if seeded:
+        scope = route.state['scopes'][-1]
+        with route.configured.open() as run:
+            prior = run.ctx.kv_get(scope.key)
+    route.state.update(response_status=status, response_headers=headers)
+    result, data = route.invoke()
+    assert result.exit_code == 2, data
+    assert data['ok'] is False
+    assert data['errors'] == [{'stage': 'fetch', 'message': 'source scan failed'}]
+    assert data['cursor'] is data['new_watermark'] is None
+    assert data['posted'] == data['verified'] == 0
+    assert route.configured.posts == posts
+    with route.configured.open() as run:
+        assert run.ctx.kv_get(route.state['scopes'][-1].key) == (prior if seeded else None)
 
 
 def test_actual_cap_even_natural_end_withholds(route):

@@ -2067,7 +2067,12 @@ fresh v2 scopes never adopt annotation or pre-strict v1 cursors, and final quiet
 credential checks precede a second authority guard and exact KV readback.
 Standalone recovery precedes bounded source-credential reads. Current verified
 delivery precedes cursor commit; configured caps, malformed skips and source
-changes withhold advancement. Legacy watermarks never seed v1 cursors. Public
+changes withhold advancement. Both strict poll paths require HTTP 200 and refuse
+any `Content-Range`, multipart byte-range body or mismatched declared raw length
+at their shared source reader before parsing; duplicate/coalesced content types
+are ambiguous and refused too. A parseable partial response cannot authorize
+current delivery, cursor progress or history success; preserve
+the prior cursor and report failure. Legacy watermarks never seed v1 cursors. Public
 envelopes append a closed `cursor` state/reason or null; withheld success is not
 caught-up proof. The [observed import progress seam](packages/media-helpers/README.md#observed-import-progress-development-branch)
 lets all fourteen migrated CLI routes retain known counts after cleanup.

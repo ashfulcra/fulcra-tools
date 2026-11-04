@@ -23,6 +23,53 @@ def track(ts="1700000000"):
     return {"name": "Song", "artist": {"#text": "Artist"}, "date": {"uts": ts}}
 
 
+@pytest.mark.parametrize('status,headers', [
+    (206, {}),
+    (206, {'Content-Range': 'bytes 0-1/20'}),
+    (200, {'Content-Range': 'bytes 0-1/20'}),
+    (200, {'Content-Range': ''}),
+    (200, [('Content-Range', ''), ('Content-Range', 'bytes 0-1/20')]),
+    (200, {'Content-Type': 'Multipart/ByteRanges; boundary=synthetic'}),
+    (200, [('Content-Type', 'application/json'), ('Content-Type', 'multipart/byteranges')]),
+    (200, {'Content-Type': 'application/json, multipart/byteranges'}),
+    (200, {'Content-Type': 'application/json; charset=utf-8, multipart/byteranges; boundary=synthetic'}),
+    (200, [('Content-Type', 'application/json'), ('Content-Type', 'application/xml')]),
+    (201, {}),
+    (203, {}),
+    (204, {}),
+    (200, {'Content-Length': '1'}),
+    (200, {'Content-Length': '20'}),
+    (200, [('Content-Length', '2'), ('Content-Length', '2')]),
+])
+def test_incomplete_http_never_reaches_json_parser(status, headers, monkeypatch):
+    from fulcra_media.importers import poll_scan
+
+    report = poll_scan.ScanReport()
+    report.begin('test')
+    monkeypatch.setattr(poll_scan.json, 'loads', lambda *_: pytest.fail('incomplete response parsed'))
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda _: httpx.Response(status, headers=headers, stream=Bytes(b'{}')),
+    )) as client, pytest.raises(RuntimeError, match='^source scan failed$'):
+        poll_scan.document(client, 'https://synthetic.invalid', report, params={})
+    assert not report.finished
+
+
+@pytest.mark.parametrize('headers', [
+    {}, {'Content-Length': '2'}, {'Accept-Ranges': 'bytes', 'Content-Length': '2'},
+    {'Content-Type': 'application/json; charset=utf-8', 'Content-Length': '2'},
+])
+def test_complete_identity_response_accepts_matching_or_absent_wire_length(headers):
+    from fulcra_media.importers import poll_scan
+
+    report = poll_scan.ScanReport()
+    report.begin('test')
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, headers=headers, stream=Bytes(b'{}')),
+    )) as client:
+        assert poll_scan.document(client, 'https://synthetic.invalid', report, params={}) == {}
+    assert report._bytes == 2
+
+
 def test_lastfm_affirmative_terminal_normalization_and_parity():
     from fulcra_media.importers.poll_scan import ScanReport
 

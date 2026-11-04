@@ -161,9 +161,10 @@ def body(client, url, report, *, params=None, timeout=30.0):
         if encoding != "identity":
             fail()
         declared = response.headers.get("Content-Length")
+        declared_size = None
         if declared is not None:
-            size = decimal(declared, maximum=MAX_TOTAL_BYTES, length=10)
-            if size > MAX_RESPONSE_BYTES or size > MAX_TOTAL_BYTES - report._bytes:
+            declared_size = decimal(declared, maximum=MAX_TOTAL_BYTES, length=10)
+            if declared_size > MAX_RESPONSE_BYTES or declared_size > MAX_TOTAL_BYTES - report._bytes:
                 fail()
         chunks = []
         size = 0
@@ -175,8 +176,15 @@ def body(client, url, report, *, params=None, timeout=30.0):
                 fail()
             chunks.append(chunk)
         report.check()
-        # Count HTTP-error bodies too, and never follow a redirect.
-        if not 200 <= response.status_code < 300:
+        content_types = response.headers.get_list("Content-Type", split_commas=True)
+        # Count refused bodies within the same bounds, but never let a valid
+        # JSON/XML fragment certify a complete source scan. iter_raw() and the
+        # identity-only encoding gate keep Content-Length a wire-byte check.
+        if (response.status_code != 200 or "Content-Range" in response.headers
+                or len(content_types) > 1
+                or any(value.split(";", 1)[0].strip().lower() == "multipart/byteranges"
+                       for value in content_types)
+                or (declared_size is not None and size != declared_size)):
             fail()
         return b"".join(chunks)
 

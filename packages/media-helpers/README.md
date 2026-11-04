@@ -267,8 +267,16 @@ Strict scans accept at most 8 MiB raw bytes per response, 64 MiB cumulatively,
 10,000 requests and 1,000,000 raw rows, with a 300-second cooperative deadline.
 Exact resource boundaries are inclusive. Parsers are checked before and after
 calls; there is no hard CPU/memory interruption guarantee. Encoded responses
-and redirects are refused. Strict Deezer pagination exhausts validated trusted
-next links instead of stopping at an old row; Last.fm validates pagination
+and redirects are refused. The shared source HTTP reader requires status 200,
+rejects any `Content-Range` and `multipart/byteranges` response, and requires a
+supplied `Content-Length` to match the identity-encoded raw bytes exactly.
+Duplicate or comma-coalesced `Content-Type` values are ambiguous and refused.
+Other 2xx statuses and contradictory framing cannot certify a scan, even when
+the returned JSON/XML is parseable. `Accept-Ranges` alone advertises a server
+capability and is allowed. These failures occur before parsing or current
+delivery, preserve prior cursors, and cannot report history success in either
+the standalone commands or daemon routes. Strict Deezer pagination exhausts
+validated trusted next links instead of stopping at an old row; Last.fm validates pagination
 metadata. These are fixture-tested rules, not live provider-compatibility proof.
 Feeds must be recognized, parseable RSS/Atom. Existing URL enrichment in record
 payloads remains; cursor digests are minimization, not encryption.
