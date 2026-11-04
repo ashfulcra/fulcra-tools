@@ -27,7 +27,11 @@ in place. If macOS refuses to unload the cached job, the app reports the failure
 and does not claim the old process was upgraded.
 
 The beta is signed, notarized, and built for Apple silicon. It includes its
-Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. Chrome
+Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. The 0.1.4 installer also includes the
+[local folder and transcript plugins](../local-sources/README.md) and
+[selected Notion pages](../notion/README.md). Notion live verification remains
+pending. Notion currently uses an internal connection token and page
+links, with preview on by default. Chrome
 Attention is an optional extension in the disk image with separate setup.
 [Release details and plugin status](../../docs/collect.md#plugin-status).
 
@@ -194,3 +198,7 @@ The current app uses Python, PyObjC, and rumps. A Swift port is a design directi
 it is not part of the released installer.
 
 Bundle sanitization refuses test-only payloads whose leaf or any ancestor inside app_packages is a symlink, or whose resolved path escapes app_packages. This prevents pyarrow test pruning from deleting outside the bundle; check-only mode also fails closed.
+
+The disk image includes [install instructions](resources/dmg/INSTALL.txt) for
+all new sources. Notarization, stapling, and Gatekeeper acceptance are release
+requirements; do not ask users to bypass Gatekeeper.

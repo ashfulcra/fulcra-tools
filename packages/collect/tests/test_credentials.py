@@ -227,3 +227,22 @@ def test_user_secret_is_separate_from_plugin_secret(_in_memory_keyring):
     credentials.set_user_secret("bearer-token", "user-value")
     assert credentials.get_secret("lastfm", "bearer-token") == "plugin-value"
     assert credentials.get_user_secret("bearer-token") == "user-value"
+
+
+def test_fresh_user_secret_observes_another_process_write(monkeypatch):
+    from fulcra_collect import credentials
+    storage = {'token': 'account-a'}
+    monkeypatch.setattr(credentials, '_keyring_get', lambda service, key: storage['token'])
+    credentials._clear_caches()
+    assert credentials.get_user_secret('bearer-token') == 'account-a'
+    storage['token'] = 'account-b'
+    assert credentials.get_user_secret('bearer-token') == 'account-a'
+    assert credentials.get_user_secret_fresh('bearer-token') == 'account-b'
+
+
+def test_fresh_user_secret_fails_closed_on_blocked_keychain(monkeypatch):
+    from fulcra_collect import credentials
+    def blocked(*args):
+        raise TimeoutError('synthetic blocked keychain')
+    monkeypatch.setattr(credentials, '_keyring_get', blocked)
+    assert credentials.get_user_secret_fresh('bearer-token') is None

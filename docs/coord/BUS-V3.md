@@ -285,6 +285,18 @@ coord-engine bus-v3 tag-provision <team> --agent coordinator \
 
 `agent` is required in an entry; the rest are optional and can be filled in
 later. A **partial** entry is legitimate — its events carry what it has.
+`tag-provision` never writes an entry without `agent`: one such entry makes
+every reader reject the whole registry, which untags every agent's events. If
+the `agent` tag cannot be created, the verb exits 2, leaves the registry as it
+was, and prints the uuids it did create so the retry records them with
+`--tag-id-agent`.
+
+Tag names are `<dimension>:<value>`, and the platform accepts at most 30
+characters (a longer name is refused with 422 `string_too_long`). An identity
+longer than 24 characters therefore cannot get an auto-created `agent:` tag.
+`tag-provision` checks every name before creating anything and exits 2 with
+nothing created; create a tag with a shorter name yourself and pass its uuid
+as `--tag-id-agent`.
 
 **`model` is DECLARED, not detected.** The engine cannot see which model is
 driving it, so `--model` is taken on trust and a stale declaration silently

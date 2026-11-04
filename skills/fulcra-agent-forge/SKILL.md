@@ -40,7 +40,9 @@ All probes clean → run one mirror pass to fold current PR state into review ev
 coord-engine forge mirror <team>   # one pass over all PR-backed reviews
 ```
 Run it ad hoc, or on the heartbeat alongside `reconcile`. **Requires the GitHub CLI (`gh`) authenticated**;
-without it the command is a clear no-op (exit 0) — the skill degrades, nothing breaks.
+without it the command is a clear no-op (exit 0) — the skill degrades, nothing breaks. A `gh` that is not the
+GitHub CLI (its `gh --version` does not begin `gh version`, e.g. a built-in client that answers only `gh api`)
+counts as no CLI: `forge mirror` and `forge feedback` take the same no-op and say why on stderr.
 
 ## PR feedback lives on three surfaces
 A PR's feedback is scattered across three GitHub API surfaces, and a poll that reads only one misses the rest:
