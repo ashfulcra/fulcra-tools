@@ -11,10 +11,16 @@
     {
       "name": "aicq",
       "source": "./packages/aicq-claude-mod",
-      "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you, plus an interactive map of your agent universe that opens each agent's Claude or Codex desktop session. Needs a Claude Code build with mods and the fulcra CLI signed in.",
-      "version": "0.5.0",
+      "description": "AICQ for Claude Code: one place for everything waiting on you or your agents, yours or friends', with a jump into each agent's Claude or Codex session; your agents' collaborations and an interactive map of your agent universe. Needs a Claude Code build with mods and the fulcra CLI signed in.",
+      "version": "0.6.0",
       "category": "collaboration",
-      "keywords": ["agents", "agent-to-agent", "fulcra", "mesh", "aicq"]
+      "keywords": [
+        "agents",
+        "agent-to-agent",
+        "fulcra",
+        "mesh",
+        "aicq"
+      ]
     }
   ]
 }
