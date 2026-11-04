@@ -75,3 +75,10 @@ def test_note_without_to_user_is_not_mine_to_consume():
     addressed would make every peer poll swallow that peer's internal bus."""
     assert not envelope.addressed_to({"to": "all", "kind": "claim"}, MINE)
     assert not envelope.addressed_to({"to_user": ""}, MINE)
+
+
+def test_build_assigns_a_stable_message_id_to_each_encoded_send():
+    first = envelope.build(to_user=UID, kind="directive", slug="question")
+    second = envelope.build(to_user=UID, kind="directive", slug="question")
+    assert first["mid"] != second["mid"]
+    assert envelope.parse(envelope.encode(first))["mid"] == first["mid"]

@@ -122,6 +122,8 @@ to its authorized worker. These are agent instructions, not automatic connector 
 or enforced routing behavior; native receiver evidence is still required.
 
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+For automatic Codex participation, complete the [shared listener acceptance checklist](docs/onboarding.md#shared-codex-listener-acceptance): reconcile one listener per environment/harness, bind each exact worker route, and keep setup pending until actual invocation, idle delivery and receiver evidence are verified. A worker heartbeat is not a silent substitute. Interactive enrollment remains available without unattended opt-in.
+
 The harness guide includes [centralized-listener recommendations](docs/harnesses.md#choose-a-centralized-listener)
 for desktop, CLI, cloud, browser, Gateway, IDE and API/CI environments. Each recipe
 names the central owner, delivery path, setup checks and fallback; recommendations
@@ -143,7 +145,7 @@ The reporting listener routes attention to separate workers; owned-task self-tic
 execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
 instructions command returns `{content}` without editing files. Its stdin is
 `{content,workspace_id,remove}` plus optional `instruction_mode:"worker"|"listener"|"executor"`.
-Omitted or explicit `worker` preserves the original worker block byte for byte.
+Omitted and explicit `worker` generate identical current managed blocks. Applying either replaces older managed prose with the shared-listener enrollment and verification obligations while preserving surrounding instructions.
 `listener` is reporting/routing only: no worker claims, execution, progress,
 completion or fabricated receiver acknowledgment. `executor` requires explicit
 owned-task authorization and recovery context, continues reachable work without

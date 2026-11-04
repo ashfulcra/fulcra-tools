@@ -413,6 +413,21 @@ config directory, and standalone helper CLIs may have their own credential
 files. Plugin-specific reports, uploads, and ledgers can also contain private
 data; this table is not a complete inventory of everything a connector stores.
 
+## HTTPS trust in the macOS bundle
+
+The `fulcra-collect` command checks OpenSSL's compiled-in CA locations before
+running a subcommand. If neither location exists and `SSL_CERT_FILE` is unset,
+[ssl_bootstrap.py](fulcra_collect/ssl_bootstrap.py) points `SSL_CERT_FILE` and an
+unset `REQUESTS_CA_BUNDLE` at the installed certifi bundle. Daemon workers and
+later CLI subprocesses inherit those values. Existing operator-supplied values
+are preserved; an existing platform CA location leaves the environment alone.
+No request is sent by this local startup check, and certificate verification
+remains enabled. A missing certifi bundle leaves normal TLS failure visible.
+This fixes missing bundle trust paths independently of Keychain authorization;
+installed/signed-app HTTPS qualification remains separate from synthetic tests.
+The CLI startup fixture restores both CA variables, including when originally
+absent, so its synthetic bundle cannot affect later HTTP-client tests.
+
 ## Tests
 
 ```bash

@@ -14,6 +14,15 @@ work independently of Collect. Collect is an optional host for local/source
 connectors, not a prerequisite for using Fulcra. The root README indexes every
 package and bundled skill; retain the human introduction and verify release claims.
 
+**Coord v5 Codex automatic enrollment:** reconcile one shared listener per
+environment/harness and its exact source/job-to-worker route. Follow the
+[shared listener acceptance checklist](packages/coord-v5/docs/onboarding.md#shared-codex-listener-acceptance).
+Interactive membership does not finish automatic setup. Keep a linked owned
+acceptance task or exact blocker until actual invocation, idle worker delivery
+and independent receiver evidence are verified; never silently substitute a
+per-worker heartbeat. Preserve monitoring and temporary fallback obligations
+until a verified replacement exists. This instruction grants no setup authority.
+
 Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
@@ -33,6 +42,20 @@ Coord V5 has an opt-in parallel `transport read-updates` route. Use shadow mode
 before gated deployment; update watermarks are not record cursors or complete-history
 proof. Quiet hints never cancel retained delivery obligations. Preserve the direct
 route, private journals and per-source scope; see the package README for audit/fallback limits.
+
+Mesh request attention is distinct from transport cursors. The optional
+`coord-mesh queue --attention-db ABS` durably retains addressed directive/query/message/request
+requests before cursor advancement, including previously read rows in the returned
+window. Receiver receipt does not dispose of work; a reply requires a committed
+claim and exact independently verified response readback. Claimed/ambiguous replies
+never retry automatically. This adds no grants, native listener or authority to
+execute peer text. New mesh envelopes carry stable per-send `mid` identities;
+attention entries expose `reply_to` for original IDs and source-qualified historical
+mid-less records without changing source envelopes. Schema-v2 legacy ACK reconciliation
+records receipt only when `in_reply_to` is absent; upgrading v1 reopens matching
+ACK dispositions while preserving
+the source evidence and uncertain claims. Read the coord-mesh README before upgrading
+host consumers; stop old writers first, because the version fence applies on open.
 
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
@@ -216,6 +239,9 @@ under `skills/`, each package with its own README, build, and tests.
   queue-only is the default, explicit exact-member delegation gates acceptance,
   and proposal mode stages all join effects. Do not install the retired coord
   listener for this flow. Claim listening only after a real scheduled run.
+  Member check status needs a verified authorized audience too, including inherited
+  root/group/account-wide shares. Unknown or unexpected readers require an already
+  authorized private checkpoint or chat fallback; preserve unrelated grants.
 
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS
@@ -1696,8 +1722,9 @@ unattended opt-in are satisfied; a verified schedule is a backstop. A reporting
 listener routes attention to separate workers, while deliberate self-ticking
 owned-task execution is a separate opt-in mode. Planner mode is not event-adapter
 support or idle-wake proof. `enrollment instructions` accepts optional
-`instruction_mode: worker|listener|executor`; omitted/explicit worker preserves
-the existing block bytes. Apply listener/executor blocks only in their own local/session
+`instruction_mode: worker|listener|executor`; omitted and explicit worker modes
+produce the same managed block. Regeneration updates older managed prose while
+preserving surrounding text. Apply listener/executor blocks only in their own local/session
 instructions, not shared repository-wide worker instructions. The listener reports
 its own reads/routes/conflicts/reconciliation, not worker progress/completion or
 fabricated receiver acknowledgment. Executor work needs explicit task ownership
@@ -2053,6 +2080,16 @@ tool that itself shells out, pass an `env` whose `PATH` includes the install
 dirs (`relay._subprocess_env`) AND set `EnvironmentVariables.PATH` in the
 daemon's launchd plist; keep both so a plist regeneration can't silently
 reintroduce the outage.
+
+### HTTPS trust in packaged Collect
+
+- `fulcra-collect` bootstraps missing compiled-in OpenSSL CA paths locally before
+  subcommands, using the installed certifi bundle for `SSL_CERT_FILE` and an
+  unset `REQUESTS_CA_BUNDLE`. Workers and CLI children inherit the environment.
+  Preserve operator-supplied values and certificate verification; do not solve
+  bundle trust failures by disabling TLS checks. Existing platform CA locations
+  are left alone. This does not repair Keychain ACLs or prove signed-app HTTPS;
+  see [the Collect README](packages/collect/README.md#https-trust-in-the-macos-bundle).
 
 ### Keychain
 

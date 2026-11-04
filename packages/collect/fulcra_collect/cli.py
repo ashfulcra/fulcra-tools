@@ -14,7 +14,7 @@ import sys
 import click
 
 from . import config as config_mod
-from . import credentials, registry, worker
+from . import credentials, registry, ssl_bootstrap, worker
 from .control import send_request
 from .daemon import Daemon
 from .plugin import validate_setting_value
@@ -58,6 +58,9 @@ def _configure_logging() -> None:
 @click.group()
 def cli() -> None:
     """Background hub for the Fulcra local helpers."""
+    # A frozen Python may have no compiled-in CA files. Set the inherited
+    # environment before daemon/worker HTTP or bundled CLI subprocesses.
+    ssl_bootstrap.ensure_ca_bundle()
 
 
 def _stderr_is_a_tty() -> bool:
