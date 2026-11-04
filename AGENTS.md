@@ -194,6 +194,17 @@ under `skills/`, each package with its own README, build, and tests.
   Never put synthesized knowledge into two-way sync working files or infer a
   source grant from a map/manifest. Check reader access and source freshness
   separately from producer publication; unknown provider namespaces stay unknown.
+  Company-owned installations follow
+  [company-deployment.md](skills/map-our-team/references/company-deployment.md):
+  company map/connector storage stays separate from member-owned proposal streams
+  and producer instances. Review access is not onward-publication authority;
+  Notion credential kinds and Attio token levels do not replicate provider ACLs
+  into Fulcra copies. Use the [first-time setup guide](docs/team-knowledge-setup.md)
+  for company/member prompts and the optional public maintainer feedback route.
+  The maintenance recipe optionally polls incoming joins and member proposals;
+  queue-only is the default, explicit exact-member delegation gates acceptance,
+  and proposal mode stages all join effects. Do not install the retired coord
+  listener for this flow. Claim listening only after a real scheduled run.
 
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS

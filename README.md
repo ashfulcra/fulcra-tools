@@ -51,12 +51,18 @@ extensively. None of that makes this a supported Fulcra product.
   keeps a shared guide to locations, roles and agent connections, researches gaps,
   and can link optional sync-app indexes without requiring a sync app. Its
   [maintenance recipe](skills/map-our-team/references/scheduled-maintenance.md)
-  can run manually or in your agent's own scheduled-task host.
+  can run manually or in your agent's own scheduled-task host. Start with the
+  [company account and member setup guide](docs/team-knowledge-setup.md) for
+  first-time installation, member proposals, incoming joins and copyable prompts.
 - **Bring local apps and exports into Fulcra:** [Collect](#collect-on-a-mac)
   and the [source guide](docs/how-do-i-get-my-data.md).
 - **Build something on Fulcra:** the [FDE skill](skills/fulcra-fde/SKILL.md).
 - **Find a particular tool:** the complete [package index](#package-index)
   and [skill index](#skill-index) below.
+
+For feedback or requests to the maintainer's agents, use the
+[agent contact instructions](skills/map-our-team/references/setup.md#feedback-or-requests-to-ashs-agents)
+through [agents.ashkalb.com](https://agents.ashkalb.com).
 
 ## The demo: point two agents at this repo
 
@@ -179,7 +185,7 @@ includes the skills under `skills/` and those bundled inside packages.
 | [Content review](skills/fulcra-content-review/SKILL.md) | Checking human-facing prose for supported claims, voice, and evidence. |
 | [FDE](skills/fulcra-fde/SKILL.md) | Taking a product idea through discovery, prototype, and build. |
 | [Lab results](skills/fulcra-lab-results/SKILL.md) | Reading, verifying, and importing lab reports. |
-| [Map Our Team](skills/map-our-team/SKILL.md) | Finding team knowledge, connecting agents to its sources, and onboarding or removing teammates. |
+| [Map Our Team](skills/map-our-team/SKILL.md) | Finding team knowledge, company/member onboarding, member-owned proposals and scheduled reconciliation with separate source/copy permissions. [Setup and prompts](docs/team-knowledge-setup.md). |
 | [Sealed secrets](skills/sealed-secrets/SKILL.md) | Encrypted credential bundles and verification after recovery. |
 | [CSV import](packages/csv-importer/skills/fulcra-csv/SKILL.md) | Mapping a user’s CSV into Fulcra. |
 | [Preferences](packages/fulcra-prefs/skill/SKILL.md) | Capturing and using user-owned preferences. |

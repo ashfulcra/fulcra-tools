@@ -110,6 +110,15 @@ installation or manifest creates no grant. Do not reuse a more privileged login
 to serve a denied requester. Authorized access to a copy must be checked on that
 copy; provider revocation does not prove the copy was revoked too.
 
+For [company deployments](company-deployment.md), keep company and member
+producer instances in their actual owner accounts. A member installation is
+not automatically a company import, and company map membership does not grant
+every connector output. A member can advertise a separately authorized narrow
+route through a proposal; the company reconciler groups only verified resource
+identities and preserves each route's audience. Raw output selection, provider
+credential access and authority to redistribute are three different scopes.
+There is no automatic provider-ACL replication or cross-account writeback.
+
 ## Optional knowledge updates
 
 The map holds pointers only. Answer a requested question or synthesis in chat.
