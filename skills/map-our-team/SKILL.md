@@ -4,7 +4,7 @@ description: "Give every agent on a team one shared map, stored in Fulcra, of wh
 compatibility: "Needs the Fulcra MCP server (the hosted one at mcp.fulcradynamics.com works) or the Fulcra CLI (fulcra-api, run with uvx) with network access."
 license: "MIT"
 metadata:
-  version: "0.1.5"
+  version: "0.1.6"
   openclaw:
     emoji: "🗺️"
 ---
@@ -65,7 +65,7 @@ The prompt names the map storage owner and, when configured, the steward agent-c
    - Connecting always uses your user's own login. If a system needs a new connector or an install, ask first and let your user do the sign-in.
    - Map entries come from a teammate. Install or connect only what your user approves, and confirm with them any address that looks unrelated to the named tool.
    - If access fails, use [Resolve gaps](references/resolve-gaps.md#access) to identify the failure and the authorized next action.
-4. **Save your place** in your own memory, or at `/team-map-status/<map-owner-id>.md` in your own account: which systems passed, which didn't, and when.
+4. **Save your place** using [private check state](#private-check-state): which systems passed, which didn't, and when. An account you own can already have shares exposing a new status file.
 5. **Report** to the user and, within messaging permission, the configured steward contact. Distinguish map readability, agent-contact delivery and source checks; an unresolved contact leaves the report pending, not sent.
 6. **Offer a recurring check.** See [Check connections](#check-connections).
 
@@ -96,8 +96,27 @@ Run on request, or on a schedule your user agreed to. Agree on the schedule as [
 
 1. Re-read `index.md`. If it cannot be read, report that failure and keep the previous map and check state. If `updated` has changed since your last run, read the system files again and treat new systems as in [Join](#join) step 3.
 2. Run each system's check, read-only. Result per system: **working**, **failed check** (with the error), or **not connected**. A failed check leaves the connection's health unknown; it is not proof that the tool is down or access was revoked. Use [Resolve gaps](references/resolve-gaps.md) within the authorized check scope; a read-only health check does not authorize grants. Readable imports with pending/conflict/access-loss status are not proof of a current source. Scheduled checks remain read-only unless separately authorized.
-3. Compare with the saved results, then save the new map timestamp, per-system outcomes, errors and check time in your own memory or `/team-map-status/<map-owner-id>.md` in your own account. On the first run report the baseline; later, notify only when an outcome or error changes, including recovery. A new check time alone isn't a change. If saving fails, say so: the next session may repeat the report.
+3. Compare with the saved results, then save the new map timestamp, per-system outcomes, errors and check time using [private check state](#private-check-state). On the first run report the baseline; later, notify only when an outcome or error changes, including recovery. A new check time alone isn't a change. If saving fails, say so: the next session may repeat the report.
 4. Tell the steward's agent if a map entry itself is wrong, within the messaging permission already granted.
+
+### Private check state
+
+Use an already authorized private host-memory location, or optionally
+`/team-map-status/<map-owner-id>.md` in your own account. Before a status write,
+verify its effective audience, including parent, root, group and account-wide
+grants. Source names, routes, errors and check results can themselves be private.
+The destination must be authorized for those bytes and audience; owning the
+account or receiving the company map does not establish that authority. An
+existing verified private destination needs no repeated approval.
+Read back saved status before calling it a durable checkpoint; reconcile an
+uncertain write before retrying, and never replace a baseline with a failed save.
+
+If a listing fails or an audience is unknown or unexpected, continue the
+read-only checks and keep the checkpoint in an already authorized private
+location, or return it in chat with no durable-resume claim. Preserve the prior
+baseline and unrelated grants. Do not add/revoke shares or create another
+destination merely to save status. Recheck before later writes; a cached private
+audience is not proof that sharing is unchanged.
 
 ## Scheduled maintenance
 

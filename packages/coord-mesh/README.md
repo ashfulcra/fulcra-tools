@@ -139,3 +139,61 @@ From the repository root:
 ```bash
 uv run --package coord-mesh --extra dev --no-editable pytest packages/coord-mesh/tests -q
 ```
+
+## Durable request attention (opt-in)
+
+A source cursor proves records were read; it does not prove requests reached a
+worker or received an answer. Incoming `directive`, `query`, `message`, and `request`
+envelopes addressed to the explicit recipient all require attention. Peer data
+is not permission to execute a request.
+
+Pass `queue --attention-db /absolute/private/attention.db` to materialize those
+requests before cursor advancement. The returned window is replayed idempotently,
+including already-seen records, so upgrading a reader can recover retained
+questions previously classified as information. The database is independent of
+the peer cursor. Conflicting edits or unreadable schema return UNKNOWN and retain
+the cursor; a missing table cannot silently become an empty queue. This option
+creates no source grant, listener, schedule, native sender or automatic reply.
+Keep host terminal/historical dispositions and exact role routing separately.
+Only the returned window can be backfilled; this is not complete-history proof.
+
+Host integrations can import `coord_mesh.attention.AttentionStore`. `snapshot()`
+returns `schema` (`mesh-attention/2`), `entries`, and `pending`; each entry binds source user, record,
+immutable envelope, receiver evidence, reply state, and verified reply record.
+`acknowledge()` records independently obtained receipt evidence but leaves the
+request pending. Do not fabricate receipts to suppress history.
+
+New `coord-mesh send` envelopes carry a generated `mid` which stays fixed through
+encoding, publication and exact full-envelope readback. Legacy mid-less directives
+remain readable. Each attention entry exposes `reply_to`: the original `mid`, or
+a deterministic `mesh-record:` SHA-256 identity bound to its source user and record.
+This fallback leaves the immutable source envelope unchanged and survives restarts.
+
+For an authorized answer, `prepare_reply()` fixes a response with exact source
+recipient and `in_reply_to` equal to the entry's `reply_to`; `claim_reply()` commits before the caller's transport
+write. A claimed attempt survives restart and cannot be claimed again. After
+independent source readback, `verify_reply()` requires the exact full response and
+record ID before marking responded. Ambiguous writes require readback reconciliation,
+never blind resend or a new message ID. These APIs accept host evidence; they do
+not themselves establish authentication, native wake, human authorization or
+peer receipt. Keep native delivery, worker read, response publication and remote
+peer consumption distinct.
+
+Legacy acknowledgments may be source-reconciled without sending again through
+`verify_legacy_reply`: exact source recipient, v1 response kind, incoming slug plus
+`-ack`, and body prefix `In reply to <original mid>:` must all match. The
+`in_reply_to` key must be absent; its presence, even empty/null, distinguishes
+explicitly anchored or malformed modern evidence from the legacy receipt path. The caller
+supplies the independently read reply record ID and receipt evidence. The full
+ACK and readback stay in `receiver_evidence`; an ACK such as "Received" leaves the
+answer obligation pending and does not reserve the answer's reply slot. No
+synthetic `in_reply_to` is added; uncertain reply claims cannot be overwritten.
+
+Opening a schema-v1 database upgrades its version to 2. Previously verified
+legacy ACK-shaped dispositions reopen as pending, preserving the exact old ACK,
+record ID and evidence in `receiver_evidence`. Ordinary verified answers and
+uncertain claims remain intact. Older readers refuse the new version on open rather than
+silently treating a receipt as an answer. Stop older host writers before upgrading;
+the open-time version check cannot fence an already running older connection.
+This migration sends nothing; review
+reopened obligations and prepare a separately authorized answer when appropriate.

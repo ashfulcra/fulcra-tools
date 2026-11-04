@@ -302,3 +302,27 @@ def test_a_stale_window_does_not_replay_what_the_watermark_already_covers(capsys
     _run(monkeypatch, [ROWS[0], ROWS[1]])
     out = capsys.readouterr().out
     assert "oldest" not in out and "middle" not in out, out
+
+
+def test_attention_backfills_seen_message_and_survives_cursor_advancement(capsys, monkeypatch, registry, tmp_path):
+    import json
+    from coord_mesh.attention import AttentionStore
+    row = {'id':'invented-attention-record','recorded_at':T3,'note':json.dumps({'v':1,'mid':'invented-message','to_user':MINE,'kind':'message','slug':'invented-directory-question','body':'Is a directory available?'})}
+    db = tmp_path/'attention.db'
+    assert _run(monkeypatch, [row], ['--attention-db',str(db)]) == cli.RC_OK
+    assert _run(monkeypatch, [row], ['--attention-db',str(db)]) == cli.RC_OK
+    assert '0 event(s)' in capsys.readouterr().out
+    with AttentionStore(db) as store:
+        assert len(store.pending()) == 1
+        assert store.pending()[0]['envelope']['kind'] == 'message'
+
+
+def test_attention_failure_is_unknown_and_cannot_advance_cursor(monkeypatch, registry, tmp_path):
+    import json
+    row={'id':'invented-conflict','recorded_at':T3,'note':json.dumps({'v':1,'mid':'invented-message','to_user':MINE,'kind':'query','body':'First'})}
+    db=tmp_path/'attention.db'
+    assert _run(monkeypatch,[row],['--attention-db',str(db)]) == cli.RC_OK
+    before=_cursor(registry)
+    changed={**row,'recorded_at':'2026-08-18T23:00:00+00:00','note':json.dumps({'v':1,'mid':'invented-message','to_user':MINE,'kind':'query','body':'Changed'})}
+    assert _run(monkeypatch,[changed],['--attention-db',str(db)]) == cli.RC_UNKNOWN
+    assert _cursor(registry)==before

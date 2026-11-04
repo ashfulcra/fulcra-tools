@@ -68,6 +68,12 @@ have their own setup and release status; this repo does not bundle the external
 
 ## Validation and limits
 
+Version 0.1.6 checks effective audiences before saving member check status,
+including inherited root/group shares. Unknown or unexpected readers leave the
+checkpoint in an already authorized private location or chat while checks
+continue; the skill preserves unrelated grants. The pre-map admission test now
+matches the authorized introduction flow in Join.
+
 The [acceptance scenarios](references/acceptance.md) are a live/simulated test
 plan. On 2026-11-03, two authorized bot accounts verified Fulcra file
 write/shared-read/readback, dedicated-share reuse and duplicate removal, and

@@ -9,7 +9,7 @@ Until a listener's wake has been verified in an environment, each addressed work
 Generate `instruction_mode:"listener"` through the [instructions command](onboarding.md#capability-assessment)
 for this reporting session; use `executor` only for separately authorized owned-task execution.
 Keep these role blocks in listener/executor local/session instructions, never shared repository-wide
-worker instructions. The default `worker` block is unchanged. Listener reports cover its own reads,
+worker instructions. The default `worker` block includes shared-listener enrollment and verification obligations. Listener reports cover its own reads,
 routes, conflicts and reconciliation, never worker claims/progress/completion or invented receiver
 acknowledgments. Executor recovery needs explicit ownership and context; a wake cannot authorize
 adoption. Mode selection installs nothing: fallback ticks/loops and direct executor self-ticking
@@ -81,6 +81,8 @@ Recommended listener prompt, generated with the installed listener role block:
 > permissions or routes rather than repairing credentials or starting new workers.
 
 ## Codex desktop
+
+Complete the [shared listener acceptance checklist](onboarding.md#shared-codex-listener-acceptance) for requested automatic participation. Register each worker with the one environment listener; interactive membership alone does not close that task.
 
 For enrolled workers that unload between turns, the host-injected dispatcher
 can opt into `allowColdWake:true` after verifying the existing native sender
