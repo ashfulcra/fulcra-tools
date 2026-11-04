@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from . import pin_currency
 from .roles import age_hours
 
 #: A host whose last reconcile is older than this is reported stale.
@@ -26,7 +27,8 @@ def health_prefix(team: str) -> str:
 
 
 def build_shard(*, host: str, now: str, engine_version: str,
-                result: dict[str, Any]) -> dict[str, Any]:
+                result: dict[str, Any],
+                engine_build: Optional[str] = None) -> dict[str, Any]:
     """One host's reconcile beat.
 
     ``advanced`` is the fact the shard used to omit, and omitting it is how a
@@ -47,6 +49,13 @@ def build_shard(*, host: str, now: str, engine_version: str,
     compatibility cache, and its shard call site does not receive that reason,
     so it reports ``advanced: True`` with its warnings. "Advanced" here means
     "was not aborted and wrote the index", not "published a clean generation".
+
+    ``engine_build`` is the VCS commit this engine was installed from
+    (:func:`coord_engine.pin_currency.build_sha`). ``engine_version`` cannot
+    stand in for it: ``__version__`` changes only on a release, so hosts running
+    different commits can report the same version and no reader could tell
+    which of them matched the fleet pin. The key is always written; ``None`` means the build is
+    unknowable on that host (editable or non-VCS install), never "current".
     """
     return {
         "schema": "coord.teams.health.v1",
@@ -60,13 +69,34 @@ def build_shard(*, host: str, now: str, engine_version: str,
         "fast_path": bool(result.get("fast_path")),
         "advanced": not bool(result.get("degraded")),
         "degraded_reason": result.get("reason") if result.get("degraded") else None,
+        "engine_build": engine_build,
     }
 
 
+def _valid_build(raw: Any) -> Optional[str]:
+    """A shard's ``engine_build`` if it is a usable sha, else None (UNKNOWN)."""
+    if not isinstance(raw, str):
+        return None
+    sha = raw.strip().lower()
+    if len(sha) < pin_currency.MIN_SHA_PREFIX or any(
+            c not in "0123456789abcdef" for c in sha):
+        return None
+    return sha
+
+
 def fold(shards: list[dict[str, Any]], *, now: str,
-         stale_hours: float = STALE_HOURS) -> dict[str, Any]:
+         stale_hours: float = STALE_HOURS,
+         pin: Optional[str] = None,
+         pin_status: str = "error") -> dict[str, Any]:
     """Fold host shards into the fleet view: per-host age + stale flag, plus
-    rollups (hosts, fresh count, newest pass)."""
+    rollups (hosts, fresh count, newest pass).
+
+    ``pin``/``pin_status`` are the fleet pin as :func:`pin_currency.load_pin`
+    read it. Each host gets a ``pin_verdict`` from :func:`pin_currency.classify`:
+    ``current`` only when the shard names a build that matches a readable pin.
+    A shard with no ``engine_build`` (a writer older than the field, or a
+    non-VCS install) is ``unknown-build``; an unreadable pin makes every host
+    ``unknown-pin``. Neither UNKNOWN is ever counted as current."""
     hosts: list[dict[str, Any]] = []
     for s in shards:
         if not isinstance(s, dict) or not s.get("host"):
@@ -87,7 +117,10 @@ def fold(shards: list[dict[str, Any]], *, now: str,
             "warnings": s.get("warnings"),
             "advanced": raw_advanced if isinstance(raw_advanced, bool) else None,
             "degraded_reason": s.get("degraded_reason"),
+            "engine_build": _valid_build(s.get("engine_build")),
         })
+        hosts[-1]["pin_verdict"] = pin_currency.classify(
+            hosts[-1]["engine_build"], pin, pin_status)
     hosts.sort(key=lambda h: str(h.get("last_reconcile") or ""), reverse=True)
     fresh = [h for h in hosts if not h["stale"]]
     # The advance rollups answer "is the index moving NOW", so only fresh hosts
@@ -104,6 +137,12 @@ def fold(shards: list[dict[str, Any]], *, now: str,
         "advancing": sum(1 for h in fresh if h["advanced"] is True),
         "aborting": sum(1 for h in fresh if h["advanced"] is False),
         "unknown_advance": sum(1 for h in fresh if h["advanced"] is None),
+        # Build currency of the FRESH hosts, against the pin read for this fold.
+        "fleet_pin": pin if pin_status == "ok" else None,
+        "pin_status": pin_status,
+        "at_pin": sum(1 for h in fresh if h["pin_verdict"] == "current"),
+        "off_pin": sum(1 for h in fresh if h["pin_verdict"] == "mismatch"),
+        "unknown_build": sum(1 for h in fresh if h["pin_verdict"] == "unknown-build"),
     }
 
 

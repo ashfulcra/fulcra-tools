@@ -76,6 +76,6 @@
     "test": "npm run test:unit && npm run test:install"
   },
   "devDependencies": {
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }
