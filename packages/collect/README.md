@@ -425,6 +425,8 @@ No request is sent by this local startup check, and certificate verification
 remains enabled. A missing certifi bundle leaves normal TLS failure visible.
 This fixes missing bundle trust paths independently of Keychain authorization;
 installed/signed-app HTTPS qualification remains separate from synthetic tests.
+The CLI startup fixture restores both CA variables, including when originally
+absent, so its synthetic bundle cannot affect later HTTP-client tests.
 
 ## Tests
 

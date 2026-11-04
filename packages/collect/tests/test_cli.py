@@ -112,8 +112,11 @@ def test_cli_bootstraps_ca_before_daemon_serve(monkeypatch, tmp_path):
 
     bundle = tmp_path / "certifi.pem"
     bundle.write_text("synthetic CA bundle")
-    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    # Register the original state even when absent: bootstrap writes directly
+    # to os.environ, so delenv(..., raising=False) alone cannot undo that write.
+    for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     monkeypatch.setattr(ssl, "get_default_verify_paths", lambda: SimpleNamespace(
         openssl_cafile="/nonexistent/collect-test-ca.pem", openssl_capath=None))
     monkeypatch.setattr(certifi, "where", lambda: str(bundle))
