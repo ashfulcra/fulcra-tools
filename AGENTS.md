@@ -1526,8 +1526,9 @@ unattended opt-in are satisfied; a verified schedule is a backstop. A reporting
 listener routes attention to separate workers, while deliberate self-ticking
 owned-task execution is a separate opt-in mode. Planner mode is not event-adapter
 support or idle-wake proof. `enrollment instructions` accepts optional
-`instruction_mode: worker|listener|executor`; omitted/explicit worker preserves
-the existing block bytes. Apply listener/executor blocks only in their own local/session
+`instruction_mode: worker|listener|executor`; omitted and explicit worker modes
+produce the same managed block. Regeneration updates older managed prose while
+preserving surrounding text. Apply listener/executor blocks only in their own local/session
 instructions, not shared repository-wide worker instructions. The listener reports
 its own reads/routes/conflicts/reconciliation, not worker progress/completion or
 fabricated receiver acknowledgment. Executor work needs explicit task ownership

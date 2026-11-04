@@ -125,7 +125,7 @@ The reporting listener routes attention to separate workers; owned-task self-tic
 execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
 instructions command returns `{content}` without editing files. Its stdin is
 `{content,workspace_id,remove}` plus optional `instruction_mode:"worker"|"listener"|"executor"`.
-Omitted and explicit `worker` generate the same managed block, now including shared-listener enrollment and verification obligations. Regenerate it to update older installed prose; surrounding instructions remain unchanged.
+Omitted and explicit `worker` generate the same managed block, now including shared-listener enrollment and verification obligations. Regenerate it to update older installed prose; surrounding instructions remain unchanged. This same replacement behavior applies whether worker mode is omitted or explicit.
 `listener` is reporting/routing only: no worker claims, execution, progress,
 completion or fabricated receiver acknowledgment. `executor` requires explicit
 owned-task authorization and recovery context, continues reachable work without
