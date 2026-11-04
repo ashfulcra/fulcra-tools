@@ -44,16 +44,16 @@ you act as (see the [presence skill](../../skills/fulcra-agent-presence/SKILL.md
 |---|---|
 | Wake up / what needs me | `queue` — the bus v3 event delivery surface ([`docs/coord/BUS-V3.md`](../../docs/coord/BUS-V3.md)): schema v1 is the legacy print-then-advance cursor; activated schema v2 CAS-stages a token and advances only through `queue commit TEAM --token TOKEN`; every nonzero exit is fail-closed and rc alone is NOT the state discriminator (rc 2 carries ABSENT/REFUSED branches, rc 3 carries UNKNOWN/INVALID/INCOMPATIBLE/REFUSED — read `state` + `error_code` from the `--json` envelope); the obligations fold never changes a successful read's rc — a clean window whose separate durable-obligation fold could not complete stays rc 0 and reports fold UNKNOWN/INVALID through the additive `obligations` key on the success envelope, while nonzero queue-family failures (read and `queue commit` alike — commit returns rc 3 for INCOMPATIBLE, stale-token REFUSED, and unsupported CAS) retain their documented `state`/`error_code` contract; that fold is opt-in (`--obligations`) and a skipped fold is stated, never implied, as `"obligations":{"state":"not-checked"}` on every machine-readable success envelope — a malformed config or cursor is INVALID (human-fixable, never auto-recreated over, `error_code=*-invalid`), distinct from UNKNOWN (`*-read-failed`/`window-unknown`, retry); under `--json` a successful read prints exactly one `{"type":"queue-result","state":"DATA"\|"CLEAR",events,count,cursor:{path,advanced},engine_version,protocol,obligations}` object and EVERY nonzero exit of `queue`/`queue commit` prints exactly one `queue-error` object (state `UNKNOWN`\|`INVALID`\|`INCOMPATIBLE`\|`ABSENT`\|`REFUSED` + per-branch `error_code`; sole exclusion: argparse's own usage exits) — text-mode success output is byte-stable for shell consumers; `queue --consume` (deliberate takeover of another agent's cursor) writes a durable audit doc to `_coord/audit/consume/<UTC-stamp>-<caller>-takes-<target>.md` before reading and is REFUSED if the audit write fails, while `--peek` writes nothing; `doctor` includes the adoption-claim + running-presence version census; `obligations` (the standalone do-I-owe-anything fold: rc 3 = UNKNOWN, rc 4 = INVALID; on queue reads the fold is opt-in via `--obligations`) · `briefing` · `needs-me` · `inbox` · `digest` fold the durable state |
 | Bus authority migration | `bus-v3 migrate TEAM --dry-run\|--apply` — classify discovered/explicit legacy cursor owners and idempotently add the complete schema-v1 authority block; malformed/unreadable state blocks, apply never writes cursor/task/role documents, and the JSON `state` + `error_code` contract (including `ISSUED-BUT-UNPROVEN`) is defined in [`BUS-V3.md`](../../docs/coord/BUS-V3.md) |
-| Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` (incl. `supersede` — close a re-dispatched copy with `superseded_by`; `block` requires `--unlock`) |
+| Task views (self-healing) | `reconcile` · `status` · `board` · `search` · `task` (incl. `supersede` — close a re-dispatched copy with `superseded_by`; `block` requires `--unlock`; `task start` with an `--assignee` also writes that task's bus-v4 `open` — to the assignee, or `all` for `*`, with the doc owner as `from` — so self-created work enters the assignee's fold at once; an unassigned task, a team without a bus-v4 config, or a doc write that did not land opens nothing, and an unreadable bus-v4 config or a failed open keeps the doc and exits 3 naming the repair, `obligations TEAM --agent ASSIGNEE --export-open --force`) |
 | Directives & messaging | `tell` · `broadcast` · `remind` (schedules a future-dated bus-v3 record: the reminder delivers itself at WHEN via the assignee's queue read) · `respond` · `later` (backlog) · `intent` (spoken commitment) — the retired `listen` watcher was removed 2026-08-03 (PR #523); replies ride the queue read |
 | Dropped-work fold | `threads` (started-then-silent / blocked-on / intent-never-started, per principal) |
 | Identity & liveness | `presence` · `agents` · `roles` (claim/release/status) · `escalate` · `engagement gate` (mixed-fleet coverage) |
 | Operator loop | `asks` (waiting-for-operator, oldest first) · `answer` (unblock + hand back) |
-| Review handshake | `review` (request/status) — one `pr-N` slug advances through exact `--head` rounds; obligation persists until active-head verdict files exist |
+| Review handshake | `review` (request/status/merge-ready) — one `pr-N` slug advances through exact `--head` rounds; obligation persists until active-head verdict files exist; `review status` with no readable doc answers ABSENT (never created), a tombstone (soft-deleted dir) or `… retry` (doc listed but unreadable, or listing failed); `review merge-ready TEAM SLUG [--notify MERGER]` is the merger's pre-click check and never merges: rc 0 only when the register is APPROVED at an exact head, the PR (`gh pr view`) is OPEN and not a draft, PR head == register head == verdict head, and every reported CI check passed (no checks = NOT READY); rc 2 NOT READY names every failed check; rc 1 is UNKNOWN (register, verdict shard or forge unreadable, or no GitHub CLI on the host; a `gh` whose `gh --version` does not begin `gh version` is not the GitHub CLI, and that answer carries no "retry" because a retry cannot help); `--notify` delivers a READY result as a head-keyed directive (same head dedupes) — see [`review-cli.md`](../../skills/fulcra-agent-review/references/review-cli.md) |
 | Continuity | `continuity` (snapshot/checkpoint/park/resume) |
 | Durable tooling stash | `stash` (push/pull/list — manifest + sha256 + fail-closed secrets guard) |
 | Wake routing | `wake` (queue-file/consume — local SessionStart nudges) · `router` (`run` — feed-first policy plane, direct cloud-adapter execution, host-local queue; `execute` — thin host-local executor; [plan](../../docs/coord/wake-router-PLAN.md)) |
-| Fleet ops | `health` (two separate facts per host: `fresh` is SHARD RECENCY, `advanced` is whether the pass moved the index — every reconcile exit writes a shard, aborts included, so a fresh host can have advanced nothing; a shard without the field is UNKNOWN, never fine) · `doctor` · `acceptance pair` · `forge` · `annotate` · `bus-v3 tag-provision` (register an identity's four timeline-tag dimensions — agent/platform/harness/model — in `_coord/bus-v3/tags.json`, so every event this agent writes is filterable in the Fulcra visual explorer; `model` is a declaration the engine cannot verify, and a switch is a cheap re-provision; it never writes an entry without the required `agent` tag, which would make every reader reject the registry, and it refuses a tag name over the platform's 30-character limit before creating anything) · `bus-v3 send` (the supported hand-send for a bare event — resolves the stream from the records authority and attaches those tags, which a raw `fulcra-api record` pipe cannot do) |
+| Fleet ops | `health` (two separate facts per host: `fresh` is SHARD RECENCY, `advanced` is whether the pass moved the index — every reconcile exit writes a shard, aborts included, so a fresh host can have advanced nothing; a shard without the field is UNKNOWN, never fine; each host also shows its `engine_build` against the store's fleet pin — `= pin`, `NOT the pin`, or `build UNKNOWN` — because the version label cannot distinguish builds) · `doctor` · `acceptance pair` · `forge` · `annotate` · `bus-v3 tag-provision` (register an identity's four timeline-tag dimensions — agent/platform/harness/model — in `_coord/bus-v3/tags.json`, so every event this agent writes is filterable in the Fulcra visual explorer; `model` is a declaration the engine cannot verify, and a switch is a cheap re-provision; it never writes an entry without the required `agent` tag, which would make every reader reject the registry, and it refuses a tag name over the platform's 30-character limit before creating anything) · `bus-v3 send` (the supported hand-send for a bare event — resolves the stream from the records authority and attaches those tags, which a raw `fulcra-api record` pipe cannot do) |
 | ATC (cap routing) | `route` · `usage` · `headroom` · `atc` · `dash` |
 
 `coord-engine <verb> --help` for flags; most read verbs take `--json`. Sub-verb lists above are by concern, not exhaustive — the parser's help is the inventory. The
@@ -262,7 +262,7 @@ disable a bound or make an op hang. Retention is the deliberate exception:
 | `COORD_OBLIGATION_BUDGET` | `90` | seconds | Deadline for the `obligations` fold. |
 | `COORD_READ_RETRY_MS` | `2000` | milliseconds | Backoff before the single retry of a read that returned an error. `0` or negative disables the retry; unparseable falls back to the default. |
 | `COORD_RECORDS_API_VERSION` | `v1alpha1` | — | Records API version override; env wins over the store's `_coord/bus-v3/records.json`. |
-| `COORD_RETENTION_DAYS` | `14` | days | `reconcile` cold-archives quiet terminal (`done`/`abandoned`) and stale `proposed` tasks after 14 days by default (flag/env overrides). Settled reviews are archived wholesale after 7 days and indexed so hot folds skip their soft-delete tombstones; presence dead over 7 days is pruned; legacy `artifact/` is consolidated into `artifacts/`. Set to `0` to disable retention. Moves are copy-verified and fail closed. Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins). |
+| `COORD_RETENTION_DAYS` | `14` | days | `reconcile` cold-archives quiet terminal (`done`/`abandoned`) and stale `proposed` tasks after 14 days by default (flag/env overrides). Settled reviews are archived wholesale after 7 days and indexed so hot folds skip their soft-delete tombstones; presence dead over 7 days is pruned; legacy `artifact/` is consolidated into `artifacts/`. Set to `0` to disable retention. Moves are copy-verified and fail closed. Each archived task's obligation is retired on bus-v4 with one `close` addressed to `all`, written only after the source delete succeeds; without a bus-v4 config nothing is written; an unreadable config or a failed write is a `retention: v4 close FAILED` warning that leaves the archive in place. Each close is queued as `_coord/retention/pending-v4-close/<slug>.json` before any ack/response shard moves or the source is deleted (a task whose marker cannot be written stays hot with its shards in place) and cleared once the close has an answer; every reconcile pass, including those the daily throttle skips, retries the queue, at most 50 markers per pass with the remainder reported as `cap reached`. A retry never closes a task that is hot again: it re-opens from that doc (the close may already have landed) and keeps the marker until the open succeeds, and it keeps the marker while the hot path is unreadable. A close that races a restore re-reads the hot path afterwards and re-opens from the doc it finds; a failed re-open or an unreadable hot path re-writes the marker for the next pass. `task restore` clears the slug's marker only after its move succeeds, then writes the matching bus-v4 `open` (to the assignee, or `all` for a broadcast; none for an unassigned or terminal task) and exits 3 if that write fails. Obligations archived before this change stay open until cleaned up separately. Legacy alias: `FULCRA_COORD_RETENTION_DAYS` (canonical wins). |
 
 ### Wake router (host-local)
 
@@ -291,16 +291,60 @@ acknowledgments/responses, and projection metadata. `CLEAR`, `DATA`,
 permission/read doubt, incomplete namespace, or unsupported team path is
 `UNKNOWN`, triggers the named full-scan recovery, and never advances the
 watermark. A record count is only a zero/nonzero detector signal, never a
-cardinality, threshold, diff, or identity. Counts and enumerated identities need not match; numeric equality is not
+cardinality, threshold, diff, or identity. Live `data-updates` omits types with no records in
+the window, so the configured coordination channel ABSENT from a well-formed
+`data_types` map is a zero signal (an unreadable authority or a malformed
+count stays `UNKNOWN`). Counts and enumerated identities need not match; numeric equality is not
 a coverage test. A positive signal must materialize at least one
 immutable identity in one bounded attested cursor read or coverage is
 `UNKNOWN`; a zero signal becomes CLEAR only when that cursor window proves it.
 The outer feed and record cursor must attest one contiguous window: exact
-requested `after`, and record `through` at or beyond feed `through`. A lagging,
-missing, mismatched, or incomparable boundary/frontier is `UNKNOWN`, advances
-no watermark, and leaves the public overlay `NOT_RUN`/nonzero. Bootstrap is
-licensed only by an outer `after` plus a cursor covering the same full
-frontier. The concrete
+requested boundary, and record `through` at or beyond the feed frontier. The
+outer feed's boundary/frontier is read from `after`/`through`, or from the
+`start_time`/`end_time` keys `fulcra-api data-updates` (0.1.46+) actually emits
+(space-separated ISO accepted); an envelope with neither takes the named
+boundary recovery. A lagging, missing, mismatched, or incomparable
+boundary/frontier is `UNKNOWN`, advances no watermark, and leaves the public
+overlay `NOT_RUN`/nonzero. Bootstrap is licensed only by an outer boundary
+(`after` or `start_time`) plus a cursor covering the same full frontier.
+**With today's CLI the record leg is never attested:** `get-records` answers
+JSONL with no `after`/`through`, so the transport returns no record window. An
+unavailable or incomplete record window behind an attested outer window takes
+the named full-scan recovery (and re-anchors under the complete-task-read gate
+below), so on current builds **every reconcile pass is a full-scan recovery**;
+the trusted incremental path waits for an endpoint that attests the record
+window. That recovery keeps the tasks whose latest lifecycle state in the
+attested feed is an upload (collapsed by event instant with the E1 tie rules,
+so an upload later deleted or archived in the same window is not one) as
+references, so an rc-0 partial `task/` listing that omits one fails closed (no publish, no
+re-anchor). A mismatched or unparseable record window stays non-recoverable.
+An EMPTY `start_time`/`end_time` window wider than the corroboration bound
+(`COORD_FEED_EMPTY_CORROBORATION_HOURS`) while corroboration is dormant is
+`UNKNOWN` with reason `FEED_WIDE_EMPTY_UNPROVEN` and takes the same named
+full-scan recovery, never a trusted `CLEAR` (live 2026-10-15: a 38-day window
+answered `file_changes: []` while one day of it held 3790 changes);
+`after`/`through` envelopes keep the dormant default unchanged. That
+recovery **re-anchors** the cursor: the batch carries the server's `end_time`
+as `attested_frontier` (never as its trusted watermark), and once the full
+scan completes the persisted cursor moves to exactly that instant — the
+server stamped it before the scan began, so the scan has seen every change at
+or before it; it is never a local or scan-derived time. Only a **complete
+task fold** licenses it: every task the scan listed was READ this pass — a
+single read failure keeps the prior cursor, so the window that still owes that
+read is re-covered next pass. A shard that was read but has unparseable
+frontmatter is skipped identically every pass and does not hold the cursor
+(re-reading cannot change it). It also persists
+only with `summaries.json`, which an aborted or projection-refused (e.g.
+review budget-cut) pass never writes.
+Boundary/frontier-unknown recoveries keep the prior cursor. Enabling
+corroboration by default is not built yet. Because `summaries.json` is
+last-writer-wins across hosts, a pass re-reads the store's cursor just before
+publishing on every path (full, incremental and the no-change fast path) and **skips its generation + summaries write** when that cursor is
+strictly newer than the one it started from (health: `superseded by a newer
+cursor in the store`), so it cannot roll another host's re-anchor back; equal or
+older writes as before, an unreadable store cursor writes as before and logs it.
+This narrows the race but is not a fence (no CAS), and a host on an older build
+can still roll the cursor back. The concrete
 count key always comes from the stored `_coord/bus-v3/records.json` authority:
 the host-local `COORD_RECORDS_TYPE` writer/test override cannot redirect
 detection. That authority read and its optional one retry spend the detector's

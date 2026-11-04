@@ -561,6 +561,11 @@ Reads fold `data-updates` deltas in-session. Bounded read repair warms projectio
 for later readers. Retention runs as a capped, session-attributed role duty. The
 legacy `coord-reconcile:*` writer class is denied.
 
+> **Status today (target not reached):** host-local reconcile heartbeats are the
+> live write path. Each reconciling host runs `coord-engine reconcile` from a
+> launchd job and writes as `coord-reconcile:<host>` (see `coord-engine health`);
+> that writer class is not denied, and retention runs inside those passes.
+
 ### 12.2 Fleet directives and version fence
 
 Fleet-wide pin, minimum version, and configuration authority live in one
@@ -578,6 +583,15 @@ the fence requires a reviewed manifest change or revert.
 
 Activation remains feature-gated until every fleet writer can observe the manifest
 and enforce the fence.
+
+> **Status today (target not reached):** no review-gated manifest exists on main
+> and no fence is enforced. The fleet engine pin is the `PIN=` line of the store's
+> `team/<team>/_coord/bus-v3/adopt-latest.sh`, adopted per host (or by
+> `ADOPT-WHEN-GATED.md`), and `coord-engine health` reports each reconcile host as
+> at the pin, not the pin, or build UNKNOWN. The minimum engine version is a floor,
+> `current_engine_version`, in the store's `team/<team>/_coord/bus-v3/records.json`
+> (see [`BUS-V3.md`](BUS-V3.md)); `queue` warns that this authority has no fleet
+> version fence.
 
 ### 12.3 Event-read cutover and mesh
 
