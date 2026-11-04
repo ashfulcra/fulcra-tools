@@ -14,6 +14,15 @@ work independently of Collect. Collect is an optional host for local/source
 connectors, not a prerequisite for using Fulcra. The root README indexes every
 package and bundled skill; retain the human introduction and verify release claims.
 
+**Coord v5 Codex automatic enrollment:** reconcile one shared listener per
+environment/harness and its exact source/job-to-worker route. Follow the
+[shared listener acceptance checklist](packages/coord-v5/docs/onboarding.md#shared-codex-listener-acceptance).
+Interactive membership does not finish automatic setup. Keep a linked owned
+acceptance task or exact blocker until actual invocation, idle worker delivery
+and independent receiver evidence are verified; never silently substitute a
+per-worker heartbeat. Preserve monitoring and temporary fallback obligations
+until a verified replacement exists. This instruction grants no setup authority.
+
 Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
@@ -1687,8 +1696,9 @@ unattended opt-in are satisfied; a verified schedule is a backstop. A reporting
 listener routes attention to separate workers, while deliberate self-ticking
 owned-task execution is a separate opt-in mode. Planner mode is not event-adapter
 support or idle-wake proof. `enrollment instructions` accepts optional
-`instruction_mode: worker|listener|executor`; omitted/explicit worker preserves
-the existing block bytes. Apply listener/executor blocks only in their own local/session
+`instruction_mode: worker|listener|executor`; omitted and explicit worker modes
+produce the same managed block. Regeneration updates older managed prose while
+preserving surrounding text. Apply listener/executor blocks only in their own local/session
 instructions, not shared repository-wide worker instructions. The listener reports
 its own reads/routes/conflicts/reconciliation, not worker progress/completion or
 fabricated receiver acknowledgment. Executor work needs explicit task ownership
