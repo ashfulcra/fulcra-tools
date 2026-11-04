@@ -216,6 +216,9 @@ under `skills/`, each package with its own README, build, and tests.
   queue-only is the default, explicit exact-member delegation gates acceptance,
   and proposal mode stages all join effects. Do not install the retired coord
   listener for this flow. Claim listening only after a real scheduled run.
+  Member check status needs a verified authorized audience too, including inherited
+  root/group/account-wide shares. Unknown or unexpected readers require an already
+  authorized private checkpoint or chat fallback; preserve unrelated grants.
 
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS

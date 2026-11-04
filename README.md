@@ -185,7 +185,7 @@ includes the skills under `skills/` and those bundled inside packages.
 | [Content review](skills/fulcra-content-review/SKILL.md) | Checking human-facing prose for supported claims, voice, and evidence. |
 | [FDE](skills/fulcra-fde/SKILL.md) | Taking a product idea through discovery, prototype, and build. |
 | [Lab results](skills/fulcra-lab-results/SKILL.md) | Reading, verifying, and importing lab reports. |
-| [Map Our Team](skills/map-our-team/SKILL.md) | Finding team knowledge, company/member onboarding, member-owned proposals and scheduled reconciliation with separate source/copy permissions. [Setup and prompts](docs/team-knowledge-setup.md). |
+| [Map Our Team](skills/map-our-team/SKILL.md) | Finding team knowledge, company/member onboarding, private check state, member-owned proposals and scheduled reconciliation with separate source/copy permissions. [Setup and prompts](docs/team-knowledge-setup.md). |
 | [Sealed secrets](skills/sealed-secrets/SKILL.md) | Encrypted credential bundles and verification after recovery. |
 | [CSV import](packages/csv-importer/skills/fulcra-csv/SKILL.md) | Mapping a user’s CSV into Fulcra. |
 | [Preferences](packages/fulcra-prefs/skill/SKILL.md) | Capturing and using user-owned preferences. |
