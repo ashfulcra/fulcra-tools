@@ -1,5 +1,13 @@
 # No-janitor coord — specification
 
+> **📎 HISTORICAL — design provenance, not current instructions.** This draft
+> (2026-08-13) was never ratified as written. In particular, the repo manifest
+> it names as the single authority (`docs/coord/fleet-manifest.json`, §3) was
+> never built: the coordination authority is the store document
+> `team/<team>/_coord/bus-v3/records.json` (see [`BUS-V3.md`](BUS-V3.md)), and the
+> fleet engine pin lives in the store's `_coord/bus-v3/adopt-latest.sh`. Read the
+> rest for the reasoning only.
+
 **STATUS: DRAFT for cross-model review.** Authored 2026-08-13 under P1 operator
 order. Gate: normal dual-green cross-model review; workstream ratification by
 coordinator.

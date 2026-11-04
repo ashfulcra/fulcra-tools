@@ -19,9 +19,11 @@ members = [
     "fulcra-dayone",
     "fulcra-gmail",
     "fulcra-labs",
+    "fulcra-local-sources",
     "fulcra-media-helpers",
     "fulcra-menubar",
     "fulcra-netflix-skill",
+    "fulcra-notion",
     "fulcra-okf",
     "fulcra-prefs",
     "fulcra-purpleair",
@@ -639,6 +641,32 @@ requires-dist = [
 provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
+name = "fulcra-local-sources"
+version = "0.1.0"
+source = { editable = "packages/local-sources" }
+dependencies = [
+    { name = "fulcra-collect" },
+    { name = "fulcra-common" },
+    { name = "httpx" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fulcra-collect", editable = "packages/collect" },
+    { name = "fulcra-common", editable = "packages/fulcra-common" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "fulcra-media-helpers"
 version = "0.1.0"
 source = { editable = "packages/media-helpers" }
@@ -733,6 +761,32 @@ dev = [
 requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "fulcra-notion"
+version = "0.1.0"
+source = { editable = "packages/notion" }
+dependencies = [
+    { name = "fulcra-collect" },
+    { name = "fulcra-local-sources" },
+    { name = "httpx" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fulcra-collect", editable = "packages/collect" },
+    { name = "fulcra-local-sources", editable = "packages/local-sources" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
 provides-extras = ["dev"]
 

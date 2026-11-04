@@ -1535,8 +1535,21 @@ def cmd_task_start(args: argparse.Namespace, transport: Any) -> int:
     if not args.force and transport.read(path) is not None:
         print(f"task {slug} already exists (use --force)", file=sys.stderr)
         return 1
-    transport.write(path, content)
+    written = transport.write(path, content)
     print(f"created team/{args.team}/task/{slug}.md ({args.status})")
+    if not written:
+        return 0
+    # `tell` announces the obligation as a v3 directive, which the mirror opens on bus-v4. `task start` writes the
+    # doc and nothing else, so an assigned task it created never entered the assignee's fold (33073a42).
+    from . import dual_emit
+    opened = dual_emit.open_task_doc(
+        transport, args.team, actor=_host(), slug=slug, doc=content, at=_iso(_now()))
+    if opened is False:
+        print(f"task start incomplete: the doc is written but its bus-v4 open was NOT, so fold-backed "
+              f"needs-me/obligations will not show {slug}. Re-export it with "
+              f"`coord-engine obligations {args.team} --agent <assignee> --export-open --force`.",
+              file=sys.stderr)
+        return 3
     return 0
 
 
@@ -1744,7 +1757,8 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
     """Move an archived task back into the hot path (verified move)."""
     for month in sorted(_archive_months(transport, args.team), reverse=True):
         src = f"{rec.archive_prefix(args.team)}{month}/{args.name}.md"
-        if transport.read(src) is None:
+        archived_doc = transport.read(src)
+        if archived_doc is None:
             continue
         dst = _task_path(args.team, args.name)
         # ABSENT, not merely unreadable. This guard is the only thing standing
@@ -1765,6 +1779,22 @@ def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
             return 1
         if rec._crash_safe_move(transport, src, dst):
             print(f"restored {args.name} from archive/{month}/ (run reconcile to reindex)")
+            # Only now that the doc is hot is a close retention still owes for it void. Cleared before the
+            # move, a failed move would leave the task archived with its owed close gone. A retry that
+            # races this sees the hot doc and drops the marker, or re-opens after its own close.
+            if hasattr(transport, "delete"):
+                transport.delete(f"{rec.pending_v4_close_prefix(args.team)}{args.name}.json")
+            # Retention closed this task on bus-v4 when it archived it, so the fold-backed reads
+            # (needs-me, obligations) would never show it again without a matching open.
+            from . import dual_emit
+            reopened = dual_emit.reopen_restored(
+                transport, args.team, actor=_host(), slug=args.name, doc=archived_doc, at=_iso(_now()))
+            if reopened is False:
+                print(f"restore incomplete: the doc is back but its bus-v4 open was NOT written, so "
+                      f"fold-backed needs-me/obligations will not show {args.name}. Re-export it with "
+                      f"`coord-engine obligations {args.team} --agent <assignee> --export-open --force`.",
+                      file=sys.stderr)
+                return 3
             return 0
         print(f"restore failed: verified move from archive/{month}/ failed", file=sys.stderr)
         return 1
@@ -2818,6 +2848,29 @@ def _review_tally(
     # budget, so it always scans every verdict shard (fully_scanned ignored).
     tally, vok, _ = _tally_from_verdict_entries(transport, team, slug, entries, raw)
     return tally, raw is not None, vok, listing_ok
+
+
+def _review_presence(transport: Any, team: str, slug: str) -> Optional[str]:
+    """What the review root lists for ``slug``, via ONE root listing.
+
+    ``"doc"``    -- ``<slug>.md`` is listed: the review EXISTS, so a failed doc
+                    read is UNKNOWN (retry), never ABSENT or a tombstone.
+    ``"dir"``    -- only a ``<slug>/`` prefix: a tombstone candidate (soft
+                    deletes leave the dir behind).
+    ``"absent"`` -- neither is listed: the slug was never created.
+    ``None``     -- the listing raised: UNKNOWN, never assume absent."""
+    try:
+        entries = transport.list_dir(f"team/{team}/review/")
+    except TransportError:
+        return None
+    has_dir = False
+    for e in entries:
+        name = (e.get("name") or "")
+        if name == f"{slug}.md" and not e.get("is_dir"):
+            return "doc"
+        if name.rstrip("/") == slug and (e.get("is_dir") or name.endswith("/")):
+            has_dir = True
+    return "dir" if has_dir else "absent"
 
 
 def _classify_orphan_dir(transport: Any, team: str, slug: str) -> str:
@@ -4919,7 +4972,16 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         # A dir with real verdict shards (orphan) or a verdicts listing that RAISED
         # (unknown) is NOT a tombstone — fall through to the generic fail-closed
         # message, where a retry may genuinely help.
-        if _classify_orphan_dir(transport, team, slug) == "tombstone":
+        presence = _review_presence(transport, team, slug)
+        if presence == "absent":
+            # Never created (or not even a lingering dir): ABSENT, not a
+            # tombstone -- "deleted" would tell the caller to stop looking for a
+            # review that simply does not exist.  rc 1, and no "retry".
+            print(f"review status: {slug} in team/{team}: no such review "
+                  f"(ABSENT) — no doc and no review dir",
+                  file=sys.stderr)
+            return 1
+        if presence == "dir" and _classify_orphan_dir(transport, team, slug) == "tombstone":
             print(f"review status: {slug} in team/{team} is a tombstone "
                   f"(archived/deleted review) — no doc, no verdicts",
                   file=sys.stderr)
@@ -5379,6 +5441,12 @@ def _payload_hash(payload: tuple[str, str, str, str]) -> str:
     return hashlib.sha256("\x00".join(payload).encode("utf-8")).hexdigest()[:8]
 
 
+def _hash_slug(base: str, payload: tuple[str, ...]) -> str:
+    """``<slugified base>-<payload hash>`` for a directive built from an explicit payload (review requests,
+    intents, merge-ready reports): the same shape ``_directive_slug`` derives for argparse-driven verbs."""
+    return f"{tasks.slugify(base)}-{_payload_hash(payload)}"
+
+
 def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
                      content: str, payload: tuple[str, str, str, str], assignee: str,
                      not_before: Optional[str]) -> int:
@@ -5674,7 +5742,7 @@ def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: st
         summary += f" after reviewing exact head {head}"
     next_action = f"file your verdict at {verdict_file}"
     payload = _directive_payload(title, summary, next_action, reviewer)
-    dslug = f"{tasks.slugify(title)}-{_payload_hash(payload)}"
+    dslug = _hash_slug(title, payload)
     try:
         _, content = tasks.new_task_doc(
             title, now=_iso(_now()), status="proposed", owner=sender,
@@ -5960,7 +6028,7 @@ def cmd_intent(args: argparse.Namespace, transport: Any) -> int:
 
     # Identity: text + assignee ONLY (intent_by excluded — see docstring).
     payload = _directive_payload(text, None, None, principal)
-    slug = f"{tasks.slugify(text)}-{_payload_hash(payload)}"
+    slug = _hash_slug(text, payload)
     path = _task_path(args.team, slug)
 
     existing = transport.read(path)
@@ -11307,7 +11375,10 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
                     shards.append(sh)
     except TransportError:
         pass
-    view = health_mod.fold(shards, now=_iso(_now()))
+    # One read of the adoption authority so the fold can say which fresh hosts
+    # run the pinned build. An unreadable pin is reported, never assumed.
+    pin, pin_status = pin_currency.load_pin(transport, args.team)
+    view = health_mod.fold(shards, now=_iso(_now()), pin=pin, pin_status=pin_status)
     code = 0 if view["healthy"] else 1
     # Tier-1 continuity audit: an agent beating presence but with no fresh
     # snapshot is working without a recoverable trail. Compute it here so both
@@ -11387,6 +11458,20 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
     if view.get("unknown_advance"):
         print(f"  note: {view['unknown_advance']} fresh host(s) on an engine too old"
               f" to report whether the pass advanced — UNKNOWN, not fine")
+    # Build currency. The version label cannot carry this (it changes only on a
+    # release, so different commits share one), so it rides on the build sha.
+    # A host on a different build may be ahead of the pin or behind it; offline
+    # there is no way to tell which, so the line says "not the pin", not "behind".
+    if view["fresh"]:
+        if view.get("fleet_pin"):
+            print(f"  engine pin {view['fleet_pin'][:12]}: {view['at_pin']} fresh host(s) at the pin,"
+                  f" {view['off_pin']} on a different build,"
+                  f" {view['unknown_build']} build UNKNOWN")
+        else:
+            reason = {"absent": "adoption authority absent",
+                      "invalid": "adoption authority carries no PIN= line"}.get(
+                          view.get("pin_status"), "adoption authority unreadable")
+            print(f"  engine pin UNKNOWN ({reason}) — cannot say which hosts run the pinned build")
     if view["total"] == 0:
         print("  (no health shards at all — nobody has ever reconciled this team)")
     for h in view["hosts"]:
@@ -11399,8 +11484,19 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
                 advance = f"  DID NOT ADVANCE: {reason}"
             elif h["advanced"] is None:
                 advance = "  advance UNKNOWN (engine predates the field)"
+        build = h.get("engine_build")
+        verdict = h.get("pin_verdict")
+        if not build:
+            build_desc = "build UNKNOWN"
+        elif verdict == "current":
+            build_desc = f"build {build[:12]} = pin"
+        elif verdict == "mismatch":
+            build_desc = f"build {build[:12]} NOT the pin"
+        else:
+            build_desc = f"build {build[:12]}"
         print(f"  [{flag:5}] {h['host']} — last reconcile {age} ago"
-              f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)"
+              f" (v{h.get('engine_version')}, {build_desc}, {h.get('tasks')} tasks,"
+              f" {h.get('warnings')} warn)"
               f"{advance}")
     # Tier-1 continuity audit (computed above): an agent beating presence but
     # with no fresh snapshot is working without a recoverable trail.
@@ -11794,6 +11890,117 @@ def _gc_entries(transport: Any, team: str) -> "tuple[list, list[str]]":
             repos=review_gc.repos_from_of(fm.get("of")),
         ))
     return entries, unreadable
+
+
+_MERGE_READY_TITLE_PREFIX = "MERGE-READY: "
+
+
+def cmd_review_merge_ready(args: argparse.Namespace, transport: Any) -> int:
+    """`review merge-ready <team> <slug>` — verify a review is safe to merge; never merge (directive 082d799e).
+
+    rc 0 MERGE-READY. rc 2 NOT READY, with every failed check named. rc 1 UNKNOWN: an input could not be read
+    (the register, a verdict shard, the forge), so nothing is claimed either way; the prose ends in "retry" iff a
+    retry can help. With ``--notify <agent>`` a READY result is delivered to that agent's queue as a directive
+    whose payload carries the head, so a re-run at the same head dedupes and a new head is a new report.
+    Under ``--json`` every exit prints exactly one object with ``verdict`` = ready | not-ready | unknown."""
+    from . import merge_ready
+    team, slug = args.team, args.slug
+
+    def stop(rc: int, message: str, **extra: Any) -> int:
+        verdict = "not-ready" if rc == 2 else "unknown"
+        if args.json:
+            jsonutil.print_json({"team": team, "slug": slug, "ready": False, "verdict": verdict,
+                                 "reasons": [message], **extra})
+        else:
+            print(f"merge-ready: {'NOT READY ' + slug + ': ' if rc == 2 else ''}{message}", file=sys.stderr)
+        return rc
+
+    tally, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
+    if not doc_ok:
+        if _review_presence(transport, team, slug) == "absent":
+            return stop(2, f"no such review in team/{team}")
+        return stop(1, f"{_review_doc_path(team, slug)} unreadable — UNKNOWN, retry")
+    if not listing_ok or not vreads_ok:
+        return stop(1, f"verdicts under {_verdicts_prefix(team, slug)} not fully readable — UNKNOWN, retry")
+    repo = getattr(args, "repo", None)
+    url = forge_mod.parse_pr_url(tally.get("of"), repo=repo)
+    if not url:
+        return stop(2, f"artifact {tally.get('of')!r} is not a GitHub PR" + (f" in {repo}" if repo else ""))
+    runner = getattr(args, "runner", None)
+    if runner is None:
+        cli_state, why = forge_mod.github_cli()
+        if cli_state != "ok":
+            return stop(1, f"GitHub CLI unavailable: {why} — PR head and CI are UNKNOWN on this host"
+                        + (", retry" if cli_state == "unknown" else ""), pr=url)
+        runner = forge_mod.default_runner
+    pr = merge_ready.pr_view(runner, url)
+    if pr is None:
+        return stop(1, f"forge read of {url} failed — PR head and CI UNKNOWN, retry", pr=url)
+    result = merge_ready.evaluate(tally, pr)
+    result.update({"team": team, "slug": slug, "pr": url,
+                   "verdict": "ready" if result["ready"] else "not-ready"})
+    rc = 0 if result["ready"] else 2
+    notify = getattr(args, "notify", None)
+    if result["ready"] and notify:
+        if args.json:
+            # Delivery helpers narrate on stdout; under --json stdout carries exactly one value.
+            import contextlib
+            with contextlib.redirect_stdout(sys.stderr):
+                report = _report_merge_ready(transport, args, team=team, slug=slug, url=url, result=result,
+                                             notify=notify)
+        else:
+            report = _report_merge_ready(transport, args, team=team, slug=slug, url=url, result=result,
+                                         notify=notify)
+        if report is None:
+            result.update({"ready": False, "verdict": "unknown",
+                           "reasons": [f"MERGE-READY but the report to {notify} was NOT delivered — retry"]})
+            rc = 1
+        else:
+            result["reported"] = {"to": notify, "ptr": f"task/{report}.md"}
+    if args.json:
+        jsonutil.print_json(result)
+    elif rc == 0:
+        print(f"MERGE-READY {slug}: {url} at {result['head']} — approved by {', '.join(result['approvals'])}, "
+              f"PR head == register head == verdict head, CI green ({result['checks']} checks)")
+        if result.get("reported"):
+            print(f"  reported to {notify}: {result['reported']['ptr']}")
+    elif rc == 1:
+        print(f"merge-ready: {result['reasons'][0]}", file=sys.stderr)
+    else:
+        print(f"NOT READY {slug}: {url}")
+        for reason in result["reasons"]:
+            print(f"  - {reason}")
+    return rc
+
+
+def _report_merge_ready(transport: Any, args: argparse.Namespace, *, team: str, slug: str, url: str,
+                        result: dict[str, Any], notify: str) -> Optional[str]:
+    """Deliver the READY report to ``notify``; the directive slug, or None when delivery is unverified.
+
+    The payload — and so the slug — names only the review, the PR, the head and the recipient. Approver lists
+    and check counts can change at one head without new code, and putting them in the payload minted a second
+    actionable report for the same head (codex-reviewer, PR 831 round 1)."""
+    sender = _identity(getattr(args, "sender", None))
+    title = f"{_MERGE_READY_TITLE_PREFIX}{slug}"
+    summary = (f"{url} verified MERGE-READY at exact head {result['head']}: approved at that head, PR head "
+               f"matches, CI green. Verification only — the merge is yours.")
+    next_action = f"merge {url} with expected head {result['head']}, or say why not"
+    payload = _directive_payload(title, summary, next_action, notify)
+    dslug = _hash_slug(title, payload)
+    try:
+        _, content = tasks.new_task_doc(
+            title, now=_iso(_now()), status="proposed", owner=sender, assignee=notify,
+            summary=summary, next_action=next_action, kind="directive", slug=dslug, priority="P1")
+    except tasks.TaskError as e:
+        print(f"merge-ready: report to {notify} failed: {e}", file=sys.stderr)
+        return None
+    ns = argparse.Namespace(team=team, sender=sender, priority="P1")
+    if _write_directive(transport, ns, slug=dslug, content=content, payload=payload,
+                        assignee=notify, not_before=None) != 0:
+        return None
+    if getattr(ns, "_directive_outcome", None) == "written":
+        _emit_dispatch_companion(transport, ns, slug=dslug, assignee=notify)
+    return dslug
 
 
 def cmd_review_gc(args: argparse.Namespace, transport: Any) -> int:
@@ -12993,9 +13200,9 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
 # --- forge (fulcra-agent-forge) ---
 
 def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
-    import shutil as _sh
-    if not _sh.which("gh") and args.runner is None:
-        print("forge mirror: gh CLI not found — nothing mirrored (install GitHub CLI to enable)",
+    cli_state, why = forge_mod.github_cli() if args.runner is None else ("ok", "")
+    if cli_state in ("absent", "other"):
+        print(f"forge mirror: GitHub CLI unavailable: {why} — nothing mirrored (install GitHub CLI to enable)",
               file=sys.stderr)
         return 0  # degradation, not an error
     res = forge_mod.mirror(transport, args.team, now=_iso(_now()),
@@ -13027,9 +13234,9 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
     """Sweep-only verb: the three-surface feedback sweep, no state mirroring."""
-    import shutil as _sh
-    if not _sh.which("gh") and args.runner is None:
-        print("forge feedback: gh CLI not found — nothing swept (install GitHub CLI to enable)",
+    cli_state, why = forge_mod.github_cli() if args.runner is None else ("ok", "")
+    if cli_state in ("absent", "other"):
+        print(f"forge feedback: GitHub CLI unavailable: {why} — nothing swept (install GitHub CLI to enable)",
               file=sys.stderr)
         return 0  # degradation, not an error
     fb = forge_mod.feedback_sweep(transport, args.team,
@@ -13270,6 +13477,20 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
                   "(record tags are uuids, never names); nothing was created",
                   file=sys.stderr)
             return 2
+    # The same rule for a name the platform will refuse: a long identity used
+    # to fail only at create time, after the shorter names had been minted.
+    too_long = [(dim, bus_tags.tag_name(dim, declared))
+                for dim, declared, explicit in wanted
+                if not explicit and declared and
+                len(bus_tags.tag_name(dim, declared)) > bus_tags.TAG_NAME_MAX]
+    if too_long:
+        for dim, name in too_long:
+            print(f"tag-provision: the tag name {name!r} is {len(name)} "
+                  f"characters; the platform accepts at most "
+                  f"{bus_tags.TAG_NAME_MAX}. Create a tag with a shorter name "
+                  f"and pass its uuid as --tag-id-{dim}", file=sys.stderr)
+        print("tag-provision: nothing was created", file=sys.stderr)
+        return 2
 
     ensure = getattr(transport, "tag_ensure", None)
     resolved: dict[str, str] = {}
@@ -13290,6 +13511,20 @@ def cmd_bus_v3_tag_provision(args: argparse.Namespace, transport: Any) -> int:
 
     if resolved:
         entry.update(resolved)
+        # Every reader refuses the WHOLE registry when one entry lacks the
+        # required dimension, so writing such an entry would untag every
+        # agent's events, not just this one's. Report what was created
+        # instead, so a retry can record it without minting duplicates.
+        if bus_tags._parse_entry(entry) is None:
+            hint = " ".join(f"--tag-id-{d} {t}" for d, t in resolved.items())
+            print(f"tag-provision: {agent} has no {bus_tags.REQUIRED_DIMENSION} "
+                  f"tag, and an entry without one would make every reader "
+                  f"reject {path}; the registry was NOT written. Created so "
+                  f"far: {hint}. Record them with the "
+                  f"{bus_tags.REQUIRED_DIMENSION} tag in one run: "
+                  f"--tag-id-{bus_tags.REQUIRED_DIMENSION} <uuid> {hint}",
+                  file=sys.stderr)
+            return 2
         agents[agent] = entry
         if not transport.write(
                 path, bus_tags.render_registry(registry["base"], agents)):
@@ -13835,6 +14070,15 @@ def build_parser() -> argparse.ArgumentParser:
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
+    rvm = rvsub.add_parser("merge-ready",
+                           help="verify approved-at-head + PR head == register head == verdict head + CI green; "
+                                "never merges")
+    rvm.add_argument("team"); rvm.add_argument("slug"); add_json(rvm)
+    rvm.add_argument("--notify", metavar="AGENT", help="deliver a READY result to this agent's queue (the merger)")
+    rvm.add_argument("--repo", default=None, metavar="OWNER/REPO",
+                     help="only accept a PR artifact in this repository")
+    rvm.add_argument("--from", dest="sender", help="reporting agent (defaults to identity)")
+    rvm.set_defaults(func=cmd_review_merge_ready, runner=None)
     rvg = rvsub.add_parser("gc", help="retire register entries that can never settle (DRY RUN by default)")
     rvg.add_argument("team")
     rvg.add_argument("--apply", action="store_true",
@@ -14138,6 +14382,8 @@ _MIXED_MODE_ACTIVITY: dict[Any, Any] = {
     # `digest TEAM` views; `--store` and `--emit-timeline` BOTH persist, so this
     # defers to the same `_digest_persists` the command branches on.
     cmd_digest: lambda a: _digest_persists(a),
+    # `review merge-ready TEAM SLUG` verifies; `--notify AGENT` delivers the READY report as a directive.
+    cmd_review_merge_ready: lambda a: bool(getattr(a, "notify", None)),
 }
 
 

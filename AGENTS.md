@@ -27,6 +27,17 @@ Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
 
+Coord v5 managed listener enrollment checks current transport tool names/schemas
+and existing account-to-principal/source binding. Stale tool identity is unavailable,
+not proof of missing credentials or an empty bus. Preserve cursors, deduplication,
+pending delivery intents and existing routes; authorized shared enrollment is additive
+within the exact listener scope. A verified alternate transport does not prove hosted
+connector recovery or scheduled receiver execution. See `packages/coord-v5/README.md`.
+The packaged harness guide now gives centralized-listener recipes across desktop,
+CLI, cloud, browser, Gateway and custom-host environments. Keep recommendations,
+shipped adapters and verified native capabilities distinct; unavailable dispatch
+falls back to durable addressed attention, not per-worker polling or guessed APIs.
+
 Coord V5 has an opt-in parallel `transport read-updates` route. Use shadow mode
 before gated deployment; update watermarks are not record cursors or complete-history
 proof. Quiet hints never cancel retained delivery obligations. Preserve the direct
@@ -91,6 +102,47 @@ configuration saves and automatic token refresh must never clear it.
 
 ## Public repository privacy
 
+**Selected local-source uploads:** use Collect's captured Fulcra token, never
+the CLI's independently stored account. Use `RunContext.collect_token()` for
+selected-source uploads; its missing/expired token requires reconnecting in Collect.
+The legacy `fulcra_token()` helper still supports independent CLI/env fallback
+and is unsuitable for account-bound sources. Capture and compare the stored
+token as well as the epoch before uploading. Use the bounded
+`credentials.get_user_secret_fresh()` read for capture and final upload guards;
+the ordinary cached reader cannot detect another process changing the token. Do not re-canonicalize a selected
+folder path on subsequent scans: substituted ancestor/root links must fail closed.
+Partition content-hash state by the
+authenticated destination account. Before each source read and upload, validate
+the captured plugin epoch, source/collection selection, preview mode, enabled
+state and account-transition gate. Hold the shared configuration/account lease
+through the final consent check and upload. Use descriptor-anchored no-follow
+regular-file reads and a private snapshot whose identity, size and hash match
+the scan; consumers upload or render that snapshot instead of reopening the
+source pathname. Preserve file/traversal byte limits and suppress private paths
+and credentials from complete error tracebacks.
+
+Local-source setup health checks capture the current persisted plugin epoch,
+allow checks before enablement, and validate saved selection/settings plus the
+account-transition gate before scanning and before each bounded content read.
+Recheck after the scan; revoked consent must return a failed health result with
+no preview. Do not use the setup context's empty worker epoch or bypass these
+guards for local-only previews.
+
+**Selected Notion pages:** the `notion-pages` plugin reads only explicitly
+selected page roots and ordinary nested blocks. Never add workspace search,
+child-page/database traversal, synced-block following or attachment downloads
+implicitly. Use omission markers for unsupported content. Keep credentials in
+Keychain, preview on by default, content hashes scoped to the destination
+account, and captured settings/epoch/credentials checked before reads and
+under the shared configuration/account lease before uploads. Use the strict
+Collect token and bounded fresh credential checks. Its source-tree registration
+is not a claim that the released installer includes it; live provider and
+signed-installer verification remain separate release prerequisites. Setup
+health probes must capture the current persisted epoch and guard each read too;
+allow probes before enablement but abort changed selection/credentials. Reject
+missing known block fields and inconsistent pagination instead of saving a
+partial page as an empty success.
+
 All packages, plugins, skills, examples, and release artifacts must be reusable
 without personal accounts or machine-specific values. Follow
 [`docs/PRIVACY.md`](docs/PRIVACY.md) before publishing. Run the tracked-tree
@@ -137,6 +189,42 @@ touching. First failing probe is where your setup gap is.
 
 uv-workspace monorepo, macOS-first. Packages under `packages/`, agent skills
 under `skills/`, each package with its own README, build, and tests.
+
+- **Map Our Team** — [`skills/map-our-team`](skills/map-our-team/README.md)
+  provides a shared index of a team's knowledge sources, owners and connection
+  instructions. Its [skill](skills/map-our-team/SKILL.md) covers the steward's
+  map and each teammate's onboarding, checks and offboarding. It uses Fulcra
+  Files and the external
+  [connect-our-agents skill](https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md);
+  content and access controls stay at their sources. Read its README for
+  installation and validation limits before using it with a real team. Create honors an existing build/save request
+  without another approval, checks inherited map audiences even in an empty
+  account, and separates storage-owner, human operator and verified agent-contact IDs.
+  Lifecycle retries preserve unchanged files/timestamps, and Add verifies the
+  grant before roster publication plus exact map readback. Honor a named writer
+  across chats for the same operator. Gap recovery
+  researches current evidence and useful roles before asking for consequential
+  missing decisions; documenting a role is not appointing an owner. Optional
+  [producer manifests](skills/map-our-team/references/source-discovery.md) advertise
+  connector-owned sources under `/knowledge-sources/v1/`; the skill works without
+  them. Its [maintenance recipe](skills/map-our-team/references/scheduled-maintenance.md)
+  supplies the shared recurring run prompt; template guides link it instead of
+  duplicating the protocol. It installs no scheduler or implicit write authority.
+  Preserve the steward's map writer and producer's source/index writers.
+  Never put synthesized knowledge into two-way sync working files or infer a
+  source grant from a map/manifest. Check reader access and source freshness
+  separately from producer publication; unknown provider namespaces stay unknown.
+  Company-owned installations follow
+  [company-deployment.md](skills/map-our-team/references/company-deployment.md):
+  company map/connector storage stays separate from member-owned proposal streams
+  and producer instances. Review access is not onward-publication authority;
+  Notion credential kinds and Attio token levels do not replicate provider ACLs
+  into Fulcra copies. Use the [first-time setup guide](docs/team-knowledge-setup.md)
+  for company/member prompts and the optional public maintainer feedback route.
+  The maintenance recipe optionally polls incoming joins and member proposals;
+  queue-only is the default, explicit exact-member delegation gates acceptance,
+  and proposal mode stages all join effects. Do not install the retired coord
+  listener for this flow. Claim listening only after a real scheduled run.
 
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS
@@ -201,6 +289,13 @@ under `skills/`, each package with its own README, build, and tests.
   `Contents/MacOS`. The release script signs each with Developer ID, a secure
   timestamp, and hardened runtime before Briefcase seals the outer app. A valid
   outer resource seal alone does not establish notarization eligibility.
+- **Reconcile interrupted notarization before submitting again.** Verify the
+  configured profile with `notarytool history` before a release build. A submit
+  command that ends without an ID does not prove that Apple received nothing.
+  Preserve the artifact and private log, check history and native prompts, and
+  reconcile the existing attempt first. Keep receipts, credentials, and machine
+  diagnostics outside the public tree. Do not publish a signed candidate until
+  notarization, stapling, and Gatekeeper acceptance are verified.
 - **Shipping a new plugin in the frozen macOS app** — the menubar Briefcase
   `requires` is the ONLY list you edit, but it is not sufficient on its own: a
   monorepo package isn't on PyPI, so the release build must also build a local
@@ -260,7 +355,25 @@ under `skills/`, each package with its own README, build, and tests.
   index instead of repeatedly classifying historical tombstones, and the legacy
   `artifact/` namespace is consolidated into `artifacts/`. UNKNOWN listings stay
   hot, moves are copy-verified rather than destructive-only, and archived work
-  reverses through `task restore` or `review restore`. Note the age thresholds
+  reverses through `task restore` or `review restore`. An archived task is owed by
+  nobody: retention writes one bus-v4 `close` to `all` for it after the source
+  delete succeeds (never before — closing hot work hides it); an unreadable bus-v4
+  config or failed write is a `v4 close FAILED` warning, not a rollback, and never
+  "no plane". The close is durable: retention writes a marker under
+  `_coord/retention/pending-v4-close/` BEFORE it moves any ack/response shard or
+  deletes the source (a task whose marker cannot be written stays hot with every
+  shard in place) and clears it once the close has an answer, and EVERY pass (not
+  only the daily archive pass) retries what is still queued, at most 50 per pass
+  with the rest reported as `cap reached`. A failed close or a pass killed mid-way is
+  therefore retried, never lost. A retry never closes a task whose doc is hot again:
+  its close may already have landed, so it re-opens from that doc and keeps the
+  marker until the open succeeds, and it keeps the marker while that path is
+  UNKNOWN. A close that races a restore re-reads the hot path afterwards and
+  re-opens from the doc it finds; if that re-open fails or the read is UNKNOWN, it
+  re-writes the marker (the restore may have just cleared it) and the next pass
+  finishes the job. `task restore` clears the slug's marker only after its move succeeds, then
+  writes the matching v4 `open` and exits 3 if it cannot. Archives from before this rule
+  left phantom opens in the folds; those need a separate verified cleanup. Note the age thresholds
   above are necessary, not sufficient: tasks and reviews share ONE per-pass
   archive cap and tasks are swept first, so a large task backlog defers review
   archiving indefinitely. When that happens the pass now warns `retention: cap
@@ -423,6 +536,13 @@ under `skills/`, each package with its own README, build, and tests.
   call site never sees that reason, so it reports `advanced: True` with its
   warnings — "advanced" means *was not aborted and wrote the index*, never
   *published a clean generation*.
+  **The same shard now carries `engine_build`**, and `health` compares it with the
+  `PIN=` line of the store's `adopt-latest.sh`: each host reads `= pin`, `NOT the
+  pin`, or `build UNKNOWN`, with `at_pin`/`off_pin`/`unknown_build` rollups over
+  fresh hosts. The version label cannot do this: `__version__` changes only on a
+  release, so hosts running different commits can report the same version. A
+  missing build is UNKNOWN, never current; "not the pin" may be
+  ahead or behind, so it is never rendered as "behind". The exit code is unchanged.
 - The `.settled` marker's MERGE EVIDENCE is never overwritten by the tally
   cache: a settleable tally once stamped `state: APPROVED` over
   `state: MERGED` + `merge_sha` — found in production, where the very
@@ -567,6 +687,13 @@ it (not on PyPI).
     over two weeks by a notifier that woke a human, a headless invoke that
     could not authenticate, and a peek that never consumed — none ran the
     agent, while every layer reported success.
+- **`bus-v3 tag-provision` never writes a registry entry without `agent`.**
+  One such entry makes every reader reject `_coord/bus-v3/tags.json`, which
+  untags the whole fleet's events. The verb exits 2 instead, leaves the
+  registry unchanged, and prints the uuids it created for a `--tag-id-*`
+  retry. Tag names are capped at 30 characters by the platform, so an
+  identity over 24 characters needs a shorter, hand-created agent tag passed
+  as `--tag-id-agent`; the verb checks names before creating anything.
 - **Durable tooling stash.** An agent's operational bundle survives ephemeral
   machines via `coord-engine stash push/pull/list`: push refreshes a
   `manifest.json` (per-file sha256 + exec bit) and runs a **fail-closed
@@ -808,8 +935,12 @@ it (not on PyPI).
   a *different* `of`/required-set/requester is a loud rc 1 conflict and a
   present-but-unreadable doc fails closed (never overwritten).
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
-  and gates the merge. The `<artifact>` is an opaque ref, so the handshake
-  works with any forge or none — a forge-only "Approve" does NOT count
+  and gates the merge; `coord-engine review merge-ready <team> <slug>
+  [--notify <merger>]` adds the forge half before the click (PR head ==
+  register head == verdict head, CI green; rc 0 READY / 2 NOT READY / 1
+  UNKNOWN) and never merges; a host without the GitHub CLI is UNKNOWN without "retry", and a `gh` that
+  is some other client (its `gh --version` does not begin `gh version`) counts as none. The
+  `<artifact>` is an opaque ref, so the handshake works with any forge or none — a forge-only "Approve" does NOT count
   (co-located agents often share one forge account); the bus verdict, keyed
   by agent identity, is the source of truth. **The verdict FILE discharges
   the obligation**; the ack is inbox hygiene and targets the review-request
@@ -903,17 +1034,44 @@ it (not on PyPI).
     components, hidden leaves, and the legacy singular `response/` namespace
     are not authoritative coverage.
     `data-updates` record counts are detector signals only, never cardinality,
-    a diff, a threshold, or an identity. Live measurements persistently showed
+    a diff, a threshold, or an identity. Live `data-updates` omits zero-record types,
+    so the configured channel absent from a well-formed `data_types` map is a
+    zero signal; a malformed count or unreadable authority stays UNKNOWN. Live measurements persistently showed
     `2721 -> 9`, `1444 -> 0`, and `2737 -> 25` count/enumeration pairs. A
     positive signal therefore requires a bounded attested enumeration with at
     least one immutable identity; positive-with-none is `UNKNOWN`/nonzero. A
     zero signal is not proof of CLEAR: a bounded enumeration must prove the
     whole outer feed window. The outer feed must attest the exact requested
-    `after`; the record cursor must repeat that boundary and reach or pass the
-    outer `through`. A missing, lagging, mismatched, or incomparable horizon is
-    UNKNOWN, advances no watermark, and leaves freshness overlay NOT_RUN/nonzero.
-    Bootstrap is complete only when an outer `after` supplies its boundary and
-    the record cursor covers the same full frontier.
+    boundary — `after`, or the `start_time` that `fulcra-api data-updates`
+    (0.1.46+) actually emits, with `through`/`end_time` as its frontier; an
+    envelope with neither takes the named boundary recovery — and the record
+    cursor must repeat that boundary and reach or pass the outer frontier. A
+    missing, lagging, mismatched, or incomparable horizon is UNKNOWN, advances
+    no watermark, and leaves freshness overlay NOT_RUN/nonzero. **With today's
+    CLI the record leg is never attested** — `get-records` answers JSONL with no
+    `after`/`through`, so the transport returns no window — and an unavailable
+    or incomplete record window with an attested outer window takes the named
+    full-scan recovery (re-anchoring under the complete-task-read gate). So on
+    current builds **every reconcile pass is a full-scan recovery**; the
+    trusted incremental path waits for an endpoint that attests the record
+    window. That recovery keeps the tasks whose latest lifecycle state in the
+    attested feed is an upload (collapsed by instant, so an upload later deleted or
+    archived in the same window is not one) as references, so an rc-0 partial `task/` listing that omits one fails closed (no publish,
+    no re-anchor). A mismatched or unparseable record window stays non-recoverable. Bootstrap is
+    complete only when an outer `after`/`start_time` supplies its boundary and
+    the record cursor covers the same full frontier. An EMPTY
+    `start_time`/`end_time` window wider than the corroboration bound while
+    corroboration is dormant is UNKNOWN (`FEED_WIDE_EMPTY_UNPROVEN`) and takes
+    the named full-scan recovery, never a trusted CLEAR; `after`/`through`
+    keep the dormant default. That recovery re-anchors the persisted cursor to
+    the server-attested `end_time` (`attested_frontier`, never a trusted
+    watermark) only when the task fold is complete — every listed task READ
+    this pass (any read failure keeps the prior cursor; a read-but-unparseable
+    shard is deterministic and does not) — and an aborted or projection-refused
+    pass never writes
+    `summaries.json`, so it cannot move the cursor either.
+    Boundary/frontier-unknown recoveries keep the prior cursor. Enabling
+    corroboration by default is not built yet.
     Review projection v3 rows carry the full direct-query tally; one shared
     validator requires `of`/`head`, unique row slugs, settled invariants, and
     all three orphan/tombstone slug lists before producer carry, publication,
@@ -1318,8 +1476,8 @@ it (not on PyPI).
   (`*-degraded`); the **single-slug verify** paths are prose at **rc 1**, where the convention is
   load-bearing: the prose ends in **"…, retry"** iff the failure is retryable (a transient
   unknown — e.g. `review status` `tally unknown, retry`, `roles status` `lease state unknown … retry`,
-  `tell` `cannot verify delivery, retry`) and names a **tombstone** iff terminal (a `review status` on a
-  soft-deleted review — a retry never resurrects it). An **UNEXPECTED** exception is neither: the
+  `tell` `cannot verify delivery, retry`) and names a **tombstone** or **ABSENT** iff terminal (a `review
+  status` on a soft-deleted review, or on a slug that was never created — a retry never changes either). An **UNEXPECTED** exception is neither: the
   top-level guard emits a registered envelope `coord-engine: error: command=<cmd> type=<Exc>: <msg>`
   (rc 1) — the `error:` token distinguishes an engine fault from a retryable degrade.
 - **Views never lie past the current read — the index-freshness invariant.** Two mechanisms keep
@@ -1365,7 +1523,16 @@ it (not on PyPI).
     fence but cannot mint its section bindings is fail-closed by newer readers; a host older than the
     passthrough can still remove any fence. **A general new top-level key is live only once the whole
     fleet is upgraded** — check `health` before assuming a fold-state key is doing anything, and
-    never rebuild the aggregate from a fixed key set.
+    never rebuild the aggregate from a fixed key set. The same last-writer-wins shape applies to
+    `reconcile_cursor`: a pass writes the cursor it STARTED from (or advances it), so a pass that
+    began before another host's re-anchor would roll that cursor back. Immediately before
+    publishing — on every path, including the no-change fast path — `reconcile` re-reads the store's cursor; if its watermark is strictly newer than
+    the one this pass started from, the pass **skips its generation + summaries write** and its
+    health shard reads `advanced: false`, `degraded_reason: superseded by a newer cursor in the
+    store` (never "keep the newer cursor over my rows" — those rows never saw the changes in
+    between). Equal/older writes as before; an unreadable store cursor writes as before and logs
+    it. This is a **narrowing, not a fence** (no compare-and-swap, so a write can still race the
+    re-read), and it protects only against hosts running the build that has it.
 
   Mechanics (stamping, deterministic cut, the reconcile reuse anchor) live with the engine —
   [`fulcra-agent-reconcile`](skills/fulcra-agent-reconcile/SKILL.md) and

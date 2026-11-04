@@ -120,6 +120,10 @@ EXPECTED_MIXED = {
         "read": [["cutover", "show", "r"]],
         "write": [["cutover", "set", "r", "--serve", "files", "--reason", "rollback", "--agent", "a"]],
     },
+    "cmd_review_merge_ready": {
+        "read": [["review", "merge-ready", "r", "pr1"]],
+        "write": [["review", "merge-ready", "r", "pr1", "--notify", "boss"]],
+    },
     "cmd_digest": {
         "read": [["digest", "r"]],
         # BOTH flags enter the persistent branch. `--emit-timeline` was missing
