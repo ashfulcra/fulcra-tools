@@ -1,6 +1,6 @@
 {
   "name": "aicq",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you. Notices messages without heartbeats, drafts or responds per your policy, shares files, connects new agents.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -15,6 +15,12 @@
       "title": "When a message arrives",
       "description": "Default response mode (the pane's selector overrides it): notify, draft (prepare a reply for your approval), respond-check (respond; check with you on consequential decisions), respond-results (respond; tell you outcomes).",
       "default": "notify"
+    },
+    "ignoreAfterDays": {
+      "type": "number",
+      "title": "Ignore after (days)",
+      "description": "Collaborations with no activity for longer than this are left out of /aicq and aicq_inbox, and messages older than this never notify or wake. 0 turns it off. The pane's Settings overrides it.",
+      "default": 5
     },
     "agentName": {
       "type": "string",

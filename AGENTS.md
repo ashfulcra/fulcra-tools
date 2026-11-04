@@ -369,6 +369,9 @@ under `skills/`, each package with its own README, build, and tests.
   an agent name or folder. Missing indexes contribute no link, failed reads are
   degraded, and macOS `open` accepts only the documented app URI shapes. Desktop
   and terminal controls do not establish mobile or second-instance routing proof.
+  Collaboration lists default to a five-day inactivity filter, configurable from
+  zero to 365 days; `include_stale` can request older threads. Prepared approvals
+  stay visible. Filtering presentation does not complete or cancel work.
 - Coord retention is on by default: terminal and quiet proposed tasks archive
   after 14 days, settled review families after 7 days, and dead presence shards
   are pruned after 7 days. `COORD_RETENTION_DAYS=0` or

@@ -150,6 +150,8 @@ declare module 'claude-code' {
       attached: AttachedContext | null
       mode: string
       showQuiet: boolean
+      ignoreDays: number
+      showStale: boolean
       query: string
       overrides: Record<string, string>
       invites: Invite[]

@@ -279,3 +279,22 @@ export function contextBlock(c: Collaboration): string {
     ...lines,
   ].join('\n')
 }
+
+const DAY_MS = 86_400_000
+
+/**
+ * Whether a collaboration is past the owner's "ignore after" limit: no activity for more than `days`.
+ * `days` <= 0 turns ignoring off. A collaboration in `exempt` (one with the owner's own pending draft)
+ * is never ignored, because it is waiting on the owner, not on the other side.
+ */
+export function isStale(c: Pick<Collaboration, 'key' | 'updatedAt'>, nowMs: number, days: number, exempt: ReadonlySet<string> = new Set()): boolean {
+  if (!(days > 0) || exempt.has(c.key)) return false
+  const at = Date.parse(c.updatedAt)
+  return Number.isFinite(at) && nowMs - at > days * DAY_MS
+}
+
+/** Whether a single message is older than the limit (a late-delivered old message never notifies or wakes). */
+export function isStaleAt(at: string, nowMs: number, days: number): boolean {
+  const t = Date.parse(at)
+  return days > 0 && Number.isFinite(t) && nowMs - t > days * DAY_MS
+}
