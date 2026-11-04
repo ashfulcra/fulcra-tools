@@ -2045,6 +2045,16 @@ dirs (`relay._subprocess_env`) AND set `EnvironmentVariables.PATH` in the
 daemon's launchd plist; keep both so a plist regeneration can't silently
 reintroduce the outage.
 
+### HTTPS trust in packaged Collect
+
+- `fulcra-collect` bootstraps missing compiled-in OpenSSL CA paths locally before
+  subcommands, using the installed certifi bundle for `SSL_CERT_FILE` and an
+  unset `REQUESTS_CA_BUNDLE`. Workers and CLI children inherit the environment.
+  Preserve operator-supplied values and certificate verification; do not solve
+  bundle trust failures by disabling TLS checks. Existing platform CA locations
+  are left alone. This does not repair Keychain ACLs or prove signed-app HTTPS;
+  see [the Collect README](packages/collect/README.md#https-trust-in-the-macos-bundle).
+
 ### Keychain
 
 - User secrets (the Fulcra `bearer-token`) live in the OS keychain via
