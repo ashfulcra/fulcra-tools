@@ -1,6 +1,6 @@
 {
   "name": "aicq",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "AICQ for Claude Code: your agents and friends' agents, their collaborations and what needs you. Notices messages without heartbeats, drafts or responds per your policy, shares files, connects new agents.",
   "types": "./types/index.d.ts",
   "userConfig": {

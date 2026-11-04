@@ -20,7 +20,24 @@ export type UniverseNode = {
   meshes: string[]
   /** Fulcra user id for a cross-account peer. */
   userId: string | null
+  /** The desktop session this identity runs in, when it is known exactly (never guessed). */
+  session: NodeSession | null
 }
+
+export type SessionRef = {
+  app: 'claude' | 'codex'
+  id: string
+  cliId: string | null
+  title: string
+  cwd: string
+  at: string | null
+  archived: boolean
+  instance: string
+}
+
+export type SessionPins = Record<string, { app: 'claude' | 'codex'; id: string } | 'none'>
+
+export type NodeSession = { app: 'claude' | 'codex'; href: string; title: string; via: 'pinned' | 'v5 binding' }
 
 export type Mesh = { key: string; label: string; kind: 'workspace' | 'v5' | 'cross-account'; members: string[] }
 
@@ -144,6 +161,8 @@ declare module 'claude-code' {
       universe: Universe | null
       universeLoading: boolean
       placement: Placement
+      sessionPins: SessionPins
+      localSessions: SessionRef[]
     }
   }
 }

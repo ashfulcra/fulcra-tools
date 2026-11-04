@@ -364,6 +364,11 @@ under `skills/`, each package with its own README, build, and tests.
   (`.claude-plugin/marketplace.json`): `/plugin marketplace add ashfulcra/fulcra-tools`,
   then `/plugin install aicq@fulcra-tools`. Details:
   [`packages/aicq-claude-mod/README.md`](packages/aicq-claude-mod/README.md).
+  Universe-map session controls use an explicit owner pin or exact V5 session
+  binding and the local Claude/Codex desktop indexes; never guess a session from
+  an agent name or folder. Missing indexes contribute no link, failed reads are
+  degraded, and macOS `open` accepts only the documented app URI shapes. Desktop
+  and terminal controls do not establish mobile or second-instance routing proof.
 - Coord retention is on by default: terminal and quiet proposed tasks archive
   after 14 days, settled review families after 7 days, and dead presence shards
   are pruned after 7 days. `COORD_RETENTION_DAYS=0` or
