@@ -6,7 +6,7 @@ import {
   ACTIVE, STATE_LABEL, collaborations, gist, contactKeyOf, contacts, contextBlock, humanAge, isStale, isStaleAt, learnAgentNames, learnPersonNames, quietLine, replyLine, threadTopic,
 } from './collab'
 import type { Collaboration, ContactSummary } from './collab'
-import { buildUniverse, grouped, isAllowedLink, parseAgentLinks, parseClaudeSession, parseCodexIndex } from './universe'
+import { buildUniverse, grouped, isAllowedLink, parseAgentLinks, parseClaudeSession, parseCodexIndex, sessionPinFor } from './universe'
 import type { AgentLinks, NodeSession, Placement, SessionPins, SessionRef, Universe, UniverseNode } from './universe'
 import { waitingOnYou } from './waiting'
 import type { WaitingItem } from './waiting'
@@ -83,7 +83,7 @@ type Config = {
 }
 
 // Module state: starts over on reload (view cursors included); the arrival-ledger cursors, mode and wake history persist in $.store.
-const cfg: Config = { coordTeam: 'fulcra', coordEngine: '~/.local/bin/coord-engine', owner: 'ash', everyMs: 120_000, defaultMode: 'notify', ignoreAfterDays: 5, agentName: '', meshOutbox: '', workspaceNames: [], fulcraCli: '~/.local/bin/fulcra' }
+const cfg: Config = { coordTeam: 'fulcra', coordEngine: '~/.local/bin/coord-engine', owner: 'user', everyMs: 120_000, defaultMode: 'notify', ignoreAfterDays: 5, agentName: '', meshOutbox: '', workspaceNames: [], fulcraCli: '~/.local/bin/fulcra' }
 let cli = ''
 let me = ''
 let peers: Peer[] = []
@@ -201,18 +201,32 @@ async function v5Actors($: $, degraded: string[]): Promise<V5Actor[]> {
  */
 async function readAgentLinks($: $, degraded: string[]): Promise<AgentLinks[]> {
   const dir = `team/${cfg.coordTeam}/agent-links`
-  const ls = await fulcra($, ['file', 'list', `${dir}/`])
-  if (ls.exitCode !== 0) {
+  let ls
+  try {
+    ls = await fulcra($, ['file', 'list', `${dir}/`])
+  } catch {
+    degraded.push(agentLinks.length ? 'agent links (refresh failed; showing the last read)' : 'agent links (failed or timed out)')
+    return agentLinks
+  }
+  if (ls.exitCode !== 0 || ls.isStdoutTruncated) {
     degraded.push(agentLinks.length ? 'agent links (refresh failed; showing the last read)' : 'agent links')
     return agentLinks
   }
-  const names = ls.stdout.split('\n').map(l => l.trim().split(/\s+/).pop() ?? '').filter(n => /^[A-Za-z0-9_.:-]+\.json$/.test(n)).slice(0, 80)
+  const listed = ls.stdout.split('\n').map(l => l.trim().split(/\s+/).pop() ?? '').filter(n => /^[A-Za-z0-9_.:-]+\.json$/.test(n))
+  const names = listed.slice(0, 80)
+  if (listed.length > names.length) degraded.push(`agent links: ${listed.length - names.length} beyond the 80-report read limit`)
   const out: AgentLinks[] = []
   let unreadable = 0
   for (let i = 0; i < names.length; i += POOL) {
-    const reads = await Promise.all(names.slice(i, i + POOL).map(n => fulcra($, ['file', 'download', `${dir}/${n}`, '-'])))
+    const reads = await Promise.all(names.slice(i, i + POOL).map(async n => {
+      try {
+        return await fulcra($, ['file', 'download', `${dir}/${n}`, '-'])
+      } catch {
+        return null
+      }
+    }))
     for (const r of reads) {
-      const parsed = r.exitCode === 0 ? parseAgentLinks(r.stdout) : null
+      const parsed = r?.exitCode === 0 && !r.isStdoutTruncated ? parseAgentLinks(r.stdout) : null
       if (parsed) out.push(parsed)
       else unreadable += 1
     }
@@ -286,6 +300,18 @@ async function coordJson($: $, args: string[], label: string, degraded: string[]
   try {
     const r = await coord($, args)
     const data = r.exitCode === 0 && !r.isStdoutTruncated ? parseJsonOut(r.stdout) : null
+    // coord's legacy agents/board outputs can return rc 0 with explicit unknown-read markers.
+    // Check their contract at the shared read boundary, before any map or waiting view sees data.
+    const marker = (v: unknown) => !!v && typeof v === 'object' && 'type' in v && typeof v.type === 'string' && v.type.endsWith('-degraded')
+    const marked = Array.isArray(data) ? data.some(marker)
+      : !!data && typeof data === 'object' && (
+        Object.entries(data).some(([key, value]) => key.endsWith('-degraded') && (Array.isArray(value) ? value.length > 0 : !!value)) ||
+        ('health' in data && (data.health === 'UNKNOWN' || data.health === 'DEGRADED'))
+      )
+    if (marked) {
+      degraded.push(`${label} (read degraded)`)
+      return null
+    }
     if (data === null) degraded.push(`${label}${r.isStdoutTruncated ? ' (truncated)' : r.exitCode !== 0 ? ` (exit ${r.exitCode})` : ' (unparseable)'}`)
     return data
   } catch {
@@ -403,8 +429,11 @@ async function openSession($: $, href: string) {
 async function setSessionPin($: $, key: string, value: string) {
   const [app, ...rest] = value.split(':')
   const id = rest.join(':')
+  const aliases = ((await read($, universeAtom)) as Universe | null)?.nodes.find(n => n.key === key)?.aliases ?? []
   await update($, sessionPinsAtom, pins => {
     const next = { ...pins }
+    // A new canonical choice replaces inherited alias choices, including when returning to automatic.
+    for (const alias of aliases) delete next[`agent:${alias}`]
     if (value === 'auto') delete next[key]
     else next[key] = value === 'none' ? 'none' : { app: app === 'codex' ? 'codex' : 'claude', id }
     return next
@@ -1265,7 +1294,7 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
   const loading = ((await read($, universeLoadingAtom)) as boolean | undefined) ?? false
   const all = (await read($, inbox)) as AicqMessage[]
   const selected = v.kind === 'node' ? v.key : null
-  const first = thisMachine || 'SingularityServer'
+  const first = thisMachine
   const top = (
     <Box key="utop" justifyContent="space-between" marginBottom={1}>
       <Box>
@@ -1324,12 +1353,12 @@ async function renderUniverse($: $, els: MapElements, v: PaneView, wide: boolean
   const n = selected ? byKey.get(selected) : undefined
   let detail = null
   if (n) {
-    const collab = collaborations(all, { paused: [], drafts: [] }).find(c => (n.userId && c.contactUserId === n.userId) || c.contact === n.label || c.contact === n.key.replace(/^agent:/, ''))
+    const collab = collaborations(all, { paused: [], drafts: [] }).find(c => (n.userId && c.contactUserId === n.userId) || c.contact === n.label || c.contact === n.key.replace(/^agent:/, '') || n.aliases?.includes(c.contact))
     const agentId = n.key.replace(/^agent:|^peer:/, '')
     const machines = [...new Set([...u.machines.map(m => m.name), 'Cloud', 'Unplaced', n.machine])]
     const platforms = [...new Set(['Claude Code', 'Codex', 'OpenClaw', 'Hermes', 'ChatGPT', 'Grok', 'Coord service', 'Unknown runtime', n.platform])]
     const pins = ((await read($, sessionPinsAtom)) as SessionPins | undefined) ?? {}
-    const pin = pins[n.key]
+    const pin = sessionPinFor(n.key, pins, agentLinks)
     const local = (((await read($, localSessionsAtom)) as SessionRef[] | undefined) ?? []).filter(x => !x.archived).slice(0, 40)
     const appName = (app: 'claude' | 'codex') => APP_NAME[app]
     const sessionOptions = [
@@ -1412,7 +1441,7 @@ export const register: Register = (on, options) => {
   cfg.fulcraCli = s(options.fulcraCli, '~/.local/bin/fulcra')
   cfg.coordTeam = s(options.coordTeam, 'fulcra') || 'fulcra'
   cfg.coordEngine = s(options.coordEngine, '~/.local/bin/coord-engine') || '~/.local/bin/coord-engine'
-  cfg.owner = s(options.owner, 'ash') || 'ash'
+  cfg.owner = s(options.owner, 'user') || 'user'
 
   on('session.start', async ($, e, next) => {
     await migrate($)
@@ -1760,7 +1789,7 @@ export const register: Register = (on, options) => {
     const universeLoading = ((await read($, universeLoadingAtom)) as boolean | undefined) ?? false
     const waitingAll: WaitingItem[] = waitingOnYou(collabs, universeNow, cfg.owner, c => titleOf(c.contactUserId, c.contact, c.workspace), cfg.agentName)
     // Threads past the ignore-after limit are already out of `collabs`. Blocked tasks are never ignored for age:
-    // something blocked on the owner stays a live obligation until it is unblocked (Ash, 2026-10-12).
+    // something blocked on the owner stays a live obligation until it is unblocked (owner policy, 2026-10-12).
     const waiting = waitingAll
     const waitingSection = (prefix: string) => {
       // Coverage: a source that could not be read makes the list partial, never an all-clear.

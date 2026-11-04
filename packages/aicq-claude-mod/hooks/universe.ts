@@ -7,12 +7,14 @@
 
 export type Liveness = 'live' | 'idle' | 'stale' | 'lapsed' | 'unknown'
 
-export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string; since: string }
+export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string; since: string; assignee?: string }
 
 export type UniverseNode = {
   key: string
   kind: 'agent' | 'peer'
   label: string
+  /** Other own-account identities folded into this node. */
+  aliases?: string[]
   machine: string
   platform: string
   liveness: Liveness
@@ -95,7 +97,7 @@ export function platformOf(name: string, hint = ''): string {
   return 'Unknown runtime'
 }
 
-/** Canonical machine names from reconcile hosts ("coord-reconcile:Ashs-MBP-Work" → "Ashs-MBP-Work"). */
+/** Canonical machine names from reconcile hosts ("coord-reconcile:ExampleLaptop" → "ExampleLaptop"). */
 export function machinesFrom(health: Json | null): Machine[] {
   const hosts = Array.isArray(health?.hosts) ? (health!.hosts as Json[]) : []
   const out: Machine[] = []
@@ -114,7 +116,7 @@ function canonicalMachine(raw: string, machines: readonly string[]): string {
   const hit = machines.find(m => m.toLowerCase() === t.toLowerCase() || m.toLowerCase().replace(/[^a-z0-9]/g, '') === t.toLowerCase().replace(/[^a-z0-9]/g, ''))
   if (hit) return hit
   if (/^mac$/i.test(t)) return 'Mac'
-  // An instance id like "codex-desktop-singularity-home-infra" names its machine by prefix.
+  // An instance id like "codex-desktop-exampleserver-project" names its machine by prefix.
   const tokens = t.toLowerCase().split(/[^a-z0-9]+/).filter(x => x.length >= 6)
   const byToken = machines.find(m => tokens.some(tok => m.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(tok)))
   if (byToken) return byToken
@@ -252,6 +254,17 @@ export function parseAgentLinks(text: string): AgentLinks | null {
   return { identity: str(d.identity), aliases, platform: str(d.platform), machine: str(d.machine), updatedAt: str(d.updated_at), app: pick('app'), web: pick('web') }
 }
 
+/** Resolve the same explicit owner choice for the builder, session lookup and picker. */
+export function sessionPinFor(key: string, pins: SessionPins, reported: readonly AgentLinks[] = []): SessionPins[string] | undefined {
+  if (pins[key] !== undefined) return pins[key]
+  const report = reported.find(l => `agent:${l.identity}` === key)
+  for (const alias of report?.aliases ?? []) {
+    const pin = pins[`agent:${alias}`]
+    if (pin !== undefined) return pin
+  }
+  return undefined
+}
+
 function appOf(url: string, platform: string): NodeSession['app'] {
   if (url.startsWith('codex:')) return 'codex'
   if (url.startsWith('claude:') || url.startsWith('https://claude.ai/')) return 'claude'
@@ -265,7 +278,7 @@ function appOf(url: string, platform: string): NodeSession['app'] {
  * agent's own report. No name or folder matching, so a link never opens the wrong session.
  */
 export function sessionFor(key: string, boundSessionId: string, pins: SessionPins, sessions: readonly SessionRef[], reported: readonly AgentLinks[] = []): NodeSession | null {
-  const pin = pins[key]
+  const pin = sessionPinFor(key, pins, reported)
   if (pin === 'none') return null
   const name = key.replace(/^agent:/, '')
   const own = reported.find(l => l.identity === name || l.aliases.includes(name))
@@ -333,6 +346,19 @@ export type UniverseInputs = {
 }
 
 export function buildUniverse(i: UniverseInputs): Universe {
+  // Apply owner choices before alias nodes collapse. A canonical choice wins; otherwise carry the
+  // first explicitly configured alias forward (including `none`) rather than letting a report replace it.
+  const pins = { ...i.sessionPins }
+  const placements = { ...i.placement }
+  for (const l of i.agentLinks ?? []) {
+    const key = `agent:${l.identity}`
+    const pin = sessionPinFor(key, i.sessionPins, i.agentLinks)
+    if (pin !== undefined) pins[key] = pin
+    for (const alias of l.aliases) {
+      const aliasKey = `agent:${alias}`
+      placements[key] = { ...placements[aliasKey], ...placements[key] }
+    }
+  }
   const machines = machinesFrom(i.health)
   const names = machines.map(m => m.name)
   // A reconcile daemon's host is a machine by definition, even when health no longer lists it.
@@ -356,6 +382,7 @@ export function buildUniverse(i: UniverseInputs): Universe {
       id: str(r.id), title: str(r.title).replace(/-[0-9a-f]{8}$/, '').replace(/-/g, ' ').slice(0, 140),
       blockedOn: str(r.blocked_on), nextAction: str(r.next_action).slice(0, 300), priority: str(r.priority),
       since: str(r.timestamp) || str(r.mtime),
+      assignee: str(r.assignee),
     }
     for (const who of new Set([str(r.owner), str(r.assignee)].filter(Boolean))) {
       blockedBy.set(who, [...(blockedBy.get(who) ?? []), item])
@@ -377,24 +404,25 @@ export function buildUniverse(i: UniverseInputs): Universe {
   const add = (name: string, row: Json | null) => {
     if (name.startsWith('@') || name === i.owner || name === `user:${i.owner}` || name === 'human') return
     const key = `agent:${name}`
-    const v5 = i.v5.find(a => a.logicalAgentId === name)
+    const report = (i.agentLinks ?? []).find(l => l.identity === name || l.aliases.includes(name))
+    const v5 = i.v5.find(a => a.logicalAgentId === name) ?? i.v5.find(a => report?.aliases.includes(a.logicalAgentId))
     const placed = name === i.thisAgent.name
-      ? { machine: i.thisAgent.machine, platform: i.thisAgent.platform }
+      ? { machine: i.thisAgent.machine || 'Unplaced', platform: i.thisAgent.platform }
       : placeIdentity(name, names, { machine: v5?.instanceId, text: `${memberText.get(name) ?? ''} ${str(row?.summary)} ${v5?.instanceId ?? ''}` })
-    const over = i.placement[key] ?? {}
+    const over = placements[key] ?? {}
     // Owner's correction, then the agent's own report, then the guess from its name.
-    const said = reportedPlacement((i.agentLinks ?? []).find(l => l.identity === name || l.aliases.includes(name)), names)
+    const said = reportedPlacement(report, names)
     const live = str(row?.liveness)
     const blocked = blockedBy.get(name) ?? []
     nodes.set(key, {
-      key, kind: 'agent', label: labelOf(name, names),
+      key, kind: 'agent', label: labelOf(name, names), aliases: report?.identity === name ? report.aliases : [],
       machine: over.machine || said.machine || placed.machine, platform: over.platform || said.platform || placed.platform,
       liveness: (LIVENESS.includes(live as Liveness) ? live : str(row?.state) === 'lapsed' ? 'lapsed' : 'unknown') as Liveness,
       lastSeen: null, summary: str(row?.summary), annotation: str(row?.annotation),
       open: (row?.open && typeof row.open === 'object' ? row.open : {}) as Record<string, number>,
       blocked, blockedOnOwner: blocked.filter(b => b.blockedOn === `user:${i.owner}`).length,
       meshes: [], userId: null,
-      session: sessionFor(key, v5?.sessionId ?? '', i.sessionPins, i.sessions, i.agentLinks ?? []),
+      session: sessionFor(key, v5?.sessionId ?? '', pins, i.sessions, i.agentLinks ?? []),
     })
   }
   for (const row of i.agents ?? []) add(str(row.agent), row)
@@ -417,7 +445,7 @@ export function buildUniverse(i: UniverseInputs): Universe {
       if (LIVENESS.indexOf(dup.liveness) < LIVENESS.indexOf(primary.liveness)) primary.liveness = dup.liveness
       primary.summary ||= dup.summary
       primary.annotation ||= dup.annotation
-      primary.session ??= dup.session
+      if (pins[primary.key] !== 'none') primary.session ??= dup.session
       nodes.delete(aliasKey)
       for (const m of meshes) {
         if (!m.members.includes(aliasKey)) continue

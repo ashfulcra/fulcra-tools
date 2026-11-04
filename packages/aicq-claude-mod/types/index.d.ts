@@ -1,12 +1,14 @@
 // Universe types mirror hooks/universe.ts (the contract must be self-contained).
 export type Liveness = 'live' | 'idle' | 'stale' | 'lapsed' | 'unknown'
 
-export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string; since: string }
+export type BlockedItem = { id: string; title: string; blockedOn: string; nextAction: string; priority: string; since: string; assignee?: string }
 
 export type UniverseNode = {
   key: string
   kind: 'agent' | 'peer'
   label: string
+  /** Other own-account identities folded into this node. */
+  aliases?: string[]
   machine: string
   platform: string
   liveness: Liveness

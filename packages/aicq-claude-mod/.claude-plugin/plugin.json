@@ -62,7 +62,7 @@
       "type": "string",
       "title": "Owner principal",
       "description": "Your principal on the coord bus (blocked-on-you links use user:<owner>).",
-      "default": "ash"
+      "default": "user"
     }
   },
   "author": {

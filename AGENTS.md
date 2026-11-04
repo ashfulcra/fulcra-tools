@@ -238,7 +238,17 @@ under `skills/`, each package with its own README, build, and tests.
   into collaborations with work states, draws `/aicq` (SVG on desktop), and
   responds per the four AICQ modes (heartbeats and acks never wake;
   4 auto-turns/hour/collaboration cap). Sends read back before claiming
-  delivery. Gate: `claude plugin validate` + `claude plugin test` on a
+  delivery. `/aicq waiting` ranks human approvals, replies and blocked-on-owner
+  tasks; blocked tasks and local pending drafts remain visible despite age.
+  `ignoreAfterDays` defaults to 5 (`0` disables ignoring), and `aicq_inbox`
+  accepts `include_stale`. The owner principal defaults to `user`; preserve
+  explicitly configured principals and placement. Session links come only from
+  owner pins, exact app/V5 session matches, or own-account `agent-links/1`
+  reports, through the shared allowlist. Alias folding must preserve owner
+  overrides and thread lookup. Interpret coord `read-degraded` markers even
+  at rc 0; report failures and the 80-report read cap as partial coverage.
+  The pane supports terminal and desktop; mobile is not implemented.
+  Gate: `claude plugin validate` + `claude plugin test` on a
   mods-capable build. Install anywhere from the repo's plugin marketplace
   (`.claude-plugin/marketplace.json`): `/plugin marketplace add ashfulcra/fulcra-tools`,
   then `/plugin install aicq@fulcra-tools`. Details:

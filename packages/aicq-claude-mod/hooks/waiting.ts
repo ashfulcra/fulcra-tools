@@ -50,7 +50,7 @@ export function rankWaiting(a: WaitingItem, b: WaitingItem): number {
 /** The universe node an own-account collaboration's counterpart is, when the map knows it by name. */
 function nodeForCollab(c: Collaboration, nodes: readonly UniverseNode[]): UniverseNode | undefined {
   if (!c.workspace) return undefined
-  return nodes.find(n => n.kind === 'agent' && (n.key === `agent:${c.contact}` || n.label === c.contact))
+  return nodes.find(n => n.kind === 'agent' && (n.key === `agent:${c.contact}` || n.label === c.contact || n.aliases?.includes(c.contact)))
 }
 
 /**
@@ -77,7 +77,8 @@ export function waitingOnYou(
     if (!WAITING_STATES.includes(c.state)) continue
     const node = nodeForCollab(c, nodes)
     const last = [...c.messages].reverse().find(m => m.direction === 'in')
-    if (c.workspace && !addressedToOwner(last?.to ?? '', owner, agentName)) continue
+    // A prepared reply is the owner's local approval obligation, even before the first inbound message.
+    if (c.workspace && c.state !== 'prepared-for-approval' && !addressedToOwner(last?.to ?? '', owner, agentName)) continue
     out.push({
       key: `thread:${c.key}`, kind: 'thread', who: nameOf(c), whose: c.workspace ? 'mine' : 'friend',
       platform: node?.platform ?? '', machine: node?.machine ?? (c.workspace ? '' : 'Friends’ accounts'),
@@ -87,15 +88,19 @@ export function waitingOnYou(
       state: c.state, session: node?.session ?? null, collabKey: c.key, nodeKey: node?.key ?? null, taskId: null,
     })
   }
+  const tasks = new Map<string, WaitingItem>()
   for (const n of nodes) {
     for (const b of n.blocked) {
       if (b.blockedOn !== `user:${owner}`) continue
-      out.push({
+      // The map attaches a task to both owner and assignee. It remains one human decision.
+      const assignedHere = n.key === `agent:${b.assignee}` || (!!b.assignee && n.aliases?.includes(b.assignee))
+      if (tasks.has(b.id) && !assignedHere) continue
+      tasks.set(b.id, {
         key: `task:${n.key}:${b.id}`, kind: 'task', who: n.label, whose: n.kind === 'peer' ? 'friend' : 'mine',
         platform: n.platform, machine: n.machine, title: b.title, ask: b.nextAction, since: b.since || null,
         priority: b.priority, state: 'blocked', session: n.session, collabKey: null, nodeKey: n.key, taskId: b.id,
       })
     }
   }
-  return out.sort(rankWaiting)
+  return [...out, ...tasks.values()].sort(rankWaiting)
 }

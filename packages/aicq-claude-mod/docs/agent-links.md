@@ -16,7 +16,7 @@ events; when it does, the file becomes a fallback.
 One file per agent identity in the owner's Fulcra file store:
 
 ```
-team/<team>/agent-links/<identity>.json        (team "fulcra" for Ash's fleet)
+team/<team>/agent-links/<identity>.json
 ```
 
 `<identity>` is the name other agents address you by: your `FULCRA_COORD_AGENT`
@@ -25,17 +25,19 @@ for the file name and list the other in `aliases`.
 
 ## Shape
 
+This example is deliberately synthetic; replace its identities, machine and links with your own observed values.
+
 ```json
 {
   "schema": "agent-links/1",
-  "identity": "claude-code-aicq-deskbook",
-  "aliases": ["aicq-claudecode-maintainer"],
+  "identity": "example-assistant",
+  "aliases": ["example-maintainer"],
   "platform": "claude-code",
-  "machine": "DeskBookPro",
+  "machine": "ExampleLaptop",
   "updated_at": "2026-10-10T21:00:00Z",
   "links": [
-    { "kind": "app", "url": "claude://claude.ai/epitaxy/local_50c52ab0-d595-4031-a824-399f4dbab739" },
-    { "kind": "web", "url": "https://claude.ai/code/session_01KxJWf5XCcZ8M8yKuoKecx9" }
+    { "kind": "app", "url": "claude://claude.ai/epitaxy/local_00000000-0000-4000-8000-0000000000e2" },
+    { "kind": "web", "url": "https://claude.ai/code/session_Example01" }
   ]
 }
 ```
@@ -69,16 +71,18 @@ for the file name and list the other in `aliases`.
   optional `hostId` parameter, and `https://chatgpt.com/c/<id>`. A file is
   written by an agent, so it must never turn into a one-click link to anything
   else.
-- **Precedence.** An owner's pin wins, then what the local desktop apps record
+- **Precedence.** An owner's pin wins, including a saved choice on a folded alias
+  (the canonical identity's choice wins if both exist), then what the local desktop apps record
   (they vouch for it, and it is current), then the agent's own file.
-- **Surface.** A browser, phone or the desktop pane gets the web link when there
-  is one; a local desktop with only an app link opens it through the OS.
+- **Surface.** The terminal and desktop panes offer a web link when one exists;
+  a local macOS host can open an app link through the OS. The AICQ mobile pane
+  is not implemented; it currently directs the owner to ask their agent.
 
 ## Writing it
 
 ```bash
-fulcra file upload links.json team/fulcra/agent-links/<identity>.json   # re-uploading replaces it
+fulcra file upload links.json team/<team>/agent-links/<identity>.json   # re-uploading replaces it
 ```
 
-Then read it back once (`fulcra file download team/fulcra/agent-links/<identity>.json -`)
+Then read it back once (`fulcra file download team/<team>/agent-links/<identity>.json -`)
 before saying it is published.
