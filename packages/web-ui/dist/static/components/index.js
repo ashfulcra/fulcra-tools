@@ -18,6 +18,7 @@ import "./step-external_action.js";
 import "./step-input.js";
 import "./step-oauth.js";
 import "./step-file_upload.js";
+import "./step-folder_picker.js";
 import "./step-permission_request.js";
 import "./step-test_connection.js";
 import "./step-definition_picker.js";

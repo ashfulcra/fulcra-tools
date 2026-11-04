@@ -1,8 +1,9 @@
 # Beta packaging — signed macOS `.dmg`
 
 How to produce the signed, notarized **Fulcra Collect.dmg** that beta testers
-install. The `.dmg` bundles the app (collect core + every plugin, gmail
-included), the built attention Chrome extension, and install instructions.
+install. The `.dmg` bundles the app (collect core + every plugin listed in the
+menubar package requirements, including Gmail, selected Notion pages and the local-source plugins),
+the built attention Chrome extension, and install instructions.
 
 ## What's automated vs. what's yours
 
@@ -59,6 +60,21 @@ bash packages/menubar/scripts/release_dmg.sh
 ```
 
 Output: `dist/Fulcra Collect.dmg`, signed + notarized + stapled.
+
+Before starting, check the saved notarization profile with a read-only request:
+
+```sh
+xcrun notarytool history --keychain-profile fulcra-notary --output-format json
+```
+
+Use your configured profile name if it differs. If the tool cannot find it,
+check the login keychain while the Mac is unlocked. Restore missing credentials
+through the secure setup above; never put a password in the repo or a build log.
+
+If submission stops without an ID, preserve the disk image and the private log.
+Check submission history and any macOS prompts before trying again. An unfinished
+command does not prove Apple received nothing. Keep submission receipts and
+machine diagnostics outside the public tree.
 
 Environment variables:
 

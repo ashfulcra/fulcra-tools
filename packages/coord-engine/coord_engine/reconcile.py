@@ -18,7 +18,7 @@ from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Optional
 
-from . import __version__, aggregate, config, generation, health as health_mod, jsonutil, model, okf, review
+from . import __version__, aggregate, config, dual_emit, generation, health as health_mod, jsonutil, model, okf, review
 from . import projection as projection_mod
 from .budget import Deadline
 from .change_detection import (
@@ -213,7 +213,9 @@ def _write_health_shard(transport: Any, team: str, *, host: str, now: str,
     """Best-effort health beat + retention GC — never fails the pass."""
     try:
         from . import __version__ as _v
-        shard = health_mod.build_shard(host=host, now=now, engine_version=_v, result=result)
+        from . import pin_currency
+        shard = health_mod.build_shard(host=host, now=now, engine_version=_v, result=result,
+                                       engine_build=pin_currency.build_sha())
         transport.write(f"{health_mod.health_prefix(team)}{agent_key(host)}.json",
                         json.dumps(shard, indent=1))
         for e in transport.list_dir(health_mod.health_prefix(team)):
@@ -545,6 +547,139 @@ def _retention_marker_path(team: str) -> str:
     return f"team/{team}/_coord/retention/last-run.json"
 
 
+def pending_v4_close_prefix(team: str) -> str:
+    """Retention's durable record of bus-v4 closes it owes: one ``<slug>.json`` per archived task."""
+    return f"team/{team}/_coord/retention/pending-v4-close/"
+
+
+RETENTION_RETRY_CAP_PER_PASS = 50
+
+
+def _queue_v4_close(transport: Any, team: str, *, sender: str, slug: str, ptr: str, priority: str,
+                    now: str) -> bool:
+    """Record the bus-v4 close retention owes for ``slug``. Written BEFORE the source delete, so a pass
+    that dies anywhere between the delete and the close still leaves the debt for the next pass to pay.
+    Measured 2026-10-20 00:10Z: a pinned host archived five tasks and wrote no closes, and nothing ever
+    revisited them."""
+    return bool(transport.write(f"{pending_v4_close_prefix(team)}{slug}.json", json.dumps(
+        {"slug": slug, "ptr": ptr, "priority": priority, "archived_at": now, "host": sender},
+        sort_keys=True)))
+
+
+def _reopen_hot(transport: Any, team: str, *, sender: str, slug: str, doc: str, now: str) -> bool:
+    """Re-open a task that is hot again after retention may already have closed it. False = the open failed."""
+    return dual_emit.open_task_doc(transport, team, actor=sender, slug=slug, doc=doc, at=now) is not False
+
+
+def _retire_and_guard(transport: Any, team: str, *, sender: str, slug: str, ptr: str, priority: str,
+                      now: str, notes: list[str]) -> Optional[bool]:
+    """Write the close, then make sure it did not land on a task that is hot again.
+
+    ``task restore`` can run between the decision to close and the close itself; its open would then
+    precede our close and the fold would drop live work. So after a written close the hot path is read
+    once more, and a doc found there is re-opened from that doc (the open lands after the close).
+
+    Returns the close verdict (None = no bus-v4 plane, True/False = write verdict), or ``"unresolved"``
+    when the close was written but the check after it has no settled answer: the re-open failed or the
+    hot path read UNKNOWN. An unresolved check re-writes the pending marker, because the restore that
+    raced the close may already have deleted it; the next pass then re-opens or re-closes from the
+    marker. An UNKNOWN hot path is never assumed archived."""
+    result = dual_emit.retire_archived(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                       priority=priority, at=now)
+    if result is not True:
+        return result
+    doc, hot = transport.read_classified(f"{task_prefix(team)}{slug}.md")
+    if hot == "absent":
+        return result
+    if hot == "ok" and doc is not None:
+        if _reopen_hot(transport, team, sender=sender, slug=slug, doc=doc, now=now):
+            notes.append(f"retention: {slug} was restored while its v4 close was written; "
+                         "re-opened from its doc")
+            return result
+        why = "was restored while its v4 close was written and its re-open FAILED"
+    else:
+        why = "hot path read UNKNOWN right after its v4 close"
+    queued = _queue_v4_close(transport, team, sender=sender, slug=slug, ptr=ptr, priority=priority,
+                             now=now)
+    notes.append(f"retention: {slug} {why}; " + (
+        "kept queued for the next pass" if queued else
+        "and its pending marker could not be written (UNKNOWN): run "
+        "`obligations --export-open --force` for its assignee"))
+    return "unresolved"
+
+
+def _close_archived_on_v4(transport: Any, team: str, *, sender: str, slug: str, ptr: str,
+                          priority: str, now: str, notes: list[str]) -> None:
+    """Retire an archived task's obligation on bus-v4. The marker ``_queue_v4_close`` wrote before the
+    source delete is cleared only once the close has an answer; a failed close keeps it for the next
+    pass. Closing twice is harmless: a close of a slug a fold does not hold is a no-op there."""
+    outcome = _retire_and_guard(transport, team, sender=sender, slug=slug, ptr=ptr, priority=priority,
+                                now=now, notes=notes)
+    if outcome is False:
+        notes.append(f"retention: v4 close FAILED for archived {slug}; queued for retry on every pass")
+        return
+    if outcome == "unresolved":
+        return
+    if hasattr(transport, "delete"):
+        transport.delete(f"{pending_v4_close_prefix(team)}{slug}.json")  # a failed delete costs one repeat
+
+
+def _retry_pending_v4_closes(transport: Any, team: str, *, sender: str, now: str,
+                             cap: int = RETENTION_RETRY_CAP_PER_PASS) -> list[str]:
+    """Retry the bus-v4 closes retention still owes, at most ``cap`` per pass. Runs on EVERY pass, not
+    only the daily one.
+
+    A task that is hot again (``task restore``) is never closed. Its close may already have been written
+    (a pass that died after the close, or a restore that raced it), so it is re-opened from its doc and
+    the marker is dropped only once that open has an answer. An unreadable task path or marker is
+    UNKNOWN and keeps the marker; only a settled answer clears it."""
+    notes: list[str] = []
+    prefix = pending_v4_close_prefix(team)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError:
+        return ["retention: pending v4-close listing UNKNOWN; retries skipped this pass"]
+    names = [str(e.get("name") or "") for e in entries
+             if not e.get("is_dir") and str(e.get("name") or "").endswith(".json")]
+    if len(names) > cap:
+        notes.append(f"retention: pending v4-close retry cap reached: {len(names) - cap} of "
+                     f"{len(names)} marker(s) not retried this pass")
+    for name in names[:cap]:
+        marker = prefix + name
+        raw = transport.read(marker)
+        try:
+            pending = json.loads(raw) if raw is not None else None
+            slug, ptr = str(pending["slug"]), str(pending["ptr"])
+        except (TypeError, ValueError, KeyError):
+            notes.append(f"retention: pending v4 close {name} unreadable or malformed (UNKNOWN); kept")
+            continue
+        doc, hot = transport.read_classified(f"{task_prefix(team)}{slug}.md")
+        if hot == "ok" and doc is not None:
+            if not _reopen_hot(transport, team, sender=sender, slug=slug, doc=doc, now=now):
+                notes.append(f"retention: pending v4 close for {slug}: the task is hot again and its "
+                             "re-open FAILED; kept")
+                continue
+            if hasattr(transport, "delete"):
+                transport.delete(marker)
+            notes.append(f"retention: pending v4 close for {slug} dropped; the task is hot again "
+                         "and was re-opened from its doc")
+            continue
+        if hot != "absent":
+            notes.append(f"retention: pending v4 close for {slug} kept; its hot path is UNKNOWN")
+            continue
+        outcome = _retire_and_guard(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                    priority=str(pending.get("priority") or ""), now=now, notes=notes)
+        if outcome is False:
+            notes.append(f"retention: v4 close FAILED again for archived {slug}; still queued")
+            continue
+        if outcome == "unresolved":
+            continue
+        if hasattr(transport, "delete"):
+            transport.delete(marker)
+        notes.append(f"retention: v4 close retried for archived {slug}")
+    return notes
+
+
 def settled_index_path(team: str) -> str:
     return f"team/{team}/_coord/retention/settled-reviews.json"
 
@@ -645,16 +780,24 @@ def _quiet_mtime_old_enough(value: Any, *, now: str, days: float) -> bool:
 
 
 def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: str,
-                   days: float, log: Any) -> tuple[list, list[str], dict]:
+                   days: float, log: Any, sender: Optional[str] = None) -> tuple[list, list[str], dict]:
     """Cold-archive quiet work older than ``days``, reversibly and fail-closed.
 
     Eligible tasks are terminal or ``proposed``; ``active``/``waiting`` are never
     retention candidates. A doc-less review directory is eligible only when its
     verdict listing is KNOWN and proves exactly one ``codex-reviewer`` verdict.
     Every move is copy -> verify -> delete, capped per pass and throttled daily.
+
+    An archived task is owed by nobody, so each completed move also retires the
+    obligation on bus-v4 (``dual_emit.retire_archived``) — only AFTER the source
+    delete, because closing a task that is still hot would hide live work. A
+    failed close is a warning, never a reason to undo the archive; it stays queued under
+    ``pending_v4_close_prefix`` and every pass retries it, including passes the daily throttle skips.
     """
     notes: list[str] = []
     archived_map: dict = {}  # slug -> (month, title), for the log's Archived bullets
+    if sender:
+        notes.extend(_retry_pending_v4_closes(transport, team, sender=sender, now=now))
     marker = transport.read(_retention_marker_path(team))
     if marker is not None and today in marker:
         return rows, notes, archived_map  # already ran today
@@ -683,7 +826,19 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                 continue
             src = f"{task_prefix(team)}{slug}.md"
             dst = f"{archive_prefix(team)}{month}/{slug}.md"
+            ptr = f"task/archive/{month}/{slug}.md"
+            priority = str(r.get("priority") or "")
             if _verified_copy(transport, src, dst):
+                # The close is owed from the moment the source goes, so record it before anything moves; a
+                # task whose debt cannot be recorded stays hot, with its shards untouched, rather than risk
+                # an obligation nothing will close.
+                if sender and not _queue_v4_close(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                                  priority=priority, now=now):
+                    if hasattr(transport, "delete"):
+                        transport.delete(dst)
+                    notes.append(f"retention: {slug} kept hot; its v4 close could not be queued")
+                    keep.append(r)
+                    continue
                 shards_moved = True
                 archived += 1
                 archived_map[slug] = (month, r.get("title") or slug)
@@ -703,7 +858,12 @@ def _run_retention(transport: Any, team: str, rows: list, *, now: str, today: st
                         shards_moved = False
                 if shards_moved and hasattr(transport, "delete") and transport.delete(src):
                     notes.append(f"retention: archived {slug} -> archive/{month}/")
+                    if sender:
+                        _close_archived_on_v4(transport, team, sender=sender, slug=slug, ptr=ptr,
+                                              priority=priority, now=now, notes=notes)
                     continue
+                if sender and hasattr(transport, "delete"):
+                    transport.delete(f"{pending_v4_close_prefix(team)}{slug}.json")
                 archived -= 1
                 if hasattr(transport, "delete"):
                     transport.delete(dst)
@@ -905,6 +1065,69 @@ def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]
         return json.loads(raw)
     except Exception:
         return None
+
+
+#: Health/result reason when a pass skips its summaries write because another
+#: host already advanced the store's cursor past the one this pass started from.
+SUPERSEDED_BY_NEWER_CURSOR = "superseded by a newer cursor in the store"
+
+
+def _store_cursor_supersedes(
+    transport: Any, team: str, started_from: Optional[dict[str, Any]],
+) -> Optional[bool]:
+    """Re-read the store's cursor just before publishing (ruling 05df6cab).
+
+    True when its watermark is strictly newer than the one this pass started
+    from; False when equal/older, or when this pass started from no watermark
+    (nothing to compare: write as today); None when the store cursor cannot be
+    read or parsed.  A narrowing, not a fence: there is no compare-and-swap,
+    so a write can still race this read.
+    """
+    started = _parse_iso_utc((started_from or {}).get("watermark"))
+    if started is None:
+        return False
+    try:
+        current = _load_prior_aggregate(transport, team)
+    except Exception:
+        return None
+    if not isinstance(current, dict):
+        return None  # absent, unparseable, or a non-object document: unreadable
+    cursor, reason = _parse_reconcile_cursor(current.get(RECONCILE_CURSOR_KEY))
+    if reason is not None or cursor is None:
+        return None
+    stored = _parse_iso_utc(cursor.get("watermark"))
+    if stored is None:
+        return False
+    return stored > started
+
+
+def _superseded_pass(
+    transport: Any, team: str, *, started_from: Optional[dict[str, Any]],
+    host: str, now: str, tasks: int, warnings: list[str], rows: Any, log: Any,
+) -> Optional[dict[str, Any]]:
+    """Guard EVERY summaries publication path (full, incremental, fast path).
+
+    Returns the degraded result to return when the store's cursor is strictly
+    newer than the one this pass started from -- after writing the health
+    shard and logging -- or None when the pass may publish.  Never merges the
+    newer cursor over this pass's rows.
+    """
+    superseded = _store_cursor_supersedes(transport, team, started_from)
+    if superseded is None:
+        log.warn("reconcile: store cursor unreadable before publication; "
+                 "writing as before (no superseded check)", team=team)
+        return None
+    if superseded is not True:
+        return None
+    reason = SUPERSEDED_BY_NEWER_CURSOR
+    result = {"degraded": True, "reason": reason, "tasks": tasks,
+              "warnings": [*warnings, reason], "rows": rows}
+    _write_health_shard(transport, team, host=host, now=now,
+                        result=result, log=log)
+    log.error("reconcile publication skipped: store cursor is newer than "
+              "this pass's starting cursor", team=team,
+              started_from=(started_from or {}).get("watermark"))
+    return result
 
 
 def _publication_generation(aggregate_doc: Any) -> Optional[str]:
@@ -1167,6 +1390,36 @@ def _feed_task_delta(
     return changed, deleted, new_processed, changes
 
 
+def _feed_uploaded_task_slugs(team: str, batch: Any) -> set[str]:
+    """Slugs whose LATEST lifecycle state in the batch is an upload of a direct
+    ``task/<slug>.md`` shard -- the tasks a complete listing must contain.
+
+    Events are collapsed per path with the existing E1 rules (latest instant
+    wins; equal instants prefer ``uploaded > deleted > archived``), never by
+    response order, so an upload later deleted or archived in the same window
+    is not a reference, while a re-upload after a delete still is.  If the
+    batch cannot be ordered (an event without a usable instant), every upload
+    stays a reference: doubt keeps the guard fail-closed.
+    """
+    prefix = f"team/{team}/task/"
+    rows: list[dict[str, Any]] = []
+    for row in _batch_feed_rows(batch):
+        path = str(row.get("path") or "").strip().lstrip("/")
+        if not path.startswith(prefix):
+            continue
+        rest = path[len(prefix):]
+        if "/" in rest or not rest.endswith(".md") or rest in ("index.md", "log.md"):
+            continue
+        if row.get("state") not in _FEED_STATE_PRIORITY:
+            continue
+        rows.append({**row, "path": path})
+    collapsed = _collapse_feed_changes(rows)
+    if collapsed is None:
+        return {r["path"][len(prefix):-3] for r in rows if r.get("state") == "uploaded"}
+    return {path[len(prefix):-3] for path, (_at, event) in collapsed.items()
+            if event.get("state") == "uploaded"}
+
+
 def _batch_feed_rows(batch: ChangeBatch) -> list[dict[str, Any]]:
     """Adapt one sealed batch to E1's lifecycle collapse shape without I/O."""
     rows: list[dict[str, Any]] = []
@@ -1217,12 +1470,19 @@ def _project_task_row(
 def _full_scan_task_rows(
     transport: Any, team: str, listing: list, prior_by_name: dict[str, Any],
     last_reconcile_iso: Any, log: Any,
-) -> tuple[list[dict[str, Any]], list[str], int, int]:
+) -> tuple[list[dict[str, Any]], list[str], int, int, list[str]]:
     """Fold the full ``task/`` listing into rows, reusing unchanged prior rows.
     The authoritative pass — the fail-closed fallback and the drift self-check's
-    reference. Returns ``(rows, warnings, reused, parsed)``."""
+    reference. Returns ``(rows, warnings, reused, parsed, uncertain)``;
+    ``uncertain`` names every listed task whose READ failed this pass, so a
+    caller can tell a complete fold from one that still owes a read.  A shard
+    that was read but has unparseable frontmatter is not uncertain (ruling
+    93a9965d): it is deterministic -- its content cannot change without a new
+    write, which is a feed event the next poll reads -- and it stays a loud
+    warning."""
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
+    uncertain: list[str] = []
     reused = parsed = 0
     for entry in listing:
         name = entry.get("name") or ""
@@ -1250,8 +1510,10 @@ def _full_scan_task_rows(
             rows.append(prior)
             reused += 1
             continue
-        row, warning, _read_failed = _project_task_row(
+        row, warning, read_failed = _project_task_row(
             transport, team, slug, mtime=entry_mtime, size=entry_size, log=log)
+        if read_failed:
+            uncertain.append(slug)
         if row is None:
             # unparseable / unreadable / non-task: never drop a task — keep prior.
             if warning is not None:
@@ -1263,7 +1525,7 @@ def _full_scan_task_rows(
             continue
         rows.append(row)
         parsed += 1
-    return rows, warnings, reused, parsed
+    return rows, warnings, reused, parsed, uncertain
 
 
 def _incremental_reconcile_rows(
@@ -1641,6 +1903,11 @@ def reconcile(
     if fast_delta is not None:
         fast_changed, fast_deleted, fast_processed, _fast_feed = fast_delta
         if not fast_changed and not fast_deleted:
+            superseded_result = _superseded_pass(
+                transport, team, started_from=prior_cursor, host=host, now=now,
+                tasks=len(prior_rows), warnings=[], rows=prior_rows, log=log)
+            if superseded_result is not None:
+                return superseded_result
             fast_agg = dict(prior_agg or {})
             fast_agg[RECONCILE_CURSOR_KEY] = {
                 "watermark": now,
@@ -1711,7 +1978,7 @@ def reconcile(
             log.error("list failed, pass aborted (prior artifacts intact)",
                       team=team, error=str(e))
             return {"degraded": True, "reason": str(e), "tasks": 0}
-        rows, warnings, reused, parsed = _full_scan_task_rows(
+        rows, warnings, reused, parsed, task_scan_uncertain = _full_scan_task_rows(
             transport, team, listing, prior_by_name, last_reconcile_iso, log)
         # A directory listing can return rc 0 with only a tiny prefix of the
         # real directory.  The feed-folded rows are the independently
@@ -1724,6 +1991,12 @@ def reconcile(
         reference_names = (
             set(aggregate.rows_by_name(inc[0])) if inc is not None else set()
         )
+        if recovery_requested:
+            # A recovery batch may carry the attested outer feed's changes
+            # (ruling 2a301eab): every task it saw uploaded must be listed, or
+            # this full scan is a partial listing and must not publish or
+            # re-anchor past the omission.
+            reference_names |= _feed_uploaded_task_slugs(team, batch)
         listed_names = set(aggregate.rows_by_name(rows))
         uncorroborated_missing = sorted(reference_names - listed_names)
         if uncorroborated_missing:
@@ -1745,8 +2018,25 @@ def reconcile(
                 team=team, missing=len(uncorroborated_missing),
             )
             return result
+        attested_frontier = getattr(batch, "attested_frontier", None)
         if batch.trusted and (prior_cursor is None or not stale):
             new_cursor = {"watermark": now, "processed": {}, "streak": 0}
+        elif (recovery_requested and prior_cursor is not None
+              and isinstance(attested_frontier, str) and attested_frontier
+              and not task_scan_uncertain):
+            # The feed attested [cursor, F] (start_time matched the cursor) but
+            # an empty answer that wide is unproven.  F was stamped by the
+            # server before this full scan began, so the completed scan has
+            # seen every change at or before F: re-anchor to F, never to a
+            # local or scan-derived time.  Only a COMPLETE task fold licenses it
+            # (rulings 6c80ed8a, amended by 93a9965d): every listed task READ --
+            # a read failure keeps a prior row or skips the slug, and moving
+            # the cursor would consume the window that still owes that read.
+            # A read-but-unparseable shard is deterministic and does not hold it.
+            # It persists only with summaries.json, which an aborted or
+            # projection-refused pass never writes.
+            new_cursor = {"watermark": attested_frontier, "processed": {},
+                          "streak": 0}
         elif prior_cursor is not None:
             # The listing repairs canonical rows but says nothing about whether
             # this feed window was complete. Keep the old frontier so the next
@@ -1791,7 +2081,8 @@ def reconcile(
     days = config.retention_days(DEFAULT_RETENTION_DAYS, override=retention_days)
     if days > 0:
         rows, notes, archived_map = _run_retention(
-            transport, team, rows, now=now, today=today, days=days, log=log)
+            transport, team, rows, now=now, today=today, days=days, log=log,
+            sender=host)
         # `notes` that match none of these are DISCARDED — nothing else reads the
         # list. "cap reached" is here because a note the caller never sees is the
         # same silence the note exists to end.
@@ -2046,6 +2337,16 @@ def reconcile(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings,
         state=ack_state, prior=prior_unknown,
     )
+    # A pass holds rows read from the cursor it STARTED from.  If another host
+    # has since advanced the store's cursor, writing would roll that cursor
+    # back; keeping the newer cursor over these rows would claim coverage they
+    # never saw.  So skip this pass's publication entirely (ruling 05df6cab).
+    superseded_result = _superseded_pass(
+        transport, team, started_from=prior_cursor, host=host, now=now,
+        tasks=len(rows), warnings=warnings, rows=rows, log=log)
+    if superseded_result is not None:
+        return superseded_result
+
     # Unit 4's generation is the publication authority.  The legacy aggregate
     # remains a compatibility cache for existing readers, and is written only
     # after the immutable generation and digest-bound current manifest verify.

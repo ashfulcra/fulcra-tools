@@ -85,7 +85,7 @@ If you change the contract here, update both.
 ## Setup-step component model
 
 The wizard renders one of N kinds of setup step (`intro`, `input`,
-`oauth`, `file_upload`, `permission_request`, `test_connection`, `definition_picker`,
+`oauth`, `file_upload`, `folder_picker`, `permission_request`, `test_connection`, `definition_picker`,
 `external_action`, `done`). Up to refactor #68 (2026-05-27) those
 kinds were rendered by `<template x-if="current_step.kind === '...'">`
 blocks inline in `index.html` — duplicated at two render sites
@@ -107,6 +107,18 @@ request callback retains the existing **Open System Settings** / **Verify access
 flow, including Full Disk Access.
 
 This capability is in the 0.1.3 app. See the [callback contract](../collect/README.md#native-permission-requests).
+
+### Local folder selection
+
+The `folder_picker` step calls the authenticated loopback daemon only after the
+user chooses **Choose folder**. The daemon opens a fixed macOS folder chooser,
+validates the result, and saves the absolute path in Collect's private local
+configuration. The picker response contains only the folder's display name;
+the authenticated local settings API continues to return saved path settings
+when the dashboard reopens configuration. Canceling
+or selecting the filesystem root leaves Next blocked. Folder selection does not
+enable a plugin or upload any files; a later `test_connection` preview and the
+final enable action remain separate.
 
 ### List selection
 
