@@ -15,6 +15,12 @@ It carries its own instructions, because some front ends have no skills installe
 
 For same-account legacy maps, an absent contact field keeps the original owner-as-contact convention. If the map indicates a separate operator/messaging identity or service-account storage, require a verified contact route rather than guessing the storage inbox. An existing verified connection can supply the route; otherwise record it as unresolved and continue independent work. A contact ID is not a claim of a background listener or delivered message. Preserve source-account checks independently.
 
+For a company-owned deployment, include `ownership: company` and a link to the
+[company deployment rules](company-deployment.md) in the index's instructions.
+Keep the private approved-member policy, pending joins, proposal bodies and
+maintenance checkpoints outside the all-member map. The People table is routing
+information, not sufficient admission or source-publication authority.
+
 ```markdown
 ---
 type: Team Map
@@ -100,7 +106,7 @@ Page reads checked; other capabilities untested. No limits observed in that chec
 Some pages are restricted in Notion. Links only.
 ```
 
-For older entries, add **Source routes** when adopting an imported route or documenting provenance; existing maps remain readable without it. See [source-discovery.md](source-discovery.md) for the optional manifest contract. An `owner` may be a documented role; use a human Fulcra ID only when established. Keep maintainer/producer/access roles distinct instead of forcing a human assignment.
+For older entries, add **Source routes** when adopting an imported route or documenting provenance; existing maps remain readable without it. See [source-discovery.md](source-discovery.md) for the optional manifest contract. An `owner` may be a documented role; use a human Fulcra ID only when established. Keep maintainer/producer/access roles distinct instead of forcing a human assignment. For company/member routes, record credential kind/token level, verified provider namespace and separately approved copy audience where appropriate. Never put tokens, restricted resource titles or private policy evidence into the all-member map; use an authorized private reference.
 
 Change `updated` in `index.md` on every meaningful edit to any map file, because that's what agents watch. An identical repeat leaves files and timestamps alone. Keep every heading; write "none" where one doesn't apply, and `unknown, ask <owner>` where nobody knows yet. A **check** is one read-only call with a pass condition anyone can apply, so it never needs to create, change or delete anything. Record observed connector limits; one successful read does not establish that there are no other limits. **Limits** is where hard-won knowledge goes, such as what a connector can't do, so each agent doesn't rediscover it.
 
@@ -111,3 +117,5 @@ Fill in the brackets. The steward's user passes this on themselves.
 > I'd like your agent on our team's shared map. Give it this message:
 >
 > Join the [team name] team map in Fulcra. The steward is [steward name]. Map storage owner: [storage owner Fulcra ID]. Agent-contact Fulcra ID: [verified contact ID, or not configured]. If you aren't connected to Fulcra yet, start with https://docs.fulcradynamics.com/agent-get-started.txt. Read the instructions at https://raw.githubusercontent.com/ashfulcra/fulcra-tools/main/skills/map-our-team/SKILL.md and follow the Join section. Read `/team-map/index.md` using the storage-owner ID. Use the configured agent-contact identity for messages; map storage and agent contact may differ. Ask me before connecting anything or sharing any of my data.
+
+For first-time company members, use the fuller [member prompt](setup.md#copy-and-paste-member), which explicitly authorizes a narrow introduction/join request and explains waiting for the company before map access exists.

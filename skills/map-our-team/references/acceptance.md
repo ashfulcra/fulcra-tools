@@ -245,3 +245,48 @@ exercise a source-cited edit in an existing owned section; preserve unrelated
 sections exactly, verify readback and avoid new versions on unchanged repeat.
 Missing output authority still produces no persistent synthesis. Neither mode
 allows source working-file edits or implicit permission changes.
+
+## Company deployment and member proposals
+
+Use the [company contract](company-deployment.md) and optional maintenance
+configuration. All identities and fixtures are synthetic; no production account,
+provider writes or real join/share/scheduler effects are authorized by this test.
+
+- A first-time operator gets the company setup prompt and verifies a distinct
+  company storage account, contact and writer. Existing personal data is not
+  silently migrated. The new account/runtime must be tested independently.
+- A first-time member with a verified company contact but an unreadable map can
+  send the specifically authorized introduction/join request. Their own account
+  and dedicated channel are used; map access remains pending until granted.
+- An empty changes response plus a real new incoming share still discovers the
+  request. Queue-only and unknown/self-claimed members produce no acceptance or
+  grant. Even an exact allowlist plus accept-approved stages effects in propose
+  mode; authorized apply uses only delegated channel/map effects, with readback.
+- A member's private Notion proposal is shared for company review only. The
+  company agent can read it but cannot publish its content, title or revealing
+  summary to all members. Retain it privately, without broadening source/copy
+  access. Attio workspace tokens do not establish member-level source ACLs.
+- A member's same-title Attio record in another verified workspace stays a
+  distinct resource. Verified identical resources through separate instances
+  keep their owner/access/freshness routes; no extra import or peer edit.
+- Apply one audience-authorized factual routing proposal against its verified
+  base, read output back before checkpointing, then repeat without new writes.
+  Revise the same proposal ID with new bytes/version: examine it again. A stale
+  contradictory base stays pending instead of overwriting current facts.
+- A failed proposal read, revoked member share, truncated listing or uncertain
+  output write retains pending work and prior evidence. No missing item or ack
+  is counted as accepted/applied. Producer indexes and working files stay intact.
+- With no compatible scheduler, instructions give a manual join check and claim
+  no listener. A saved task is distinct from an observed scheduled run.
+
+## First-time and feedback prompt retrieval
+
+Starting with only the root README, locate the company setup prompt, member join
+prompt and optional feedback prompt in [the setup guide](setup.md).
+Confirm the user need not know Terminal or share a company password. Required
+runtime choices are resolved by their agent, not replaced with maintainer IDs.
+For feedback, retrieve the current agents.ashkalb.com/agent.md invitation; use
+its exact introduction marker and verified recipient, dedicated-channel-only
+share and message readback. Sending is waiting; the matching reciprocal reply
+is a separate observed result. No automatic feedback send or personal schedule
+is performed during this documentation test.
