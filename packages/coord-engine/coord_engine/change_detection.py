@@ -9,14 +9,15 @@ watermark advance.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 from .budget import Deadline
-from . import records
+from . import config, records
 
 
 class Coverage(str, Enum):
@@ -71,6 +72,11 @@ class ChangeBatch:
     # feed window.  Its digest keeps generation identity content-specific while
     # the feed watermark deliberately stays at the last proven frontier.
     recovery_snapshot: Optional[str] = None
+    # Set only on an untrusted FEED_WIDE_EMPTY_UNPROVEN batch: the server's
+    # end_time for a window whose start_time matched the requested cursor.
+    # Never a trusted watermark; reconcile may re-anchor to it only after the
+    # full scan that follows has completed (see reconcile).  Not digested.
+    attested_frontier: Optional[str] = None
 
     def for_namespace(self, namespace: str) -> tuple[Change, ...]:
         return tuple(change for change in self.changes if change.namespace == namespace)
@@ -78,10 +84,69 @@ class ChangeBatch:
 
 FEED_BOUNDARY_UNKNOWN = "data-updates coverage boundary unavailable or unparseable"
 FEED_FRONTIER_UNKNOWN = "data-updates coverage frontier unavailable or unparseable"
+#: A long-window empty whose recent sub-window is NOT empty. The wider answer is
+#: disproven: a superset cannot hold fewer changes than its subset.
+FEED_EMPTY_DISPROVEN = (
+    "data-updates reported no changes over a window whose recent sub-window has changes"
+)
+#: A long-window empty the corroboration read could not confirm. Not disproven,
+#: but not proven either, and "a zero signal is not proof of CLEAR".
+FEED_EMPTY_UNCORROBORATED = (
+    "data-updates reported no changes over a long window and corroboration could not be read"
+)
+#: A long-window empty that corroboration (dormant) did not check. Measured live
+#: 2026-10-15: a 38-day window returned ``file_changes: []`` while the last day
+#: alone held 3790 changes. Unlike the two reasons above this is not evidence the
+#: feed lied, only that an empty this wide is unproven -- so it keeps the same
+#: full-scan recovery an unattested boundary gets, never a trusted CLEAR.
+FEED_WIDE_EMPTY_UNPROVEN = (
+    "data-updates reported no changes over a window wider than the corroboration "
+    "bound and corroboration is dormant"
+)
+#: The record-cursor leg cannot be attested with today's CLI: ``get-records``
+#: answers JSONL with no ``after``/``through``, so the transport returns no
+#: window at all.  That is an absent capability, not evidence of a wrong
+#: answer, so it takes the same named full-scan recovery (never a trusted
+#: CLEAR or watermark).  Mismatched/unparseable windows stay non-recoverable.
+RECORD_WINDOW_UNAVAILABLE = "record cursor window unavailable or malformed"
+RECORD_WINDOW_INCOMPLETE = "record cursor window missing after, through, or records"
+#: Only BOUNDARY/FRONTIER, the unproven wide empty (which keeps a window that
+#: was never trusted on the recovery it already took) and the unattestable
+#: record-cursor leg (ruling 7adff21a) license the established-cursor
+#: full-scan recovery. The
+#: two empty-corroboration reasons are deliberately NOT here: whether a feed
+#: caught lying should trigger a full scan is a separate decision from whether an
+#: unreadable coverage boundary should.
 RECOVERABLE_FEED_WINDOW_REASONS = frozenset({
     FEED_BOUNDARY_UNKNOWN,
     FEED_FRONTIER_UNKNOWN,
+    FEED_WIDE_EMPTY_UNPROVEN,
+    RECORD_WINDOW_UNAVAILABLE,
+    RECORD_WINDOW_INCOMPLETE,
 })
+
+#: Corroborate a long-window empty against a recent sub-window. DORMANT BY
+#: DEFAULT -- see `_corroboration_enabled`.
+EMPTY_CORROBORATION_ENV = "COORD_FEED_EMPTY_CORROBORATION"
+#: How recent the corroborating sub-window is, measured BACK FROM THE FEED'S OWN
+#: FRONTIER rather than a local clock, so cross-host clock skew cannot move it.
+EMPTY_CORROBORATION_HOURS_ENV = "COORD_FEED_EMPTY_CORROBORATION_HOURS"
+DEFAULT_EMPTY_CORROBORATION_HOURS = 24.0
+
+
+def _corroboration_enabled() -> bool:
+    """Ships DORMANT: this check can only turn CLEAR into UNKNOWN, never the
+    reverse, so it is strictly fail-closed -- but that direction is exactly what
+    makes it able to freeze a team if it ever misfires. Off until a reviewer has
+    evaluated it live. Any unrecognised value is OFF."""
+    return (os.environ.get(EMPTY_CORROBORATION_ENV, "").strip().lower()
+            in {"1", "true", "yes", "on"})
+
+
+def _corroboration_window(frontier: datetime) -> datetime:
+    hours = config.env_float(EMPTY_CORROBORATION_HOURS_ENV,
+                             DEFAULT_EMPTY_CORROBORATION_HOURS)
+    return frontier - timedelta(hours=hours)
 
 
 def detector_recovery_reason(batch: ChangeBatch) -> Optional[str]:
@@ -186,12 +251,12 @@ def _record_window(
     cardinality, threshold, diff, or substitute identity.
     """
     if not isinstance(value, Mapping):
-        return None, "record cursor window unavailable or malformed"
+        return None, RECORD_WINDOW_UNAVAILABLE
     if not isinstance(prior_watermark, str):
         return None, "record cursor prior watermark unavailable"
     after, through, rows = value.get("after"), value.get("through"), value.get("records")
     if not isinstance(after, str) or not isinstance(through, str) or not isinstance(rows, list):
-        return None, "record cursor window missing after, through, or records"
+        return None, RECORD_WINDOW_INCOMPLETE
     requested = _instant({"uploaded_at": prior_watermark}, "uploaded")
     start = _instant({"uploaded_at": after}, "uploaded")
     end = _instant({"uploaded_at": through}, "uploaded")
@@ -219,8 +284,12 @@ def _coordination_count(
 
     ``data-updates`` reports counts by concrete data type, not an invented
     ``record_counts.coordination`` alias.  The queue's classified records
-    authority is the only proof of which stream belongs to this team.  Missing
-    or malformed evidence is UNKNOWN rather than a zero-count observation.
+    authority is the only proof of which stream belongs to this team.  An
+    unreadable authority or a malformed map/count is UNKNOWN.  A channel absent
+    from a well-formed map is a zero count: live ``data-updates`` omits types
+    with no records in the window (2026-10-15: the coordination channel was
+    absent over 30 minutes and counted 27 over six hours).  A zero is still
+    only a signal; CLEAR needs the attested record-cursor window to prove it.
     """
     data_types = envelope.get("data_types")
     if not isinstance(data_types, Mapping) or deadline.expired():
@@ -234,9 +303,9 @@ def _coordination_count(
     if deadline.expired() or status != "ok" or not isinstance(config, Mapping):
         return None
     channel = config.get("data_type")
-    if not isinstance(channel, str) or not channel.strip() or channel not in data_types:
+    if not isinstance(channel, str) or not channel.strip():
         return None
-    count = data_types[channel]
+    count = data_types.get(channel, 0)
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         return None
     return channel, count
@@ -246,8 +315,14 @@ def _feed_window(
     envelope: Mapping[str, Any], prior_watermark: Optional[str],
 ) -> tuple[Optional[tuple[str, str]], str]:
     """Accept one exact outer feed window and normalize both boundaries."""
-    boundary = _instant({"uploaded_at": envelope.get("after")}, "uploaded")
-    frontier = _instant({"uploaded_at": envelope.get("through")}, "uploaded")
+    # fulcra-api >= 0.1.46 attests its server-side window as start_time /
+    # end_time (space-separated ISO, e.g. "2026-09-07 15:00:41.309344+00:00");
+    # after/through remain accepted. An envelope carrying neither still routes
+    # to the named boundary recovery.
+    boundary = _instant(
+        {"uploaded_at": envelope.get("after", envelope.get("start_time"))}, "uploaded")
+    frontier = _instant(
+        {"uploaded_at": envelope.get("through", envelope.get("end_time"))}, "uploaded")
     if boundary is None:
         return None, FEED_BOUNDARY_UNKNOWN
     if frontier is None:
@@ -271,6 +346,53 @@ class ChangeDetector:
     def __init__(self, transport: Any) -> None:
         self.transport = transport
 
+    def _corroborate_empty(
+        self, reader: Any, feed_start: str, feed_watermark: str, deadline: Deadline,
+    ) -> tuple[bool, str]:
+        """Check an empty long-window answer against a recent sub-window.
+
+        Returns ``(True, "")`` when the empty stands: either the window was not
+        long enough to be worth corroborating, or the sub-window was also empty.
+        Returns ``(False, reason)`` when the empty is DISPROVEN by a non-empty
+        sub-window, or when corroboration could not be read at all.
+
+        The sub-window is measured back from the FEED'S OWN frontier, never a
+        local clock, so cross-host skew cannot move the boundary.
+
+        The uncorroborated case is deliberately fail-closed, and it is the reason
+        this ships dormant: a transient failure on the EXTRA read turns a
+        genuinely clean pass into UNKNOWN. That is the correct direction per
+        "a zero signal is not proof of CLEAR", and it is also a real cost a
+        reviewer should weigh before it is switched on.
+        """
+        start = _instant({"uploaded_at": feed_start}, "uploaded")
+        frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")
+        if start is None or frontier is None:
+            # _feed_window already normalized both; unreachable in practice, and
+            # if it ever happens we have not proven anything.
+            return False, FEED_EMPTY_UNCORROBORATED
+        cutoff = _corroboration_window(frontier[0])
+        if start[0] >= cutoff:
+            # The window asked about is already within the recent bound. There is
+            # no wider-vs-narrower comparison to make, so the empty stands on the
+            # same evidence it always did.
+            return True, ""
+        if deadline.expired():
+            return False, FEED_EMPTY_UNCORROBORATED
+        try:
+            sub = reader(cutoff.isoformat().replace("+00:00", "Z"), deadline=deadline)
+        except Exception:
+            return False, FEED_EMPTY_UNCORROBORATED
+        if not isinstance(sub, Mapping):
+            return False, FEED_EMPTY_UNCORROBORATED
+        sub_rows = sub.get("file_changes")
+        if not isinstance(sub_rows, list):
+            return False, FEED_EMPTY_UNCORROBORATED
+        if sub_rows:
+            # A superset cannot hold fewer changes than its subset.
+            return False, FEED_EMPTY_DISPROVEN
+        return True, ""
+
     def poll(self, team: str, prior_watermark: Optional[str], deadline: Deadline) -> ChangeBatch:
         if deadline.expired():
             return _unknown()
@@ -290,6 +412,46 @@ class ChangeDetector:
         if feed_window is None:
             return _unknown(feed_reason)
         feed_start, feed_watermark = feed_window
+
+        # An EMPTY `file_changes` is not proof of quiet. Measured at the raw
+        # HTTP boundary 2026-10-02: every rep at -8d through -15d returned HTTP
+        # 500 (which the transport correctly maps to None = UNKNOWN), and at
+        # widths that otherwise answer -- -1d, -7d, -25d -- some reps returned
+        # rc 0 with `file_changes: []` while `data_types` was populated. Two
+        # consecutive calls on the identical range gave 0 and 105768.
+        #
+        # No mechanism and no rate are asserted here. The samples do not
+        # isolate window width from other variables, the -1d case shows a
+        # comfortably-working width can fail, and clean batches of 6 and 20
+        # were also observed. The usable fact is the one this check acts on:
+        # an empty answer is well-formed, passes every attestation above, and
+        # is indistinguishable from a genuinely quiet range by shape.
+        #
+        # This check needs no horizon constant because it tests the
+        # CONTRADICTION rather than predicting a limit: a window cannot hold
+        # fewer changes than a sub-window of itself, so one extra read over a
+        # recent sub-window either corroborates the empty or disproves it. It
+        # costs at most one read, only on the empty path, and it cannot catch a
+        # false empty on a window narrower than the corroboration bound.
+        if not rows and _corroboration_enabled():
+            corroborated, reason = self._corroborate_empty(
+                reader, feed_start, feed_watermark, deadline)
+            if not corroborated:
+                return _unknown(reason)
+        elif not rows and "after" not in envelope:
+            # Only the start_time/end_time shape, which no prior engine ever
+            # trusted; an after/through empty keeps its pinned dormant default.
+            start = _instant({"uploaded_at": feed_start}, "uploaded")
+            frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")
+            if start is None or frontier is None:
+                return _unknown(FEED_WIDE_EMPTY_UNPROVEN)
+            if start[0] < _corroboration_window(frontier[0]):
+                return ChangeBatch(
+                    (), MappingProxyType(
+                        {name: Coverage.UNKNOWN for name in NAMESPACES}),
+                    False, reason=FEED_WIDE_EMPTY_UNPROVEN,
+                    attested_frontier=feed_watermark,
+                )
 
         coverage = {name: Coverage.CLEAR for name in NAMESPACES}
         changes: list[Change] = []
@@ -342,6 +504,20 @@ class ChangeDetector:
             cursor, prior_watermark=record_start,
         )
         if window is None:
+            if window_reason in (RECORD_WINDOW_UNAVAILABLE,
+                                 RECORD_WINDOW_INCOMPLETE):
+                # The outer feed window [cursor, feed_watermark] is attested at
+                # this point; only the record leg is unattestable.  Carry the
+                # frontier for the re-anchor gate (complete task read) AND the
+                # parsed outer-feed changes (ruling 2a301eab): untrusted,
+                # coverage UNKNOWN, never a watermark -- reconcile uses them as
+                # positive evidence that a partial task listing is partial.
+                return ChangeBatch(
+                    tuple(changes), MappingProxyType(
+                        {name: Coverage.UNKNOWN for name in NAMESPACES}),
+                    False, reason=window_reason,
+                    attested_frontier=feed_watermark,
+                )
             return _unknown(window_reason)
         record_through, record_rows = window
         feed_frontier = _instant({"uploaded_at": feed_watermark}, "uploaded")

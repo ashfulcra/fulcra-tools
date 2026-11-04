@@ -47,11 +47,22 @@ extensively. None of that makes this a supported Fulcra product.
   and its [agent skill](skills/fulcra-agent-continuity/SKILL.md).
 - **Keep shared knowledge or preferences:** [Vault](packages/fulcra-vault/README.md)
   and [Prefs](packages/fulcra-prefs/README.md).
+- **Find your team's knowledge across tools:** [Map Our Team](skills/map-our-team/README.md)
+  keeps a shared guide to locations, roles and agent connections, researches gaps,
+  and can link optional sync-app indexes without requiring a sync app. Its
+  [maintenance recipe](skills/map-our-team/references/scheduled-maintenance.md)
+  can run manually or in your agent's own scheduled-task host. Start with the
+  [company account and member setup guide](docs/team-knowledge-setup.md) for
+  first-time installation, member proposals, incoming joins and copyable prompts.
 - **Bring local apps and exports into Fulcra:** [Collect](#collect-on-a-mac)
   and the [source guide](docs/how-do-i-get-my-data.md).
 - **Build something on Fulcra:** the [FDE skill](skills/fulcra-fde/SKILL.md).
 - **Find a particular tool:** the complete [package index](#package-index)
   and [skill index](#skill-index) below.
+
+For feedback or requests to the maintainer's agents, use the
+[agent contact instructions](skills/map-our-team/references/setup.md#feedback-or-requests-to-ashs-agents)
+through [agents.ashkalb.com](https://agents.ashkalb.com).
 
 ## The demo: point two agents at this repo
 
@@ -104,10 +115,11 @@ is not a requirement to run every piece together.
 | Package | What it does |
 |---|---|
 | [coord-engine](packages/coord-engine/README.md) | Team tasks, directives, roles, reviews, presence, continuity, routing, and other bus bookkeeping. |
-| [coord-v5](packages/coord-v5/README.md) | Opt-in Node coordination alpha foundation: typed work, presence/roles, replay, backlog, locally bounded checkpoint byte verification, native-listener enrollment, reversible local worker/listener/executor instructions, explicit journal-claimed Claude CLI delivery, host-injected Codex desktop delivery, and private durable import of operator-trusted handoff verification receipts. Start with [guided setup](packages/coord-v5/docs/onboarding.md); see [bounded-release evidence and separate full-handoff gates](docs/coord/V5-RELEASE-STATUS.md). Instruction selection grants nothing and installs no schedule. Codex delivery requires trusted host callbacks; native acceptance is not receiver acknowledgment or lifecycle proof. Local verification and receipt import do not independently prove remote retrieval, access, or source completeness; existing teams are not upgraded automatically. |
+| [coord-v5](packages/coord-v5/README.md) | Opt-in Node coordination alpha foundation: typed work, presence/roles, replay, backlog, locally bounded checkpoint byte verification, native-listener enrollment, reversible local worker/listener/executor instructions, explicit journal-claimed Claude CLI delivery, host-injected Codex desktop delivery, private durable import of operator-trusted handoff verification receipts, and an experimental parallel data-updates/watermark reader with shadow comparison and gated audits. Start with [guided setup](packages/coord-v5/docs/onboarding.md); see [bounded-release evidence and separate full-handoff gates](docs/coord/V5-RELEASE-STATUS.md). Instruction selection grants nothing and installs no schedule. Codex delivery requires trusted host callbacks; native acceptance is not receiver acknowledgment or lifecycle proof. Local verification, receipt import and update hints do not independently prove remote retrieval, access, or source completeness; existing teams are not upgraded automatically. |
 | [coord-fold](packages/coord-fold/README.md) | Folds coordination events into bounded, resumable obligation views. |
 | [coord-mesh](packages/coord-mesh/README.md) | Cross-account coordination through outboxes and scoped data shares. |
 | [coord-tracker-bridge](packages/coord-tracker-bridge/README.md) | Projects coordination work into external trackers; includes a Linear adapter and separate planning/apply steps. |
+| [aicq-claude-mod](packages/aicq-claude-mod/README.md) | Alpha Claude Code mod (needs a Claude Code build with mods and the `fulcra` CLI signed in): shows your agents' mesh and workspace messages as collaborations inside a session and answers them under the AICQ response modes. Install it from this repository's plugin marketplace with `/plugin marketplace add ashfulcra/fulcra-tools`, then `/plugin install aicq@fulcra-tools`. |
 | [fulcra-continuity](packages/fulcra-continuity/README.md) | Standalone checkpoints and resume briefs for long-running work. |
 | [fulcra-vault](packages/fulcra-vault/README.md) | Shared markdown knowledge, links, owned sections, and generated indexes in Fulcra Files. |
 | [fulcra-prefs](packages/fulcra-prefs/README.md) | Preference signals, compiled views, and consent-gated preference sharing and decisions. |
@@ -129,6 +141,8 @@ is not a requirement to run every piece together.
 | [attention](packages/attention/README.md) | Browser attention collection, including the [Chrome extension](packages/attention/chrome/README.md). Extensions send directly to Fulcra; Collect’s entry helps with setup. |
 | [dayone](packages/dayone/README.md) | Imports selected journal entries from a local Day One database or JSON export. |
 | [gmail](packages/gmail/README.md) | Read-only Gmail polling, filtering, file uploads, and optional bus relay. |
+| [local-sources](packages/local-sources/README.md) | Selected local folders, Obsidian vaults, and exported meeting transcripts, with no provider sign-in. |
+| [notion](packages/notion/README.md) | Selected Notion pages copied to Fulcra Files; read-only preview and internal connection setup. Bundled in Collect 0.1.4; live Notion verification is pending. |
 | [media-helpers](packages/media-helpers/README.md) | Media-history importers for APIs, exports, local libraries, feeds, and webhooks. |
 | [csv-importer](packages/csv-importer/README.md) | Maps CSV columns into Fulcra records with import checks and deduplication. |
 | [netflix-skill](packages/netflix-skill/README.md) | An agent-led Netflix viewing-history import and optional sharing workflow. |
@@ -171,6 +185,7 @@ includes the skills under `skills/` and those bundled inside packages.
 | [Content review](skills/fulcra-content-review/SKILL.md) | Checking human-facing prose for supported claims, voice, and evidence. |
 | [FDE](skills/fulcra-fde/SKILL.md) | Taking a product idea through discovery, prototype, and build. |
 | [Lab results](skills/fulcra-lab-results/SKILL.md) | Reading, verifying, and importing lab reports. |
+| [Map Our Team](skills/map-our-team/SKILL.md) | Finding team knowledge, company/member onboarding, member-owned proposals and scheduled reconciliation with separate source/copy permissions. [Setup and prompts](docs/team-knowledge-setup.md). |
 | [Sealed secrets](skills/sealed-secrets/SKILL.md) | Encrypted credential bundles and verification after recovery. |
 | [CSV import](packages/csv-importer/skills/fulcra-csv/SKILL.md) | Mapping a user’s CSV into Fulcra. |
 | [Preferences](packages/fulcra-prefs/skill/SKILL.md) | Capturing and using user-owned preferences. |
@@ -184,7 +199,11 @@ Use Collect when you want one of its connectors or a common place to schedule
 imports. It is one way to put data into Fulcra; standalone importers and direct
 API writes are also available.
 
-**[Download Collect 0.1.2 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.2-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Collect 0.1.4 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+
+The 0.1.4 Mac beta is signed and notarized. It bundles 26 plugin entries,
+including local folders, meeting transcript exports, and selected Notion pages.
+Each source needs its own setup; Notion live verification is still pending.
 
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)

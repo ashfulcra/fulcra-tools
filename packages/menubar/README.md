@@ -27,7 +27,11 @@ in place. If macOS refuses to unload the cached job, the app reports the failure
 and does not claim the old process was upgraded.
 
 The beta is signed, notarized, and built for Apple silicon. It includes its
-Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. Chrome
+Python runtime, Fulcra CLI, dashboard, and plugins, including Apple Notes, Apple Reminders, and Todoist. The 0.1.4 installer also includes the
+[local folder and transcript plugins](../local-sources/README.md) and
+[selected Notion pages](../notion/README.md). Notion live verification remains
+pending. Notion currently uses an internal connection token and page
+links, with preview on by default. Chrome
 Attention is an optional extension in the disk image with separate setup.
 [Release details and plugin status](../../docs/collect.md#plugin-status).
 
@@ -65,6 +69,8 @@ have passed disposable-task completion checks against real Fulcra Files.
 
 ## Build the .app
 
+The current beta bundle version is 0.1.4.
+
 From the repository root on an Apple silicon Mac:
 
 ```sh
@@ -75,14 +81,27 @@ bash packages/menubar/scripts/verify_bundle.sh
 The Briefcase build includes workspace wheels, Python, native command launchers,
 and the web setup interface. It writes the app under
 `packages/menubar/build/fulcra-menubar/macos/app/`. The build rejects embedded
-builder-home paths and removes nonportable pip scripts before signing.
+builder-home paths and removes nonportable pip scripts before signing. It also
+removes generated Python bytecode after build and bundle verification because
+bytecode can retain a source path from the build machine. Dependency wheels can
+include their upstream test suites, so the same sanitizer removes those files
+while keeping runtime helpers such as `numpy.testing`. That currently trims
+about 36 MiB from the arm64 app. A final read-only privacy check runs before
+signing. The dock/Finder icon is the checked-in native `menubar-icon.icns`;
+the smaller PNG beside it remains the monochrome menu-bar template. A release
+asset test catches a missing native icon before Briefcase can substitute its
+default.
 
 For distribution, use `packages/menubar/scripts/release_dmg.sh` with an approved
 Developer ID identity and a configured notary profile. It signs, notarizes,
 staples, and checks the installer. The build also verifies a fresh copy of the
 signed app, which catches invalid nested launcher signatures before the disk
-image is made. An unnotarized development build is not the normal installer;
-do not ask users to bypass Gatekeeper.
+image is made. If Apple rejects notarization or stapling, the script tries to
+move the image to `*.NOT_NOTARIZED.dmg` so it cannot be mistaken for a release.
+If that move fails, it deletes the canonical image; if the filesystem blocks
+both operations, it exits with the exact unsafe path instead of claiming the
+image was quarantined. An unnotarized development build is not the normal
+installer; do not ask users to bypass Gatekeeper.
 
 ## Manual smoke checklist
 
@@ -177,3 +196,9 @@ destination. If you add a new deep-link here, update the contract there too.
 
 The current app uses Python, PyObjC, and rumps. A Swift port is a design direction;
 it is not part of the released installer.
+
+Bundle sanitization refuses test-only payloads whose leaf or any ancestor inside app_packages is a symlink, or whose resolved path escapes app_packages. This prevents pyarrow test pruning from deleting outside the bundle; check-only mode also fails closed.
+
+The disk image includes [install instructions](resources/dmg/INSTALL.txt) for
+all new sources. Notarization, stapling, and Gatekeeper acceptance are release
+requirements; do not ask users to bypass Gatekeeper.

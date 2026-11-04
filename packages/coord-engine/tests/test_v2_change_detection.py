@@ -110,6 +110,7 @@ def test_captured_live_envelope_preserves_the_named_boundary_recovery_reason():
 
     assert batch.trusted is False
     assert batch.reason == "data-updates coverage boundary unavailable or unparseable"
+    assert batch.attested_frontier is None
 
 
 def test_every_supported_namespace_is_explicitly_covered():
@@ -307,15 +308,23 @@ def test_authority_lookup_stops_at_detector_deadline_without_retry(monkeypatch):
     assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
 
 
-def test_missing_configured_channel_count_is_unknown_not_clear():
-    """A missing live count cannot silently become a zero-count record window."""
-    batch = _poll(ConfiguredFeedTransport({
+def test_absent_channel_zero_still_needs_cursor_proof_before_clear():
+    """Absent from a well-formed data_types is a zero SIGNAL (ruling 2adfcb99),
+    never a shortcut to CLEAR: with no attested record-cursor window to prove
+    the zero, the pass stays UNKNOWN. Formerly
+    test_missing_configured_channel_count_is_unknown_not_clear."""
+    transport = ConfiguredFeedTransport({
         "data_types": {"AppleLocationUpdate": 50, CHECKPOINT_TYPE: 4},
         "file_changes": [],
-    }))
+    })
+
+    batch = _poll(transport)
 
     assert batch.trusted is False
     assert batch.coverage["acknowledgments_responses"].value == "UNKNOWN"
+    # The zero reached the cursor stage: UNKNOWN is the missing proof, not
+    # an unreadable count.
+    assert transport.record_calls == 1
 
 
 def test_captured_engine_owned_file_shapes_are_explicit_and_trusted():
@@ -610,3 +619,163 @@ def test_transport_failure_without_an_envelope_is_unknown():
     assert batch.trusted is False
     assert batch.changes == ()
     assert all(state.value == "UNKNOWN" for state in batch.coverage.values())
+
+
+def test_live_start_end_time_envelope_is_an_attested_window():
+    """fulcra-api 0.1.46 attests its window as start_time/end_time (captured
+    2026-10-15); that shape must bind the cursor instead of forcing a full scan."""
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 12:00:00+00:00",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [_row("team/r/task/a.md", update_id="task")],
+    }
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope  # exactly as the CLI emits it: no after/through
+
+    batch = _poll(transport)
+
+    assert batch.reason != "data-updates coverage boundary unavailable or unparseable"
+    assert batch.trusted is True
+    assert batch.watermark == "2026-08-20T12:00:00Z"
+
+
+def test_live_start_time_mismatching_requested_watermark_is_unknown():
+    envelope = {
+        "start_time": "2026-08-19 11:00:00+00:00",
+        "end_time": "2026-08-20 12:00:00+00:00",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [],
+    }
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope
+
+    batch = _poll(transport)
+
+    assert batch.trusted is False
+
+
+def test_wide_empty_with_dormant_corroboration_recovers_instead_of_trusting(monkeypatch):
+    """A 38-day live window returned [] while one day held 3790 changes
+    (2026-10-15). With corroboration dormant, such an empty must keep the
+    full-scan recovery, never advance the cursor as a trusted CLEAR."""
+    from coord_engine.change_detection import (
+        ChangeDetector, FEED_WIDE_EMPTY_UNPROVEN, detector_recovery_reason)
+
+    monkeypatch.delenv("COORD_FEED_EMPTY_CORROBORATION", raising=False)
+    envelope = {
+        "start_time": "2026-09-07 15:00:41.309344+00:00",
+        "end_time": "2026-10-15 13:30:21.685020+00:00",
+        "data_types": {COORDINATION_TYPE: 0},
+        "file_changes": [],
+    }
+    transport = FeedTransport(envelope)
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-09-07T15:00:41.309344Z", Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert batch.reason == FEED_WIDE_EMPTY_UNPROVEN
+    assert detector_recovery_reason(batch) == FEED_WIDE_EMPTY_UNPROVEN
+    # The server-attested frontier rides the untrusted batch for re-anchoring;
+    # it is never the trusted watermark.
+    assert batch.attested_frontier == "2026-10-15T13:30:21.685020Z"
+    assert batch.watermark is None
+
+
+def test_channel_absent_from_live_data_types_is_a_zero_signal_the_cursor_proves():
+    """Live data-updates omits zero-record types (2026-10-15: the coordination
+    channel was absent over 30 minutes, 27 over six hours). Absence is a zero
+    signal, so an attested empty record window makes the pass trusted instead
+    of a non-recoverable UNKNOWN that aborts every quiet interval."""
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 12:00:00+00:00",
+        "data_types": {"AppleLocationUpdate": 50},
+        "file_changes": [_row("team/r/task/a.md", update_id="task")],
+    }
+    transport = ConfiguredFeedTransport(envelope, records={
+        "after": "2026-08-20T11:00:00Z",
+        "through": "2026-08-20T12:00:00Z",
+        "records": [],
+    })
+    transport.envelope = envelope
+
+    batch = _poll(transport)
+
+    assert batch.trusted is True
+    assert transport.record_channels == [(COORDINATION_TYPE, "2026-08-20T11:00:00Z")]
+    assert batch.coverage["acknowledgments_responses"].value == "CLEAR"
+
+
+@pytest.mark.parametrize("data_types", [
+    {COORDINATION_TYPE: "27"},
+    {COORDINATION_TYPE: -1},
+    {COORDINATION_TYPE: True},
+    {COORDINATION_TYPE: 2.5},
+    {COORDINATION_TYPE: None},
+    [COORDINATION_TYPE],
+    "not-a-mapping",
+])
+def test_malformed_configured_channel_count_stays_unknown(data_types):
+    """Only ABSENCE from a well-formed map is a zero; a non-Mapping data_types
+    or a present malformed value stays UNKNOWN even with a clean cursor."""
+    batch = _poll(ConfiguredFeedTransport({
+        "data_types": data_types,
+        "file_changes": [],
+    }, records={"after": "2026-08-20T11:00:00Z",
+                "through": "2026-08-20T12:00:00Z", "records": []}))
+
+    assert batch.trusted is False
+
+
+@pytest.mark.parametrize("records", [None, {"records": []},
+                                     [{"id": "jsonl-line"}]])
+def test_unattestable_record_cursor_is_a_recoverable_reason(records):
+    """Ruling 7adff21a: a JSONL-only get-records (no after/through) is an absent
+    capability, not a wrong answer. With the outer window attested, the batch
+    stays untrusted but licenses the named recovery and carries the frontier."""
+    from coord_engine.change_detection import (
+        ChangeDetector, RECORD_WINDOW_INCOMPLETE, RECORD_WINDOW_UNAVAILABLE,
+        detector_recovery_reason)
+
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 11:30:00+00:00",
+        "data_types": {COORDINATION_TYPE: 10},
+        "file_changes": [_row("team/r/task/a.md", update_id="task")],
+    }
+    transport = FeedTransport(envelope, records=records)
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-08-20T11:00:00Z", Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert batch.watermark is None
+    assert batch.reason in (RECORD_WINDOW_UNAVAILABLE, RECORD_WINDOW_INCOMPLETE)
+    assert detector_recovery_reason(batch) == batch.reason
+    assert batch.attested_frontier == "2026-08-20T11:30:00Z"
+
+
+def test_a_wrong_record_window_stays_non_recoverable():
+    from coord_engine.change_detection import ChangeDetector, detector_recovery_reason
+
+    envelope = {
+        "start_time": "2026-08-20 11:00:00+00:00",
+        "end_time": "2026-08-20 11:30:00+00:00",
+        "data_types": {COORDINATION_TYPE: 10},
+        "file_changes": [],
+    }
+    transport = FeedTransport(envelope, records={
+        "after": "2026-08-19T00:00:00Z", "through": "2026-08-20T11:30:00Z",
+        "records": []})
+    transport.envelope = envelope
+
+    batch = ChangeDetector(transport).poll(
+        "r", "2026-08-20T11:00:00Z", Deadline.open(5.0))
+
+    assert batch.trusted is False
+    assert detector_recovery_reason(batch) is None
+    assert batch.attested_frontier is None

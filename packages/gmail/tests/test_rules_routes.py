@@ -97,7 +97,7 @@ def test_search_preserves_list_order_under_parallel_fetch(client):
 
 
 def test_ui_has_search_feedback_and_no_blocking_alert(client):
-    html = client.get("/api/gmail/rules/ui").text
+    html = client.get("/api/gmail/rules/ui.js").text
     assert "Searching…" in html          # loading state
     assert "Search failed:" in html      # error surface
     assert "setStatus" in html           # inline status replaces alert()
@@ -164,7 +164,7 @@ def test_enabled_toggle(client):
 def test_ui_page_renders_builder(client):
     r = client.get("/api/gmail/rules/ui")
     assert r.status_code == 200
-    html = r.text
+    html = r.text + client.get("/api/gmail/rules/ui.js").text
     for anchor in ("gmail-rule-builder", "/api/gmail/rules/search",
                    "/api/gmail/rules/derive", "/api/gmail/rules/preview"):
         assert anchor in html
@@ -175,11 +175,11 @@ def test_ui_page_renders_builder(client):
     assert "document.cookie" not in html
     assert "localStorage" not in html
     assert "'Authorization'" not in html
-    # Untrusted ids are emitted as escaped JSON strings inside handlers rather
-    # than interpolated raw into JavaScript source.
-    assert "JSON.stringify(String(s))" in html
-    assert "jsonArg(m.message_id)" in html
-    assert "jsonArg(r.id)" in html
+    # Untrusted IDs stay in escaped inert attributes; dispatch uses fixed handlers.
+    assert 'data-id="${esc(m.message_id)}"' in html
+    assert 'data-id="${esc(r.id)}"' in html
+    assert "addEventListener('click'" in html
+    assert 'onclick=' not in html
     # The edit workflow: an edit affordance that issues a PUT, and a merge over
     # the full rule (editBody) so unedited fields aren't dropped on save.
     assert "editRule(" in html
@@ -324,3 +324,12 @@ def test_search_no_pii_in_logs(client, caplog):
     client.post("/api/gmail/rules/search", json={"account_id": "acct", "q": "receipt"})
     assert "receipt" not in caplog.text.lower() or "Your receipt" not in caplog.text
     assert "shop.example" not in caplog.text
+
+def test_ui_uses_external_script_without_inline_handlers(client):
+    import re
+    body = client.get('/api/gmail/rules/ui').text
+    assert '<script src="/api/gmail/rules/ui.js" defer></script>' in body
+    script = client.get('/api/gmail/rules/ui.js')
+    assert script.status_code == 200
+    assert script.headers['content-type'].startswith('application/javascript')
+    assert not re.search(r'onclick\s*=', body + script.text)

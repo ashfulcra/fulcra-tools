@@ -85,8 +85,7 @@ If you change the contract here, update both.
 ## Setup-step component model
 
 The wizard renders one of N kinds of setup step (`intro`, `input`,
-`oauth`, `file_upload`, `permission_request`, `browser_extension`,
-`test_connection`, `definition_picker`,
+`oauth`, `file_upload`, `folder_picker`, `permission_request`, `test_connection`, `definition_picker`,
 `external_action`, `done`). Up to refactor #68 (2026-05-27) those
 kinds were rendered by `<template x-if="current_step.kind === '...'">`
 blocks inline in `index.html` — duplicated at two render sites
@@ -107,12 +106,24 @@ clicks are ignored, and failures leave access ungranted. A plugin without a
 request callback retains the existing **Open System Settings** / **Verify access**
 flow, including Full Disk Access.
 
-This capability is in the 0.1.2 app. See the [callback contract](../collect/README.md#native-permission-requests).
+This capability is in the 0.1.3 app. See the [callback contract](../collect/README.md#native-permission-requests).
+
+### Local folder selection
+
+The `folder_picker` step calls the authenticated loopback daemon only after the
+user chooses **Choose folder**. The daemon opens a fixed macOS folder chooser,
+validates the result, and saves the absolute path in Collect's private local
+configuration. The picker response contains only the folder's display name;
+the authenticated local settings API continues to return saved path settings
+when the dashboard reopens configuration. Canceling
+or selecting the filesystem root leaves Next blocked. Folder selection does not
+enable a plugin or upload any files; a later `test_connection` preview and the
+final enable action remain separate.
 
 ### List selection
 
 The shared `input` component renders `Setting.kind="multiselect"` as checkboxes
-for both onboarding and dashboard Configure. This is in the 0.1.2 app.
+for both onboarding and dashboard Configure. This is in the 0.1.3 app.
 
 Plugins declare `default=[]` and provide a `setting_options(ctx, key)` callback
 through the [Collect plugin contract](../collect/README.md#discovered-multiselect-settings).
@@ -134,6 +145,19 @@ when the user skips the selection step after a failed save. Enable saves the
 current selections again so a skipped edit cannot leave a different scope on
 file. Next, Back, and Skip navigation never enable or run a plugin; the final
 **Enable & start sync** / **Enable & run preview** action grants that consent.
+
+### Setting value types
+
+The wizard keeps setting values in the types declared by the plugin contract.
+Checkboxes submit JSON booleans, port fields submit numbers, multiselects submit
+arrays, and text fields submit strings. Numeric interval input becomes seconds;
+ISO 8601 input such as `PT5M` stays a string. Declared boolean and numeric
+defaults keep those types instead of being stringified. The daemon rejects a
+wrong type instead of saving a value that the plugin will misread later.
+
+The settings response also normalizes the exact string forms written by older
+wizards, so reopening Configure repairs the display and the next save writes the
+native type.
 
 ### Why Lit (not a build step, not Alpine partials)
 
@@ -252,7 +276,6 @@ dist/static/components/
 ├── step-oauth.js                  — kind="oauth"
 ├── step-file_upload.js            — kind="file_upload"
 ├── step-permission_request.js     — kind="permission_request"
-├── step-browser_extension.js      — kind="browser_extension"
 ├── step-test_connection.js        — kind="test_connection"
 ├── step-definition_picker.js      — kind="definition_picker" (the original drift offender)
 └── step-done.js                   — kind="done"
@@ -261,3 +284,5 @@ dist/static/components/
 Permission requests and checks are tied to a specific visit to the setup step.
 Leaving and returning starts a fresh check; a late response from the previous
 visit cannot authorize the new one or unblock another step.
+
+OAuth callback completion runs from static/oauth-complete.js under the same strict script CSP as the wizard. Plugin identifiers are read from inert HTML data attributes.

@@ -465,6 +465,67 @@ export function openWorkTransportStore(input) {
         return { status: 'blocked', code: 'INVALID_VERIFICATION' };
       }
     },
+    /** Local advisory update watermark, separate from retained record observations. */
+    updateCursor() {
+      const row = db.prepare('SELECT value FROM meta WHERE key=?').get('updates_cursor_v1');
+      if (!row) return null;
+      const value = JSON.parse(row.value);
+      if (!plain(value) || Object.keys(value).length !== 4 ||
+          !['cursor', 'last_direct_at', 'record_start'].every(key => typeof value[key] === 'string' && Number.isFinite(Date.parse(value[key]))) ||
+          typeof value.hints_disabled !== 'boolean') throw new Error('STORE_CORRUPT');
+      return value;
+    },
+    /** Durable safety evidence is independent of advisory cursor advancement. */
+    updateHealth() {
+      const row = db.prepare('SELECT value FROM meta WHERE key=?').get('updates_health_v1');
+      if (!row) return { revision: 0, retry_required: false, hints_disabled: false };
+      const value = JSON.parse(row.value);
+      if (!plain(value) || Object.keys(value).length !== 3 ||
+          !Number.isSafeInteger(value.revision) || value.revision < 0 ||
+          typeof value.retry_required !== 'boolean' || typeof value.hints_disabled !== 'boolean')
+        throw new Error('STORE_CORRUPT');
+      return value;
+    },
+    /** Failures and detected omissions are monotonic, including stale readers.
+     * @param {{retryRequired?:boolean,hintsDisabled?:boolean}} flags */
+    noteUpdateHealth({ retryRequired = false, hintsDisabled = false }) {
+      return transaction(() => {
+        const current = this.updateHealth();
+        if (current.revision === Number.MAX_SAFE_INTEGER) throw new Error('STORE_CORRUPT');
+        const next = { revision: current.revision + 1,
+          retry_required: current.retry_required || retryRequired,
+          hints_disabled: current.hints_disabled || hintsDisabled };
+        db.prepare('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+          .run('updates_health_v1', canonicalWorkJson(next));
+        return next;
+      });
+    },
+    /** Compare-and-swap: concurrent/stale reads cannot advance past unprocessed work.
+     * A health revision binds recovery to failures known when the read began.
+     * @param {any} expected @param {any} next @param {number|undefined} healthRevision */
+    commitUpdateCursor(expected, next, healthRevision = undefined) {
+      if (!plain(next) || Object.keys(next).length !== 4 ||
+          !['cursor', 'last_direct_at', 'record_start'].every(key => typeof next[key] === 'string' && Number.isFinite(Date.parse(next[key]))) ||
+          typeof next.hints_disabled !== 'boolean') return { status: 'blocked', code: 'INVALID_UPDATE_CURSOR' };
+      return transaction(() => {
+        const current = this.updateCursor();
+        if (canonicalWorkJson(current) !== canonicalWorkJson(expected) ||
+            (current && Date.parse(next.cursor) < Date.parse(current.cursor)))
+          return { status: 'blocked', code: 'UPDATE_CURSOR_CONFLICT' };
+        const health = this.updateHealth();
+        if (healthRevision !== undefined && health.revision !== healthRevision)
+          return { status: 'blocked', code: 'UPDATE_HEALTH_CONFLICT' };
+        // Only a revision-bound clean recovery may clear the retry obligation.
+        if (healthRevision !== undefined && health.retry_required) {
+          if (health.revision === Number.MAX_SAFE_INTEGER) throw new Error('STORE_CORRUPT');
+          db.prepare('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+            .run('updates_health_v1', canonicalWorkJson({ ...health, revision: health.revision + 1, retry_required: false }));
+        }
+        db.prepare('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+          .run('updates_cursor_v1', canonicalWorkJson(next));
+        return { status: 'stored' };
+      });
+    },
     /** Return historically valid proofs plus current inactivity markers. The view decides
      * whether an inactive proof is needed to preserve an already accepted transfer.
      * @param {{now:number}} timing */

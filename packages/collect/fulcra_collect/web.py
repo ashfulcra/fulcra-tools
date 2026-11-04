@@ -281,7 +281,10 @@ def build_app(daemon) -> FastAPI:
         )
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-eval' 'unsafe-inline'; "
+            # Alpine evaluates its declarative expressions with AsyncFunction,
+            # which requires unsafe-eval. All scripts are packaged local files;
+            # no inline script tags or browser event handlers are needed.
+            "script-src 'self' 'unsafe-eval'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; connect-src 'self'; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "

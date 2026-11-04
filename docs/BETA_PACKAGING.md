@@ -1,8 +1,9 @@
 # Beta packaging — signed macOS `.dmg`
 
 How to produce the signed, notarized **Fulcra Collect.dmg** that beta testers
-install. The `.dmg` bundles the app (collect core + every plugin, gmail
-included), the built attention Chrome extension, and install instructions.
+install. The `.dmg` bundles the app (collect core + every plugin listed in the
+menubar package requirements, including Gmail, selected Notion pages and the local-source plugins),
+the built attention Chrome extension, and install instructions.
 
 ## What's automated vs. what's yours
 
@@ -40,9 +41,12 @@ App-Specific Passwords. Then store a reusable notarytool profile:
 ```
 xcrun notarytool store-credentials "fulcra-notary" \
   --apple-id "<your-apple-id>" \
-  --team-id "<TEAMID>" \
-  --password "<app-specific-password>"
+  --team-id "<TEAMID>"
 ```
+
+Paste the app-specific password at the secure prompt. Do not add it to the
+command: command-line arguments can be saved in shell history or exposed to
+other local processes.
 
 (Alternatively use an App Store Connect API key; pass `--key`/`--key-id`/
 `--issuer` to `store-credentials` instead.)
@@ -56,6 +60,21 @@ bash packages/menubar/scripts/release_dmg.sh
 ```
 
 Output: `dist/Fulcra Collect.dmg`, signed + notarized + stapled.
+
+Before starting, check the saved notarization profile with a read-only request:
+
+```sh
+xcrun notarytool history --keychain-profile fulcra-notary --output-format json
+```
+
+Use your configured profile name if it differs. If the tool cannot find it,
+check the login keychain while the Mac is unlocked. Restore missing credentials
+through the secure setup above; never put a password in the repo or a build log.
+
+If submission stops without an ID, preserve the disk image and the private log.
+Check submission history and any macOS prompts before trying again. An unfinished
+command does not prove Apple received nothing. Keep submission receipts and
+machine diagnostics outside the public tree.
 
 Environment variables:
 
@@ -79,7 +98,10 @@ Environment variables:
 5. Creates the `.dmg` (`hdiutil`).
 6. Signs the `.dmg` (`codesign --timestamp`).
 7. Notarizes (`notarytool submit --wait`), staples (`stapler staple`), and
-   validates the staple.
+   validates the staple. If any of those Apple steps fails, the script tries to
+   move the image to `<name>.NOT_NOTARIZED.dmg`. If the move fails, it deletes
+   the canonical image. If the filesystem blocks both operations, the run still
+   fails and prints the exact canonical path that must not be distributed.
 8. Runs the Gatekeeper assessment (`spctl`, in `gatekeeper_gate.sh`) as the
    **release gate**. A dmg can be notarized and stapled and still be rejected,
    and a rejected dmg is one a beta tester cannot open — so a rejection fails
@@ -100,7 +122,10 @@ spctl -a -t open --context context:primary-signature -v "dist/Fulcra Collect.dmg
 - **`security find-identity` shows only "Apple Development"** — the Developer ID
   Application cert isn't installed; redo one-time step 1.
 - **`notarytool` auth error** — the profile is missing or the app-specific
-  password was rotated; recreate it (one-time step 2).
+  password was rotated; recreate it (one-time step 2). A missing or expired
+  Apple Developer agreement also blocks submission; the Account Holder must
+  accept it before retrying. The failed image is kept as
+  `*.NOT_NOTARIZED.dmg` for diagnosis and must not be distributed.
 - **Notarization "Invalid" with signing errors** — usually a nested binary
   signed without the hardened runtime. The script signs via Briefcase precisely
   to avoid this; if it recurs, fetch the log with

@@ -58,6 +58,12 @@ def test_setup_steps_order():
     assert kinds.index("test_connection") < kinds.index("definition_picker")
 
 
+def test_full_disk_access_guidance_names_installed_app():
+    body = "\n".join(step.body_md for step in APPLE_TV_PLUGIN.setup_steps)
+    assert "Fulcra Collect" in body
+    assert "the daemon needs" not in body
+
+
 def test_plugin_entry_point_resolves():
     """The fulcra_collect.plugins entry point must load this exact object."""
     from importlib.metadata import entry_points

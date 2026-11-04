@@ -5,6 +5,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -14,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from .. import config as _config
 from .. import freshness, state
+from ..plugin import normalize_legacy_plugin_settings, validate_setting_value
 from ._deps import RouteContext, SecretBody
 
 
@@ -103,6 +106,46 @@ _UPLOAD_MAX_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 # overhead low, small enough that the per-request memory footprint stays flat.
 _UPLOAD_CHUNK_BYTES = 64 * 1024
 
+_FOLDER_PICKER_SCRIPT = (
+    'POSIX path of (choose folder with prompt "Choose a folder for Fulcra Collect")'
+)
+
+
+class FolderSelectionCancelled(RuntimeError):
+    """The user closed the native folder chooser without selecting a folder."""
+
+
+def _choose_macos_folder() -> Path:
+    """Open a fixed macOS folder chooser and return a validated directory.
+
+    The AppleScript is constant: plugin ids, setting keys and user content never
+    enter the script. The selected absolute path is returned only to the local
+    route so it can be stored in Collect's private configuration.
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _FOLDER_PICKER_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("macOS folder picker is unavailable") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or "").casefold()
+        if "canceled" in detail or "cancelled" in detail or "-128" in detail:
+            raise FolderSelectionCancelled("folder selection canceled")
+        raise RuntimeError("macOS folder picker did not complete")
+    raw = (result.stdout or "").strip()
+    if not raw:
+        raise FolderSelectionCancelled("folder selection canceled")
+    selected = Path(raw).expanduser().resolve(strict=False)
+    if selected == Path("/"):
+        raise ValueError("select a folder below the filesystem root")
+    if not selected.is_dir():
+        raise ValueError("selected item is not an existing directory")
+    return selected
+
 
 def register(app: FastAPI, ctx: RouteContext) -> None:
     daemon = ctx.daemon
@@ -144,10 +187,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.get("/api/plugin/{plugin_id}/settings", dependencies=[Depends(require_token)])
     def get_settings(plugin_id: str):
-        if plugin_id not in daemon.registry.plugins:
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
         cfg = _config.load()
-        return cfg.plugin_settings.get(plugin_id, {})
+        return normalize_legacy_plugin_settings(
+            plugin, cfg.plugin_settings.get(plugin_id, {}),
+        )
 
     @app.get("/api/plugin/{plugin_id}/setting_options/{key}", dependencies=[Depends(require_token)])
     def setting_options(plugin_id: str, key: str):
@@ -191,15 +237,15 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         unknown = [k for k in body if k not in declared]
         if unknown:
             raise HTTPException(400, f"unknown setting keys: {unknown}")
-        # Validate enum values for enum-kind settings + URL scheme/host
-        # for url-kind settings. Enum gates user picks from a list;
-        # URL gates self-SSRF — see _validate_url_setting above.
+        # Validate every value against its declared kind before it can reach
+        # config.toml or a plugin. URL settings get the additional public-host
+        # gate below — see _validate_url_setting above.
         for k, v in body.items():
             s = declared[k]
-            if s.kind == "enum" and s.enum_values and v not in s.enum_values:
-                raise HTTPException(400, f"setting {k!r}: value {v!r} not in {s.enum_values}")
-            if s.kind == "multiselect":
-                _validate_multiselect(k, v)
+            try:
+                validate_setting_value(s, v)
+            except ValueError as exc:
+                raise HTTPException(400, f"setting {k!r}: {exc}") from None
             if s.kind == "url":
                 _validate_url_setting(k, v)
         # Persist
@@ -208,6 +254,39 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         _config.save(cfg)
         daemon.handle_request({"cmd": "reload"})
         return {"ok": True}
+
+    @app.post(
+        "/api/plugin/{plugin_id}/choose-folder",
+        dependencies=[Depends(require_token)],
+    )
+    def choose_folder(plugin_id: str, key: str):
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None:
+            raise HTTPException(404, f"unknown plugin {plugin_id!r}")
+        declared = {setting.key: setting for setting in plugin.required_settings}
+        setting = declared.get(key)
+        if setting is None:
+            raise HTTPException(400, f"unknown setting key {key!r}")
+        if setting.kind != "path":
+            raise HTTPException(
+                400,
+                f"setting {key!r} has kind {setting.kind!r}; folder selection "
+                "is only allowed for 'path' settings",
+            )
+        try:
+            selected = _choose_macos_folder()
+        except FolderSelectionCancelled:
+            raise HTTPException(409, "Folder selection canceled.") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except RuntimeError:
+            raise HTTPException(503, "Could not open the macOS folder picker.") from None
+
+        cfg = _config.load()
+        cfg.update_plugin_settings(plugin_id, {key: str(selected)})
+        _config.save(cfg)
+        daemon.handle_request({"cmd": "reload"})
+        return {"ok": True, "name": selected.name}
 
     # ------------------------------------------------------------------
     # File upload — backs the wizard's file_upload step. The user picks a
@@ -300,20 +379,21 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             pass
 
         target = target_dir / safe_name
-        tmp = target.with_suffix(target.suffix + ".tmp")
 
-        # Atomic write: stream into a sibling .tmp file, then os.rename onto
-        # the target. Avoids leaving a half-written file behind on a crash
-        # or upload-cap trip, and avoids the small window where another
-        # reader could see a partial file at the final path.
+        # Atomic write: each request gets a private sibling .tmp file, then
+        # os.replace publishes it onto the target. A deterministic
+        # ``<target>.tmp`` lets concurrent same-name uploads truncate or
+        # consume each other's source file. mkstemp's O_EXCL allocation keeps
+        # the streams separate while retaining atomic publication.
         written = 0
+        tmp: Path | None = None
         try:
-            fd = os.open(
-                str(tmp),
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{safe_name}.", suffix=".tmp", dir=target_dir,
             )
+            tmp = Path(tmp_name)
             with os.fdopen(fd, "wb") as out:
+                os.fchmod(out.fileno(), 0o600)
                 while True:
                     chunk = await file.read(_UPLOAD_CHUNK_BYTES)
                     if not chunk:
@@ -333,7 +413,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         except HTTPException:
             # Clean up the partial .tmp file on a size-cap trip etc.
             try:
-                if tmp.exists():
+                if tmp is not None and tmp.exists():
                     tmp.unlink()
             except OSError:
                 pass
@@ -343,7 +423,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                 "upload failed for plugin=%s key=%s", plugin_id, key,
             )
             try:
-                if tmp.exists():
+                if tmp is not None and tmp.exists():
                     tmp.unlink()
             except OSError:
                 pass

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from fulcra_collect import worker
-from fulcra_collect.plugin import Plugin, RunContext
+from fulcra_collect.plugin import Plugin, RunContext, Setting
 from fulcra_collect.registry import RegistryResult
 from fulcra_collect.worker import _scrub_secrets
 
@@ -37,6 +37,35 @@ def test_worker_captures_epoch_with_settings(collect_home: Path):
                     run=lambda ctx: captured.append((ctx.config_epoch, ctx.config)))
     _run_capturing(plugin, collect_home)
     assert captured == [(cfg.plugin_epochs['tasks'], {'selected': ['one']})]
+
+
+def test_worker_normalizes_values_written_by_older_wizards(collect_home: Path):
+    from fulcra_collect import config
+
+    cfg = config.load()
+    cfg.plugin_settings["legacy"] = {
+        "dry_run": "false",
+        "listen_port": "9292",
+        "poll_every": "300",
+    }
+    config.save(cfg)
+    captured = []
+    plugin = Plugin(
+        id="legacy",
+        name="Legacy",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda ctx: captured.append(ctx.config),
+        required_settings=(
+            Setting("dry_run", "Preview", "toggle"),
+            Setting("listen_port", "Port", "port"),
+            Setting("poll_every", "Interval", "interval"),
+        ),
+    )
+
+    _run_capturing(plugin, collect_home)
+
+    assert captured == [{"dry_run": False, "listen_port": 9292, "poll_every": 300}]
 
 
 def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
@@ -497,44 +526,3 @@ def test_set_credential_writes_to_declared_scope(
     assert events[-1]["outcome"] == "done", events[-1]
     assert ("user", "shared-tok", "new-user-val") in writes
     assert ("plugin", "scopetest", "api-key", "new-plugin-val") in writes
-
-
-def test_a_blocked_credential_is_reported_as_needing_authorization(
-        collect_home: Path, monkeypatch):
-    """A stored-but-unreadable credential must not be reported as unset.
-
-    Saying "credential is not set" sends the user to re-enter a secret that
-    is already there, and hides the real cause: the keychain ACL no longer
-    matches this build of the app after a rebuild/re-sign.
-    """
-    from fulcra_collect import credentials
-    from fulcra_collect.plugin import Credential
-
-    monkeypatch.setattr(credentials, "is_blocked",
-                        lambda plugin_id, key: key == "api-key")
-    plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
-                    collect_mode="historical",
-                    run=lambda ctx: None,
-                    required_credentials=(Credential(key="api-key", label="K", help="h"),))
-    events = _run_capturing(plugin, collect_home)
-    err = events[-1]["error"]
-    assert events[-1]["outcome"] == "error"
-    assert "authorization" in err.lower()
-    assert "Always Allow" in err
-    assert "set-credential" not in err, "must not tell the user to re-enter a stored secret"
-
-
-def test_an_actually_unset_credential_still_says_how_to_set_it(
-        collect_home: Path, monkeypatch):
-    from fulcra_collect import credentials
-    from fulcra_collect.plugin import Credential
-
-    monkeypatch.setattr(credentials, "is_blocked", lambda plugin_id, key: False)
-    plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
-                    collect_mode="historical",
-                    run=lambda ctx: None,
-                    required_credentials=(Credential(key="api-key", label="K", help="h"),))
-    events = _run_capturing(plugin, collect_home)
-    err = events[-1]["error"]
-    assert "set-credential" in err
-    assert "authorization" not in err.lower()

@@ -50,11 +50,22 @@ def build(
     *,
     now: str,
     human: str = "human",
+    source_at: Any = None,
+    source_kind: str = "summaries",
 ) -> dict[str, Any]:
     """The four digest sections. Tolerates absent add-ons: with no presence
     shards, per_agent degrades to task parties; acks/needs:human tags simply
     don't appear if directives aren't used."""
     from . import presence as presence_mod
+
+    source_time = presence_mod.parse_iso_z(source_at) if isinstance(source_at, str) else None
+    rendered_time = presence_mod.parse_iso_z(now)
+    source = {
+        "kind": source_kind,
+        "at": presence_mod.to_iso_z(source_time) if source_time else None,
+        "age_hours": (max(0.0, (rendered_time - source_time).total_seconds() / 3600)
+                      if source_time and rendered_time else None),
+    }
 
     open_rows = [r for r in rows if r.get("status") in OPEN_STATUSES]
     horizon = _plus_days(now, UPCOMING_DAYS)
@@ -76,6 +87,7 @@ def build(
         "schema": "coord.teams.digest.v1",
         "at": now,
         "human": human,
+        "source": source,
         "blocked_on_you": blocked_on_you,
         "upcoming": upcoming,
         "per_agent": presence_mod.agents_digest(rows, presence_shards, now=now),
@@ -90,6 +102,18 @@ def render(d: dict[str, Any]) -> str:
         return f"- [{r.get('priority')}] {r.get('title') or r.get('name')}{who}"
 
     parts = [f"# Digest — {d.get('at')}"]
+    degraded = d.get("read-degraded")
+    if degraded:
+        reason = (degraded.get("reason") if isinstance(degraded, dict) else None)
+        parts.append(f"\n> UNKNOWN — {reason or 'summaries index unreadable'}. "
+                     "Rows/counts are last-known/unverified; absence of listed "
+                     "work does not establish an empty workload.")
+    source = d.get("source")
+    if isinstance(source, dict):
+        at, age = source.get("at"), source.get("age_hours")
+        parts.append(f"Source: {at or 'unknown'} ({source.get('kind') or 'unknown'}); "
+                     + (f"age={age:.2f}h" if isinstance(age, (float, int)) else "age=unknown")
+                     + "; source anchor only, not complete-history proof")
     sections = (
         (f"Blocked on {d.get('human')}", d.get("blocked_on_you") or []),
         ("Upcoming (7d)", d.get("upcoming") or []),
@@ -105,7 +129,8 @@ def render(d: dict[str, Any]) -> str:
         for a in agents:
             counts = ", ".join(f"{k}={v}" for k, v in sorted((a.get("open") or {}).items()))
             parts.append(f"- [{a.get('liveness')}] {a.get('agent')}"
-                         + (f" — {counts}" if counts else " — no open work")
+                         + (f" — {counts}" if counts else
+                            " — open work unknown" if degraded else " — no open work")
                          + (f" — {a.get('summary')}" if a.get("summary") else ""))
     return "\n".join(parts) + "\n"
 

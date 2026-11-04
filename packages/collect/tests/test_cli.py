@@ -102,3 +102,31 @@ def test_reset_definition_clears_cache(collect_home: Path, monkeypatch):
 
     after = state.load("lastfm")
     assert after.definition_id is None
+
+
+def test_cli_bootstraps_ca_before_daemon_serve(monkeypatch, tmp_path):
+    """The daemon and its later children need a usable inherited CA path."""
+    import ssl
+    import certifi
+    from types import SimpleNamespace
+
+    bundle = tmp_path / "certifi.pem"
+    bundle.write_text("synthetic CA bundle")
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.setattr(ssl, "get_default_verify_paths", lambda: SimpleNamespace(
+        openssl_cafile="/nonexistent/collect-test-ca.pem", openssl_capath=None))
+    monkeypatch.setattr(certifi, "where", lambda: str(bundle))
+    observed = []
+
+    class StubDaemon:
+        def serve(self):
+            import os
+            observed.append((os.environ.get("SSL_CERT_FILE"),
+                             os.environ.get("REQUESTS_CA_BUNDLE")))
+
+    monkeypatch.setattr("fulcra_collect.cli.Daemon", StubDaemon)
+    monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: False)
+    result = CliRunner().invoke(cli, ["daemon"])
+    assert result.exit_code == 0
+    assert observed == [(str(bundle), str(bundle))]

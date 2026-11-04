@@ -61,9 +61,9 @@ uv run --package fulcra-media-helpers fulcra-media setup  # interactive; needs a
 | **Deezer** | `import deezer` | History API with an OAuth access token; requires working provider credentials. |
 | **Netflix** | `import netflix` | Slim (in-app) CSV or full GDPR export — auto-detected. |
 | **Trakt** | `import trakt` | Direct API. Catches Apple TV+ via Universal Trakt Scrobbler. Cluster handling + cross-source twin dedup built in. |
-| **Apple Podcasts** | `import apple-podcasts` | macOS local SQLite (`MTLibrary.sqlite`). Add `apple-podcasts-timemachine` for replay recovery from Time Machine backups. |
+| **Apple Podcasts** | `import apple-podcasts` | macOS local SQLite (`MTLibrary.sqlite`). The Collect app needs Full Disk Access; a source install grants it to the terminal app. Add `apple-podcasts-timemachine` for replay recovery from Time Machine backups. |
 | **Apple Music takeout** | Collect plugin `apple-music-takeout` | Apple Data & Privacy play-activity CSV. |
-| **Apple TV on-device** | Collect plugin `apple-tv` | Local Watch Now cache; requires Full Disk Access and a recently opened TV app. |
+| **Apple TV on-device** | Collect plugin `apple-tv` | Local Watch Now cache; requires Full Disk Access for Fulcra Collect (or the source-run terminal app) and a recently opened TV app. |
 | **Apple TV / TV+ takeout** | `import apple-takeout` | privacy.apple.com → Apple Media Services → Playback Activity CSV. |
 | **Letterboxd** | `import letterboxd` | Public RSS diary feed. |
 | **Goodreads** | `import goodreads` | Public RSS of the 'read' shelf. |

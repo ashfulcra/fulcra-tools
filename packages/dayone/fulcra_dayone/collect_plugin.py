@@ -104,9 +104,10 @@ def dayone_permission_check(ctx: RunContext) -> dict:
             return {
                 "granted": False,
                 "hint": (
-                    "Full Disk Access not granted. Add the terminal running "
-                    "fulcra-collect to System Settings -> Privacy & Security "
-                    "-> Full Disk Access."
+                    "Full Disk Access not granted. In System Settings -> "
+                    "Privacy & Security -> Full Disk Access, add Fulcra "
+                    "Collect from Applications. For a source install, add "
+                    "the terminal app that starts the daemon."
                 ),
             }
         return {"granted": False, "hint": f"sqlite error: {exc}"}
@@ -198,9 +199,9 @@ PLUGIN = Plugin(
                 "`~/Library/Group Containers/*.dayoneapp2/Data/Documents/"
                 "DayOne.sqlite`, which macOS guards behind Full Disk Access. "
                 "Open **System Settings -> Privacy & Security -> Full Disk "
-                "Access**, click **+**, and add the terminal you're running "
-                "the daemon from (or the bundled fulcra-collect.app once it "
-                "exists).\n\n"
+                "Access**, click **+**, and add **Fulcra Collect** from "
+                "Applications. If you run Collect from source, add the "
+                "terminal app that starts the daemon instead.\n\n"
                 "Also for live-app mode: don't quit Day One entirely — "
                 "entries from your other devices sync locally only while "
                 "the app is running."
