@@ -114,14 +114,18 @@ def _event_row(rid, slug="m"):
 
 def test_send_succeeds_only_when_a_NEW_event_is_read_back(capsys, monkeypatch):
     calls = {"n": 0}
+    published = {}
+    def record(channel, payload, **kwargs):
+        published["note"] = payload
+        return (0, "", "")
 
     def reads(*a, **k):
         calls["n"] += 1
         if calls["n"] == 1:          # pre-write snapshot: empty
             return cli.transport.Result(cli.transport.EMPTY)
-        return cli.transport.Result(cli.transport.OK, rows=[_event_row("rec-new")])
+        return cli.transport.Result(cli.transport.OK, rows=[{"id":"rec-new", "note":published["note"]}])
 
-    monkeypatch.setattr(cli.transport, "record", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(cli.transport, "record", record)
     monkeypatch.setattr(cli.transport, "get_records", reads)
     rc = cli.main(["--channel", CH, "send", "--to-user", UID, "--slug", "m"])
     assert rc == cli.RC_OK
@@ -384,3 +388,15 @@ def test_whitespace_reports_is_refused_not_a_traceback(capsys, monkeypatch):
                    "--reports", "   "])
     assert rc == cli.RC_REFUSED
     assert "whitespace only" in capsys.readouterr().err
+
+
+def test_send_readback_must_match_the_exact_message_identity(capsys, monkeypatch):
+    calls={'n':0}
+    def reads(*args,**kwargs):
+        calls['n']+=1
+        if calls['n']==1:
+            return cli.transport.Result(cli.transport.EMPTY)
+        return cli.transport.Result(cli.transport.OK, rows=[_event_row('other-concurrent-record')])
+    monkeypatch.setattr(cli.transport,'record',lambda *args,**kwargs:(0,'',''))
+    monkeypatch.setattr(cli.transport,'get_records',reads)
+    assert cli.main(['--channel',CH,'send','--to-user',UID,'--slug','m'])==cli.RC_UNKNOWN
