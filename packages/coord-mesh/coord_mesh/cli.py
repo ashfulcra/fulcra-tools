@@ -224,7 +224,7 @@ def cmd_send(args) -> int:
         if not rid or rid in seen_before:
             continue          # pre-existing: not evidence of THIS write
         got = envelope.parse(wire.note_text(row))
-        if got and got.get("slug") == note["slug"] and got.get("to_user") == note["to_user"]:
+        if got == note:
             print(f"mesh send: {note['kind']} {note['slug']} -> {note['to_user']} "
                   f"(read-back verified, new record {rid})")
             return RC_OK

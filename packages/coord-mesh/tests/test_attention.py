@@ -112,8 +112,14 @@ def test_existing_legacy_ack_reconciles_without_resend(tmp_path):
         actual={'v':1,'mid':'legacy-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','body':'In reply to synthetic-message: Received.'}
         s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','independent authorized source readback')
         s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','independent authorized source readback')
+        assert len(s.pending())==1
+        assert s.pending()[0]['reply_state'] is None
+        assert 'legacy-record' in s.pending()[0]['receiver_evidence']
+        reply={'v':1,'mid':'answer-mid','kind':'response','to_user':'synthetic-peer','in_reply_to':'synthetic-message','body':'Here is the directory.'}
+        s.prepare_reply('synthetic-peer','synthetic-record',reply)
+        s.claim_reply('synthetic-peer','synthetic-record')
+        s.verify_reply('synthetic-peer','synthetic-record',reply,'answer-record')
         assert s.pending()==[]
-        assert s.snapshot()['entries'][0]['reply_record_id']=='legacy-record'
 
 
 @pytest.mark.parametrize('change',[{'to_user':'wrong-peer'},{'slug':'other-ack'},{'body':'Unrelated receipt'},{'kind':'request'}])
@@ -135,3 +141,41 @@ def test_legacy_ack_cannot_overwrite_an_uncertain_send(tmp_path):
         with pytest.raises(ValueError,match='uncertain'):
             s.verify_legacy_reply('synthetic-peer','synthetic-record',actual,'legacy-record','source readback')
         assert s.pending()[0]['reply_state']=='claimed'
+
+
+def test_historical_midless_directives_have_a_stable_source_bound_reply_target(tmp_path):
+    incoming = note('directive')
+    del incoming['mid']
+    p=tmp_path/'attention.db'
+    with AttentionStore(p) as s:
+        s.ingest('synthetic-peer','synthetic-record',incoming,'synthetic-recipient')
+        reply_to=s.pending()[0]['reply_to']
+        s.ingest('other-peer','synthetic-record',incoming,'synthetic-recipient')
+        assert s.pending()[0]['reply_to'] != s.pending()[1]['reply_to']
+    with AttentionStore(p) as s:
+        entry=next(e for e in s.pending() if e['source_user_id']=='synthetic-peer')
+        assert entry['reply_to']==reply_to
+        assert entry['envelope']==incoming
+        reply={'v':1,'mid':'answer-mid','kind':'response','to_user':'synthetic-peer','in_reply_to':reply_to}
+        s.prepare_reply('synthetic-peer','synthetic-record',reply)
+        s.claim_reply('synthetic-peer','synthetic-record')
+        s.verify_reply('synthetic-peer','synthetic-record',reply,'answer-record')
+        assert [e['source_user_id'] for e in s.pending()]==['other-peer']
+
+
+def test_v1_legacy_receipt_disposition_reopens_without_losing_source_evidence(tmp_path):
+    import json
+    p=tmp_path/'attention.db'
+    actual={'v':1,'mid':'legacy-mid','kind':'response','to_user':'synthetic-peer','slug':'synthetic-question-ack','body':'In reply to synthetic-message: Received.'}
+    with AttentionStore(p) as s:
+        s.ingest('synthetic-peer','synthetic-record',note('request'),'synthetic-recipient')
+        s.db.execute("UPDATE attention SET state='responded',receiver_evidence='old-source-readback',reply_json=?,reply_state='verified',reply_record_id='legacy-record'", (json.dumps(actual),))
+        s.db.execute('PRAGMA user_version=1')
+        s.db.commit()
+    with AttentionStore(p) as s:
+        entry=s.pending()[0]
+        assert entry['reply_state'] is None
+        evidence=json.loads(entry['receiver_evidence'])
+        assert evidence['envelope']==actual
+        assert evidence['record_id']=='legacy-record'
+        assert evidence['evidence']=='old-source-readback'

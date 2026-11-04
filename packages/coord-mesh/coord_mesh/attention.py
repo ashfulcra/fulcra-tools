@@ -5,6 +5,7 @@ readback. This store grants no authority, sends nothing, and creates no listener
 """
 from contextlib import contextmanager
 import json
+from hashlib import sha256
 import os
 import sqlite3
 from pathlib import Path
@@ -19,6 +20,20 @@ def canonical(value):
     return text
 
 
+def reply_identity(peer, record_id, incoming):
+    """Keep wire IDs intact; old mid-less records use a source-qualified key."""
+    return incoming.get('mid') or 'mesh-record:' + sha256(canonical([peer, record_id]).encode()).hexdigest()
+
+
+def legacy_receipt(peer, incoming, actual):
+    mid = incoming.get('mid')
+    return (isinstance(actual, dict) and actual.get('v') == 1 and bool(mid) and
+            actual.get('kind') == 'response' and bool(actual.get('mid')) and
+            actual.get('to_user') == peer and
+            actual.get('slug') == incoming.get('slug', '') + '-ack' and
+            isinstance(actual.get('body'), str) and actual['body'].startswith('In reply to ' + mid + ':'))
+
+
 class AttentionStore:
     def __init__(self, path):
         path = Path(path)
@@ -27,25 +42,36 @@ class AttentionStore:
         os.chmod(path, 0o600)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             self.db.close()
             raise ValueError('unsupported attention schema')
         if version == 0 and self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone():
             self.db.close()
             raise ValueError('not an attention database')
-        if version == 1:
+        if version in (1, 2):
             columns = {r['name'] for r in self.db.execute('PRAGMA table_info(attention)')}
             if columns != {'source_user_id', 'record_id', 'envelope_json', 'state', 'receiver_evidence', 'reply_json', 'reply_state', 'reply_record_id'}:
                 self.db.close()
                 raise ValueError('unreadable attention schema')
         self.db.execute('PRAGMA journal_mode=WAL')
+        self.db.execute('BEGIN IMMEDIATE')
         with self.db:
+            # Another opener may have completed migration while this one waited.
+            version = self.db.execute('PRAGMA user_version').fetchone()[0]
             self.db.execute('''CREATE TABLE IF NOT EXISTS attention (
               source_user_id TEXT NOT NULL, record_id TEXT NOT NULL,
               envelope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
               receiver_evidence TEXT, reply_json TEXT, reply_state TEXT,
               reply_record_id TEXT, PRIMARY KEY(source_user_id, record_id))''')
-            self.db.execute('PRAGMA user_version=1')
+            if version == 1:
+                # v1 promoted legacy receipt-only ACKs into answered requests.
+                # Reopen those exact source-verified shapes, preserving evidence.
+                for row in self.db.execute("SELECT * FROM attention WHERE state='responded' AND reply_state='verified' AND reply_json IS NOT NULL"):
+                    incoming, actual = json.loads(row['envelope_json']), json.loads(row['reply_json'])
+                    if legacy_receipt(row['source_user_id'], incoming, actual):
+                        receipt = canonical({'envelope': actual, 'record_id': row['reply_record_id'], 'evidence': row['receiver_evidence']})
+                        self.db.execute("UPDATE attention SET state='pending',receiver_evidence=?,reply_json=NULL,reply_state=NULL,reply_record_id=NULL WHERE source_user_id=? AND record_id=?", (receipt, row['source_user_id'], row['record_id']))
+            self.db.execute('PRAGMA user_version=2')
 
     def __enter__(self):
         return self
@@ -100,7 +126,7 @@ class AttentionStore:
         with self._write():
             row = self._entry(peer, record_id)
             incoming = json.loads(row['envelope_json'])
-            if not incoming.get('mid') or reply.get('in_reply_to') != incoming['mid'] or reply.get('to_user') != peer or reply.get('kind') != 'response' or not reply.get('mid'):
+            if reply.get('v') != 1 or reply.get('in_reply_to') != reply_identity(peer, record_id, incoming) or reply.get('to_user') != peer or reply.get('kind') != 'response' or not reply.get('mid'):
                 raise ValueError('reply binding mismatch')
             text = canonical(reply)
             if row['reply_json']:
@@ -129,7 +155,7 @@ class AttentionStore:
             self.db.execute("UPDATE attention SET state='responded',reply_state='verified',reply_record_id=? WHERE source_user_id=? AND record_id=?", (reply_record_id, peer, record_id))
 
     def verify_legacy_reply(self, peer, record_id, actual_envelope, reply_record_id, evidence):
-        """Reconcile a source-read old ACK with an exact textual message anchor.
+        """Record a source-read old ACK as receipt evidence, never an answer.
 
         No send or invented in_reply_to field. Never replace a pending send claim.
         """
@@ -138,24 +164,25 @@ class AttentionStore:
         with self._write():
             row = self._entry(peer, record_id)
             incoming = json.loads(row['envelope_json'])
-            mid = incoming.get('mid')
-            if not mid or actual_envelope.get('kind') != 'response' or not actual_envelope.get('mid') or actual_envelope.get('to_user') != peer or actual_envelope.get('slug') != incoming.get('slug', '') + '-ack' or not str(actual_envelope.get('body', '')).startswith('In reply to ' + mid + ':'):
+            if not legacy_receipt(peer, incoming, actual_envelope):
                 raise ValueError('legacy reply binding mismatch')
             text = canonical(actual_envelope)
             if row['reply_json'] and (row['reply_state'] != 'verified' or row['reply_json'] != text or row['reply_record_id'] != reply_record_id):
                 raise ValueError('conflicting or uncertain reply; reconciliation required')
-            self.db.execute("UPDATE attention SET state='responded',receiver_evidence=?,reply_json=?,reply_state='verified',reply_record_id=? WHERE source_user_id=? AND record_id=?", (evidence, text, reply_record_id, peer, record_id))
+            receipt = canonical({'envelope': actual_envelope, 'record_id': reply_record_id, 'evidence': evidence})
+            self.db.execute('UPDATE attention SET receiver_evidence=? WHERE source_user_id=? AND record_id=?', (receipt, peer, record_id))
 
     def snapshot(self):
         entries = []
         for row in self.db.execute('SELECT * FROM attention ORDER BY source_user_id,record_id'):
             entry = dict(row)
             entry['envelope'] = json.loads(entry.pop('envelope_json'))
+            entry['reply_to'] = reply_identity(entry['source_user_id'], entry['record_id'], entry['envelope'])
             entry['reply'] = json.loads(entry.pop('reply_json')) if entry['reply_json'] else None
             # pop the null column too, without short-circuit leftovers.
             entry.pop('reply_json', None)
             entries.append(entry)
-        return {'schema': 'mesh-attention/1', 'entries': entries, 'pending': [r for r in entries if r['state'] != 'responded']}
+        return {'schema': 'mesh-attention/2', 'entries': entries, 'pending': [r for r in entries if r['state'] != 'responded']}
 
     def pending(self):
         return self.snapshot()['pending']

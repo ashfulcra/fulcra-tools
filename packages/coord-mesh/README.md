@@ -143,7 +143,7 @@ uv run --package coord-mesh --extra dev --no-editable pytest packages/coord-mesh
 ## Durable request attention (opt-in)
 
 A source cursor proves records were read; it does not prove requests reached a
-worker or received an answer. Incoming `directive`, `query`, and `message`
+worker or received an answer. Incoming `directive`, `query`, `message`, and `request`
 envelopes addressed to the explicit recipient all require attention. Peer data
 is not permission to execute a request.
 
@@ -158,13 +158,19 @@ Keep host terminal/historical dispositions and exact role routing separately.
 Only the returned window can be backfilled; this is not complete-history proof.
 
 Host integrations can import `coord_mesh.attention.AttentionStore`. `snapshot()`
-returns `schema`, `entries`, and `pending`; each entry binds source user, record,
+returns `schema` (`mesh-attention/2`), `entries`, and `pending`; each entry binds source user, record,
 immutable envelope, receiver evidence, reply state, and verified reply record.
 `acknowledge()` records independently obtained receipt evidence but leaves the
 request pending. Do not fabricate receipts to suppress history.
 
+New `coord-mesh send` envelopes carry a generated `mid` which stays fixed through
+encoding, publication and exact full-envelope readback. Legacy mid-less directives
+remain readable. Each attention entry exposes `reply_to`: the original `mid`, or
+a deterministic `mesh-record:` SHA-256 identity bound to its source user and record.
+This fallback leaves the immutable source envelope unchanged and survives restarts.
+
 For an authorized answer, `prepare_reply()` fixes a response with exact source
-recipient and `in_reply_to`; `claim_reply()` commits before the caller's transport
+recipient and `in_reply_to` equal to the entry's `reply_to`; `claim_reply()` commits before the caller's transport
 write. A claimed attempt survives restart and cannot be claimed again. After
 independent source readback, `verify_reply()` requires the exact full response and
 record ID before marking responded. Ambiguous writes require readback reconciliation,
@@ -173,4 +179,19 @@ not themselves establish authentication, native wake, human authorization or
 peer receipt. Keep native delivery, worker read, response publication and remote
 peer consumption distinct.
 
-Legacy acknowledgments may be source-reconciled without sending again through `verify_legacy_reply`: exact source recipient, response kind, incoming slug plus `-ack`, and body prefix `In reply to <original mid>:` must all match. The caller supplies independently read original record ID and receipt evidence. No synthetic `in_reply_to` is added; uncertain reply claims cannot be overwritten.
+Legacy acknowledgments may be source-reconciled without sending again through
+`verify_legacy_reply`: exact source recipient, v1 response kind, incoming slug plus
+`-ack`, and body prefix `In reply to <original mid>:` must all match. The caller
+supplies the independently read reply record ID and receipt evidence. The full
+ACK and readback stay in `receiver_evidence`; an ACK such as "Received" leaves the
+answer obligation pending and does not reserve the answer's reply slot. No
+synthetic `in_reply_to` is added; uncertain reply claims cannot be overwritten.
+
+Opening a schema-v1 database upgrades its version to 2. Previously verified
+legacy ACK-shaped dispositions reopen as pending, preserving the exact old ACK,
+record ID and evidence in `receiver_evidence`. Ordinary verified answers and
+uncertain claims remain intact. Older readers refuse the new version on open rather than
+silently treating a receipt as an answer. Stop older host writers before upgrading;
+the open-time version check cannot fence an already running older connection.
+This migration sends nothing; review
+reopened obligations and prepare a separately authorized answer when appropriate.

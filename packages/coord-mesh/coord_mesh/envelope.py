@@ -11,6 +11,7 @@ recipient is allowed to see. The datashare is the consent object, and only
 where no broader grant already exists.
 """
 import json
+from uuid import uuid4
 from typing import Any, Optional
 
 from . import safety
@@ -40,7 +41,7 @@ def build(*, to_user: str, kind: str, slug: str, to: str = BROADCAST,
         raise ValueError("slug is required — an event with no slug cannot be answered")
 
     note: dict[str, Any] = {
-        "v": V, "to": to, "to_user": to_user,
+        "v": V, "mid": str(uuid4()), "to": to, "to_user": to_user,
         "kind": kind, "pri": priority, "slug": slug,
     }
     # The content rule: claims and pure acks may be envelope-only, but anything
