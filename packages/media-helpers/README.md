@@ -522,13 +522,19 @@ wrapped-plugin fixture using a file is not evidence of worker selection. Existin
 [legacy and current connection setup](#trakt-connections-and-api-apps), source IDs,
 normalization and cluster/twin policy remain unchanged.
 
-Collect's credential status and explicit access recovery include all seven
-consumed fields: client ID, optional legacy client secret, access token, refresh
-token, optional callback, and optional OAuth `created_at`/`expires_in` metadata.
-The two expiry fields are managed by sign-in/refresh, with no manual setup input.
-A saved but inaccessible optional item is UNKNOWN, not confirmed absence, and
-must be recovered before collecting. Older installers omitted the expiry fields
-from their permission inventory; approving a different item cannot fix that gap.
+The development Keychain backend stores client ID, optional legacy client secret,
+access/refresh tokens, callback and token timing metadata in one versioned
+`credential-bundle-v1` item. Logical connection fields share that item's grant;
+`created_at`/`expires_in` are internal metadata with no separate approval controls.
+Reads do not mutate or prompt. Explicit edits and owned refreshes publish one
+whole tuple and verify exact readback; old field items remain intact. Inaccessible
+legacy values remain UNKNOWN. Explicit PKCE reconnect revokes the old generation
+before creating fresh setup, without approving each inaccessible old item. A
+controlled migration may retain explicitly unknown timing metadata while using
+the preserved token pair and live provider-identity checks; a later authoritative
+refresh supplies the timing values. Never infer a timestamp from Keychain creation
+dates or reuse a consumed grant to recover it. Signed upgrade acceptance remains
+a separate prerequisite for publishing this backend.
 
 The Trakt-only [source owner](../collect/fulcra_collect/trakt_source.py) captures
 the exact credential tuple, consent and source generation. Its private nonsecret

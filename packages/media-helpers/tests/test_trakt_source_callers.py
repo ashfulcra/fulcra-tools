@@ -100,6 +100,15 @@ def caller(request, configured, monkeypatch):
         source_creds[key] = value
         if key in {"access_token", "refresh_token"}:
             persist(key, value)
+    def raw_secret(service, key, **kwargs):
+        assert service == 'fulcra-collect:trakt'
+        if key == 'credential-bundle-v1':
+            from fulcra_collect.trakt_source import _FIELDS
+            return json.dumps({'version': 1, 'values': {k: source_creds.get(k) for k in _FIELDS},
+                               'unknown_fields': []})
+        return source_creds.get(key)
+    monkeypatch.setattr(credentials, '_keyring_get', raw_secret)
+    monkeypatch.setattr(credentials, '_authorize_item', lambda service, key: bool(raw_secret(service, key)))
     monkeypatch.setattr(credentials, "get_secret", get_secret)
     monkeypatch.setattr(credentials, "authorize_secret", lambda p, k: bool(get_secret(p, k)))
     monkeypatch.setattr(credentials, "set_secret", put_secret)
@@ -108,6 +117,12 @@ def caller(request, configured, monkeypatch):
     original_init = KeychainStore.__init__
     def synthetic_init(self, *, _quiet_write=None):
         def quiet(key, value):
+            if key == 'credential-bundle-v1':
+                values = json.loads(value)['values']
+                for field, updated in values.items():
+                    if source_creds.get(field) != updated:
+                        put_secret('trakt', field, updated)
+                return
             if value is None:
                 source_creds.pop(key, None)
             else:
@@ -553,8 +568,9 @@ def test_actual_worker_complete_then_source_changed_after_page_one(caller):
     assert not any(k.startswith('v1_media_cursor:') for k in caller.kv)
 
 
-@pytest.mark.parametrize('field', ['client_id', 'access_token', 'refresh_token', 'client_secret', 'redirect_uri', 'created_at', 'expires_in'])
-@pytest.mark.parametrize('kind', ['missing', 'unknown'])
+@pytest.mark.parametrize('field,kind', [(key, 'missing') for key in
+    ['client_id', 'access_token', 'refresh_token', 'client_secret', 'redirect_uri', 'created_at', 'expires_in']]
+    + [('credential-bundle-v1', 'unknown')])
 def test_actual_worker_missing_or_unknown_never_selects_legacy(caller, monkeypatch, field, kind):
     if caller.mode != 'keychain':
         pytest.skip('ordinary daemon Keychain entry')
@@ -567,12 +583,12 @@ def test_actual_worker_missing_or_unknown_never_selects_legacy(caller, monkeypat
             assert outcome == 'done'  # confirmed optional absence retains old OOB contract
             return
     else:
-        original = credentials.get_secret
-        def unknown(plugin, key):
+        original = credentials._keyring_get
+        def unknown(service, key, **kwargs):
             if key == field:
                 raise TimeoutError('synthetic UNKNOWN')
-            return original(plugin, key)
-        monkeypatch.setattr(credentials, 'get_secret', unknown)
+            return original(service, key, **kwargs)
+        monkeypatch.setattr(credentials, '_keyring_get', unknown)
     outcome, _ = caller.worker()
     assert outcome == 'error'
     assert caller.info['gets'] == [] and caller.configured.posts == []
@@ -734,13 +750,13 @@ def test_actual_worker_expired_budget_during_secret_sample_never_claims_grant(ca
     clock = [0.0]
     monkeypatch.setattr(trakt.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(trakt, 'SCAN_SECONDS', 5)
-    original = credentials.get_secret
-    def sample(plugin, key):
-        result = original(plugin, key)
-        if key == 'refresh_token' and ('get', 'Bearer synthetic-token', 2) in caller.info['trace']:
+    original = credentials._keyring_get
+    def sample(service, key, **kwargs):
+        result = original(service, key, **kwargs)
+        if key == 'credential-bundle-v1' and ('get', 'Bearer synthetic-token', 2) in caller.info['trace']:
             clock[0] = 6
         return result
-    monkeypatch.setattr(credentials, 'get_secret', sample)
+    monkeypatch.setattr(credentials, '_keyring_get', sample)
     outcome, _ = caller.worker()
     assert outcome == 'error'
     assert not any(item[0] == 'grant' for item in caller.info['trace'])

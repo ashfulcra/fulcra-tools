@@ -308,6 +308,7 @@ def _validate_identity_observation(value, selection):
 class KeychainStore:
     key = 'keychain:fulcra-collect:trakt'
     file = False
+    bundle_key = 'credential-bundle-v1'
 
     def __init__(self, *, _quiet_write=None):
         self._quiet_write = _quiet_write
@@ -316,32 +317,111 @@ class KeychainStore:
         from .credentials import _mutate_trakt_secret_quiet
         (self._quiet_write or _mutate_trakt_secret_quiet)(key, value)
 
-    def snapshot(self):
+    def _require_quiet_writer(self):
         from . import credentials
-        # Every consumed optional field is a strict quiet read. UNKNOWN propagates.
-        values = {}
-        for key in _FIELDS:
-            try:
-                values[key] = credentials.get_secret('trakt', key)
-            except (credentials.keyring.errors.KeyringError, TimeoutError) as exc:
-                raise credentials.CredentialReadError(exc, stage='credential_hydration',
-                                                      scope='plugin', key=key) from exc
-        return _values(values, complete=False)
+        if self._quiet_write is None and not credentials._uses_macos_keychain():
+            raise credentials.KeychainAccessRequired('Quiet Trakt credential writes unavailable')
+
+    def _read(self, key):
+        from . import credentials
+        try:
+            return credentials._keyring_get('fulcra-collect:trakt', key)
+        except (credentials.keyring.errors.KeyringError, TimeoutError) as exc:
+            raise credentials.CredentialReadError(exc, stage='credential_hydration',
+                scope='plugin', key=self.bundle_key) from exc
+
+    def _decode_bundle(self, raw):
+        bundle = _decode(raw)
+        if (not isinstance(bundle, dict) or set(bundle) != {'version', 'values', 'unknown_fields'}
+                or type(bundle['version']) is not int or bundle['version'] != 1
+                or not isinstance(bundle['values'], dict) or set(bundle['values']) != set(_FIELDS)
+                or not isinstance(bundle['unknown_fields'], list)
+                or any(not isinstance(k, str) for k in bundle['unknown_fields'])
+                or len(bundle['unknown_fields']) != len(set(bundle['unknown_fields']))
+                or any(k not in ('created_at', 'expires_in') or bundle['values'][k] is not None
+                       for k in bundle['unknown_fields'])):
+            _hold()
+        _values(bundle['values'], complete=False)
+        return bundle
+
+    def _write_bundle(self, values, unknown):
+        if set(values) != set(_FIELDS):
+            _hold()
+        _values(values, complete=False)
+        bundle = {'version': 1, 'values': deepcopy(values),
+                  'unknown_fields': [k for k in unknown if values[k] is None]}
+        raw = _encoded(bundle).decode()
+        if len(raw.encode()) > 65536:
+            _hold()
+        self._background(self.bundle_key, raw)
+        if self._decode_bundle(self._read(self.bundle_key)) != bundle:
+            _hold()
+        return bundle
+
+    def _bundle(self):
+        raw = self._read(self.bundle_key)
+        if raw is not None:
+            return self._decode_bundle(raw)
+        # Compatibility conversion is quiet, complete and non-destructive.
+        # A denied optional legacy item is UNKNOWN, never an empty credential.
+        try:
+            values = {key: self._read(key) for key in _FIELDS}
+        except Exception as exc:
+            from .credentials import CredentialReadError
+            if isinstance(exc, CredentialReadError):
+                exc.legacy_migration_required = True
+            raise
+        _values(values, complete=False)
+        # Reads never migrate or mutate credentials. The first explicit edit
+        # or owned refresh publishes the complete tuple to the new item.
+        return {'version': 1, 'values': values, 'unknown_fields': []}
+
+    def prepare_reconnect(self, client_id=None):
+        """Explicit new authorization only, after the owner revoked its old row.
+
+        Unreadable legacy secrets stay untouched. A new PKCE authorization can
+        use the public client ID without approving every old secret first.
+        """
+        self._require_quiet_writer()
+        with Owner(self)._lease('keychain-bundle.lock'):
+            raw = self._read(self.bundle_key)
+            if raw is not None:
+                return self._decode_bundle(raw)['values']
+            client_id = client_id if client_id is not None else self._read('client_id')
+            if not isinstance(client_id, str) or not client_id:
+                _hold()
+            values = {key: None for key in _FIELDS}
+            values['client_id'] = client_id
+            return self._write_bundle(values, ['created_at', 'expires_in'])['values']
+
+    def snapshot(self):
+        # One OS-user lease serializes all profiles' bundle conversions and edits.
+        # Every owned source operation takes source.lock before this short lease.
+        with Owner(self)._lease('keychain-bundle.lock'):
+            return deepcopy(self._bundle()['values'])
 
     def authorize(self, key):
         from . import credentials
-        # Explicit UI authorization only; the owner calls this outside locks.
-        # False is confirmed absence, not denied/UNKNOWN (which must raise).
-        return credentials.authorize_secret('trakt', key)
+        # All logical fields share one application grant. Never authorize each
+        # legacy item again, including nonsecret token timing metadata.
+        return credentials._authorize_item('fulcra-collect:trakt', self.bundle_key)
 
     def set(self, key, value):
-        self._background(key, str(value) if value is not None else None)
+        self._require_quiet_writer()
+        if key not in _FIELDS:
+            _hold()
+        with Owner(self)._lease('keychain-bundle.lock'):
+            bundle = self._bundle()
+            values = deepcopy(bundle['values'])
+            values[key] = str(value) if value is not None else None
+            self._write_bundle(values, bundle['unknown_fields'])
 
     def publish(self, values):
-        current = self.snapshot()
-        for key in _FIELDS:
-            if current.get(key) != values.get(key):
-                self._background(key, values.get(key))
+        self._require_quiet_writer()
+        with Owner(self)._lease('keychain-bundle.lock'):
+            bundle = self._bundle()
+            if bundle['values'] != values or self._read(self.bundle_key) is None:
+                self._write_bundle(values, bundle['unknown_fields'])
 
     def save_receipt(self, attempt, value):
         raw = _encoded(value).decode()
@@ -527,7 +607,15 @@ class Owner:
             self._save(journal)  # revoke before the first secret mutation
             cfg.rotate_plugin_epoch('trakt')
             config._save_locked(cfg, config._config_path())
-            before = self._snapshot(complete=False)
+            try:
+                before = self._snapshot(complete=False)
+            except Exception as exc:
+                if (not isinstance(self.store, KeychainStore) or key != 'client_id'
+                        or not isinstance(value, str) or not value
+                        or not getattr(exc, 'legacy_migration_required', False)):
+                    raise
+                self.store.prepare_reconnect(client_id=value)
+                before = self._snapshot(complete=False)
             setup = {'profile': profile, 'epoch': cfg.plugin_epochs.get('trakt', ''),
                      'settings': config.settings_fingerprint(cfg.plugin_settings.get('trakt', {}))}
             _manual_local(setup)
@@ -578,7 +666,22 @@ class Owner:
             cfg = config.load()
             if cfg.account_transition:
                 _hold()
-            values = self._snapshot(complete=False)
+            try:
+                values = self._snapshot(complete=False)
+            except Exception as exc:
+                if (not isinstance(self.store, KeychainStore)
+                        or not getattr(exc, 'legacy_migration_required', False)):
+                    raise
+                # Explicit reconnect revokes before creating a new bundle.
+                # This path never treats an inaccessible legacy token as absent
+                # during ordinary collection or refresh recovery.
+                journal['sources'][self.key] = {'consent': uuid4().hex,
+                    'generation': uuid4().hex, 'status': 'disconnected'}
+                self._save(journal)
+                cfg.rotate_plugin_epoch('trakt')
+                config._save_locked(cfg, config._config_path())
+                self.store.prepare_reconnect()
+                values = self._snapshot(complete=False)
             if not isinstance(values.get('client_id'), str) or not values['client_id']:
                 _hold()
             attempt = uuid4().hex

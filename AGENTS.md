@@ -146,6 +146,16 @@ Keep status, health, worker and explicit-access error classification consistent:
 pending/changed reads require a quiet recheck, not another approval. Configure's
 recovery surface must include declared OAuth-managed fields outside input steps.
 
+Trakt's development backend uses one versioned `credential-bundle-v1` Keychain
+item for the complete token tuple. Logical field authorization must target that
+item, never start a per-field native approval batch. Ordinary snapshots are
+read-only; explicit edits and owned refreshes publish one whole bundle with exact
+readback. Keep legacy items, no-replay journals, epochs and provider identity pins.
+Unknown legacy timing metadata stays explicitly unknown, not guessed from item
+creation dates. Explicit PKCE reconnect may create fresh setup only after revoking
+the predecessor source; unreadable or corrupt current bundles never fall back to
+legacy secrets. Installed signed-upgrade acceptance is separate from source tests.
+
 ## Public repository privacy
 
 **Selected local-source uploads:** use Collect's captured Fulcra token, never

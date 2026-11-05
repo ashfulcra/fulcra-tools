@@ -25,6 +25,7 @@ def contained(monkeypatch, tmp_path):
     monkeypatch.setattr(credentials.keyring, 'set_password', lambda s, k, v: store.__setitem__((s, k), v))
     monkeypatch.setattr(credentials.keyring, 'delete_password', lambda s, k: store.pop((s, k), None))
     monkeypatch.setattr(credentials, 'authorize_secret', lambda p, k: (p, k) and bool(store.get(('fulcra-collect:' + p, k))))
+    monkeypatch.setattr(credentials, '_authorize_item', lambda s, k: bool(store.get((s, k))))
     monkeypatch.setenv('FULCRA_COLLECT_HOME', str(tmp_path / 'profile'))
     return SimpleNamespace(store=store, root=tmp_path / 'owner')
 
@@ -408,14 +409,14 @@ def test_two_private_processes_one_grant_across_profiles(contained, tmp_path):
         results.close()
 
 
-@pytest.mark.parametrize('failure', ['second-write', 'readback', 'journal-commit', 'no-receipt', 'corrupt-receipt'])
+@pytest.mark.parametrize('failure', ['bundle-write', 'readback', 'journal-commit', 'no-receipt', 'corrupt-receipt'])
 def test_publication_crash_holds_then_local_recovery_without_grant(owner, monkeypatch, failure):
     from fulcra_collect import trakt_source as source
     binding = owner.capture(lambda **_: None, lambda: None)
     original_write, original_publish, original_save = owner.store._background, owner.store.publish, owner._save
     def write(key, value):
-        if key == 'refresh_token':
-            raise OSError('synthetic second-write failure')
+        if key == 'credential-bundle-v1':
+            raise OSError('synthetic atomic-bundle failure')
         original_write(key, value)
     def bad_readback(values):
         original_publish(values)
@@ -424,7 +425,7 @@ def test_publication_crash_holds_then_local_recovery_without_grant(owner, monkey
         if next(iter(journal['sources'].values()))['status'] == 'committed':
             raise OSError('synthetic journal commit failure')
         original_save(journal)
-    if failure == 'second-write':
+    if failure == 'bundle-write':
         monkeypatch.setattr(owner.store, '_background', write)
     elif failure == 'readback':
         monkeypatch.setattr(owner.store, 'publish', bad_readback)
@@ -752,6 +753,7 @@ def test_round1_paused_setup_ui_does_not_hold_short_control_locks(owner, contain
     owner.store._quiet_write = quiet
     monkeypatch.setattr(credentials.keyring, 'set_password', ui_write)
     monkeypatch.setattr(credentials, 'authorize_secret', authorize)
+    monkeypatch.setattr(source.KeychainStore, 'authorize', lambda self, key: authorize('trakt', key))
     monkeypatch.setattr(source, 'settings_update_scope', lambda: settings_update_scope(timeout_s=.2))
     def old_setup():
         try:
@@ -844,6 +846,7 @@ def test_round1_explicit_authorization_absent_vs_unknown_is_strict(owner, monkey
             raise credentials.KeychainAccessRequired('synthetic access denied')
         return result
     monkeypatch.setattr(credentials, 'authorize_secret', authorize)
+    monkeypatch.setattr(source.KeychainStore, 'authorize', lambda self, key: authorize('trakt', key))
     if result is False:
         assert owner.edit('access_token', 'explicit-access')['ready'] is False
         assert owner.store.snapshot()['access_token'] == 'explicit-access'
@@ -880,6 +883,7 @@ def test_round1_actual_daemon_disconnect_supersedes_paused_manual_setup(owner, c
     monkeypatch.setattr(source.KeychainStore, '__init__',
         lambda self, **kw: original_init(self, _quiet_write=quiet))
     monkeypatch.setattr(credentials, 'authorize_secret', authorize)
+    monkeypatch.setattr(source.KeychainStore, 'authorize', lambda self, key: authorize('trakt', key))
     monkeypatch.setattr(source, 'settings_update_scope', lambda: settings_update_scope(timeout_s=.2))
     daemon = Daemon(registry=RegistryResult(plugins={'trakt': PLUGIN}), config=config.load())
     responses = []

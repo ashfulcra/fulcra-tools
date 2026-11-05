@@ -1150,29 +1150,37 @@ Changing app identity may require another grant. Configured non-native
 backends retain their own interaction behavior. See
 [the agent Keychain guide](../../AGENTS.md#keychain).
 
-Trakt's availability and explicit recovery inventory includes its saved token
-issue time (`created_at`) and lifetime (`expires_in`), as well as its five
-connection fields. These optional OAuth metadata fields need no manual input,
-but an inaccessible saved value must remain unverified and block collection.
-Their absence from an older app's Configure screen does not prove access works;
-use a corrected installer rather than repeatedly approving unrelated items.
+On this development branch, Trakt's five logical connection fields share one
+Keychain item, `credential-bundle-v1`, owned by the signed Collect application.
+An explicit access action targets that bundle, never each old field. Token issue
+time (`created_at`) and lifetime (`expires_in`) are internal bundle metadata,
+not separate password-approval controls. All ordinary reads remain quiet.
+Legacy items are preserved: readable legacy values remain usable without a
+read-side write; the first explicit edit or owned refresh publishes the complete
+tuple atomically. An inaccessible legacy value stays UNKNOWN. Explicit reconnect
+can start a fresh PKCE authorization using the public client ID without approving
+every old secret. It revokes the previous source generation first and leaves the
+old items intact. A controlled migration can retain inaccessible timing metadata
+as explicitly unknown until an authoritative token response supplies it; those
+timestamps do not authorize history reads or replace the live provider identity
+checks. This source change still requires signed-installer upgrade acceptance.
 
 Workers, plugin status, setup checks and explicit access actions preserve the
 same availability classification: a denied read is `keychain_access_required`,
 an unfinished read is `keychain_pending`, and a concurrent credential transition
 is `keychain_changed`. Configure offers quiet rechecking for pending, changed
 or unavailable reads; its recovery panel also covers OAuth-managed fields
-outside manual input steps. A later Trakt owner snapshot retains the exact
-field and availability too, rather than losing them in a generic source error.
+outside manual input steps. Trakt's field controls all use the same bundle grant;
+internal timing metadata has no separate approval button.
 
-Trakt background refresh receipts and credential mirrors also use bounded quiet
+Trakt background refresh receipts and credential bundles also use bounded quiet
 write/delete operations in the isolated same-executable child. The child disables
 interaction only for itself, accepts secrets on stdin, and returns status only;
 it does not change ACLs or parent interaction settings. Denial, timeout or an
 ambiguous acknowledgement holds for exact receipt reconciliation, without an
 interactive `keyring` fallback. Other backends must explicitly support the quiet
 path or refuse it. Explicit Trakt setup durably revokes the previous source,
-requests item authorization outside the short account/configuration/source locks,
+requests bundle authorization outside the short account/configuration/source locks,
 then uses bounded quiet mutation only after the exact edit/profile is rechecked.
 A delayed prompt cannot overwrite a newer disconnect or setup. Authorization
 denial/UNKNOWN keeps the edit incomplete; use the existing explicit access action

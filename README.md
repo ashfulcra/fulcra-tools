@@ -111,6 +111,9 @@ validation boundary is implemented; plugin conversion and the replacement
 installer are not yet released. A replacement installer must also verify
 background credential access across an upgrade. See the
 [migration status](docs/collect-v1.md).
+The development source consolidates Trakt credentials into one Keychain bundle;
+legacy items remain intact and ordinary reads never prompt or migrate them.
+This is not yet a claim about the published installer.
 
 Every directory under `packages/` is listed here. Each README covers that
 package’s setup, behavior, and limits. Install the pieces you need; the repository

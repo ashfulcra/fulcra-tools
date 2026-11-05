@@ -16,6 +16,8 @@ from fulcra_collect import credentials
 def _fake_backend(monkeypatch):
     # All native-boundary tests inject a fake API explicitly. No user item IO.
     monkeypatch.setattr(credentials, "_uses_macos_keychain", lambda: False)
+    monkeypatch.setattr(keyring, 'get_password',
+                        lambda *a: pytest.fail('credential test needs an explicit read backend'))
 
 
 def test_timeout_keeps_one_pending_os_read(monkeypatch):
@@ -597,22 +599,32 @@ def test_trakt_quiet_write_timeout_kills_owned_group_without_retry(monkeypatch):
 
 
 def test_trakt_active_setup_mutation_is_quiet_and_authorization_is_separate(monkeypatch):
-    from fulcra_collect.trakt_source import KeychainStore
+    from fulcra_collect.trakt_source import KeychainStore, _FIELDS
     calls = []
-    monkeypatch.setattr(credentials, 'authorize_secret', lambda p, k: calls.append(('authorize', p, k)) or True)
+    items = {KeychainStore.bundle_key: json.dumps({'version': 1,
+        'values': {k: None for k in _FIELDS}, 'unknown_fields': []})}
+    monkeypatch.setattr(credentials, '_keyring_get', lambda service, key, **kw: items.get(key))
+    monkeypatch.setattr(credentials, '_authorize_item', lambda p, k: calls.append(('authorize', p, k)) or True)
     monkeypatch.setattr(credentials, 'set_secret', lambda *a: pytest.fail('interactive active-field write'))
-    store = KeychainStore(_quiet_write=lambda k, v: calls.append(('quiet', k, v)))
+    def quiet(key, value):
+        calls.append(('quiet', key, value))
+        items[key] = value
+    store = KeychainStore(_quiet_write=quiet)
     assert store.authorize('access_token') is True
-    assert calls == [('authorize', 'trakt', 'access_token')]
+    assert calls == [('authorize', 'fulcra-collect:trakt', KeychainStore.bundle_key)]
     store.set('access_token', 'synthetic-value')
-    assert calls[-1] == ('quiet', 'access_token', 'synthetic-value')
+    assert calls[-1][0:2] == ('quiet', KeychainStore.bundle_key)
+    assert json.loads(calls[-1][2])['values']['access_token'] == 'synthetic-value'
 
 
 def test_trakt_explicit_mutation_has_no_unsupported_quiet_backend_fallback(monkeypatch):
     from fulcra_collect.trakt_source import KeychainStore
     monkeypatch.setattr(credentials, '_uses_macos_keychain', lambda: False)
+    reads = []
+    monkeypatch.setattr(keyring, 'get_password', lambda *a: reads.append(a) or None)
     monkeypatch.setattr(keyring, 'set_password', lambda *a: pytest.fail('interactive fallback'))
     store = KeychainStore()
     store._quiet_write = None  # exercise production unsupported-backend refusal
     with pytest.raises(credentials.KeychainAccessRequired):
         store.set('access_token', 'synthetic-value')
+    assert reads == []

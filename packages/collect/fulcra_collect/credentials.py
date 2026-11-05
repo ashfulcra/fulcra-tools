@@ -176,6 +176,10 @@ def get_plugin_credentials(plugin) -> dict[str, str | None]:
 
 def authorize_secret(plugin_id: str, key: str) -> bool:
     """Explicit user action only: request access without exposing the value."""
+    if plugin_id == 'trakt':
+        from .trakt_source import KeychainStore, _FIELDS
+        if key in _FIELDS:
+            return KeychainStore().authorize(key)
     return _authorize_item(_service(plugin_id), key)
 
 
@@ -213,6 +217,10 @@ def _mutate_trakt_secret_quiet(key: str, value: str | None) -> None:
 
 
 def get_secret(plugin_id: str, key: str) -> str | None:
+    if plugin_id == 'trakt':
+        from .trakt_source import KeychainStore, _FIELDS
+        if key in _FIELDS:
+            return KeychainStore().snapshot()[key]
     return _keyring_get(_service(plugin_id), key)
 
 
@@ -230,7 +238,7 @@ def has_secret(plugin_id: str, key: str) -> bool:
     """Return True iff a non-empty secret is present in the keychain for
     (plugin_id, key). Intended for the menubar's `credential_status`
     handler, which reports credential presence without revealing values."""
-    return bool(_keyring_get(_service(plugin_id), key))
+    return bool(get_secret(plugin_id, key))
 
 
 # ---------------------------------------------------------------------------
