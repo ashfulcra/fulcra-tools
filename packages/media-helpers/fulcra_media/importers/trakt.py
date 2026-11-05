@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from collections import Counter
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -227,6 +227,7 @@ class _ScanBounds:
     """
 
     deadline: float = field(default_factory=lambda: time.monotonic() + SCAN_SECONDS)
+    end_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     requests: int = 0
     bytes: int = 0
     rows: int = 0
@@ -278,7 +279,7 @@ def _read_page(client, headers, per_page, page, bounds, before_request=None):
         before_request()
     with client.stream(
         "GET", f"{TRAKT_BASE}/sync/history",
-        params={"extended": "full", "limit": per_page, "page": page},
+        params={"extended": "full", "limit": per_page, "page": page, "end_at": bounds.end_at},
         headers={**headers, "Accept-Encoding": "identity"}, timeout=bounds.timeout(),
     ) as response:
         encodings = response.headers.get_list("Content-Encoding")

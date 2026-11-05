@@ -146,6 +146,11 @@ Keep status, health, worker and explicit-access error classification consistent:
 pending/changed reads require a quiet recheck, not another approval. Configure's
 recovery surface must include declared OAuth-managed fields outside input steps.
 
+Strict Trakt scans pin one UTC `end_at` in the shared scan bounds, including
+401 restart, while retaining exact pagination/count/ID validation. Do not accept
+inconsistent provider totals or treat a fixed date range as a transactional
+snapshot; backdated changes still fail closed before delivery/cursor progress.
+
 Trakt's development backend uses one versioned `credential-bundle-v1` Keychain
 item for the complete token tuple. Logical field authorization must target that
 item, never start a per-field native approval batch. Ordinary snapshots are

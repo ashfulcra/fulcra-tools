@@ -536,6 +536,15 @@ refresh supplies the timing values. Never infer a timestamp from Keychain creati
 dates or reuse a consumed grant to recover it. Signed upgrade acceptance remains
 a separate prerequisite for publishing this backend.
 
+Strict Trakt history scans capture one UTC `end_at` for every page and retain
+it across the single allowed authentication restart. This scopes the read before
+later watches and avoids mixing independently cached unbounded pages. Trakt's
+[history contract](https://github.com/trakt/trakt-api/blob/master/projects/api/src/contracts/sync/index.ts)
+accepts the range query. Counts, page lengths and unique IDs must still agree;
+concurrent backdated edits can invalidate a scan, which fails without advancing
+its cursor. A date bound is not a transactional snapshot guarantee. This source
+change is unreleased until the corrected signed installer is published.
+
 The Trakt-only [source owner](../collect/fulcra_collect/trakt_source.py) captures
 the exact credential tuple, consent and source generation. Its private nonsecret
 `~/.local/state/fulcra-trakt/journal.json` is rooted in the actual OS user's home,

@@ -399,3 +399,25 @@ def test_cooperative_deadline_around_slow_operations(monkeypatch, where):
         assert requests == []
     else:
         assert stream.closed
+
+
+def test_scan_pins_one_ending_timestamp_across_pages(monkeypatch):
+    from datetime import datetime, timezone
+
+    seen = []
+    started = datetime.now(timezone.utc)
+
+    def source(request):
+        page = int(request.url.params["page"])
+        cutoff = request.url.params.get("end_at")
+        seen.append(cutoff)
+        # A live unbounded history changes between pages. A fixed ending
+        # timestamp keeps this scan's scope independent of later watches.
+        total = 3 if cutoff or page == 1 else 4
+        return httpx.Response(200, headers=metadata(page, total=total),
+                              json=[{"id": 1}, {"id": 2}] if page == 1 else [{"id": 3}])
+
+    assert [r["id"] for r in fetch(monkeypatch, source)] == [1, 2, 3]
+    assert len(seen) == 2 and seen[0] == seen[1]
+    cutoff = datetime.fromisoformat(seen[0].replace("Z", "+00:00"))
+    assert started <= cutoff <= datetime.now(timezone.utc)
