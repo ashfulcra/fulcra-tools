@@ -1172,6 +1172,9 @@ is `keychain_changed`. Configure offers quiet rechecking for pending, changed
 or unavailable reads; its recovery panel also covers OAuth-managed fields
 outside manual input steps. Trakt's field controls all use the same bundle grant;
 internal timing metadata has no separate approval button.
+Wrapped bundle failures retain the original availability and physical-item
+origin through hydration and status checks; a timeout must not become another
+authorization request merely because it crossed the field adapter.
 
 Trakt background refresh receipts and credential bundles also use bounded quiet
 write/delete operations in the isolated same-executable child. The child disables

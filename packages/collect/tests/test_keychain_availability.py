@@ -47,61 +47,76 @@ def test_unverified_reads_never_request_another_grant(collect_home, monkeypatch,
     assert 'Allow Keychain access' not in json.dumps(reply)
 
 
-@pytest.mark.parametrize('field', ['created_at', 'expires_in'])
-def test_trakt_expiry_access_is_visible_and_recoverable(collect_home, monkeypatch, field):
-    """A field consumed by the source cannot be invisible to Configure."""
+def test_trakt_bundle_access_is_visible_and_recovered_once(collect_home, monkeypatch):
     from fulcra_collect import credentials
     from fulcra_collect.daemon import Daemon, Config
     from fulcra_collect.registry import RegistryResult
+    from fulcra_collect.trakt_source import KeychainStore, _FIELDS
     from fulcra_media.plugins.trakt import PLUGIN
-
     allowed = False
     reads = []
-
+    values = {key: None for key in _FIELDS}
+    values.update(client_id='synthetic-id', access_token='synthetic-token', refresh_token='synthetic-refresh')
+    raw = json.dumps({'version': 1, 'values': values, 'unknown_fields': []})
     def read(service, key, *, allow_ui=False):
         nonlocal allowed
         assert service == 'fulcra-collect:trakt'
+        assert key == KeychainStore.bundle_key
         reads.append((key, allow_ui))
-        if key == field:
-            if allow_ui:
-                allowed = True
-            if not allowed:
-                raise credentials.KeychainAccessRequired('synthetic denied item')
-        return 'synthetic-value'
-
+        if allow_ui:
+            allowed = True
+        if not allowed:
+            raise credentials.KeychainAccessRequired('synthetic denied bundle')
+        return raw
     monkeypatch.setattr(credentials, '_keyring_get', read)
-    # Opt in explicitly to the synthetic backend, including when the root
-    # Trakt guard was installed before this module was imported.
-    monkeypatch.setattr(credentials, 'authorize_secret',
-                        lambda plugin, key: credentials._authorize_item(credentials._service(plugin), key))
+    monkeypatch.setattr(credentials, 'authorize_secret', lambda plugin, key: KeychainStore().authorize(key))
     daemon = Daemon(registry=RegistryResult(plugins={'trakt': PLUGIN}), config=Config())
     status = daemon.handle_request({'cmd': 'credential_status', 'plugin': 'trakt'})
-    assert status['credentials'].get(field) == 'access_required'
+    assert status['credentials']['client_id'] == 'access_required'
+    assert not {'created_at', 'expires_in'} & set(status['credentials'])
     with pytest.raises(credentials.CredentialReadError) as error:
         credentials.get_plugin_credentials(PLUGIN)
-    assert error.value.detail['key'] == field
-    reply = daemon.handle_request({'cmd': 'authorize_credential', 'plugin': 'trakt', 'key': field})
-    assert reply == {'ok': True, 'status': 'set'}
-    assert (field, True) in reads
-    assert reads[-1] == (field, False)
-    assert credentials.get_plugin_credentials(PLUGIN)[field] == 'synthetic-value'
-    assert 'synthetic-value' not in json.dumps([status, reply])
+    assert error.value.detail['key'] == KeychainStore.bundle_key
+    assert daemon.handle_request({'cmd': 'authorize_credential', 'plugin': 'trakt', 'key': 'client_id'}) == {'ok': True, 'status': 'set'}
+    assert sum(interactive for _, interactive in reads) == 1
+    assert daemon.handle_request({'cmd': 'credential_status', 'plugin': 'trakt'})['ok'] is True
 
 
-@pytest.mark.parametrize('field', ['created_at', 'expires_in'])
-def test_trakt_owner_snapshot_retains_exact_pending_field(monkeypatch, field):
+def test_trakt_owner_snapshot_retains_pending_bundle(monkeypatch):
     from fulcra_collect import credentials, macos_keychain
     from fulcra_collect.trakt_source import KeychainStore
-    def read(plugin, key):
-        assert plugin == 'trakt'
-        if key == field:
-            raise macos_keychain.KeychainReadTimeout('synthetic-private')
-        return 'synthetic-value'
-    monkeypatch.setattr(credentials, 'get_secret', read)
+    def read(service, key, **kwargs):
+        assert service == 'fulcra-collect:trakt'
+        assert key == KeychainStore.bundle_key
+        raise macos_keychain.KeychainReadTimeout('synthetic-private')
+    monkeypatch.setattr(credentials, '_keyring_get', read)
     with pytest.raises(credentials.CredentialReadError) as error:
         KeychainStore().snapshot()
     assert error.value.detail == {'stage': 'credential_hydration', 'scope': 'plugin',
-                                  'key': field, 'availability': 'pending'}
+                                  'key': KeychainStore.bundle_key, 'availability': 'pending'}
+
+
+@pytest.mark.parametrize('kind,availability', [('timeout', 'pending'), ('changed', 'changed'),
+                                             ('denied', 'access_required'), ('other', 'unavailable')])
+def test_trakt_bundle_hydration_keeps_original_failure(collect_home, monkeypatch, kind, availability):
+    from fulcra_collect import credentials, macos_keychain
+    from fulcra_collect.daemon import Daemon, Config
+    from fulcra_collect.registry import RegistryResult
+    from fulcra_collect.trakt_source import KeychainStore
+    from fulcra_media.plugins.trakt import PLUGIN
+    error = {'timeout': macos_keychain.KeychainReadTimeout, 'changed': credentials.CredentialStateChanged,
+             'denied': credentials.KeychainAccessRequired, 'other': credentials.keyring.errors.KeyringError}[kind]
+    def read(*args, **kwargs):
+        raise error('synthetic-private')
+    monkeypatch.setattr(credentials, '_keyring_get', read)
+    with pytest.raises(credentials.CredentialReadError) as failure:
+        credentials.get_plugin_credentials(PLUGIN)
+    assert failure.value.detail['key'] == KeychainStore.bundle_key
+    assert failure.value.detail['availability'] == availability
+    daemon = Daemon(registry=RegistryResult(plugins={'trakt': PLUGIN}), config=Config())
+    reply = daemon.handle_request({'cmd': 'credential_status', 'plugin': 'trakt'})
+    assert reply['availability'] == availability
+    assert 'synthetic-private' not in json.dumps(reply)
 
 
 def test_fulcra_access_timeout_stays_pending_without_requesting_refresh_item(local_auth, monkeypatch):

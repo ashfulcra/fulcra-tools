@@ -71,6 +71,9 @@ class CredentialStateChanged(KeychainAccessRequired):
 
 
 def read_availability_error(exc: Exception) -> str:
+    if isinstance(exc, CredentialReadError):
+        availability = exc.detail.get('availability')
+        return availability if availability in {'pending', 'changed', 'access_required', 'unavailable'} else 'unavailable'
     if isinstance(exc, (TimeoutError, KeychainReadPending)):
         return "pending"
     if isinstance(exc, CredentialStateChanged):
@@ -163,6 +166,8 @@ def get_plugin_credentials(plugin) -> dict[str, str | None]:
         try:
             values[cred.key] = (get_user_secret_fresh(cred.key) if getattr(cred, "user_level", False)
                                 else get_secret(plugin.id, cred.key))
+        except CredentialReadError:
+            raise  # A bundle failure already identifies the physical read and its availability.
         except (keyring.errors.KeyringError, TimeoutError) as exc:
             if plugin.id == "trakt" or getattr(cred, "required", True):
                 raise CredentialReadError(exc, stage="credential_hydration",
