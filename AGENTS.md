@@ -14,14 +14,48 @@ work independently of Collect. Collect is an optional host for local/source
 connectors, not a prerequisite for using Fulcra. The root README indexes every
 package and bundled skill; retain the human introduction and verify release claims.
 
+**Coord v5 Codex automatic enrollment:** reconcile one shared listener per
+environment/harness and its exact source/job-to-worker route. Follow the
+[shared listener acceptance checklist](packages/coord-v5/docs/onboarding.md#shared-codex-listener-acceptance).
+Interactive membership does not finish automatic setup. Keep a linked owned
+acceptance task or exact blocker until actual invocation, idle worker delivery
+and independent receiver evidence are verified; never silently substitute a
+per-worker heartbeat. Preserve monitoring and temporary fallback obligations
+until a verified replacement exists. This instruction grants no setup authority.
+
 Record each new actionable user request as an owned bus task, or update the
 matching task. Keep its scope, status, prerequisites, next action, and completion
 evidence current. A continuity checkpoint is not a substitute for the task backlog.
+
+Coord v5 managed listener enrollment checks current transport tool names/schemas
+and existing account-to-principal/source binding. Stale tool identity is unavailable,
+not proof of missing credentials or an empty bus. Preserve cursors, deduplication,
+pending delivery intents and existing routes; authorized shared enrollment is additive
+within the exact listener scope. A verified alternate transport does not prove hosted
+connector recovery or scheduled receiver execution. See `packages/coord-v5/README.md`.
+The packaged harness guide now gives centralized-listener recipes across desktop,
+CLI, cloud, browser, Gateway and custom-host environments. Keep recommendations,
+shipped adapters and verified native capabilities distinct; unavailable dispatch
+falls back to durable addressed attention, not per-worker polling or guessed APIs.
 
 Coord V5 has an opt-in parallel `transport read-updates` route. Use shadow mode
 before gated deployment; update watermarks are not record cursors or complete-history
 proof. Quiet hints never cancel retained delivery obligations. Preserve the direct
 route, private journals and per-source scope; see the package README for audit/fallback limits.
+
+Mesh request attention is distinct from transport cursors. The optional
+`coord-mesh queue --attention-db ABS` durably retains addressed directive/query/message/request
+requests before cursor advancement, including previously read rows in the returned
+window. Receiver receipt does not dispose of work; a reply requires a committed
+claim and exact independently verified response readback. Claimed/ambiguous replies
+never retry automatically. This adds no grants, native listener or authority to
+execute peer text. New mesh envelopes carry stable per-send `mid` identities;
+attention entries expose `reply_to` for original IDs and source-qualified historical
+mid-less records without changing source envelopes. Schema-v2 legacy ACK reconciliation
+records receipt only when `in_reply_to` is absent; upgrading v1 reopens matching
+ACK dispositions while preserving
+the source evidence and uncertain claims. Read the coord-mesh README before upgrading
+host consumers; stop old writers first, because the version fence applies on open.
 
 **README updates are required with every change.** Every update to Fulcra Tools
 or anything in it must update the relevant READMEs in the same PR, including
@@ -209,6 +243,45 @@ touching. First failing probe is where your setup gap is.
 uv-workspace monorepo, macOS-first. Packages under `packages/`, agent skills
 under `skills/`, each package with its own README, build, and tests.
 
+- **Map Our Team** — [`skills/map-our-team`](skills/map-our-team/README.md)
+  provides a shared index of a team's knowledge sources, owners and connection
+  instructions. Its [skill](skills/map-our-team/SKILL.md) covers the steward's
+  map and each teammate's onboarding, checks and offboarding. It uses Fulcra
+  Files and the external
+  [connect-our-agents skill](https://raw.githubusercontent.com/fulcradynamics/agent-skills/main/skills/connect-our-agents/SKILL.md);
+  content and access controls stay at their sources. Read its README for
+  installation and validation limits before using it with a real team. Create honors an existing build/save request
+  without another approval, checks inherited map audiences even in an empty
+  account, and separates storage-owner, human operator and verified agent-contact IDs.
+  Lifecycle retries preserve unchanged files/timestamps, and Add verifies the
+  grant before roster publication plus exact map readback. Honor a named writer
+  across chats for the same operator. Gap recovery
+  researches current evidence and useful roles before asking for consequential
+  missing decisions; documenting a role is not appointing an owner. Optional
+  [producer manifests](skills/map-our-team/references/source-discovery.md) advertise
+  connector-owned sources under `/knowledge-sources/v1/`; the skill works without
+  them. Its [maintenance recipe](skills/map-our-team/references/scheduled-maintenance.md)
+  supplies the shared recurring run prompt; template guides link it instead of
+  duplicating the protocol. It installs no scheduler or implicit write authority.
+  Preserve the steward's map writer and producer's source/index writers.
+  Never put synthesized knowledge into two-way sync working files or infer a
+  source grant from a map/manifest. Check reader access and source freshness
+  separately from producer publication; unknown provider namespaces stay unknown.
+  Company-owned installations follow
+  [company-deployment.md](skills/map-our-team/references/company-deployment.md):
+  company map/connector storage stays separate from member-owned proposal streams
+  and producer instances. Review access is not onward-publication authority;
+  Notion credential kinds and Attio token levels do not replicate provider ACLs
+  into Fulcra copies. Use the [first-time setup guide](docs/team-knowledge-setup.md)
+  for company/member prompts and the optional public maintainer feedback route.
+  The maintenance recipe optionally polls incoming joins and member proposals;
+  queue-only is the default, explicit exact-member delegation gates acceptance,
+  and proposal mode stages all join effects. Do not install the retired coord
+  listener for this flow. Claim listening only after a real scheduled run.
+  Member check status needs a verified authorized audience too, including inherited
+  root/group/account-wide shares. Unknown or unexpected readers require an already
+  authorized private checkpoint or chat fallback; preserve unrelated grants.
+
 - **Collect** — the local ingest side: `collect` (the daemon: control socket +
   FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
@@ -325,11 +398,23 @@ under `skills/`, each package with its own README, build, and tests.
   into collaborations with work states, draws `/aicq` (SVG on desktop), and
   responds per the four AICQ modes (heartbeats and acks never wake;
   4 auto-turns/hour/collaboration cap). Sends read back before claiming
-  delivery. Gate: `claude plugin validate` + `claude plugin test` on a
+  delivery. `/aicq waiting` ranks human approvals, replies and blocked-on-owner
+  tasks; blocked tasks and local pending drafts remain visible despite age.
+  `ignoreAfterDays` defaults to 5 (`0` disables ignoring), and `aicq_inbox`
+  accepts `include_stale`. The owner principal defaults to `user`; preserve
+  explicitly configured principals and placement. Session links come only from
+  owner pins, exact app/V5 session matches, or own-account `agent-links/1`
+  reports, through the shared allowlist. Alias folding must preserve owner
+  overrides and thread lookup. Interpret coord `read-degraded` markers even
+  at rc 0; report failures and the 80-report read cap as partial coverage.
+  The pane supports terminal and desktop; mobile is not implemented.
+  Gate: `claude plugin validate` + `claude plugin test` on a
   mods-capable build. Install anywhere from the repo's plugin marketplace
   (`.claude-plugin/marketplace.json`): `/plugin marketplace add ashfulcra/fulcra-tools`,
   then `/plugin install aicq@fulcra-tools`. Details:
   [`packages/aicq-claude-mod/README.md`](packages/aicq-claude-mod/README.md).
+  Filtering presentation never completes work. Second-instance session routing
+  remains an installation acceptance check.
 - Coord retention is on by default: terminal and quiet proposed tasks archive
   after 14 days, settled review families after 7 days, and dead presence shards
   are pruned after 7 days. `COORD_RETENTION_DAYS=0` or
@@ -1703,8 +1788,9 @@ unattended opt-in are satisfied; a verified schedule is a backstop. A reporting
 listener routes attention to separate workers, while deliberate self-ticking
 owned-task execution is a separate opt-in mode. Planner mode is not event-adapter
 support or idle-wake proof. `enrollment instructions` accepts optional
-`instruction_mode: worker|listener|executor`; omitted/explicit worker preserves
-the existing block bytes. Apply listener/executor blocks only in their own local/session
+`instruction_mode: worker|listener|executor`; omitted and explicit worker modes
+produce the same managed block. Regeneration updates older managed prose while
+preserving surrounding text. Apply listener/executor blocks only in their own local/session
 instructions, not shared repository-wide worker instructions. The listener reports
 its own reads/routes/conflicts/reconciliation, not worker progress/completion or
 fabricated receiver acknowledgment. Executor work needs explicit task ownership
@@ -1731,7 +1817,11 @@ Native action generation is not evidence of a delivered wake.
 The v5 runtime's explicit host-injected `dispatchCodexWake` supports only scope
 harness `codex` and privately bound desktop thread/host targets. Trusted native
 read/send callbacks are required; injection does not prove authority or grants.
-It requires exact idle preflight, commits a SQLite claim before sending once,
+It requires exact idle preflight by default. A host may explicitly opt into
+`allowColdWake:true` for exact native `notLoaded` evidence after verifying its
+existing sender can load the enrolled target; this is not idle or event-ingress
+proof. Busy/error/unknown evidence still holds delivery. It commits a SQLite
+claim before sending once,
 and retains claimed/uncertain attempts without automatic retry. Each callback
 has a bounded observation timeout, not cancellation. Acceptance is not receiver
 acknowledgment or work completion; synthetic tests are not live acceptance.
@@ -3223,6 +3313,16 @@ dirs AND set `EnvironmentVariables.PATH` in the daemon's launchd plist.
 The development Gmail relay removes that subprocess chain: it embeds the
 bundled engine with an explicit Collect transport; see its
 [account/delivery contract](packages/gmail/README.md#account-and-delivery-development-branch).
+
+### HTTPS trust in packaged Collect
+
+- `fulcra-collect` bootstraps missing compiled-in OpenSSL CA paths locally before
+  subcommands, using the installed certifi bundle for `SSL_CERT_FILE` and an
+  unset `REQUESTS_CA_BUNDLE`. Workers and CLI children inherit the environment.
+  Preserve operator-supplied values and certificate verification; do not solve
+  bundle trust failures by disabling TLS checks. Existing platform CA locations
+  are left alone. This does not repair Keychain ACLs or prove signed-app HTTPS;
+  see [the Collect README](packages/collect/README.md#https-trust-in-the-macos-bundle).
 
 ### Keychain
 

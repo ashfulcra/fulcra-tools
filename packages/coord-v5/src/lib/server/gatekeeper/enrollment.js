@@ -265,6 +265,16 @@ function block(workspaceId, instructionMode) {
     return `<!-- coord-v5:start ${workspaceId} -->
 Coord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.
 Reporting-only listener: read authorized addressed/mapped bus events and retained obligations together.
+On resume or harness updates, inspect the actual available transport tool names and schemas.
+Use only an advertised existing account connection matching the configured principal and source;
+never guess a tool name, hard-code another deployment's account, or switch accounts to bypass failure.
+Missing or ambiguous account mapping, stale schemas and Unknown tool errors mean transport unavailable,
+not an empty source or proven authentication failure. Preserve source cursors, deduplication and pending
+delivery intents. A separately authorized existing transport may recover access after its bounded read
+and checkpoint readback verify; record that transport change, not hosted-tool recovery or scheduled proof.
+Do not change credentials, grants or host services as an implied recovery step.
+Reuse the exact principal/workspace/environment/harness listener registration. Add authorized private
+source/protocol/account-to-worker routes without replacing existing routes or resetting their watermarks.
 Unknown, failed or partial reads retain obligations; an empty event tail never proves all-clear.
 Execute only exact prepared supported native message actions through locally configured authorized routes.
 Report only your own reads, routing, conflicts and delivery reconciliation. Keep native receipts
@@ -291,5 +301,5 @@ These instructions install nothing and grant no permissions, ownership or unatte
 Use the installed Coord v5 onboarding guide for enrollment and harness-specific execution.
 <!-- coord-v5:end -->
 `;
-  return `<!-- coord-v5:start ${workspaceId} -->\nCoord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.\nAt work start, resume obligations. Record actionable commitments before substantial work.\nPublish progress, blockers and results through typed coordination events. Before yielding,\nmake the next action and recovery context durable. Report failed reads; never call them empty.\nUse the installed Coord v5 onboarding guide for enrollment and harness-specific listening.\n<!-- coord-v5:end -->\n`;
+  return `<!-- coord-v5:start ${workspaceId} -->\nCoord v5 workspace: ${workspaceId}. Use the configured workspace descriptor and exact actor grants.\nAt work start, resume obligations. Record actionable commitments before substantial work.\nPublish progress, blockers and results through typed coordination events. Before yielding,\nmake the next action and recovery context durable. Report failed reads; never call them empty.\nWhen automatic checking is requested, reconcile one shared environment/harness listener and its registration.\nFor Codex desktop, bind the exact source/job-to-session route; preserve existing listener journals and pending delivery.\nVerify actual event or scheduled invocation, idle worker delivery and independent receiver acknowledgment separately.\nKeep unverified automatic setup as a linked owned task with the exact prerequisite; never silently substitute a worker heartbeat.\nRetire or relax a temporary worker fallback only after verified replacement and within the operator's approved scope.\nThese instructions install nothing and grant no permissions or schedule authority.\nUse the installed Coord v5 onboarding guide for enrollment and harness-specific listening.\n<!-- coord-v5:end -->\n`;
 }

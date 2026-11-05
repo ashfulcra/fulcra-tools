@@ -107,7 +107,28 @@ guarantee, shared multi-source summary cache or opaque provider cursor here.
 
 ## Explicit enrollment
 
+Hosted connector names and schemas can change independently of this package.
+The managed listener instructions require checking the currently advertised
+transport interface and binding its existing account connection to the configured
+principal/source. Missing or ambiguous bindings and `Unknown tool` failures mean
+unavailable transport, not an empty source or a demonstrated authentication failure.
+Retain cursors, deduplication and delivery intents. A separately authorized existing
+transport can recover access only after a bounded read and checkpoint readback;
+that does not prove the original hosted connector recovered or a scheduled wake ran.
+No refresh, credential/grant change or host-service restart is installed by this guidance.
+Shared enrollment remains additive within the exact listener scope: preserve existing
+private routes and per-source watermarks, and bind each new account/source/protocol
+to its authorized worker. These are agent instructions, not automatic connector repair
+or enforced routing behavior; native receiver evidence is still required.
+
 Start with [Join a workspace](docs/onboarding.md) and the [harness guide](docs/harnesses.md).
+For automatic Codex participation, complete the [shared listener acceptance checklist](docs/onboarding.md#shared-codex-listener-acceptance): reconcile one listener per environment/harness, bind each exact worker route, and keep setup pending until actual invocation, idle delivery and receiver evidence are verified. A worker heartbeat is not a silent substitute. Interactive enrollment remains available without unattended opt-in.
+
+The harness guide includes [centralized-listener recommendations](docs/harnesses.md#choose-a-centralized-listener)
+for desktop, CLI, cloud, browser, Gateway, IDE and API/CI environments. Each recipe
+names the central owner, delivery path, setup checks and fallback; recommendations
+are distinct from shipped adapters and do not install services or grant permissions.
+
 The guide's [survey-informed operating patterns](docs/harnesses.md#survey-informed-operating-patterns)
 separate reported, manual and scheduled evidence, with bounded recovery recipes
 and explicit unknowns; they are not installed configuration or fleet acceptance.
@@ -124,7 +145,7 @@ The reporting listener routes attention to separate workers; owned-task self-tic
 execution is a distinct opt-in mode. It neither installs a schedule nor grants membership. The
 instructions command returns `{content}` without editing files. Its stdin is
 `{content,workspace_id,remove}` plus optional `instruction_mode:"worker"|"listener"|"executor"`.
-Omitted or explicit `worker` preserves the original worker block byte for byte.
+Omitted and explicit `worker` generate identical current managed blocks. Applying either replaces older managed prose with the shared-listener enrollment and verification obligations while preserving surrounding instructions.
 `listener` is reporting/routing only: no worker claims, execution, progress,
 completion or fabricated receiver acknowledgment. `executor` requires explicit
 owned-task authorization and recovery context, continues reachable work without
@@ -242,7 +263,8 @@ the existing prepared descriptor shape is unchanged. Caller prompt text is refus
 the bounded notification prompt is reconstructed from journaled identity/items/IDs.
 
 `options` must explicitly supply trusted host callbacks `readThread(target)`
-and `sendMessage({threadId,hostId,prompt})`, with optional `now()` and `timeoutMs`
+and `sendMessage({threadId,hostId,prompt})`, with optional `now()`, `allowColdWake`
+and `timeoutMs`
 (default 60000, integer 1..60000). Each native call has its own observation timeout,
 so read plus send may take up to twice that bound; this cannot cancel an invoked
 callback. No tool lookup, credentials, subprocess, schedule, automatic send or new
@@ -251,7 +273,16 @@ callback injection is not proof of authentication or authorization.
 
 Preflight requires raw native schema-version-1 thread evidence with exact
 `thread.id`, resolved `thread.hostId` and `thread.status.type:"idle"`. A present
-`thread.kind` must be `codex`. Direct objects, one MCP JSON text block, or
+`thread.kind` must be `codex`. The optional boolean `allowColdWake` defaults to
+false. With explicit `true`, an exact native `notLoaded` status returns
+`THREAD_UNLOADED` and may proceed through the same claim/send/receipt path.
+This status is not relabeled idle. The host must verify that its existing native
+sender can load that exact enrolled thread, and enforce human authorization,
+before enabling cold delivery. No resume API or second listener is created.
+Active, busy, system-error, missing and unknown statuses remain blocked even
+with opt-in. Synthetic success cannot establish cold-load support: capture the
+actual unloaded preflight, native admission and receiver evidence separately.
+Direct objects, one MCP JSON text block, or
 `structuredContent` are supported; malformed/error/contradictory wrappers fail
 closed. Busy/unknown/unavailable reads cause no send and retain the prepared
 obligation for later reconsideration. This snapshot is not global race-free busy
@@ -481,7 +512,10 @@ requires verified source receipts, exact actor grants, scope and observation evi
 an event/package cannot grant itself trust. No distributed lock, rollout or exactly-once
 external execution is claimed.
 
-Run `npm ci --ignore-scripts` and `npm test`. Tests use synthetic fixtures and real
+Run `npm ci --ignore-scripts`, `npm audit --audit-level=low` and `npm test`.
+The development lockfile uses Vitest 4.1.12 and patched Vite/source-map-js
+dependencies; these are test tools, not dependencies of the packed runtime.
+Tests use synthetic fixtures and real
 local SQLite, never live network. `node --test test/*.test.mjs` packs/installs offline
 into empty directories, exercises installed commands and audits tarball contents.
 Tests/fixtures are excluded from the tarball. See [PROVENANCE.md](PROVENANCE.md).

@@ -1236,6 +1236,21 @@ with `PYTHONDONTWRITEBYTECODE=1`; permission tests qualify whether denial is
 actually enforced. This package gate does not establish a signed app, a current
 frontend build, clean installed dependency graph or live-provider acceptance.
 
+## HTTPS trust in the macOS bundle
+
+The `fulcra-collect` command checks OpenSSL's compiled-in CA locations before
+running a subcommand. If neither location exists and `SSL_CERT_FILE` is unset,
+[ssl_bootstrap.py](fulcra_collect/ssl_bootstrap.py) points `SSL_CERT_FILE` and an
+unset `REQUESTS_CA_BUNDLE` at the installed certifi bundle. Daemon workers and
+later CLI subprocesses inherit those values. Existing operator-supplied values
+are preserved; an existing platform CA location leaves the environment alone.
+No request is sent by this local startup check, and certificate verification
+remains enabled. A missing certifi bundle leaves normal TLS failure visible.
+This fixes missing bundle trust paths independently of Keychain authorization;
+installed/signed-app HTTPS qualification remains separate from synthetic tests.
+The CLI startup fixture restores both CA variables, including when originally
+absent, so its synthetic bundle cannot affect later HTTP-client tests.
+
 ## Tests
 
 ```bash
