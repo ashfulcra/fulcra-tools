@@ -542,7 +542,14 @@ later watches and avoids mixing independently cached unbounded pages. Trakt's
 [history contract](https://github.com/trakt/trakt-api/blob/master/projects/api/src/contracts/sync/index.ts)
 accepts the range query. Counts, page lengths and unique IDs must still agree;
 concurrent backdated edits can invalidate a scan, which fails without advancing
-its cursor. A date bound is not a transactional snapshot guarantee. This source
+its cursor. A date bound is not a transactional snapshot guarantee. Collect also accepts an
+explicit `start_at` plugin setting (an ISO timestamp with a UTC offset) for live
+catch-up. Omission retains the full-history scan. Its saved settings/epoch and
+v1 cursor remain scoped to that range; completing it proves no delivery before
+that date. Preserve the separate historical reconciliation backlog and original
+pending batches when selecting a live range. Invalid or future starts fail
+before provider I/O. This avoids placing recent watches behind a full older
+history reconciliation; it does not silently declare older history complete. This source
 change is unreleased until the corrected signed installer is published.
 
 The Trakt-only [source owner](../collect/fulcra_collect/trakt_source.py) captures

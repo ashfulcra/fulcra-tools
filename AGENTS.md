@@ -149,7 +149,11 @@ recovery surface must include declared OAuth-managed fields outside input steps.
 Strict Trakt scans pin one UTC `end_at` in the shared scan bounds, including
 401 restart, while retaining exact pagination/count/ID validation. Do not accept
 inconsistent provider totals or treat a fixed date range as a transactional
-snapshot; backdated changes still fail closed before delivery/cursor progress.
+snapshot; backdated changes still fail closed before delivery/cursor progress. An
+explicit Trakt `start_at` setting narrows the live scan and participates in the
+captured settings/epoch/cursor scope. Keep earlier history as a separate owed
+reconciliation; do not infer its completion from a ranged run or alter a pending
+batch's original settings to make it fit the new range.
 
 Trakt's development backend uses one versioned `credential-bundle-v1` Keychain
 item for the complete token tuple. Logical field authorization must target that

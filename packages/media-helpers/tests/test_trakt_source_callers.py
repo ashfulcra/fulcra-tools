@@ -787,3 +787,18 @@ def test_round1_actual_worker_cannot_restart_with_other_profile_successor(caller
     assert caller.source_creds['access_token'] == 'new-consent-a'
     assert caller.configured.posts == []
     assert not any(k.startswith('v1_media_cursor:') for k in caller.kv)
+
+
+def test_worker_uses_explicit_live_range(caller):
+    if caller.mode != "keychain":
+        pytest.skip("Collect-only saved selection")
+    from fulcra_collect import config
+    cfg = config.load()
+    cfg.update_plugin_settings("trakt", {"start_at": "2020-01-01T00:00:00Z"})
+    config.save(cfg)
+    caller.info["source"] = "ok"
+    outcome, _ = caller.worker()
+    assert outcome == "done"
+    assert caller.info["gets"]
+    assert all(req.url.params["start_at"] == "2020-01-01T00:00:00Z"
+               for req in caller.info["gets"])

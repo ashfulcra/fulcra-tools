@@ -421,3 +421,22 @@ def test_scan_pins_one_ending_timestamp_across_pages(monkeypatch):
     assert len(seen) == 2 and seen[0] == seen[1]
     cutoff = datetime.fromisoformat(seen[0].replace("Z", "+00:00"))
     assert started <= cutoff <= datetime.now(timezone.utc)
+
+
+def test_explicit_start_is_sent_unchanged_on_every_page(monkeypatch):
+    bounds = trakt._ScanBounds(start_at="2020-01-01T00:00:00Z")
+    seen = []
+    def source(request):
+        seen.append(request.url.params.get("start_at"))
+        page = int(request.url.params["page"])
+        return httpx.Response(200, headers=metadata(page),
+                              json=[{"id": 1}, {"id": 2}] if page == 1 else [{"id": 3}])
+    assert len(fetch(monkeypatch, source, _bounds=bounds)) == 3
+    assert seen == ["2020-01-01T00:00:00Z"] * 2
+
+
+@pytest.mark.parametrize("value", ["invalid", "2020-01-01", "2020-01-01T00:00:00", 1, True,
+                                   "9999-01-01T00:00:00Z"])
+def test_invalid_start_is_rejected_before_source_io(value):
+    with pytest.raises(ValueError, match="Trakt start_at"):
+        trakt._ScanBounds(start_at=value)

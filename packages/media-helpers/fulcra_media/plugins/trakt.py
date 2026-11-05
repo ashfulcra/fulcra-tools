@@ -138,7 +138,7 @@ def _run_trakt(ctx: RunContext) -> None:
     if owner is None or not hasattr(ctx, "_register_current_work_guard"):
         raise RuntimeError("Trakt strict credential backend unavailable")
     from fulcra_collect.trakt_identity import CurrentIdentity, ProbeWindow
-    bounds = trakt_importer._ScanBounds()
+    bounds = trakt_importer._ScanBounds(start_at=ctx.config.get("start_at"))
     initial_probe = ProbeWindow(bounds)
     binding = owner.capture(ctx._trakt_authority, ctx._trakt_local)
     initial_probe.check()

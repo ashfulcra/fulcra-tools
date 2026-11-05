@@ -228,9 +228,24 @@ class _ScanBounds:
 
     deadline: float = field(default_factory=lambda: time.monotonic() + SCAN_SECONDS)
     end_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    start_at: str | None = None
     requests: int = 0
     bytes: int = 0
     rows: int = 0
+
+    def __post_init__(self):
+        if self.start_at is None:
+            return
+        try:
+            if not isinstance(self.start_at, str) or len(self.start_at) < 20 or self.start_at[10] != "T":
+                raise ValueError
+            start = datetime.fromisoformat(self.start_at.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(self.end_at.replace("Z", "+00:00"))
+            if start.tzinfo is None or start.utcoffset() is None or start > end:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ValueError("Trakt start_at must be an explicit past UTC-offset timestamp") from None
+        self.start_at = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def charge_request(self):
         self.check()
@@ -279,7 +294,8 @@ def _read_page(client, headers, per_page, page, bounds, before_request=None):
         before_request()
     with client.stream(
         "GET", f"{TRAKT_BASE}/sync/history",
-        params={"extended": "full", "limit": per_page, "page": page, "end_at": bounds.end_at},
+        params={"extended": "full", "limit": per_page, "page": page, "end_at": bounds.end_at,
+                **({"start_at": bounds.start_at} if bounds.start_at is not None else {})},
         headers={**headers, "Accept-Encoding": "identity"}, timeout=bounds.timeout(),
     ) as response:
         encodings = response.headers.get_list("Content-Encoding")
