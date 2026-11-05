@@ -437,16 +437,11 @@ class Daemon:
                            if getattr(cred, "user_level", False)
                            else credentials.has_secret(plugin_id, cred.key))
                 out[cred.key] = "set" if present else "missing"
-            except credentials.KeychainAccessRequired:
-                out[cred.key] = "access_required"
-            except Exception:
-                out[cred.key] = "unavailable"
-        if "access_required" in out.values():
-            return {"ok": False, "credentials": out, "code": "keychain_access_required",
-                    "error": "Open Configure and choose Allow Keychain access."}
-        if "unavailable" in out.values():
-            return {"ok": False, "credentials": out, "code": "keychain_unavailable",
-                    "error": "Keychain read is unavailable. A saved credential may still exist."}
+            except Exception as exc:
+                out[cred.key] = credentials.read_availability_error(exc)
+        for availability in ("access_required", "pending", "changed", "unavailable"):
+            if availability in out.values():
+                return {"ok": False, "credentials": out, **credentials.credential_failure(availability)}
         return {"ok": True, "credentials": out}
 
     def _authorize_credential(self, plugin_id: str, key: str) -> dict:
@@ -463,13 +458,8 @@ class Daemon:
                            if self._credential_is_user_level(plugin_id, key)
                            else credentials.authorize_secret(plugin_id, key))
                 return {"ok": bool(present), "status": "set" if present else "missing"}
-        except (credentials.KeychainAccessRequired, TimeoutError):
-            return {"ok": False, "code": "keychain_access_required",
-                    "error": "Finish the Keychain access request, then check again. "
-                             "Always Allow remembers access for this app."}
-        except Exception:
-            return {"ok": False, "code": "keychain_unavailable",
-                    "error": "Keychain access could not be verified. Your saved credential was kept."}
+        except Exception as exc:
+            return {"ok": False, **credentials.credential_failure(credentials.read_availability_error(exc))}
 
     def _check_credential_key(self, plugin_id: str, key: str) -> dict | None:
         """Return an error reply if (plugin_id, key) doesn't name a

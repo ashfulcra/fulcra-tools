@@ -197,13 +197,12 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     try:
         ctx_credentials = credentials.get_plugin_credentials(plugin)
     except credentials.CredentialReadError as exc:
-        emit({"type": "result", "outcome": "error", "code": "keychain_unavailable" if exc.detail['availability'] == 'unavailable' else "keychain_access_required",
-              "credential_error": exc.detail,
-              "error": "Keychain access is required. Open Configure and choose Allow Keychain access."})
+        emit({"type": "result", "outcome": "error",
+              **credentials.credential_failure(exc.detail['availability']), "credential_error": exc.detail})
         return "error"
-    except (credentials.KeychainAccessRequired, TimeoutError):
-        emit({"type": "result", "outcome": "error", "code": "keychain_access_required",
-              "error": "Keychain access is required. Open Configure and choose Allow Keychain access."})
+    except (credentials.KeychainAccessRequired, TimeoutError) as exc:
+        emit({"type": "result", "outcome": "error",
+              **credentials.credential_failure(credentials.read_availability_error(exc))})
         return "error"
     except credentials.keyring.errors.KeyringError:
         emit({"type": "result", "outcome": "error", "code": "keychain_unavailable",
@@ -291,9 +290,9 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     except credentials.CredentialReadError as exc:
         # Keep bounded stack frames without serializing arbitrary backend exception
         # text. Scope comes only from the actual read site, never string parsing.
-        emit({"type": "result", "outcome": "error", "code": "keychain_unavailable" if exc.detail['availability'] == 'unavailable' else "keychain_access_required",
-              "credential_error": exc.detail,
-              "error": _scrub_secrets("Saved Collect sign-in access is unverified. Open Fulcra Settings.\n"
+        emit({"type": "result", "outcome": "error",
+              **credentials.credential_failure(exc.detail['availability']), "credential_error": exc.detail,
+              "error": _scrub_secrets(credentials.credential_failure(exc.detail['availability'])['error'] + "\n"
                                       + ''.join(traceback.format_tb(exc.__traceback__))),
               "watermark": getattr(ctx.state, "watermark", None),
               "definition_id": getattr(ctx.state, "definition_id", None),

@@ -522,6 +522,14 @@ wrapped-plugin fixture using a file is not evidence of worker selection. Existin
 [legacy and current connection setup](#trakt-connections-and-api-apps), source IDs,
 normalization and cluster/twin policy remain unchanged.
 
+Collect's credential status and explicit access recovery include all seven
+consumed fields: client ID, optional legacy client secret, access token, refresh
+token, optional callback, and optional OAuth `created_at`/`expires_in` metadata.
+The two expiry fields are managed by sign-in/refresh, with no manual setup input.
+A saved but inaccessible optional item is UNKNOWN, not confirmed absence, and
+must be recovered before collecting. Older installers omitted the expiry fields
+from their permission inventory; approving a different item cannot fix that gap.
+
 The Trakt-only [source owner](../collect/fulcra_collect/trakt_source.py) captures
 the exact credential tuple, consent and source generation. Its private nonsecret
 `~/.local/state/fulcra-trakt/journal.json` is rooted in the actual OS user's home,

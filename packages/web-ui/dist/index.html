@@ -16,7 +16,7 @@
        resolves AFTER the Lit module above. Order matters: components must
        be registered as custom elements before <fulcra-step> appears in
        the DOM. Loaded before wizard.js / page scripts as a result. -->
-  <script type="module" src="/static/components/index.js?v=20261024d"></script>
+  <script type="module" src="/static/components/index.js?v=20261105a"></script>
 </head>
 <body class="bg-white text-slate-900 min-h-screen"
       x-data="app()"
@@ -1279,7 +1279,7 @@
        happily serves the cached body on conditional GETs. Bumping the v=
        query string here is the cheap way to force a fresh load when the
        file actually changed. Daemon-side fix is a follow-up. -->
-  <script src="/static/wizard.js?v=20261024d"></script>
+  <script src="/static/wizard.js?v=20261105a"></script>
   <script src="/static/browser-signin.js?v=20261024b"></script>
   <script src="/static/onboarding.js?v=20261024b"></script>
   <script src="/static/dashboard.js?v=20260527d"></script>

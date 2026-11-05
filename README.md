@@ -97,7 +97,9 @@ route on 2026-09-30, while visibility of the deleted source record was not teste
 
 Collect's migration to v1 Event/Metric datatypes is in progress. The shared
 validation boundary is implemented; plugin conversion and the replacement
-installer are not yet released. See the [migration status](docs/collect-v1.md).
+installer are not yet released. A replacement installer must also verify
+background credential access across an upgrade. See the
+[migration status](docs/collect-v1.md).
 
 Every directory under `packages/` is listed here. Each README covers that
 package’s setup, behavior, and limits. Install the pieces you need; the repository

@@ -5,6 +5,121 @@ import json
 import pytest
 
 
+@pytest.mark.parametrize('surface', ['status', 'authorize', 'worker', 'health'])
+@pytest.mark.parametrize('failure,availability', [
+    ('timeout', 'pending'), ('pending', 'pending'), ('changed', 'changed'),
+])
+def test_unverified_reads_never_request_another_grant(collect_home, monkeypatch, surface, failure, availability):
+    from fastapi.testclient import TestClient
+    from fulcra_collect import credentials, macos_keychain, worker
+    from fulcra_collect.daemon import Daemon, Config
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+    from fulcra_collect.web import build_app, _ensure_token
+
+    errors = {'timeout': macos_keychain.KeychainReadTimeout,
+              'pending': credentials.KeychainReadPending,
+              'changed': credentials.CredentialStateChanged}
+    def read(*args, **kwargs):
+        raise errors[failure]('synthetic-private')
+    monkeypatch.setattr(credentials, '_keyring_get', read)
+    def source(_):
+        pytest.fail('source I/O before credential availability')
+    plugin = Plugin(id='sample', name='Synthetic', kind='manual', collect_mode='historical',
+                    run=source, health_check=source,
+                    required_credentials=(Credential(key='source-key', label='Source', help=''),))
+    daemon = Daemon(registry=RegistryResult(plugins={'sample': plugin}), config=Config())
+    if surface == 'status':
+        reply = daemon.handle_request({'cmd': 'credential_status', 'plugin': 'sample'})
+        assert reply['credentials']['source-key'] == availability
+    elif surface == 'authorize':
+        reply = daemon.handle_request({'cmd': 'authorize_credential', 'plugin': 'sample', 'key': 'source-key'})
+    elif surface == 'worker':
+        out = io.StringIO()
+        assert worker.run_plugin(plugin, out=out) == 'error'
+        reply = json.loads(out.getvalue())
+    else:
+        client = TestClient(build_app(daemon))
+        client.headers['Authorization'] = 'Bearer ' + _ensure_token()
+        reply = client.post('/api/plugin/sample/health_check').json()
+    assert reply['code'] == 'keychain_' + availability
+    assert 'synthetic-private' not in json.dumps(reply)
+    assert 'Allow Keychain access' not in json.dumps(reply)
+
+
+@pytest.mark.parametrize('field', ['created_at', 'expires_in'])
+def test_trakt_expiry_access_is_visible_and_recoverable(collect_home, monkeypatch, field):
+    """A field consumed by the source cannot be invisible to Configure."""
+    from fulcra_collect import credentials
+    from fulcra_collect.daemon import Daemon, Config
+    from fulcra_collect.registry import RegistryResult
+    from fulcra_media.plugins.trakt import PLUGIN
+
+    allowed = False
+    reads = []
+
+    def read(service, key, *, allow_ui=False):
+        nonlocal allowed
+        assert service == 'fulcra-collect:trakt'
+        reads.append((key, allow_ui))
+        if key == field:
+            if allow_ui:
+                allowed = True
+            if not allowed:
+                raise credentials.KeychainAccessRequired('synthetic denied item')
+        return 'synthetic-value'
+
+    monkeypatch.setattr(credentials, '_keyring_get', read)
+    # Opt in explicitly to the synthetic backend, including when the root
+    # Trakt guard was installed before this module was imported.
+    monkeypatch.setattr(credentials, 'authorize_secret',
+                        lambda plugin, key: credentials._authorize_item(credentials._service(plugin), key))
+    daemon = Daemon(registry=RegistryResult(plugins={'trakt': PLUGIN}), config=Config())
+    status = daemon.handle_request({'cmd': 'credential_status', 'plugin': 'trakt'})
+    assert status['credentials'].get(field) == 'access_required'
+    with pytest.raises(credentials.CredentialReadError) as error:
+        credentials.get_plugin_credentials(PLUGIN)
+    assert error.value.detail['key'] == field
+    reply = daemon.handle_request({'cmd': 'authorize_credential', 'plugin': 'trakt', 'key': field})
+    assert reply == {'ok': True, 'status': 'set'}
+    assert (field, True) in reads
+    assert reads[-1] == (field, False)
+    assert credentials.get_plugin_credentials(PLUGIN)[field] == 'synthetic-value'
+    assert 'synthetic-value' not in json.dumps([status, reply])
+
+
+@pytest.mark.parametrize('field', ['created_at', 'expires_in'])
+def test_trakt_owner_snapshot_retains_exact_pending_field(monkeypatch, field):
+    from fulcra_collect import credentials, macos_keychain
+    from fulcra_collect.trakt_source import KeychainStore
+    def read(plugin, key):
+        assert plugin == 'trakt'
+        if key == field:
+            raise macos_keychain.KeychainReadTimeout('synthetic-private')
+        return 'synthetic-value'
+    monkeypatch.setattr(credentials, 'get_secret', read)
+    with pytest.raises(credentials.CredentialReadError) as error:
+        KeychainStore().snapshot()
+    assert error.value.detail == {'stage': 'credential_hydration', 'scope': 'plugin',
+                                  'key': field, 'availability': 'pending'}
+
+
+def test_fulcra_access_timeout_stays_pending_without_requesting_refresh_item(local_auth, monkeypatch):
+    from fulcra_collect import macos_keychain
+    _, client = local_auth
+    reads = []
+    def read(service, key, *, allow_ui=False):
+        reads.append(key)
+        raise macos_keychain.KeychainReadTimeout('synthetic-private')
+    monkeypatch.setattr(macos_keychain, 'get_password', read)
+    reply = client.post('/api/fulcra/auth/keychain_access').json()
+    assert reply['code'] == 'keychain_pending'
+    assert reply['items']['bearer-token']['availability'] == 'pending'
+    assert reply['items']['oauth-credentials']['availability'] == 'not_checked'
+    assert reads == ['bearer-token']
+    assert 'synthetic-private' not in json.dumps(reply)
+
+
 @pytest.fixture
 def local_auth(collect_home, monkeypatch):
     from types import SimpleNamespace

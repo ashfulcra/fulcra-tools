@@ -46,6 +46,14 @@ the closed shared sign-in scope and requires quiet confirmation; a one-time
 allowance can remain unverified. **Check access again (quiet)** never requests UI.
 Plugin Configure remains scoped to its declared key. Neither button starts a run.
 
+Configure shows saved-access recovery for every declared credential, including
+OAuth-managed fields that are not manual input steps. Only a positively reported
+access denial offers **Allow Keychain access**. Pending, changed and unavailable
+checks offer **Check again (quiet)** and preserve saved values. A timed-out check
+does not ask for another approval. Older quiet responses cannot overwrite newer
+availability; the shared panel updates in both onboarding and Configure without
+replacing the active input component or discarding drafts.
+
 Dashboard recovery links consume only the daemon's current structured scope:
 source credential hydration goes to Configure; Collect bearer access goes to
 Fulcra Settings. Missing/stale/post-restart scope has no inferred recovery link,

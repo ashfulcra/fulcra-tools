@@ -858,9 +858,10 @@ def test_trakt_plugin_metadata():
     assert TRAKT_PLUGIN.kind == "scheduled"
     assert TRAKT_PLUGIN.default_interval == timedelta(hours=6)
     # Credentials are now managed via the web-UI OAuth wizard and stored in
-    # the OS keychain. The legacy secret and saved refresh callback are optional.
+    # the OS keychain. The legacy secret, callback and expiry metadata are optional.
     cred_keys = {c.key for c in TRAKT_PLUGIN.required_credentials}
-    assert cred_keys == {"client_id", "client_secret", "access_token", "refresh_token", "redirect_uri"}
+    assert cred_keys == {"client_id", "client_secret", "access_token", "refresh_token", "redirect_uri",
+                         "created_at", "expires_in"}
     assert TRAKT_PLUGIN.oauth_handler is not None
     assert TRAKT_PLUGIN.health_check is not None
     assert len(TRAKT_PLUGIN.setup_steps) == 7

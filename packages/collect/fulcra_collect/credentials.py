@@ -29,7 +29,9 @@ _log = logging.getLogger("fulcra_collect.credentials")
 # Background reads never request macOS authentication UI. Explicit access
 # requests use the same pending-call fence, so repeated checks/clicks cannot
 # stack another OS call while an earlier one is still outstanding.
-_KEYCHAIN_READ_TIMEOUT_S = 3.0
+# The outer wait includes the native child's five-second I/O deadline and
+# bounded process cleanup. Slow helpers remain UNKNOWN, not missing grants.
+_KEYCHAIN_READ_TIMEOUT_S = 7.0
 _MAX_PENDING_READS = 16
 _pending_reads: set[tuple[str, str]] = set()
 _pending_reads_lock = Lock()
@@ -84,6 +86,20 @@ class CredentialReadError(KeychainAccessRequired):
         super().__init__("Saved credential access is unverified; no credential was changed.")
         self.detail = {"stage": stage, "scope": scope, "key": key,
                        "availability": read_availability_error(exc)}
+
+
+def credential_failure(availability: str) -> dict[str, str]:
+    """One nonsecret failure contract for workers, setup and access actions."""
+    messages = {
+        "access_required": "Keychain access is required. Open Configure and choose Allow Keychain access.",
+        "pending": "The saved credential check is pending. Wait, then check again without requesting another approval.",
+        "changed": "Saved credentials changed during this check. Check again.",
+        "unavailable": "Keychain access is unavailable. Your saved credential was kept.",
+    }
+    if availability not in messages:
+        availability = "unavailable"
+    code = "keychain_access_required" if availability == "access_required" else "keychain_" + availability
+    return {"availability": availability, "code": code, "error": messages[availability]}
 
 
 def credential_revision() -> int:

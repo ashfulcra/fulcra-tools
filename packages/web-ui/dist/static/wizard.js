@@ -172,6 +172,11 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     _credStatus: {},
     _credAccessBusy: false,
     _credAccessError: "",
+    _credReadEpoch: 0,
+    get credential_access_fields() {
+      return Object.values(this.credsMap).map(field => ({...field, status: this._credStatus[field.key]}))
+        .filter(field => ["access_required", "pending", "changed", "unavailable"].includes(field.status));
+    },
 
     // First-run state on the wizard's "done" step. User feedback 2026-05-26:
     // after completing setup, the user expected the plugin to actually run
@@ -263,6 +268,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.firstRunStatus, this.firstRunSummary, this.firstRunTimelineUrl,
           this.nextBlocked, this.nextPending, this.stepError,
           this.input_fields, this.settingOptions,
+          this._credStatus, this._credAccessBusy, this._credAccessError,
         ];
         // Notify every mounted dispatcher. We bubble through window so
         // both render sites (onboarding flow and dashboard Configure
@@ -299,11 +305,13 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     async _loadCredentialStatus(current = () => true) {
+      const readEpoch = ++this._credReadEpoch;
+      const applies = () => current() && readEpoch === this._credReadEpoch;
       // Credentials — mark which keys are already set in the keychain.
       // The response shape is: {ok: bool, credentials: {key: "set"|"missing"}}
       try {
         const resp = await api(`/api/plugin/${this.plugin_id}/credentials`);
-        if (!current()) return;
+        if (!applies()) return;
         const credMap = (resp && resp.credentials) ? resp.credentials : {};
         this._credStatus = {};
         this._credPresent = {};
@@ -314,7 +322,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           if (status === "set") this._credPresent[key] = true;
         }
       } catch (e) {
-        if (!current()) return;
+        if (!applies()) return;
         // Transport failures keep access unverified, never missing.
         this._credPresent = {};
         this._credStatus = Object.fromEntries(Object.keys(this.credsMap).map(key => [key, "unavailable"]));
@@ -326,6 +334,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       const epoch = this._nextEpoch;
       const current = () => epoch === this._nextEpoch;
       this._credAccessBusy = true;
+      ++this._credReadEpoch;
       this._credAccessError = "";
       try {
         const result = await api(`/api/plugin/${this.plugin_id}/credential/${encodeURIComponent(key)}/authorize`, {method: "POST"});
@@ -333,13 +342,25 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         await this._loadCredentialStatus(current); // Quiet recheck, preserving unsaved settings.
         if (!current()) return;
         if (!result?.ok || !this._credPresent[key]) {
-          this._credAccessError = result?.error || "Access is still unavailable. Always Allow remembers access for this app.";
+          this._credAccessError = result?.error || (this._credStatus[key] === "pending"
+            ? "The saved credential check is pending. Check again without another approval."
+            : "Saved key access is still unverified. Check its current status before requesting access again.");
         }
       } catch (e) {
         if (current()) this._credAccessError = "Keychain access could not be verified. Your saved key was kept.";
       } finally {
         if (current()) this._credAccessBusy = false;
       }
+    },
+
+    async checkCredentialAccess() {
+      if (this._credAccessBusy) return;
+      const epoch = this._nextEpoch;
+      const current = () => epoch === this._nextEpoch;
+      this._credAccessBusy = true;
+      this._credAccessError = "";
+      try { await this._loadCredentialStatus(current); }
+      finally { if (current()) this._credAccessBusy = false; }
     },
 
     // Seed inputValues with declared defaults for the current input step.

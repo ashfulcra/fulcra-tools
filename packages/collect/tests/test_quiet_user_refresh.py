@@ -125,5 +125,5 @@ def test_quiet_user_native_request_is_bounded_and_acknowledgement_failures_do_no
     with pytest.raises(macos_keychain.KeyringError) as exc:
         macos_keychain.mutate_user_password('bearer-token', 'SYNTHETIC_PRIVATE')
     assert packets == [{'op':'set','service':'fulcra-collect:user','account':'bearer-token','value':'SYNTHETIC_PRIVATE'}]
-    assert actions == ['start', ('kill',12345), 'wait']
+    assert actions == (['start', ('kill',12345), 'wait'] if failure == 'timeout' else ['start', 'wait'])
     assert 'SYNTHETIC_PRIVATE' not in str(exc.value)

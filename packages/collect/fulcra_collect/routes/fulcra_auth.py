@@ -87,7 +87,10 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         ok = items['bearer-token']['status'] == 'present'
         result = {'ok': ok, 'items': items, 'refresh_item_readable': items['oauth-credentials']['status'] == 'present'}
         if not ok:
-            result.update(code='keychain_access_required',
+            availability = items['bearer-token']['availability']
+            code = ('keychain_missing' if availability == 'missing'
+                    else credentials.credential_failure(availability)['code'])
+            result.update(code=code,
                           error='Saved sign-in access is unverified or missing. Finish any pending request, then check again.')
         return result
 

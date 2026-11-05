@@ -613,13 +613,15 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         try:
             ctx_credentials = _creds.get_plugin_credentials(plugin)
         except _creds.CredentialReadError as exc:
+            failure = _creds.credential_failure(exc.detail['availability'])
             return {"available": True, "ok": False,
-                    "code": "keychain_unavailable" if exc.detail['availability'] == 'unavailable' else "keychain_access_required",
+                    **failure,
                     "credential_error": exc.detail,
-                    "summary": "Saved credential access is unverified. Your credential was kept.", "preview": []}
-        except (_creds.KeychainAccessRequired, TimeoutError):
-            return {"available": True, "ok": False, "code": "keychain_access_required",
-                    "summary": "Open Configure and choose Allow Keychain access.", "preview": []}
+                    "summary": failure['error'], "preview": []}
+        except (_creds.KeychainAccessRequired, TimeoutError) as exc:
+            failure = _creds.credential_failure(_creds.read_availability_error(exc))
+            return {"available": True, "ok": False, **failure,
+                    "summary": failure['error'], "preview": []}
         except _creds.keyring.errors.KeyringError:
             return {"available": True, "ok": False, "code": "keychain_unavailable",
                     "summary": "Keychain access is unavailable. Your saved credential was kept.", "preview": []}

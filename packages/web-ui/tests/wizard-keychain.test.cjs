@@ -9,6 +9,62 @@ function wizard(api) {
   return context.createWizard({id:'lastfm', required_credentials:[{key:'api-key', label:'API key'}],
     setup_steps:[{kind:'input', settings_keys:['api-key']}]}, () => {});
 }
+function credentialPanel(w) {
+  let Dispatcher;
+  const context=vm.createContext({FulcraStepBase:class {},nothing:'',
+    html:(strings,...values)=>({strings,values}),
+    customElements:{define:(_name,klass)=>{Dispatcher=klass;}},
+    document:{createElement:()=>({})},window:{FulcraStepComponents:{input:'fulcra-step-input'}}});
+  const source=fs.readFileSync(path.join(__dirname,'../dist/static/components/step.js'),'utf8')
+    .replace(/^import .*;$/mg,'');
+  vm.runInContext(source,context);
+  const component=new Dispatcher();component.step={kind:'input'};component.ctx=w;
+  const callbacks=[];
+  function flatten(value){
+    if(typeof value==='function'){callbacks.push(value);return '';}
+    if(Array.isArray(value))return value.map(flatten).join('');
+    if(value&&value.strings)return value.strings.map((s,i)=>s+flatten(value.values[i])).join('');
+    return typeof value==='string'?value:'';
+  }
+  return {text:flatten(component.render()),callbacks};
+}
+test('saved metadata outside input steps has explicit scoped recovery', async()=>{
+  const calls=[];const w=wizard(async(url,opts)=>{
+    calls.push([url,opts?.method||'GET']);
+    return url.endsWith('/authorize')?{ok:true,status:'set'}:{ok:true,credentials:{'api-key':'set','created_at':'set'}};
+  });
+  w.credsMap.created_at={key:'created_at',label:'Token issue time'};
+  w._credStatus={created_at:'access_required'};
+  const rendered=credentialPanel(w);
+  assert.match(rendered.text,/Token issue time/);
+  assert.match(rendered.text,/Allow Keychain access/);
+  assert.equal(calls.length,0);
+  await rendered.callbacks[0]();
+  assert.deepEqual(calls,[['/api/plugin/lastfm/credential/created_at/authorize','POST'],['/api/plugin/lastfm/credentials','GET']]);
+});
+test('pending saved access offers only a quiet check',async()=>{
+  const calls=[];const w=wizard(async(url,opts)=>{calls.push([url,opts?.method||'GET']);return {credentials:{'api-key':'pending'}};});
+  w._credStatus={'api-key':'pending'};
+  const rendered=credentialPanel(w);
+  assert.match(rendered.text,/pending/i);
+  assert.doesNotMatch(rendered.text,/Always Allow|Allow Keychain access/);
+  await rendered.callbacks[0]();
+  assert.deepEqual(calls,[['/api/plugin/lastfm/credentials','GET']]);
+});
+test('timed-out explicit access does not tell the user to approve again',async()=>{
+  const w=wizard(async(url)=>url.endsWith('/authorize')?{ok:false,code:'keychain_pending'}:{credentials:{'api-key':'pending'}});
+  await w.authorizeCredential('api-key');
+  assert.match(w._credAccessError,/pending/i);
+  assert.doesNotMatch(w._credAccessError,/Always Allow/);
+});
+test('an older quiet read cannot overwrite newer denied access',async()=>{
+  const replies=[];const w=wizard(()=>new Promise(resolve=>replies.push(resolve)));
+  const first=w._loadCredentialStatus();const second=w._loadCredentialStatus();
+  replies[1]({credentials:{'api-key':'access_required'}});await second;
+  replies[0]({credentials:{'api-key':'set'}});await first;
+  assert.equal(w._credStatus['api-key'],'access_required');
+  assert.equal(w._credPresent['api-key'],undefined);
+});
 test('load preserves unknown credential status and never authorizes automatically', async () => {
   const calls = [];
   const w = wizard(async (url, opts) => {

@@ -399,6 +399,51 @@ def test_child_timeout_kills_owned_group_reaps_and_never_leaks_output(monkeypatc
     assert all(stream.closed for stream in (proc.stdin,proc.stdout,proc.stderr))
 
 
+def test_completed_credential_read_does_not_signal_a_reaped_process_group(monkeypatch):
+    from types import SimpleNamespace
+    from fulcra_collect import macos_keychain
+    proc = SimpleNamespace(pid=12345, returncode=0,
+        stdin=io.BytesIO(), stdout=io.BytesIO(), stderr=io.BytesIO(), wait=lambda **_: 0)
+    monkeypatch.setattr(macos_keychain.subprocess, 'Popen', lambda *a, **kw: proc)
+    monkeypatch.setattr(macos_keychain, '_communicate',
+                        lambda *a: b'{"status":"ok","value":"synthetic"}')
+    def forbidden_signal(*_):
+        pytest.fail('The completed child is reaped; its old group must not be signalled.')
+    monkeypatch.setattr(macos_keychain.os, 'killpg', forbidden_signal)
+    assert macos_keychain.get_password('fulcra-collect:test', 'key') == 'synthetic'
+    assert all(stream.closed for stream in (proc.stdin, proc.stdout, proc.stderr))
+
+
+def test_cleanup_permission_error_preserves_unknown_timeout_without_requesting_access(monkeypatch):
+    from types import SimpleNamespace
+    from fulcra_collect import macos_keychain
+    proc = SimpleNamespace(pid=12345, returncode=0,
+        stdin=io.BytesIO(), stdout=io.BytesIO(), stderr=io.BytesIO(), wait=lambda **_: 0)
+    monkeypatch.setattr(macos_keychain.subprocess, 'Popen', lambda *a, **kw: proc)
+    def timed_out(*_):
+        raise macos_keychain.subprocess.TimeoutExpired('synthetic', 2, output=b'PRIVATE')
+    def forbidden_signal(*_):
+        raise PermissionError('synthetic group unavailable')
+    monkeypatch.setattr(macos_keychain, '_communicate', timed_out)
+    monkeypatch.setattr(macos_keychain.os, 'killpg', forbidden_signal)
+    with pytest.raises(TimeoutError) as error:
+        macos_keychain.get_password('fulcra-collect:test', 'key')
+    assert credentials.read_availability_error(error.value) == 'pending'
+    assert 'PRIVATE' not in str(error.value)
+    assert all(stream.closed for stream in (proc.stdin, proc.stdout, proc.stderr))
+
+
+def test_quiet_helper_accepts_a_slow_success_without_native_io(monkeypatch):
+    import sys
+    from fulcra_collect import macos_keychain
+    # An actual private-pipe process, containing no application/native imports.
+    code = ('import sys,time; sys.stdin.buffer.read(); time.sleep(2.2); '
+            'print(\'{"status":"ok","value":"synthetic"}\',flush=True)')
+    monkeypatch.setattr(macos_keychain, 'isolated_command',
+                        lambda: [sys.executable, '-c', code])
+    assert macos_keychain.get_password('fulcra-collect:test', 'key') == 'synthetic'
+
+
 def test_child_pipe_holding_descendant_cannot_outlive_read_deadline(monkeypatch):
     import sys
     import time

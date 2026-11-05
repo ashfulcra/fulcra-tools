@@ -1139,10 +1139,31 @@ key stays **unverified**, rather than appearing missing. In Configure choose
 the current app. Success requires another quiet read; no saved value is
 returned or replaced. Settings has the same explicit access action for the
 saved Fulcra sign-in. Read slots remain occupied after a timeout until the OS
-call finishes (one per item, at most 16 per process; caller timeout 3 seconds).
+call finishes (one per item, at most 16 per process). The native helper has a
+five-second I/O deadline; the caller allows seven seconds including cleanup.
+A helper timeout remains pending/UNKNOWN and does not establish that another
+Keychain approval is needed. Complete exit and pipe EOFs end process cleanup;
+the reader does not signal a reaped child's old process group. A permission
+failure during incomplete cleanup preserves the original failure and cannot
+turn an unknown read or write into success.
 Changing app identity may require another grant. Configured non-native
 backends retain their own interaction behavior. See
 [the agent Keychain guide](../../AGENTS.md#keychain).
+
+Trakt's availability and explicit recovery inventory includes its saved token
+issue time (`created_at`) and lifetime (`expires_in`), as well as its five
+connection fields. These optional OAuth metadata fields need no manual input,
+but an inaccessible saved value must remain unverified and block collection.
+Their absence from an older app's Configure screen does not prove access works;
+use a corrected installer rather than repeatedly approving unrelated items.
+
+Workers, plugin status, setup checks and explicit access actions preserve the
+same availability classification: a denied read is `keychain_access_required`,
+an unfinished read is `keychain_pending`, and a concurrent credential transition
+is `keychain_changed`. Configure offers quiet rechecking for pending, changed
+or unavailable reads; its recovery panel also covers OAuth-managed fields
+outside manual input steps. A later Trakt owner snapshot retains the exact
+field and availability too, rather than losing them in a generic source error.
 
 Trakt background refresh receipts and credential mirrors also use bounded quiet
 write/delete operations in the isolated same-executable child. The child disables

@@ -250,6 +250,18 @@ PLUGIN = Plugin(
             help="Saved during sign-in so token refresh uses the same callback.",
             required=False,
         ),
+        Credential(
+            key="created_at",
+            label="Trakt token issue time",
+            help="Managed during Trakt sign-in and refresh. Allow access to an existing saved value; no manual entry is needed.",
+            required=False,
+        ),
+        Credential(
+            key="expires_in",
+            label="Trakt token lifetime",
+            help="Managed during Trakt sign-in and refresh. Allow access to an existing saved value; no manual entry is needed.",
+            required=False,
+        ),
     ),
     oauth_handler=trakt_oauth_handler,
     oauth_authorize_url=trakt_authorize_url,

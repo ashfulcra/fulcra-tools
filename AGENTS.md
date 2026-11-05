@@ -100,6 +100,17 @@ the consumed-grant no-replay journal; denial/timeout/ambiguous publication
 requires reconnecting. Explicit interactive sign-in remains separate. Tests
 must inject an isolated quiet backend or fence the native child, and must not
 interpret a synthetic quiet-write pass as signed-app Keychain acceptance.
+Native credential-helper timeouts are pending/UNKNOWN, not proof of a missing
+grant. Keep the outer credential wait longer than the child I/O and cleanup
+bounds. Do not signal a completed/reaped helper's old process group, and do not
+let cleanup permission errors replace the original read/write failure.
+Declare every field a source consumes in its availability/recovery inventory,
+including Trakt's optional `created_at` and `expires_in` OAuth metadata. Optional
+confirmed absence is different from denied or UNKNOWN access. Do not request
+another unrelated grant when the source consumes an omitted field.
+Keep status, health, worker and explicit-access error classification consistent:
+pending/changed reads require a quiet recheck, not another approval. Configure's
+recovery surface must include declared OAuth-managed fields outside input steps.
 
 ## Public repository privacy
 

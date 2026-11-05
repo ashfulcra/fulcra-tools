@@ -26,6 +26,10 @@ class KeychainAccessRequired(KeyringError):
     """The saved item's availability is UNKNOWN until access is granted."""
 
 
+class KeychainReadTimeout(KeychainAccessRequired, TimeoutError):
+    """A bounded helper timed out; this does not establish a missing grant."""
+
+
 class _Security:
     def __init__(self):
         self.sec = C.CDLL(find_library('Security'))
@@ -171,7 +175,7 @@ def _valid_mutation(value):
 
 
 _MAX_PACKET_BYTES = 256 * 1024
-_CHILD_TIMEOUT_S = 2.0
+_CHILD_TIMEOUT_S = 5.0
 
 
 def isolated_command() -> list[str]:
@@ -228,6 +232,7 @@ def mutate_user_password(account: str, value: str) -> None:
 
 def _isolated_request(request, *, writing):
     proc = None
+    communication_complete = False
     deadline = time.monotonic() + _CHILD_TIMEOUT_S
     try:
         proc = subprocess.Popen(isolated_command(), stdin=subprocess.PIPE,
@@ -235,6 +240,7 @@ def _isolated_request(request, *, writing):
                                 start_new_session=True)
         packet = json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
         stdout = _communicate(proc, packet, deadline)
+        communication_complete = True
         response = json.loads(stdout, object_pairs_hook=_unique_object)
         if response == {'status': 'access_required'}:
             raise KeychainAccessRequired('Open Configure and choose Allow Keychain access.')
@@ -249,19 +255,23 @@ def _isolated_request(request, *, writing):
         return response['value']
     except subprocess.TimeoutExpired:
         # Never propagate TimeoutExpired.output: it could contain a secret.
-        raise KeychainAccessRequired('Keychain read did not complete; availability is unknown.') from None
+        raise KeychainReadTimeout('Keychain operation did not complete; availability is unknown.') from None
     except KeyringError:
         raise
     except Exception:
         raise KeyringError('Keychain read is unavailable') from None
     finally:
         if proc is not None:
-            # A direct child may exit while a descendant still holds pipes.
-            # This session belongs to this request; kill it even after exit.
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            # Complete communication includes child exit and both pipe EOFs.
+            # Its PID can then be reused; do not signal that old group.
+            # Incomplete communication still needs bounded descendant cleanup.
+            if not communication_complete:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    # Preserve the original UNKNOWN/failure, never replace it
+                    # with a cleanup error or turn it into credential success.
+                    pass
             try:
                 proc.wait(timeout=.5)
             except subprocess.TimeoutExpired:

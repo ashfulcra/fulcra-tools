@@ -319,7 +319,14 @@ class KeychainStore:
     def snapshot(self):
         from . import credentials
         # Every consumed optional field is a strict quiet read. UNKNOWN propagates.
-        return _values({key: credentials.get_secret('trakt', key) for key in _FIELDS}, complete=False)
+        values = {}
+        for key in _FIELDS:
+            try:
+                values[key] = credentials.get_secret('trakt', key)
+            except (credentials.keyring.errors.KeyringError, TimeoutError) as exc:
+                raise credentials.CredentialReadError(exc, stage='credential_hydration',
+                                                      scope='plugin', key=key) from exc
+        return _values(values, complete=False)
 
     def authorize(self, key):
         from . import credentials
