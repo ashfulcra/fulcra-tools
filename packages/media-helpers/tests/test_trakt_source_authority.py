@@ -128,7 +128,10 @@ def test_worker_unknown_optional_is_not_absence(contained, monkeypatch):
     import io
     out = io.StringIO()
     assert worker.run_plugin(plugin, out=out) == 'error'
-    assert json.loads(out.getvalue())['code'] == 'keychain_access_required'
+    result = json.loads(out.getvalue())
+    assert result['code'] == 'keychain_pending'
+    assert result['credential_error'] == {'stage': 'credential_hydration', 'scope': 'plugin',
+                                         'key': 'client_secret', 'availability': 'pending'}
 
 
 def test_wrapper_guard_lasts_through_cursor_after_original_recovery(contained, monkeypatch):
