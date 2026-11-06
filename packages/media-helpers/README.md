@@ -904,3 +904,7 @@ The underlying TV cache snapshot timeout uses the same installed-app access guid
 Some Podcasts libraries also omit `ZDURATION`. Import the known last-played timestamp as a point Event when duration is absent or null, retaining `duration_seconds: null` in source metadata. Never invent a listening interval. Known durations keep their existing interval encoding and stable source IDs; setup preview explains the absent-duration case.
 
 When the same Podcast play already has a verified positive duration, a later source snapshot without duration retains that interval and its enrichment. The source play ID and known endpoint must agree; conflicting or malformed prior intervals require reconciliation. An earlier invented interval without a reported duration supplies no such evidence and becomes a point event. Raw source snapshots retain the unavailable metadata separately.
+
+Trakt bundle snapshots use the shared bounded quiet-read boundary also used for fresh Collect account reads. A transient pending observation can be checked again without an authorization request or credential write; persistent pending, changed and denied access remain failures. Successful source tests and notarization do not certify a complete historical backfill.
+
+Development media chunk planning retains prior unindexed rows only when their source identities intersect the current chunk. This preserves cross-chunk aliases and twins while avoiding repeated policy reads over unrelated earlier history; current candidates and relevant aliases still receive fresh exclusion checks.

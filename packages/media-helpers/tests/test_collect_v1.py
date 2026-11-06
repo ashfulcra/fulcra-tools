@@ -675,3 +675,28 @@ def test_cross_source_distinct_fingerprints_are_separate_native_records(setup):
     result = writer.run_import([other])
     assert result.posted == result.verified == 1 and result.skipped_existing == 0
     assert len(session.rows) == 2
+
+
+def test_later_chunks_do_not_recheck_unrelated_prior_records(setup):
+    writer, ctx, session, kv, receipts = setup
+    queries = []
+    original = session.excluded_ids
+    def checked(destination, identifiers, **kwargs):
+        queries.append(tuple(identifiers))
+        return original(destination, identifiers, **kwargs)
+    session.excluded_ids = checked
+    writer.run_import([event(primary=str(i), extras=(f'synthetic-binding-{i}',))
+                       for i in range(3)], chunk_size=1)
+    assert len(session.posts) == 3
+    assert all(len(query) <= 1 for query in queries)
+
+
+def test_later_chunk_retains_relevant_twin_when_source_index_lags(setup):
+    writer, ctx, session, kv, receipts = setup
+    session.get_source_records = lambda *args, **kwargs: []
+    result = writer.run_import([event(importer='first', primary='a', extras=('synthetic-shared',)),
+                                event(primary='b', extras=('synthetic-unrelated',)),
+                                event(importer='second', primary='c', extras=('synthetic-shared',))],
+                               chunk_size=1)
+    assert result.posted == 2
+    assert result.skipped_existing == 1

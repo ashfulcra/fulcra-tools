@@ -325,7 +325,7 @@ class KeychainStore:
     def _read(self, key):
         from . import credentials
         try:
-            return credentials._keyring_get('fulcra-collect:trakt', key)
+            return credentials._keyring_get_fresh('fulcra-collect:trakt', key)
         except (credentials.keyring.errors.KeyringError, TimeoutError) as exc:
             raise credentials.CredentialReadError(exc, stage='credential_hydration',
                 scope='plugin', key=key) from exc

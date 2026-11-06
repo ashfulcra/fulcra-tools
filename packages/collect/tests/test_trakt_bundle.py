@@ -163,7 +163,7 @@ def test_physical_read_origin_survives_hydration_status_and_recovery(backend, mo
     reads.clear()
     status = daemon._credential_status('trakt')
     assert status['credential_error'] == recovery
-    assert reads.count(source.KeychainStore.bundle_key) == 1
+    assert reads.count(source.KeychainStore.bundle_key) == (3 if not legacy and availability == 'pending' else 1)
     assert all(value == availability for value in status['credentials'].values())
     assert status['credential_recovery'] == (
         'trakt_reconnect' if legacy and availability == 'access_required'
@@ -198,3 +198,25 @@ def test_current_denied_bundle_can_be_authorized_once(backend, monkeypatch):
     monkeypatch.setattr(credentials, '_authorize_item', lambda *a: calls.append(a) or True)
     assert source.KeychainStore().authorize('client_id') is True
     assert calls == [('fulcra-collect:trakt', source.KeychainStore.bundle_key)]
+
+
+@pytest.mark.parametrize('pending_type', [TimeoutError, 'keychain-pending'])
+def test_bundle_rechecks_transient_pending_without_grants_or_mutation(backend, monkeypatch, pending_type):
+    from fulcra_collect import credentials
+    source, values, items, reads, writes, write = backend
+    items['credential-bundle-v1'] = json.dumps({'version': 1, 'values': values,
+                                               'unknown_fields': []})
+    original = credentials._keyring_get
+    attempts = []
+    def slow_first(service, key):
+        attempts.append((service, key))
+        if len(attempts) == 1:
+            failure = credentials.KeychainReadPending if pending_type == 'keychain-pending' else pending_type
+            raise failure('synthetic pending')
+        return original(service, key)
+    monkeypatch.setattr(credentials, '_keyring_get', slow_first)
+    monkeypatch.setattr(credentials, 'authorize_secret', lambda *_: pytest.fail('unexpected grant'))
+    assert source.KeychainStore(_quiet_write=write).snapshot() == values
+    assert attempts == [('fulcra-collect:trakt', 'credential-bundle-v1')] * 2
+    assert reads == ['credential-bundle-v1']
+    assert writes == []

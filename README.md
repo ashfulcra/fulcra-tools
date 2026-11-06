@@ -256,10 +256,8 @@ The review handshake lives on the bus; a GitHub comment alone does not satisfy
 it. [`AGENTS.md`](AGENTS.md) has the full conventions, including how to log work,
 request review, and close tasks with evidence.
 
-The Collect development branch also closes the accepted-worker shutdown race and preserves Trakt bundle versus legacy-item recovery guidance. These fixes are not claims about the current public 0.1.4 installer; final signing, notarization and upgrade verification remain release gates.
-
-Pending the next installer publication, development Apple Podcasts readers also handle older libraries without cleaned-title metadata; Apple TV runtime errors direct installed users to the app’s Full Disk Access grant. Current public-download limits above still apply.
-
-Development long-history recovery also rechecks transient pending account-credential reads quietly under a fixed budget, without requesting access or replaying credential writes. This follow-up still needs acceptance in its own frozen installer.
-
-The development Podcasts compatibility fix also preserves unknown durations as point events at their known play timestamps. It does not substitute guessed listening time for missing source metadata.
+The development branch also fixes worker shutdown and credential recovery, supports
+older Podcasts libraries, and corrects the installed app's Full Disk Access
+guidance. Fresh account and Trakt-bundle reads share bounded quiet rechecking;
+media backfills avoid repeatedly checking unrelated earlier chunks. Native
+long-run acceptance and publication of the corrected installer remain open.

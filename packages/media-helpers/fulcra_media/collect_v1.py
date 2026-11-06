@@ -440,7 +440,11 @@ class MediaRecordWriter:
                     existing = self.session.get_source_records(destination, source_bindings,
                         start=min(_utc(event.start_time) for event, _ in candidates) - timedelta(minutes=10),
                         end=max(_utc(event.end_time) for event, _ in candidates) + timedelta(minutes=10)) if source_bindings else []
-                    existing.extend(planned[destination])
+                    # Retain unindexed aliases/twins needed by this chunk,
+                    # without rereading every unrelated earlier chunk's policy.
+                    bindings = set(source_bindings)
+                    existing.extend(row for row in planned[destination]
+                                    if bindings.intersection(row["sources"]))
                     excluded_twins = self.session.excluded_ids(destination,
                         list(dict.fromkeys(row["id"] for row in existing)), check_only=check_only) if existing else set()
                     existing = [row for row in existing if row["id"] not in excluded_twins]

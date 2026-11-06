@@ -331,6 +331,11 @@ def get_user_secret(key: str) -> str | None:
 
 
 def get_user_secret_fresh(key: str) -> str | None:
+    """Read the shared account item through the uncached quiet boundary."""
+    return _keyring_get_fresh(_USER_SERVICE, key)
+
+
+def _keyring_get_fresh(service: str, key: str) -> str | None:
     """Fresh quiet observation, with bounded rechecks of transient pending reads.
 
     A long import performs many guarded reads. One slow native helper is not
@@ -348,7 +353,7 @@ def get_user_secret_fresh(key: str) -> str | None:
         if credential_revision() != revision:
             raise CredentialStateChanged('Credential state changed during quiet recheck.')
         try:
-            value = _keyring_get(_USER_SERVICE, key)
+            value = _keyring_get(service, key)
             if credential_revision() != revision:
                 raise CredentialStateChanged('Credential state changed during quiet recheck.')
             return value
