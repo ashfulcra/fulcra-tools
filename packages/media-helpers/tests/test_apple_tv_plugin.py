@@ -195,8 +195,10 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     monkeypatch.setattr(
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
-    with pytest.raises(RuntimeError, match="Full Disk Access"):
+    with pytest.raises(RuntimeError, match="Full Disk Access") as caught:
         APPLE_TV_PLUGIN.run.__wrapped__(_make_ctx({}))
+    assert 'Fulcra Collect' in str(caught.value)
+    assert 'uv cpython' not in str(caught.value)
 
 
 def test_snapshot_timeout_is_fast_fail():

@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 from fulcra_media.importers.apple_podcasts import parse_db
@@ -44,7 +45,23 @@ def test_parse_db_includes_play_count():
     assert "play_count" in e.external_ids
 
 
-import subprocess
+def test_older_library_without_cleaned_title_imports_and_previews(tmp_path):
+    import shutil
+    import sqlite3
+    from types import SimpleNamespace
+    from fulcra_media.apple_podcasts_health import apple_podcasts_health_check
+    path = tmp_path / 'MTLibrary.sqlite'
+    shutil.copy2(FIXTURE, path)
+    original = {event.deterministic_id for event in parse_db(path)}
+    with sqlite3.connect(path) as db:
+        db.execute('ALTER TABLE ZMTEPISODE DROP COLUMN ZCLEANEDTITLE')
+    events = list(parse_db(path))
+    assert {event.deterministic_id for event in events} == original
+    assert all(event.external_ids['episode_title'] for event in events)
+    result = apple_podcasts_health_check(SimpleNamespace(config={'db_path': str(path)}))
+    assert result.ok is True
+    assert '2 played episodes' in result.summary
+    assert len(result.preview) == 2
 
 
 def test_find_timemachine_snapshots_constructs_paths(tmp_path, mocker):

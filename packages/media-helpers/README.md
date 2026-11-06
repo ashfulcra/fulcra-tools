@@ -896,3 +896,5 @@ synthetic credential controls beside them must still be detected. See the
 Personal-use experiment; no package license is declared in [pyproject.toml](pyproject.toml).
 
 Trakt worker hydration samples the saved credential tuple once. Tests inject timeout and profile-change races at that bundle boundary, retaining optional UNKNOWN and captured-profile refusal checks. Run these workspace-dependent tests from the monorepo root with `python -m pytest -c pyproject.toml packages/media-helpers/tests/test_trakt_source_authority.py packages/media-helpers/tests/test_trakt_source_callers.py` so the shared containment fixtures load.
+
+Apple Podcasts import and setup preview support libraries without the optional `ZCLEANEDTITLE` column by selecting `ZTITLE` through one shared schema check. Existing episode IDs and play-time filters stay the same; missing required title metadata remains a failed read. Apple TV snapshot errors name the installed Fulcra Collect app for Full Disk Access and distinguish a possible I/O stall from a confirmed permission denial.

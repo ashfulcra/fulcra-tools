@@ -49,11 +49,11 @@ def _run_apple_tv(ctx: RunContext) -> None:
         events = apple_tv_importer.parse_cache(cache_dir)
     except apple_tv_importer.SnapshotError as exc:
         raise RuntimeError(
-            f"apple-tv: cache snapshot failed — the daemon's interpreter "
-            f"lacks Full Disk Access, so reading the TV service's group "
-            f"container blocks. Grant FDA to the daemon's uv cpython binary "
-            f"(Privacy & Security > Full Disk Access) and restart the daemon; "
-            f"then this heals. Details: {exc}"
+            f"apple-tv: cache snapshot failed. Check Full Disk Access for "
+            f"Fulcra Collect from Applications in System Settings > Privacy "
+            f"& Security > Full Disk Access, then restart Collect. For a source "
+            f"install, grant access to the terminal app that starts it. A cache "
+            f"I/O stall can also cause this timeout. Details: {exc}"
         ) from exc
 
     import_events(

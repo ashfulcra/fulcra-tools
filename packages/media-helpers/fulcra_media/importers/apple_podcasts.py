@@ -49,12 +49,19 @@ def _det_id(zuuid: str, zlastdateplayed: float) -> str:
     return f"com.fulcra.media.apple-podcasts.v1.{h[:16]}"
 
 
+def episode_title_expression(conn: sqlite3.Connection) -> str:
+    """Closed schema adaptation shared by import and setup preview."""
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(ZMTEPISODE)')}
+    if 'ZTITLE' not in columns:
+        raise sqlite3.OperationalError('Podcasts schema lacks required episode title')
+    return 'COALESCE(e.ZCLEANEDTITLE, e.ZTITLE)' if 'ZCLEANEDTITLE' in columns else 'e.ZTITLE'
+
+
 def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
     """Yield one NormalizedEvent per completed episode in the DB snapshot.
 
-    Filters: ZPLAYSTATE=3 (played) AND ZHASBEENPLAYED=1 AND
-    ZPLAYSTATEMANUALLYSET=0 AND (ZPLAYHEAD / ZDURATION) > 0.9 AND
-    ZLASTDATEPLAYED IS NOT NULL.
+    Filters: positive durable play count, not manually marked played, and a
+    non-null last-played timestamp. Optional cleaned titles fall back to ZTITLE.
     """
     # Snapshot db + sidecars to a tempdir so we never touch the live DB
     src = Path(db_path)
@@ -112,12 +119,13 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
         # ZLASTDATEPLAYED (the timestamp of the last play). The spec's
         # original ZPLAYSTATE=3 + playhead/duration check missed everything
         # — every episode in a real library matched 0 rows.
-        cur.execute("""
+        title = episode_title_expression(conn)
+        cur.execute(f"""
             SELECT
               e.ZUUID,
               e.ZLASTDATEPLAYED,
               p.ZTITLE,
-              COALESCE(e.ZCLEANEDTITLE, e.ZTITLE),
+              {title},
               e.ZDURATION,
               COALESCE(e.ZPLAYCOUNT, 0)
             FROM ZMTEPISODE e
