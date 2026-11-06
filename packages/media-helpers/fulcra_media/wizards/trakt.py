@@ -7,7 +7,7 @@ import click
 
 TRAKT_STEPS = """\
 Trakt API setup
-  Reference: https://trakt.docs.apiary.io/
+  Reference: https://developer.trakt.tv/docs/authentication-oauth
 
   Trakt aggregates watch history across many streaming services. Once
   connected, it backfills history from supported services (Apple TV+,
@@ -16,18 +16,23 @@ Trakt API setup
   1. If you don't have an account, sign up at https://trakt.tv.
   2. Trakt VIP enables the 'Streaming Scrobbler' which syncs streaming-
      service watches in real time. Highly recommended for ongoing capture.
-  3. Get your free Trakt API client credentials at https://trakt.tv/oauth/applications/new
-     - Name: anything (e.g. "fulcra-media-helpers")
-     - Redirect URI: urn:ietf:wg:oauth:2.0:oob
-  4. Save your client_id and client_secret to:
-       ~/.config/fulcra-media/trakt.json
-     as JSON: {"client_id": "...", "client_secret": "..."}
+  3. API apps now live at https://developer.trakt.tv/apps.
+     The developer portal requires a verified GitHub account. New PKCE
+     sign-in needs a Client ID only, not a Client Secret. Existing apps
+     may still be available at https://trakt.tv/oauth/applications/new.
+     Manage account authorizations separately at:
+       https://app.trakt.tv/settings/apps/connected
 
-  5. Run the device-flow login to grant your personal account access:
-       fulcra-media auth trakt    (coming soon - for now use the
-       Python script in the project's scratch dir or the README)
+  4. Use Fulcra Collect's Trakt setup wizard for browser sign-in.
+     For a new personal app, choose App type: Development, which accepts
+     local HTTP callbacks. Production apps require HTTPS. Register the
+     exact callback shown by Collect (including host and port).
+     Keep an existing working app and its credentials.
 
-  6. Once authenticated, import:
+  5. Existing CLI setups keep using ~/.config/fulcra-media/trakt.json
+     with their previously issued OAuth tokens. The CLI does not have
+     an auth subcommand; Collect credentials are stored separately.
+     Once CLI credentials are already configured, import:
        fulcra-media import trakt
 
   Known quirk: when you connect a streaming service to Trakt, Trakt may

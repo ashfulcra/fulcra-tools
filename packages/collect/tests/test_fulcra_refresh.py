@@ -11,7 +11,7 @@ Covers three layers added by SP5 task 1:
    ``fulcra_http_client`` — retries once on 401 after calling the
    refresh helper, otherwise transparent.
 4. The ``/api/fulcra/auth/status`` reply now includes ``refresh_failed``.
-5. Both interactive sign-in paths (paste-token + cli_login) clear the
+5. Both interactive sign-in paths (paste-token + device completion) clear the
    flag on success.
 
 These complement the existing test_web.py auth-route coverage; we keep
@@ -26,6 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fulcra_collect.credentials as _creds_mod
+from collect_test_helpers import synthetic_account_token
 from fulcra_collect.daemon import Config, Daemon
 from fulcra_collect.registry import RegistryResult
 from fulcra_collect.web import _ensure_token, build_app
@@ -48,7 +49,7 @@ def _client(daemon) -> TestClient:
 
 
 @pytest.fixture(autouse=True)
-def _reset_refresh_flag():
+def _reset_refresh_flag(collect_home, _in_memory_keyring):
     """Reset the process-level ``_refresh_failed`` flag between tests.
 
     ``credentials`` lives in module scope, so tests would otherwise leak
@@ -59,6 +60,11 @@ def _reset_refresh_flag():
     _creds_mod._refresh_failed = False
     yield
     _creds_mod._refresh_failed = prior
+
+
+@pytest.fixture
+def _established_refresh_account():
+    _creds_mod.set_user_secret("bearer-token", synthetic_account_token(exp=1, marker="expired"))
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +79,7 @@ def _fake_run_factory(stdout: str, returncode: int = 0):
     return _fake_run
 
 
-def test_refresh_calls_print_access_token_and_updates_keychain(
+def test_refresh_calls_print_access_token_and_updates_keychain(_established_refresh_account,
     _in_memory_keyring, monkeypatch,
 ):
     """Happy path: CLI exits 0 with a token; helper stores it + returns it."""
@@ -85,22 +91,22 @@ def test_refresh_calls_print_access_token_and_updates_keychain(
     def _fake_run(args, capture_output, text, timeout):  # noqa: ARG001
         seen_args.append(args)
         return subprocess.CompletedProcess(
-            args=args, returncode=0, stdout="fresh-token-123\n", stderr="",
+            args=args, returncode=0, stdout=synthetic_account_token(), stderr="",
         )
 
     monkeypatch.setattr(_creds_mod.subprocess, "run", _fake_run)
 
     out = _creds_mod.refresh_fulcra_access_token()
 
-    assert out == "fresh-token-123"
+    assert out == synthetic_account_token()
     assert seen_args == [["/usr/local/bin/fulcra", "auth", "print-access-token"]]
     # Keychain updated with the new token (via set_user_secret).
-    assert _creds_mod.get_user_secret("bearer-token") == "fresh-token-123"
+    assert _creds_mod.get_user_secret("bearer-token") == synthetic_account_token()
     # And success clears any prior refresh-failed state.
     assert _creds_mod.is_refresh_failed() is False
 
 
-def test_refresh_returns_none_when_cli_not_on_path(_in_memory_keyring, monkeypatch):
+def test_refresh_returns_none_when_cli_not_on_path(_established_refresh_account, _in_memory_keyring, monkeypatch):
     """If `fulcra` isn't installed, return None and set the failed flag."""
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: None)
     # subprocess.run shouldn't even be reached — guard via a sentinel.
@@ -113,7 +119,7 @@ def test_refresh_returns_none_when_cli_not_on_path(_in_memory_keyring, monkeypat
     assert _creds_mod.is_refresh_failed() is True
 
 
-def test_refresh_returns_none_on_cli_nonzero_exit(_in_memory_keyring, monkeypatch):
+def test_refresh_returns_none_on_cli_nonzero_exit(_established_refresh_account, _in_memory_keyring, monkeypatch):
     """CLI exits non-zero (e.g. refresh token expired) -> failure path."""
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: "/bin/fulcra")
     monkeypatch.setattr(
@@ -123,10 +129,10 @@ def test_refresh_returns_none_on_cli_nonzero_exit(_in_memory_keyring, monkeypatc
     assert _creds_mod.refresh_fulcra_access_token() is None
     assert _creds_mod.is_refresh_failed() is True
     # Keychain must NOT be poisoned with an empty value.
-    assert _creds_mod.get_user_secret("bearer-token") is None
+    assert _creds_mod.get_user_secret("bearer-token") == synthetic_account_token(exp=1, marker="expired")
 
 
-def test_refresh_returns_none_on_empty_stdout(_in_memory_keyring, monkeypatch):
+def test_refresh_returns_none_on_empty_stdout(_established_refresh_account, _in_memory_keyring, monkeypatch):
     """CLI exits 0 but stdout is whitespace -> treat as failure."""
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: "/bin/fulcra")
     monkeypatch.setattr(
@@ -137,7 +143,7 @@ def test_refresh_returns_none_on_empty_stdout(_in_memory_keyring, monkeypatch):
     assert _creds_mod.is_refresh_failed() is True
 
 
-def test_refresh_returns_none_on_cli_timeout(_in_memory_keyring, monkeypatch):
+def test_refresh_returns_none_on_cli_timeout(_established_refresh_account, _in_memory_keyring, monkeypatch):
     """A hung CLI -> timeout caught and surfaces as failure."""
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: "/bin/fulcra")
 
@@ -279,7 +285,7 @@ def test_retrying_client_retries_get_on_401(
 
     refresh_calls = {"n": 0}
 
-    def _fake_refresh():
+    def _fake_refresh(**kwargs):
         refresh_calls["n"] += 1
         return "new-token"
 
@@ -312,7 +318,7 @@ def test_retrying_client_retries_post_on_401(
     })
     _patch_http_client_factory(monkeypatch, fake)
     monkeypatch.setattr(
-        _creds_mod, "refresh_fulcra_access_token", lambda: "fresh-post",
+        _creds_mod, "refresh_fulcra_access_token", lambda **kwargs: "fresh-post",
     )
 
     captured = _capture_route_context(monkeypatch)
@@ -338,7 +344,7 @@ def test_retrying_client_returns_original_401_when_refresh_fails(
     """
     fake = _FakeInnerClient({"get": [_FakeResponse(401, "stale-only")]})
     _patch_http_client_factory(monkeypatch, fake)
-    monkeypatch.setattr(_creds_mod, "refresh_fulcra_access_token", lambda: None)
+    monkeypatch.setattr(_creds_mod, "refresh_fulcra_access_token", lambda **kwargs: None)
 
     captured = _capture_route_context(monkeypatch)
     daemon = _build_daemon(collect_home)
@@ -369,9 +375,9 @@ def test_auth_status_reports_refresh_failed_false_initially(
 
 
 def test_auth_status_reports_refresh_failed_true_after_failed_refresh(
-    collect_home, _in_memory_keyring, monkeypatch,
+    _established_refresh_account, collect_home, _in_memory_keyring, monkeypatch,
 ):
-    # Drive `_refresh_failed=True` by running a failing refresh.
+    # Drive `_refresh_failed=True` for an established, locally readable account.
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: None)
     assert _creds_mod.refresh_fulcra_access_token() is None
     assert _creds_mod.is_refresh_failed() is True
@@ -380,20 +386,31 @@ def test_auth_status_reports_refresh_failed_true_after_failed_refresh(
     client = _client(daemon)
     r = client.get("/api/fulcra/auth/status")
     assert r.status_code == 200
-    assert r.json()["refresh_failed"] is True
+    body = r.json()
+    assert body["availability"] == "present"
+    assert body["refresh_failed"] is True
 
 
 def test_auth_status_reports_refresh_failed_false_after_clear(
-    collect_home, _in_memory_keyring, monkeypatch,
+    _established_refresh_account, collect_home, _in_memory_keyring, monkeypatch,
 ):
     monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: None)
-    _creds_mod.refresh_fulcra_access_token()
-    _creds_mod.clear_refresh_failed()
+    assert _creds_mod.refresh_fulcra_access_token() is None
+    assert _creds_mod.is_refresh_failed() is True
 
     daemon = _build_daemon(collect_home)
     client = _client(daemon)
+    before_clear = client.get("/api/fulcra/auth/status")
+    assert before_clear.status_code == 200
+    assert before_clear.json()["availability"] == "present"
+    assert before_clear.json()["refresh_failed"] is True
+
+    _creds_mod.clear_refresh_failed()
     r = client.get("/api/fulcra/auth/status")
-    assert r.json()["refresh_failed"] is False
+    assert r.status_code == 200
+    body = r.json()
+    assert body["availability"] == "present"
+    assert body["refresh_failed"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -421,54 +438,28 @@ def test_paste_token_signin_clears_refresh_failed_flag(
     _creds_mod.refresh_fulcra_access_token()
     assert _creds_mod.is_refresh_failed() is True
 
-    mock_client = _mock_httpx_success(mocker)
-    mocker.patch("httpx.Client", return_value=mock_client)
-
-    daemon = _build_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/token", json={"token": "new-token"})
-    assert r.status_code == 200
-
+    from fulcra_collect import owned_auth
+    monkeypatch.setattr(owned_auth, 'validate_token', lambda token: None)
+    client = _client(_build_daemon(collect_home))
+    result = client.post('/api/fulcra/auth/token', json={'token': synthetic_account_token()})
+    assert result.status_code == 200
     assert _creds_mod.is_refresh_failed() is False
 
 
-def test_cli_login_signin_clears_refresh_failed_flag(
-    collect_home, _in_memory_keyring, monkeypatch, mocker,
-):
-    """POST /api/fulcra/auth/cli_login sets refresh_failed -> False."""
-    # Seed the flag.
-    monkeypatch.setattr(_creds_mod, "_find_fulcra_cli", lambda: None)
-    _creds_mod.refresh_fulcra_access_token()
-    assert _creds_mod.is_refresh_failed() is True
-
-    # Now re-point the resolver so cli_login can find the CLI, and mock
-    # subprocess.run for both `auth login` and `auth print-access-token`.
-    monkeypatch.setattr(_creds_mod, "_find_fulcra_cli",
-                        lambda: "/usr/local/bin/fulcra")
-
-    def _fake_run(args, capture_output, text, timeout):  # noqa: ARG001
-        if "login" in args:
-            return subprocess.CompletedProcess(
-                args=args, returncode=0, stdout="", stderr="",
-            )
-        if "print-access-token" in args:
-            return subprocess.CompletedProcess(
-                args=args, returncode=0, stdout="cli-token\n", stderr="",
-            )
-        raise AssertionError(f"unexpected subprocess.run args: {args}")
-
-    import subprocess as _subprocess_mod
-    monkeypatch.setattr(_subprocess_mod, "run", _fake_run)
-
-    # Mock the post-login validation httpx GET to return 200.
-    mock_client = _mock_httpx_success(mocker)
-    mocker.patch("httpx.Client", return_value=mock_client)
-
-    daemon = _build_daemon(collect_home)
-    client = _client(daemon)
-    r = client.post("/api/fulcra/auth/cli_login")
-    assert r.status_code == 200, r.text
-
+def test_split_device_login_clears_refresh_failed_flag(collect_home, _in_memory_keyring, monkeypatch):
+    """Only an approved, nonce-bound device grant dismisses the banner."""
+    from types import SimpleNamespace
+    from fulcra_collect import owned_auth
+    _creds_mod._refresh_failed = True
+    monkeypatch.setattr(owned_auth, 'validate_token', lambda token: None)
+    monkeypatch.setattr(owned_auth, 'provider', lambda: SimpleNamespace(
+        get_device_code=lambda: ('synthetic-device', 'https://fulcra.us.auth0.com/activate?user_code=TEST-CODE', 'TEST-CODE', 900, 5),
+        get_token=lambda *args: SimpleNamespace(access_token=synthetic_account_token(), refresh_token='synthetic-refresh')))
+    client = _client(_build_daemon(collect_home))
+    start = client.post('/api/fulcra/auth/cli_login_start').json()
+    result = client.post('/api/fulcra/auth/cli_login_poll', json={
+        'protocol': 2, 'attempt_id': start['attempt_id'], 'device_code': start['device_code']})
+    assert result.status_code == 200
     assert _creds_mod.is_refresh_failed() is False
 
 
@@ -502,56 +493,11 @@ def test_refresh_finds_fulcra_in_well_known_location_when_not_on_path(
     assert found == str(fake_cli), f"Expected {fake_cli}, got {found}"
 
 
-def test_cli_status_uses_find_fulcra_cli_fallback_when_not_on_path(
-    collect_home, _in_memory_keyring, monkeypatch,
-) -> None:
-    """The browser-sign-in probe must resolve the CLI via
-    ``credentials._find_fulcra_cli`` (which checks ~/.local/bin etc.), not
-    bare ``shutil.which``. The launchd-managed daemon runs with a restricted
-    PATH that excludes ~/.local/bin, so a bare ``which`` reports the CLI
-    missing — blocking sign-in with "The fulcra CLI is not on PATH" — even
-    when it is installed. This mirrors the refresh-path fix and closes the
-    same gap on the sign-in path.
-    """
-    import os
-    import fulcra_common.client as common_client
-    FAKE = "/fake/.local/bin/fulcra"
-    _real_isfile, _real_access, _real_expand = (
-        os.path.isfile, os.access, os.path.expanduser,
-    )
-
-    # Disable the venv-sibling short-circuit (resolver lives in
-    # fulcra_common.client now), then simulate launchd's restricted PATH.
-    monkeypatch.setattr("fulcra_common.client.sys.executable",
-                        "/nonexistent/venv/python")
-    monkeypatch.setattr(common_client.shutil, "which", lambda name: None)
-    # ...but it IS installed at ~/.local/bin, which _find_fulcra_cli checks.
-    monkeypatch.setattr(
-        common_client.os.path, "expanduser",
-        lambda p: FAKE if p == "~/.local/bin/fulcra" else _real_expand(p),
-    )
-    monkeypatch.setattr(
-        common_client.os.path, "isfile",
-        lambda p: True if p == FAKE else _real_isfile(p),
-    )
-    monkeypatch.setattr(
-        common_client.os, "access",
-        lambda p, mode: True if p == FAKE else _real_access(p, mode),
-    )
-
-    # The probe execs `<cli> auth print-access-token`; intercept so we don't
-    # try to run the (nonexistent) fake path.
-    def _fake_run(args, capture_output, text, timeout):  # noqa: ARG001
-        assert args[0] == FAKE, f"probe should use the resolved CLI, got {args!r}"
-        return subprocess.CompletedProcess(args, 0, stdout="tok\n", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    daemon = _build_daemon(collect_home)
-    client = _client(daemon)
-    r = client.get("/api/fulcra/auth/cli_status")
-    assert r.status_code == 200
-    assert r.json()["available"] is True
+def test_signin_status_has_no_cli_path_or_account_dependency(collect_home, _in_memory_keyring, monkeypatch):
+    monkeypatch.setattr(_creds_mod, '_find_fulcra_cli', lambda: pytest.fail('no CLI probe'))
+    result = _client(_build_daemon(collect_home)).get('/api/fulcra/auth/cli_status')
+    assert result.status_code == 200
+    assert result.json() == {'available': True, 'signed_in': False, 'protocol': 2}
 
 
 def test_refresh_returns_none_when_cli_truly_missing(monkeypatch) -> None:

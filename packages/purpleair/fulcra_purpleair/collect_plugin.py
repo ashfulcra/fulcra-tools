@@ -1,21 +1,12 @@
-"""fulcra-collect plugin: PurpleAir air-quality readings.
+"""Poll PurpleAir into account-bound v1 Metrics with a recoverable outbox.
 
-A ``scheduled`` / ``live_polled`` plugin (every 10 min by default — the
-PurpleAir cloud API refreshes a sensor about every 2 min but rate-limits
-keys, so 10 min is the safe cadence). Each poll fetches one reading per
-configured sensor — from the PurpleAir cloud API (``mode=api``, needs an
-API key + sensor index) or directly from a sensor on the LAN
-(``mode=local``, needs the sensor's IP) — and writes each present measure
-(PM2.5, PM10, EPA AQI, temperature, humidity, pressure) to its own Fulcra
-NumericAnnotation track.
-
-Idempotency is per-reading: a sensor's own observation timestamp keys the
-daemon-backed dedup claim, so re-fetching the same sample (the cloud API
-returns the last cached reading between refreshes) never double-writes.
+Stable per-measure UUIDs and exact readback replace the old per-sample claim.
+Only verified samples advance a receipt/cursor; partial or uncertain delivery
+stays durable and is reconciled before fetching the next sensor reading.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fulcra_collect.freshness import FreshnessExpectation
 from fulcra_collect.plugin import (
@@ -26,11 +17,13 @@ from fulcra_collect.plugin import (
     Setting,
     SetupStep,
 )
-from fulcra_common.client import BaseFulcraClient
+from fulcra_collect.v1_session import CollectRecordSession
+from fulcra_collect.v1_outbox import source_settings_fingerprint, dispatch_states, pending_dispatch
+from fulcra_common.v1 import _destination, record_matches
 
 from .client import fetch_api, fetch_local
-from .definitions import METRICS, NUMERIC_EXPECTED_SPEC
-from .ingest import build_records, post_records
+from .definitions import METRICS
+from .ingest import build_records
 from .models import Reading
 
 PLUGIN_ID = "purpleair"
@@ -70,8 +63,10 @@ MODE_API = "api"
 MODE_LOCAL = "local"
 
 # Plugin-scoped KV keys.
-_DEFS_KV_KEY = "definition_ids"          # {metric.key: fulcra definition id}
-_LAST_OBSERVED_KV_KEY = "last_observed"  # ISO ts of newest sample written
+# Legacy definition_ids / last_observed remain intact for historical mapping.
+_DESTINATIONS_KV_KEY = "v1_destinations"
+_PENDING_KV_KEY = "v1_pending"
+_LAST_OBSERVED_KV_KEY = "v1_last_observed"
 
 
 def _split(raw: object) -> list[str]:
@@ -107,84 +102,108 @@ def _fetch_readings(ctx: RunContext, mode: str) -> list[Reading]:
     return [fetch_api(str(sensor_index), api_key)]
 
 
-def _resolve_definition_ids(ctx: RunContext) -> dict[str, str]:
-    """Resolve (find-or-create) the six per-measure NumericAnnotation defs,
-    caching each id in plugin KV keyed by measure.
+def _pending(ctx: RunContext, session: CollectRecordSession) -> dict:
+    fingerprint = source_settings_fingerprint(ctx, session)
+    pending = ctx.kv_get(_PENDING_KV_KEY, None)
+    if pending is None:
+        return {"account_id": session.account_id, "epoch": ctx.config_epoch,
+                "settings_fingerprint": fingerprint, "items": []}
+    if not isinstance(pending, dict) or not isinstance(pending.get("items"), list):
+        raise RuntimeError("purpleair: pending outbox is unreadable; reconcile before continuing")
+    if pending["items"]:
+        if pending.get("account_id") != session.account_id:
+            raise RuntimeError("purpleair: pending records belong to another account; reconcile before continuing")
+        if pending.get("epoch") != ctx.config_epoch or pending.get("settings_fingerprint") != fingerprint:
+            raise RuntimeError("purpleair: pending source configuration changed; reconcile before continuing")
+        return pending
+    return {"account_id": session.account_id, "epoch": ctx.config_epoch,
+            "settings_fingerprint": fingerprint, "items": []}
 
-    Each measure keeps its own cached id in plugin KV and is resolved through
-    ``ensure_definition``, which validates that cached id against the live
-    account every run (``resolved_definition_id``'s single ``state.definition_id``
-    slot + shared validation watermark can't be trusted across six distinct
-    definitions — a fresh watermark set by one measure would falsely pass a
-    stale sibling id after an account switch). On a stale/absent id it
-    re-resolves, landing this measure's description on first create.
-    """
-    cache = dict(ctx.kv_get(_DEFS_KV_KEY, {}) or {})
+
+def _resolve_destinations(ctx: RunContext, session: CollectRecordSession) -> dict[str, str]:
+    configured = ctx.config.get("v1_destination_ids", {})
+    if not isinstance(configured, dict) or set(configured) - {metric.key for metric in METRICS}:
+        raise ValueError("purpleair: invalid v1 destination mapping")
+    for pin in configured.values():
+        _destination(pin, "Metric")
+    cached = ctx.kv_get(_DESTINATIONS_KV_KEY, {}) or {}
+    if not isinstance(cached, dict):
+        raise ValueError("purpleair: invalid v1 destination cache")
+    pins = cached.get("ids", {}) if cached.get("account_id") == session.account_id else {}
+    destinations = {}
     for metric in METRICS:
-        cache[metric.key] = ctx.ensure_definition(
-            cached=cache.get(metric.key),
-            expected_spec=NUMERIC_EXPECTED_SPEC,
-            canonical_name=metric.canonical_name,
-            create_extra=metric.create_extra(),
-        )
-    ctx.kv_set(_DEFS_KV_KEY, cache)
-    return cache
+        resolved = session.resolve_destination(metric.data_type_spec(),
+            pinned_id=configured.get(metric.key, pins.get(metric.key)), allow_create=metric.key not in configured)
+        destinations[metric.key] = resolved.data_type
+    session.commit(lambda: ctx.kv_set(_DESTINATIONS_KV_KEY,
+                                     {"account_id": session.account_id, "ids": destinations}))
+    return destinations
 
 
-def _write_reading(
-    ctx: RunContext,
-    reading: Reading,
-    definition_ids: dict[str, str],
-    client: BaseFulcraClient,
-) -> int:
-    """Build, claim, and ingest one reading. Returns the record count written
-    (0 when the reading carried no values or was already ingested).
+def _deliver_pending(ctx: RunContext, session: CollectRecordSession, pending: dict) -> int:
+    written = 0
+    while pending["items"]:
+        item = pending["items"][0]
+        records = item["records"]
+        verified = excluded = 0
+        for destination, record in records.items():
+            dispatch = pending_dispatch(pending, item, destination, [record],
+                load=lambda: ctx.kv_get(_PENDING_KV_KEY, None),
+                save=lambda value: ctx.kv_set(_PENDING_KV_KEY, value),
+                validate=lambda: session.commit(lambda: _pending(ctx, session)))
+            result = session.deliver_records(destination, [record], dispatch=dispatch)
+            verified += len(result.verified_ids)
+            excluded += len(result.excluded_ids)
 
-    Records are built BEFORE the claim so an all-empty sample never burns the
-    per-reading dedup key (which would suppress a later non-empty sample that
-    happened to share the timestamp)."""
-    records = build_records(reading, definition_ids)
-    if not records:
-        return 0
-    key = reading.dedup_key()
-    if not ctx.claim_dedup_keys({key}):
-        ctx.log.info("purpleair: reading %s already ingested — skipping", key)
-        return 0
-    try:
-        post_records(client, records)
-    except Exception:
-        # Release the claim so the next run retries this reading rather than
-        # dropping it forever after a transient POST failure.
-        ctx.unclaim_dedup_keys({key})
-        raise
-    # observed_at is the SENSOR's timestamp, not our write time — it is what
-    # lets the daemon distinguish a sensor still reporting from one whose
-    # readings have frozen while we keep accepting them.
-    ctx.annotation(
-        f"PurpleAir {reading.sensor_id}: {len(records)} measures",
-        observed_at=reading.observed_at.isoformat(),
-    )
-    return len(records)
+        def finish():
+            if ctx.kv_get(_PENDING_KV_KEY, None) != pending:
+                raise RuntimeError("purpleair: original pending source changed; retain batch")
+            prior = ctx.kv_get(_LAST_OBSERVED_KV_KEY, {}) or {}
+            observed = item["observed_at"]
+            if (prior.get("account_id") == session.account_id
+                    and datetime.fromisoformat(prior["observed_at"]) > datetime.fromisoformat(observed)):
+                observed = prior["observed_at"]
+            ctx.kv_set(_LAST_OBSERVED_KV_KEY,
+                       {"account_id": session.account_id, "observed_at": observed})
+            suffix = f"; {excluded} excluded" if excluded else ""
+            ctx.annotation(f"PurpleAir {item['sensor_id']}: {verified} measures{suffix}",
+                           observed_at=item["observed_at"])
+            pending["items"].pop(0)
+            ctx.kv_set(_PENDING_KV_KEY, pending)
+
+        session.commit(finish)
+        written += verified
+    return written
 
 
 def run(ctx: RunContext) -> None:
-    """One poll pass: fetch every configured sensor, write present measures."""
+    """Reconcile captured data first, then poll the selected source."""
     mode = _mode(ctx)
-    readings = _fetch_readings(ctx, mode)
-    definition_ids = _resolve_definition_ids(ctx)
-    client = BaseFulcraClient()
-
-    written = 0
-    newest = None
-    for reading in readings:
-        count = _write_reading(ctx, reading, definition_ids, client)
-        written += count
-        if count and (newest is None or reading.observed_at > newest):
-            newest = reading.observed_at
-
-    if newest is not None:
-        ctx.kv_set(_LAST_OBSERVED_KV_KEY, newest.isoformat())
-    ctx.progress(mode=mode, sensors=len(readings), records=written)
+    with CollectRecordSession(ctx) as session:
+        with session.record_write_scope():
+            pending = _pending(ctx, session)
+            written = _deliver_pending(ctx, session, pending)
+        readings = _fetch_readings(ctx, mode)
+        destinations = _resolve_destinations(ctx, session) if readings else {}
+        for reading in readings:
+            records = build_records(reading, destinations)
+            records = {destination: record for destination, record in records.items()
+                       if not session.excluded_ids(destination, [record["id"]])}
+            if not records or all(record_matches(session.get_record(destination, record["id"]), record)
+                                  for destination, record in records.items()):
+                continue
+            item = {"sensor_id": reading.sensor_id,
+                    "observed_at": reading.observed_at.isoformat(), "records": records,
+                    "dispatch_version": 1}
+            item["dispatch"] = dispatch_states(pending, {d: [r] for d, r in records.items()}, owner=item)
+            with session.record_write_scope():
+                # Reread before staging: another invocation may have captured work.
+                if _pending(ctx, session)["items"]:
+                    raise RuntimeError("purpleair: pending source must be reconciled before staging")
+                pending["items"].append(item)
+                session.commit(lambda: ctx.kv_set(_PENDING_KV_KEY, pending))
+                written += _deliver_pending(ctx, session, pending)
+        ctx.progress(mode=mode, sensors=len(readings), records=written)
 
 
 def health_check(ctx: RunContext) -> HealthResult:
@@ -210,12 +229,23 @@ def health_check(ctx: RunContext) -> HealthResult:
     return HealthResult(ok=True, summary=summary[:200], preview=preview)
 
 
+def _has_pending_records(ctx: RunContext) -> bool:
+    pending = ctx.kv_get(_PENDING_KV_KEY, None)
+    if pending is None:
+        return False
+    if not isinstance(pending, dict) or not isinstance(pending.get("items"), list):
+        raise ValueError("purpleair pending records are unreadable")
+    return bool(pending["items"])
+
+
 PLUGIN = Plugin(
     id=PLUGIN_ID,
     name="PurpleAir air quality",
     kind="scheduled",
     collect_mode="live_polled",
     run=run,
+    record_data_types=lambda _settings: {metric.key: metric.data_type_spec() for metric in METRICS},
+    record_pending=_has_pending_records,
     description=(
         "Captures air-quality readings (PM2.5, PM10, EPA AQI, temperature, "
         "humidity, pressure) from a PurpleAir sensor — via the PurpleAir cloud "

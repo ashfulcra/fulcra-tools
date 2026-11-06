@@ -130,8 +130,8 @@ export async function setHeartbeatEnabled(want: boolean): Promise<boolean> {
  * defensively re-register so a manifest/dist update doesn't strand the
  * setting in an inconsistent state.
  */
-export async function reconcileHeartbeatOnBoot(): Promise<void> {
-  const s = await loadSettings();
+export async function reconcileHeartbeatOnBoot(save:typeof saveSettings=saveSettings,load:typeof loadSettings=loadSettings): Promise<void> {
+  const s = await load();
   if (!s.heartbeatEnabled) {
     await unregisterHeartbeatScript();
     return;
@@ -139,7 +139,7 @@ export async function reconcileHeartbeatOnBoot(): Promise<void> {
   if (!(await hasHeartbeatPermission())) {
     // User revoked the host permission from chrome://extensions while
     // settings.heartbeatEnabled stayed true. Resync.
-    await saveSettings({ ...s, heartbeatEnabled: false });
+    await save({ ...s, heartbeatEnabled: false });
     await unregisterHeartbeatScript();
     return;
   }

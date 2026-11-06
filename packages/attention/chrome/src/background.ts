@@ -17,13 +17,17 @@
 //
 // State lives in chrome.storage.session under `visits` (see types.ts).
 
-import { scrubUrl } from "./scrub";
+import {handleV1AuthCommand,workerAuthMode,saveWorkerSettings,loadWorkerSettings as loadSettings,initializeWorkerAuth,readWorkerCaptureDescriptor,enqueueWorkerCapture,workerCaptureEpoch} from "./relayless/v1AuthWorker";
+import { scrubUrl,DENYLIST } from "./scrub";
 import { isIgnored } from "./ignore";
 import { categorize } from "./categorize";
 import { getChromeIdentity } from "./identity";
 import { extractPageMeta, type PageMeta } from "./content";
 import { addToOutbox, flushOutbox } from "./outbox";
-import { loadVisits, saveVisits, loadSettings, saveSettings } from "./storage";
+import { loadVisits, saveVisits as saveSessionVisits } from "./storage";
+import {V1CaptureIngress} from "./relayless/v1CaptureIngress";
+import {snapshotV1JSON} from "./relayless/v1Http";
+import {sha256Hex} from "./relayless/sha256";
 import type { AttentionEvent, Visit, Counts } from "./types";
 import { BLUR_GRACE_MS, CLIENT, HEARTBEAT_STALE_MS } from "./types";
 import { reconcileHeartbeatOnBoot } from "./heartbeat-control";
@@ -72,8 +76,91 @@ export function withSwLock<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+const captureWorkerId=crypto.randomUUID();
+const ingressFactory=globalThis.indexedDB;
+const ingress=()=>new V1CaptureIngress(ingressFactory);
+let captureHealth:'pending'|'complete'|'unknown'='pending';
+const captureReady=workerAuthMode().then(async mode=>{
+ if(mode!=='v1-held')return;
+ for(const row of await ingress().rows())if(row.state==='active')await ingress().hold(row.id,'restart-gap-unknown');
+});
+void captureReady.catch(()=>{captureHealth='unknown';console.warn('[attention] capture retention UNKNOWN; preserve active input');});
+function identifyVisit(v:Visit):void{
+ if(v.captureId)return;
+ v.captureId=`legacy-visit:${v.tabId}:${v.windowId}:${v.startTime}`;
+ v.captureDescriptor=null;v.captureIdentity=null;v.captureWorker=null;
+}
+function visitRaw(v:Visit,now:number){
+ return {kind:'visit',url:v.category===null?v.scrubbedUrl:null,category:v.category,tabId:v.tabId,windowId:v.windowId,
+  startTime:v.startTime,state:v.state,focusEpoch:v.focusEpoch,accumulatedFocusMs:v.accumulatedFocusMs,
+  observedFocusMs:(v.captureObservedFocusMs??v.accumulatedFocusMs)+(v.state==='focused'?Math.max(0,now-v.focusEpoch):0),
+  continuityUnknown:v.captureContinuityUnknown??false,captureConsentEpoch:v.captureConsentEpoch??null,
+  blurredAt:v.blurredAt,lastHeartbeat:v.lastHeartbeat,checkpointAt:now,focusIntervals:v.captureIntervals??[],
+  currentInterval:v.state==='focused'?[v.focusEpoch,now]:null};
+}
+async function checkpointVisit(v:Visit,now:number){
+ await captureReady;identifyVisit(v);
+ const raw=visitRaw(v,now),store=ingress(),original=await store.read(v.captureId!);
+ if(original&&original.state!=='active'&&JSON.stringify(original.raw)!==JSON.stringify(raw)){
+  // A surviving session can contain observations newer than a restart/failed
+  // cleanup seal. Preserve them as unowned evidence; never rewrite that seal
+  // or pretend the uncertain gap constitutes another Attention event.
+  const id=v.captureId!+':late:'+await sha256Hex(JSON.stringify(raw));
+  await store.checkpointPortion({id,origin:'visit',linkage:{store:'session.visits',parent:v.captureId!,observationOnly:true},descriptor:null,sourceContext:original.sourceContext??null,raw});
+  await store.sealPortion(id,null,'late-observation-held');return original;
+ }
+ return store.checkpointPortion({id:v.captureId!,origin:'visit',linkage:{store:'session.visits',tabId:v.tabId,startTime:v.startTime},descriptor:v.captureDescriptor??null,sourceContext:v.captureId!.startsWith('visit:')&&Object.hasOwn(v,'captureIdentity')?{version:1,client:CLIENT,identityLabel:v.captureIdentity??null}:null,raw});
+}
+async function saveVisits(visits:Record<number,Visit>,now:number):Promise<void>{
+ if(await workerAuthMode()!=='v1-held'){await saveSessionVisits(visits);return;}
+ for(const v of Object.values(visits))identifyVisit(v);
+ // Session recovery precedes a potentially refused durable write. Cleanup is
+ // performed only after emit's durable seal; never delete on a failed receipt.
+ await saveSessionVisits(visits);
+ try{for(const v of Object.values(visits))await checkpointVisit(v,now);}catch(error){captureHealth='unknown';throw error;}
+}
+const emptyMeta=():PageMeta=>({title:null,og_description:null,og_type:null,favicon_url:null,lang:null});
+async function emitHeld(visit:Visit,endTime:number):Promise<void>{
+ identifyVisit(visit);
+ const epoch=visit.captureConsentEpoch,currentLifetime=()=>epoch!==undefined&&epoch===workerCaptureEpoch();
+ // Retain active evidence even if settings/auth cannot currently be read.
+ const retained=await checkpointVisit(visit,endTime);if(retained.state!=='active')return;
+ if(!retained.sourceContext){await ingress().sealPortion(visit.captureId!,null,'capture-context-unknown');return;}
+ let settings;try{settings=await loadSettings();}catch{await ingress().sealPortion(visit.captureId!,null,'consent-unknown');return;}
+ if(!settings.enabled||isPaused(settings,endTime)){await ingress().sealPortion(visit.captureId!,null,'consent-closed');return;}
+ if(visit.captureWorker!==captureWorkerId||visit.captureContinuityUnknown||visit.state==='focused'&&endTime-visit.focusEpoch>MAX_FOCUS_PERIOD_MS){
+  await ingress().sealPortion(visit.captureId!,null,'continuity-unknown');return;
+ }
+ if(visit.captureConsentEpoch!==workerCaptureEpoch()){await ingress().sealPortion(visit.captureId!,null,'capture-scope-changed');return;}
+ if(await isIgnored(visit.url)){await ingress().sealPortion(visit.captureId!,null,'ignored-now');return;}
+ const focusedMs=focusedDurationMs(visit,endTime);
+ if(focusedMs<1000){await ingress().sealPortion(visit.captureId!,null,'below-threshold');return;}
+ let meta=emptyMeta();
+ // Navigation may already have replaced this tab. Do not enrich the original
+ // URL with a different page, or fetch metadata after consent/ignore changed.
+ if(visit.category===null){
+  const tab=await chrome.tabs.get(visit.tabId).catch(()=>null);
+  if(tab?.url===visit.url){
+   const current=await loadSettings();
+   if(current.enabled&&!isPaused(current,endTime)&&!await isIgnored(visit.url))meta=await fetchPageMeta(visit.tabId,visit.url,epoch);
+  }
+ }
+ const categorized=visit.category!==null;
+ let host:string|null=null;try{host=new URL(visit.scrubbedUrl).hostname;}catch{/* no host */}
+ const payload:AttentionEvent={url:categorized?null:visit.scrubbedUrl,title:categorized?null:scrubTitle(host,meta.title),
+  og_description:categorized?null:meta.og_description,favicon_url:categorized?null:meta.favicon_url,category:visit.category,
+  chrome_identity:retained.sourceContext.identityLabel,og_type:categorized?null:meta.og_type,lang:categorized?null:meta.lang,
+  start_time:new Date(visit.startTime).toISOString(),end_time:new Date(visit.startTime+focusedMs).toISOString(),client:retained.sourceContext.client};
+ if(visit.captureConsentEpoch!==workerCaptureEpoch()){await ingress().sealPortion(visit.captureId!,null,'capture-scope-changed');return;}
+ await ingress().sealPortion(visit.captureId!,payload,visit.captureDescriptor?'descriptor-held':'unattributed',currentLifetime);
+ await enqueueWorkerCapture(visit.captureId!);
+}
+
 // ---------- helpers ----------
 
+function capturedUrlIsPrivate(url:string):boolean{
+ try{const u=new URL(url);return !isHttpScheme(url)||!!u.hash||!!u.username||!!u.password||[...u.searchParams.keys()].some(k=>DENYLIST.has(k.toLowerCase()));}catch{return true;}
+}
 function isHttpScheme(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
@@ -141,10 +228,12 @@ export async function buildPayload(inp: {
   };
 }
 
-async function fetchPageMeta(tabId: number): Promise<PageMeta> {
+async function fetchPageMeta(tabId: number,expectedDocumentUrl?:string,captureEpoch?:string): Promise<PageMeta> {
   try {
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url ?? "";
+    if(expectedDocumentUrl!==undefined&&url!==expectedDocumentUrl)return emptyMeta();
+    if(captureEpoch!==undefined&&captureEpoch!==workerCaptureEpoch())return emptyMeta();
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       // extractPageMeta is self-contained (see content.ts): executeScript
@@ -152,7 +241,7 @@ async function fetchPageMeta(tabId: number): Promise<PageMeta> {
       // global `document`. The unit test in tests/content.test.ts exercises
       // this exact function, so this injection path can't drift untested.
       func: extractPageMeta,
-      args: [url],
+      args: expectedDocumentUrl===undefined?[url]:[url,expectedDocumentUrl],
     });
     return (results[0]?.result as PageMeta) ?? {
       title: tab.title ?? null,
@@ -190,6 +279,7 @@ async function bumpIgnoredCount(): Promise<void> {
  * from the visits map.
  */
 async function emit(visit: Visit, endTime: number): Promise<void> {
+  if(await workerAuthMode()==='v1-held'){await emitHeld(visit,endTime);return;}
   // Skip zero-duration visits — happens when a tab gets focus then blur in <1s.
   const focusedMs = focusedDurationMs(visit, endTime);
   if (focusedMs < 1000) return;
@@ -229,6 +319,7 @@ function freeze(v: Visit, now: number): Visit {
     ...v,
     state: "blurred",
     accumulatedFocusMs: v.accumulatedFocusMs + period,
+    ...(v.captureId?{captureIntervals:[...(v.captureIntervals??[]),[v.focusEpoch,now] as [number,number]],captureObservedFocusMs:(v.captureObservedFocusMs??v.accumulatedFocusMs)+Math.max(0,now-v.focusEpoch),captureContinuityUnknown:v.captureContinuityUnknown||now-v.focusEpoch>MAX_FOCUS_PERIOD_MS}:{}),
     blurredAt: now,
   };
 }
@@ -272,7 +363,7 @@ export async function setForegroundTab(tabId: number | null, now: number): Promi
     }
   }
   if (tabId === null) {
-    await saveVisits(visits);
+    await saveVisits(visits, now);
     return;
   }
 
@@ -280,29 +371,32 @@ export async function setForegroundTab(tabId: number | null, now: number): Promi
   try {
     tab = await chrome.tabs.get(tabId);
   } catch {
-    await saveVisits(visits);
+    await saveVisits(visits, now);
     return;
   }
   const url = tab.url ?? "";
   if (!isHttpScheme(url)) {
-    await saveVisits(visits);
+    await saveVisits(visits, now);
     return;
   }
   if (await isIgnored(url)) {
-    await saveVisits(visits);
+    await saveVisits(visits, now);
     return;
   }
   const scrubbed = scrubUrl(url);
   const category = await categorize(scrubbed);
 
+  const heldMode=await workerAuthMode()==='v1-held';
+  if(heldMode){const current=await loadSettings();if(!current.enabled||isPaused(current,now)){await saveVisits(visits,now);return;}}
   const existing = visits[tabId];
-  if (existing && existing.scrubbedUrl === scrubbed) {
+  if(existing&&await workerAuthMode()==='v1-held'&&(existing.captureWorker!==captureWorkerId||existing.captureConsentEpoch!==workerCaptureEpoch())){await emit(existing,existing.blurredAt??now);delete visits[tabId];}
+  if (visits[tabId] && existing && existing.scrubbedUrl === scrubbed) {
     if (existing.state === "blurred") {
       // Within grace? Resume. Beyond grace? Sweep should already have
       // emitted it; treat as fresh visit.
       if (existing.blurredAt !== null && now - existing.blurredAt <= BLUR_GRACE_MS) {
         visits[tabId] = thaw(existing, now);
-        await saveVisits(visits);
+        await saveVisits(visits, now);
         return;
       }
       // Stale — emit and replace.
@@ -310,17 +404,22 @@ export async function setForegroundTab(tabId: number | null, now: number): Promi
       delete visits[tabId];
     } else {
       // Already focused, same URL — no-op.
-      await saveVisits(visits);
+      await saveVisits(visits, now);
       return;
     }
-  } else if (existing) {
+  } else if (visits[tabId] && existing) {
     // Same tab, different URL. Emit the old visit; start a new one.
     const endTime = existing.state === "blurred" ? (existing.blurredAt ?? now) : now;
     await emit(existing, endTime);
     delete visits[tabId];
   }
 
+  const held=await workerAuthMode()==='v1-held';
+  const descriptor=held?await readWorkerCaptureDescriptor():null;
+  const captureSettings=held?await loadSettings():settings;
+  if(held&&(!captureSettings.enabled||isPaused(captureSettings,now))){await saveVisits(visits,now);return;}
   visits[tabId] = {
+    ...(held?{captureId:`visit:${crypto.randomUUID()}:0`,captureDescriptor:descriptor,captureIdentity:captureSettings.identityLabel?.trim()||null,captureWorker:captureWorkerId,captureConsentEpoch:workerCaptureEpoch(),captureIntervals:[],captureObservedFocusMs:0,captureContinuityUnknown:false}:{}),
     tabId,
     windowId: tab.windowId ?? -1,
     url,
@@ -339,7 +438,7 @@ export async function setForegroundTab(tabId: number | null, now: number): Promi
     // settings.heartbeatEnabled is false).
     lastHeartbeat: now,
   };
-  await saveVisits(visits);
+  await saveVisits(visits, now);
 }
 
 /**
@@ -354,7 +453,7 @@ export async function blurAll(now: number): Promise<void> {
       changed = true;
     }
   }
-  if (changed) await saveVisits(visits);
+  if (changed) await saveVisits(visits, now);
 }
 
 /**
@@ -367,7 +466,7 @@ export async function sweepStaleBlurred(now: number): Promise<void> {
   // Clear an expired pause so the next handler invocation actually
   // captures. Pause expiry happens lazily on the next sweep tick.
   if (settings.pausedUntil !== null && now >= settings.pausedUntil) {
-    await saveSettings({ ...settings, pausedUntil: null });
+    await saveWorkerSettings({ ...settings, pausedUntil: null });
   }
 
   const visits = await loadVisits();
@@ -391,7 +490,7 @@ export async function sweepStaleBlurred(now: number): Promise<void> {
       changed = true;
     }
   }
-  if (changed) await saveVisits(visits);
+  if (changed || await workerAuthMode()==='v1-held') await saveVisits(visits, now);
 }
 
 // ---------- handlers ----------
@@ -415,10 +514,11 @@ export async function handleNavigation(n: NavInput): Promise<void> {
   if (!settings.enabled) return;
   if (isPaused(settings, n.timeStamp)) return;
 
-  // If the nav target is ignored, count it (so the popup shows the
-  // user that ignore-list rules are firing) — but don't open a visit.
+  // Ignored targets never open visits. Legacy mode counts the rule hit;
+  // held mode preserves original legacy counters while sealing prior input.
   if (await isIgnored(n.url)) {
-    await bumpIgnoredCount();
+    if(await workerAuthMode()==='v1-held'){const visits=await loadVisits();const v=visits[n.tabId];if(v){await emit(v,n.timeStamp);delete visits[n.tabId];await saveVisits(visits,n.timeStamp);}}
+    else await bumpIgnoredCount();
     return;
   }
 
@@ -431,7 +531,7 @@ export async function handleNavigation(n: NavInput): Promise<void> {
     // Foreground nav: emit-and-start.
     await emit(existing, n.timeStamp);
     delete visits[n.tabId];
-    await saveVisits(visits);
+    await saveVisits(visits, n.timeStamp);
     // Build the new visit by querying the tab (so we capture windowId).
     await setForegroundTab(n.tabId, n.timeStamp);
     return;
@@ -442,7 +542,7 @@ export async function handleNavigation(n: NavInput): Promise<void> {
     // one (still background).
     await emit(existing, existing.blurredAt ?? n.timeStamp);
     delete visits[n.tabId];
-    await saveVisits(visits);
+    await saveVisits(visits, n.timeStamp);
     return;
   }
   // No prior visit on this tab. If it happens to be the foreground
@@ -492,7 +592,7 @@ export async function handleTabClose(tabId: number, now: number): Promise<void> 
   const endTime = v.state === "focused" ? now : (v.blurredAt ?? now);
   await emit(v, endTime);
   delete visits[tabId];
-  await saveVisits(visits);
+  await saveVisits(visits, now);
 }
 
 export async function handleIdleStateChanged(
@@ -515,7 +615,7 @@ export async function handleIdleStateChanged(
         changed = true;
       }
     }
-    if (changed) await saveVisits(visits);
+    if (changed) await saveVisits(visits, now);
     return;
   }
   // idle | locked → freeze all focused visits as of NOW. The blur
@@ -523,6 +623,102 @@ export async function handleIdleStateChanged(
   // we resume via the 'active' transition above.
   await blurAll(now);
 }
+
+
+/** Observe originals without deleting/rewriting legacy stores or guessing owner. */
+function legacyProjection(value:unknown):AttentionEvent|null{
+ if(!value||typeof value!=='object'||Array.isArray(value))return null;
+ const p=value as AttentionEvent;
+ if(Object.keys(p).sort().join(',')!=='category,chrome_identity,client,end_time,favicon_url,lang,og_description,og_type,start_time,title,url')return null;
+ if(!['category','chrome_identity','favicon_url','lang','og_description','og_type','title','url'].every(k=>p[k as keyof AttentionEvent]===null||typeof p[k as keyof AttentionEvent]==='string'))return null;
+ if(typeof p.client!=='string'||typeof p.start_time!=='string'||typeof p.end_time!=='string')return null;
+ if(p.category!==null){if(p.url!==null||p.title!==null||p.og_description!==null||p.favicon_url!==null||p.og_type!==null||p.lang!==null)return null;}
+ else if(typeof p.url!=='string'||capturedUrlIsPrivate(p.url))return null;
+ return p;
+}
+export async function checkpointLegacyArrivals(observed:readonly unknown[]=[]):Promise<void>{
+ // Detach supplied oldValue/newValue before the first await; the durable
+ // current key can change again before this observer gets scheduled.
+ const incoming=observed.map(row=>snapshotV1JSON(row,1024*1024));
+ if(await workerAuthMode()!=='v1-held')return;
+ await captureReady;
+ const legacy=await chrome.storage.local.get('outbox');
+ if(legacy.outbox!==undefined&&!Array.isArray(legacy.outbox))throw new Error('Attention capture retention UNKNOWN; legacy listing unreadable');
+ const current=new Set<string>(),all=new Map<string,unknown>();
+ for(const original of legacy.outbox??[]){const captured=snapshotV1JSON(original,1024*1024),hash=await sha256Hex(JSON.stringify(captured));current.add(hash);all.set(hash,captured);}
+ for(const original of incoming)all.set(await sha256Hex(JSON.stringify(original)),original);
+ let incomplete=false;
+ for(const [hash,original] of all){
+  const row=original as {id?:unknown;payload?:unknown},payload=legacyProjection(row?.payload);
+  if(!payload&&!current.has(hash)){incomplete=true;captureHealth='unknown';}
+  const id='legacy:'+hash;
+  await ingress().checkpointPortion({id,origin:'legacy',linkage:{store:'local.outbox',objectHash:hash,originalIdHash:await sha256Hex(JSON.stringify(row?.id??null))},descriptor:null,
+   raw:payload?{kind:'legacy-projection',payload,objectHash:hash,projection:'existing-attention-fields'}:{kind:'legacy-link',objectHash:hash,retention:'original-store-only'}});
+  if(!payload&&!current.has(hash))await ingress().noteLegacyLoss(id);
+  else await ingress().sealPortion(id,null,'legacy-owner-unproved');
+ }
+ // A prior loss-note transaction may have failed. Recheck durable link-only
+ // evidence against this observed original-store snapshot on every sweep, so
+ // a quiet pass/restart retries the fact rather than forgetting the failure.
+ for(const retained of await ingress().rows())if(retained.origin==='legacy'&&retained.raw.kind==='legacy-link'&&!current.has(retained.raw.objectHash as string)){
+  incomplete=true;captureHealth='unknown';await ingress().noteLegacyLoss(retained.id);
+ }
+ captureHealth=incomplete?'unknown':'complete';
+}
+export async function handleCaptureCommand(message:unknown):Promise<unknown>{
+ const epoch=workerCaptureEpoch(),currentLifetime=()=>epoch===workerCaptureEpoch();
+ try{
+  if(await workerAuthMode()!=='v1-held')throw new Error('MODE_MISMATCH');
+  if(!message||typeof message!=='object'||Array.isArray(message))throw new Error('PROTOCOL_MISMATCH');
+  const m=message as Record<string,unknown>;
+  if(Object.keys(m).sort().join(',')!=='command,payload,type,version'||m.type!=='attention-capture-v1'||m.version!==1)throw new Error('PROTOCOL_MISMATCH');
+  if(m.command==='status'&&m.payload===null){const status=await ingress().status();return {version:1,ok:true,result:{...status,legacyObservation:status.legacyRetentionUnknown>0?'unknown':captureHealth}};}
+  if(m.command!=='backfill'||!m.payload||typeof m.payload!=='object')throw new Error('PROTOCOL_MISMATCH');
+  const p=m.payload as {id:string;raw:Record<string,unknown>;matchingUrl:string};
+  if(Object.keys(p).sort().join(',')!=='id,matchingUrl,raw'||typeof p.id!=='string'||!/^backfill:[a-f0-9]{64}$/.test(p.id)||typeof p.matchingUrl!=='string'||!isHttpScheme(p.matchingUrl)||capturedUrlIsPrivate(p.matchingUrl))throw new Error('PROTOCOL_MISMATCH');
+  const raw=p.raw;
+  if(!raw||Object.keys(raw).sort().join(',')!=='category,endTime,kind,startTime,syntheticDurationMs,title,url'||raw.kind!=='backfill'||!Number.isFinite(raw.startTime)||!Number.isFinite(raw.endTime)||raw.syntheticDurationMs!==60000
+   ||(raw.endTime as number)-(raw.startTime as number)!==60000||!(raw.category===null||typeof raw.category==='string')||!(raw.title===null||typeof raw.title==='string')
+   ||(raw.category!==null?(raw.url!==null||raw.title!==null):(raw.url!==p.matchingUrl)))throw new Error('PROTOCOL_MISMATCH');
+  const settings=await loadSettings();if(!settings.enabled||isPaused(settings,Date.now()))throw new Error('CONSENT_CLOSED');
+  if(await isIgnored(p.matchingUrl))throw new Error('IGNORED_NOW');
+  const category=await categorize(p.matchingUrl);
+  if(category!==raw.category)throw new Error('CATEGORY_CHANGED');
+  // Canonical source key is captured by the existing page scrub boundary;
+  // no second normalization is allowed here. Worker rechecks current consent.
+  let consentCurrent=false;try{const current=await loadSettings();consentCurrent=current.enabled&&!isPaused(current,Date.now());}catch{/* unknown retains original raw, never admits preparation */}
+  const originalLifetime=()=>consentCurrent&&currentLifetime();
+  const descriptor=originalLifetime()?await readWorkerCaptureDescriptor():null;
+  await captureReady;
+  const existing=await ingress().read(p.id);
+  const sourceContext={version:1 as const,client:'fulcra-attention-chrome-backfill/0.1.0',identityLabel:settings.identityLabel};
+  if(existing&&JSON.stringify(existing.raw)!==JSON.stringify(raw)){
+   const conflictId=p.id+':input:'+await sha256Hex(JSON.stringify(raw));
+   await ingress().checkpointPortion({id:conflictId,origin:'backfill',linkage:{kind:'history-selection-conflict',parent:p.id},descriptor:null,sourceContext,raw});
+   const sealed=await ingress().sealPortion(conflictId,null,'ingress-input-conflict',originalLifetime);
+   if(!originalLifetime()||sealed.reason==='capture-scope-changed')return {version:1,ok:false,code:'CAPTURE_SCOPE_CHANGED',retained:{id:conflictId,durable:true,status:'held'}};
+   return {version:1,ok:true,receipt:{id:p.id,checkpointId:conflictId,durable:true,status:'held',uploaded:false,drains:'disabled'}};
+  }
+  const prior=await ingress().checkpointPortion({id:p.id,origin:'backfill',linkage:{kind:'history-selection',rowId:p.id},descriptor:existing?existing.descriptor:descriptor,sourceContext,raw});
+  if(prior.state==='active'){
+   if(!prior.sourceContext){await ingress().sealPortion(p.id,null,'capture-context-unknown');return {version:1,ok:false,code:'CAPTURE_CONTEXT_UNKNOWN',retained:{id:p.id,durable:true,status:'held'}};}
+   const event:AttentionEvent={url:raw.url as string|null,title:raw.title as string|null,category:raw.category as string|null,
+    og_description:null,favicon_url:null,og_type:null,lang:null,chrome_identity:prior.sourceContext.identityLabel,
+    start_time:new Date(raw.startTime as number).toISOString(),end_time:new Date(raw.endTime as number).toISOString(),client:prior.sourceContext.client};
+   const sealed=await ingress().sealPortion(p.id,event,prior.descriptor?'descriptor-held':'unattributed',originalLifetime);
+   if(sealed.reason==='capture-scope-changed')return {version:1,ok:false,code:'CAPTURE_SCOPE_CHANGED',retained:{id:p.id,durable:true,status:'held'}};
+  }
+  if(!originalLifetime())return {version:1,ok:false,code:'CAPTURE_SCOPE_CHANGED',retained:{id:p.id,durable:true,status:'held'}};
+  await enqueueWorkerCapture(p.id);
+  if(!originalLifetime())return {version:1,ok:false,code:'CAPTURE_SCOPE_CHANGED',retained:{id:p.id,durable:true,status:'held'}};
+  return {version:1,ok:true,receipt:{id:p.id,durable:true,status:'held',uploaded:false,drains:'disabled'}};
+ }catch{return {version:1,ok:false,code:'CAPTURE_RETENTION_UNKNOWN'};}
+}
+chrome.runtime.onMessage.addListener((message,sender,sendResponse)=>{
+ if(message?.type!=='attention-capture-v1')return false;
+ if(sender.url!==chrome.runtime.getURL('wizard.html')&&sender.url!==chrome.runtime.getURL('index.html')&&sender.url!==chrome.runtime.getURL('options.html')){sendResponse({version:1,ok:false,code:'SENDER_REFUSED'});return false;}
+ void withSwLock(()=>handleCaptureCommand(message)).then(sendResponse);return true;
+});
 
 // ---------- wire to chrome APIs at SW boot ----------
 
@@ -569,7 +765,7 @@ if (chrome.idle?.onStateChanged) {
 
 chrome.runtime.onStartup.addListener(() => {
   void flushOutbox();
-  void withSwLock(() => reconcileHeartbeatOnBoot());
+  void withSwLock(() => reconcileHeartbeatOnBoot(saveWorkerSettings,loadSettings));
   void refreshToolbarIcon();
 });
 
@@ -579,7 +775,7 @@ chrome.runtime.onStartup.addListener(() => {
 // re-registers the heartbeat script if it was previously enabled.
 // Both paths go through the SW lock so a user-driven popup toggle
 // firing concurrently can't race the boot-time registration.
-void withSwLock(() => reconcileHeartbeatOnBoot());
+void withSwLock(() => reconcileHeartbeatOnBoot(saveWorkerSettings,loadSettings));
 void refreshToolbarIcon();
 
 // Strip the chrome-extension Origin header off the extension's own POSTs to
@@ -681,7 +877,8 @@ async function currentIconState(): Promise<IconState> {
 }
 
 export async function refreshToolbarIcon(): Promise<void> {
-  const state = await currentIconState();
+  let state:IconState;try{state=await currentIconState();}catch{state="error";}
+  let held=false;try{held=await workerAuthMode()==='v1-held';}catch{state="error";}
   const path = {
     16:  `icons/icon-${state}-16.png`,
     32:  `icons/icon-${state}-32.png`,
@@ -691,7 +888,8 @@ export async function refreshToolbarIcon(): Promise<void> {
   try {
     await chrome.action.setIcon({ path });
     await chrome.action.setTitle({
-      title: state === "active" ? "Fulcra Attention"
+      title: held ? (captureHealth==='unknown'?"Fulcra Attention — retention UNKNOWN; both drains disabled":"Fulcra Attention — held locally; both drains disabled")
+           : state === "active" ? "Fulcra Attention"
            : state === "paused" ? "Fulcra Attention — paused"
            : "Fulcra Attention — error (Fulcra API unreachable?)",
     });
@@ -702,7 +900,8 @@ export async function refreshToolbarIcon(): Promise<void> {
   }
 }
 
-chrome.storage.onChanged.addListener(() => {
+chrome.storage.onChanged.addListener((changes,area) => {
+  if(area==='local'&&changes.outbox)void checkpointLegacyArrivals([...(changes.outbox.oldValue??[]),...(changes.outbox.newValue??[])]).catch(()=>{captureHealth='unknown';console.warn('[attention] legacy observation UNKNOWN; originals preserved');});
   void refreshToolbarIcon();
 });
 
@@ -715,6 +914,19 @@ chrome.storage.onChanged.addListener(() => {
 //
 // The message is intentionally tiny: NO url, NO selection, NO page text.
 // The framing is "did something happen on this tab" — that's it.
+// Auth messages are accepted only in the versioned worker protocol. Old UI
+// auth/setup helpers fail closed in held mode; raw capture migration is Slice B.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if(message?.type!=="attention-auth-v1")return false;
+  const pages=["index.html","wizard.html","options.html"].map(page=>chrome.runtime.getURL(page));
+  if(!sender.url||!pages.includes(sender.url)){sendResponse({version:1,ok:false,code:"SENDER_REFUSED"});return false;}
+  void handleV1AuthCommand(message).then(sendResponse);return true;
+});
+// Initialize the immutable worker mode before any drain admission. A malformed
+// mode fails closed through every flush; it never falls back to legacy.
+void workerAuthMode().then(()=>initializeWorkerAuth()).catch(()=>{});
+void captureReady.then(()=>checkpointLegacyArrivals()).catch(()=>{captureHealth='unknown';console.warn('[attention] ingress startup UNKNOWN; originals preserved');});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.kind !== "heartbeat") return false;
   const tabId = sender.tab?.id;
@@ -737,7 +949,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const v = visits[tabId];
     if (v) {
       visits[tabId] = { ...v, lastHeartbeat: Date.now() };
-      await saveVisits(visits);
+      await saveVisits(visits, Date.now());
     }
     sendResponse({ ok: true });
   });
@@ -792,5 +1004,5 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // outbox.ts) so this alarm tick can't overlap the backfill's flush and
   // double-send. sweepStaleBlurred mutates visits → must be locked.
   if (alarm.name === FLUSH_ALARM) void flushOutbox();
-  if (alarm.name === SWEEP_ALARM) void withSwLock(() => sweepStaleBlurred(Date.now()));
+  if (alarm.name === SWEEP_ALARM) void withSwLock(async()=>{await checkpointLegacyArrivals();await sweepStaleBlurred(Date.now());});
 });

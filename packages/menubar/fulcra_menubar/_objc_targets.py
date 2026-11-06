@@ -11,8 +11,9 @@ Objective-C class``).
 
 This module defines ONE class at module scope. The Python callable is
 stored per-instance so each attach() creates a new *instance*, not a new
-class. Callers retain targets on a module-level list so they are not
-garbage-collected (AppKit controls hold only a weak reference to their
+class. A module-level registry retains active targets; rerenders call
+``detach_view`` before removing old rows so callbacks do not accumulate.
+Targets must stay alive (AppKit controls hold only a weak reference to their
 target).
 """
 from __future__ import annotations
@@ -38,7 +39,7 @@ class _CallableTarget(NSObject):
         self._callable(sender)
 
 
-_retain: list = []  # keeps targets alive; AppKit controls hold only weak refs
+_retain: dict[int, _CallableTarget] = {}  # keeps targets alive; AppKit controls hold only weak refs
 
 
 def attach(
@@ -67,4 +68,22 @@ def attach(
     target = _CallableTarget.alloc().initWithCallable_(callable_)
     control.setTarget_(target)
     control.setAction_(action)
-    _retain.append(target)
+    _retain[id(target)] = target
+
+
+def detach_view(view) -> None:
+    """Release our callback targets before removing a native view subtree.
+
+    AppKit owns the controls, but its target reference is weak. Keeping the
+    proxy registry bounded requires an explicit release when dynamic rows are
+    replaced. Never clear another native component's target.
+    """
+    from AppKit import NSControl
+    for child in list(view.subviews()):
+        detach_view(child)
+    if isinstance(view, NSControl):
+        target = view.target()
+        if isinstance(target, _CallableTarget) and id(target) in _retain:
+            view.setTarget_(None)
+            view.setAction_(None)
+            _retain.pop(id(target))

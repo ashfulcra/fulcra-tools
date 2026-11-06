@@ -39,6 +39,8 @@ def fetch_feed(
     *,
     transport: httpx.BaseTransport | None = None,
     timeout: float = 30.0,
+    scan_report=None,
+    strict_scan=False,
 ) -> feedparser.FeedParserDict:
     """GET the feed and return the parsed feedparser dict.
 
@@ -48,6 +50,9 @@ def fetch_feed(
     Raises:
         httpx.HTTPStatusError on non-2xx responses.
     """
+    if strict_scan:
+        from .poll_scan import feed_document
+        return feed_document(feed_url, report=scan_report, transport=transport, timeout=timeout)
     with httpx.Client(transport=transport, timeout=timeout,
                       follow_redirects=True) as client:
         r = client.get(feed_url)
@@ -122,6 +127,7 @@ def normalize_entry(
     extract_fingerprint: Callable[[Any], str | None] | None = None,
     extra_external_ids: Callable[[Any], dict[str, Any]] | None = None,
     extract_extra_source_ids: Callable[[Any, Any], tuple[str, ...]] | None = None,
+    strict_scan=False,
 ) -> NormalizedEvent | None:
     """Convert one feedparser entry to a NormalizedEvent.
 
@@ -177,6 +183,8 @@ def normalize_entry(
         try:
             fp = extract_fingerprint(entry)
         except Exception:
+            if strict_scan:
+                raise
             fp = None
         if fp:
             external["content_fingerprint"] = fp
@@ -185,6 +193,8 @@ def normalize_entry(
         try:
             extra = extra_external_ids(entry) or {}
         except Exception:
+            if strict_scan:
+                raise
             extra = {}
         for k, v in extra.items():
             if v is not None and v != "":
@@ -202,6 +212,8 @@ def normalize_entry(
         try:
             extras = tuple(extract_extra_source_ids(entry, start) or ())
         except Exception:
+            if strict_scan:
+                raise
             extras = ()
 
     return NormalizedEvent(
@@ -229,12 +241,21 @@ def normalize_feed(
     extract_fingerprint: Callable[[Any], str | None] | None = None,
     extra_external_ids: Callable[[Any], dict[str, Any]] | None = None,
     extract_extra_source_ids: Callable[[Any, Any], tuple[str, ...]] | None = None,
+    scan_report=None,
+    strict_scan=False,
 ) -> Iterator[NormalizedEvent]:
     """Fetch + normalize every entry in the feed.
 
     Skips entries that normalize_entry rejects (missing timestamp / title).
     """
-    parsed = fetch_feed(feed_url, transport=transport)
+    parsed = fetch_feed(feed_url, transport=transport, scan_report=scan_report, strict_scan=strict_scan)
+    if strict_scan:
+        from .poll_scan import normalize_feed_rows
+        yield from normalize_feed_rows(parsed, report=scan_report, normalizer=lambda entry: normalize_entry(
+            entry, feed_meta=parsed.feed, service=service, category=category, importer_name=importer_name,
+            feed_url=feed_url, extract_fingerprint=extract_fingerprint, extra_external_ids=extra_external_ids,
+            extract_extra_source_ids=extract_extra_source_ids, strict_scan=True))
+        return
     feed_meta = parsed.feed or {}
     for entry in parsed.entries:
         ev = normalize_entry(

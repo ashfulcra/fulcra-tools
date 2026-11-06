@@ -18,12 +18,7 @@ import subprocess
 import tempfile
 
 
-class VaultIOError(RuntimeError):
-    """Transport failure -- the state of the remote file is UNKNOWN."""
-
-
-class MissingFile(VaultIOError):
-    """The file is positively absent (distinct from a failed read)."""
+from fulcra_collect.files_io import FilesIOError as VaultIOError, MissingFile
 
 
 def _cli() -> list[str]:

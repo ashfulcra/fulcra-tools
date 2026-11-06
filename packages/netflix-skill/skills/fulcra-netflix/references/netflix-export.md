@@ -1,86 +1,56 @@
-# Getting a viewing-history export out of Netflix
+# Obtain a Netflix viewing-history export
 
-Two routes exist. The **slim CSV** is instant and is the demo path — use it for
-first-time onboarding. The **GDPR export** is the upgrade: real timestamps,
-real durations, every profile, full account lifetime — but Netflix takes days
-to deliver it, so never make a new user wait on it.
+Provider instructions checked against Netflix's help pages on 2026-10-24. Those
+pages can change; an exported file's actual headers and parse result determine
+what this importer supports. Do not infer complete account coverage from a
+successful parse or upload.
 
-> **Provenance:** step wording adapted from the `fulcra-media` Netflix wizard
-> (`packages/media-helpers/fulcra_media/wizards/netflix.py` in
-> [ashfulcra/fulcra-tools](https://github.com/ashfulcra/fulcra-tools), MIT).
+## Profile viewing activity (slim CSV)
 
-## Route 1 — slim CSV (in-app, instant)
+Netflix's [viewing-history instructions](https://help.netflix.com/en/node/101917)
+say to open Account in a browser, choose Profiles and the intended profile, then
+Viewing activity. Show More expands a limited on-screen list; Download all at the
+bottom exports a CSV. The help page does not establish that CSV coverage equals
+only the rows already expanded on screen. Do not require endless Show More
+clicks or certify coverage from the page alone.
 
-Reference: <https://help.netflix.com/en/node/101917>
+Save the CSV locally and run local check-only before import. The supported slim
+format has `Title,Date` with `M/D/YY` dates. It has no real time-of-day, duration,
+device or profile identity. Each parsed observation retains a synthetic noon-UTC
+start and one-second interval, low confidence and original date/occurrence
+provenance. Within a file, repeated identical raw date/title pairs receive separate
+occurrence IDs. Title/fingerprint ambiguities remain the established parser's
+behavior, not a new claim to identify every film correctly.
 
-Walk the user through:
+A slim file supplies no profile key. Identical raw date/title/occurrence tuples
+from different profiles/files can therefore share identity. Partial overlapping
+exports cannot prove which same-day rewatch an occurrence represents. Do not
+promise independent profile histories or arbitrary overlap reconciliation; use a
+source with profile/time identity when that distinction matters.
 
-1. Open <https://www.netflix.com/account> in a web browser.
-2. Select **Profiles**, then choose the profile whose history you want.
-3. Open **Viewing activity**.
-4. Click **Show More** at the bottom until all entries are loaded — long
-   histories take several clicks; the download only contains what's been
-   loaded onto the page.
-5. Click **Download all**.
-6. Save the file (filename is usually `NetflixViewingHistory.csv`) and send it
-   back in chat, or provide its path if the agent runs on the same machine.
+## Personal-information request (rich CSV)
 
-What the file is: exactly two columns, `Title,Date`, with dates in `M/D/YY`
-format and **no** time of day, duration, device, or profile fields. One
-profile per download — repeat per profile if the user wants more than one
-(each import is idempotent, so importing several profiles' files in sequence
-is fine).
+Netflix's [personal-information request instructions](https://help.netflix.com/en/node/100624)
+link to [getmyinfo](https://www.netflix.com/account/getmyinfo) and say producing the
+information can take up to 30 days after verification. Follow the actual request,
+verification and download-email instructions, including any stated expiry; this
+guide does not promise a typical delivery time or fixed link lifetime.
 
-How the importer treats it: each row becomes one Watched annotation as a
-point-in-time event at **12:00 UTC on the date** (a synthetic time — the
-export has none) with a 1-second duration, marked `timestamp_confidence:
-"low"`, `point_in_time: true`. Two identical `Title,Date` rows are treated as
-a genuine same-day rewatch, not a duplicate.
+The existing supported rich layout is `CONTENT_INTERACTION/ViewingActivity.csv`,
+with headers including Profile Name, Start Time, Duration, Title, Supplemental
+Video Type and Device Type. Inspect the downloaded archive/headers; a different
+layout requires parser support rather than guessed column mapping. Rich parser
+records retain real UTC times/durations, profile/device provenance and high
+confidence. Existing supplemental trailer/promotional filtering remains.
+Review which profiles are represented before importing a household export.
+Neither the help page nor a CSV parse proves the complete historical account
+lifetime was supplied.
 
-## Route 2 — GDPR full export ("Download your personal information")
+## Upgrade and identity
 
-Reference: <https://help.netflix.com/en/node/100624>
-
-1. Open <https://www.netflix.com/account/getmyinfo> in a web browser.
-2. Follow Netflix's verification prompts (email confirmation + re-auth).
-3. Submit the request. Netflix says delivery may take up to 30 days; in
-   practice it's usually 1–5 days.
-4. When the email arrives, download the ZIP promptly — **the download link is
-   only valid for 7 days**.
-5. The relevant file inside the ZIP is
-   `CONTENT_INTERACTION/ViewingActivity.csv` — the 10-column rich variant
-   (Profile Name, Start Time in UTC, Duration as H:MM:SS, Title, Supplemental
-   Video Type, Device Type, and more).
-
-How the importer treats it: each row becomes one Watched annotation with the
-**real UTC start time and real duration** — `timestamp_confidence: "high"`,
-no estimates. Trailer/hook/promotional rows (non-empty Supplemental Video
-Type) are filtered out automatically; they're autoplay previews, not viewing.
-Scope covers **all profiles** in the account and the full account lifetime.
-
-The importer auto-detects which variant it's been given from the CSV header —
-no flag needed, same command either way.
-
-## Precision trade-off at a glance
-
-| | Slim CSV | GDPR export |
-|---|---|---|
-| Availability | Instant, in-app | 1–5+ days after request (Netflix quotes up to 30) |
-| Download-link validity | n/a (direct download) | 7 days |
-| Timestamps | Date only; synthetic 12:00 UTC | Real UTC start times |
-| Durations | None; synthetic 1 s | Real, H:MM:SS |
-| Confidence marking | `low`, `point_in_time: true` | `high` |
-| Profiles | One per download | All profiles in the account |
-| History depth | What's loaded on the Viewing-activity page | Full account lifetime |
-| Junk filtering | n/a (page shows real views) | Trailers/previews auto-dropped |
-
-## Upgrading later
-
-A user who onboarded with the slim CSV can request the GDPR export at any time
-and re-run the import with `ViewingActivity.csv` when it arrives. The two
-variants use **different deterministic ID schemes** (see
-[record-schema.md](record-schema.md)), so GDPR records land alongside the slim
-ones rather than replacing them — the slim records remain, marked low
-confidence, and the GDPR records carry the trustworthy timestamps. Downstream
-consumers that care can prefer high-confidence records; matching between the
-two is what the shared `content_fingerprint` field is for.
+Both variants use the same import invocation; headers select the parser. Rich and
+slim source namespaces intentionally differ, so importing rich after slim retains
+both sets instead of replacing the low-confidence originals. Fingerprints are
+provenance useful to consumers, not authorization to collapse observations or
+skip readback. See [record-schema.md](record-schema.md) for exact identities,
+fields and version boundaries.

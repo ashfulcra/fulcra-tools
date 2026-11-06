@@ -8,25 +8,21 @@ from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 from fulcra_csv import ColumnMap
 
 from .. import library
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..importers.generic_csv import _FP_AUTO, parse_media_csv
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ._common import (
-    CATEGORY_TO_CANONICAL,
     DURATION_SPEC,
-    ensure_media_def,
     import_events,
 )
 
 
-# Shared duration-annotation spec shape used by all three category branches.
-# All typed-media definitions share the same structure; category is expressed
-# only via the canonical_name argument passed to the resolver.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 _GENERIC_DURATION_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_generic_csv(ctx: RunContext) -> None:
     """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened/Read.
 
@@ -104,19 +100,6 @@ def _run_generic_csv(ctx: RunContext) -> None:
     fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
     fp_arg = _FP_AUTO if fingerprint == "auto" else fp_kind
 
-    # --- Ensure the annotation definition is known before importing ----------
-    # The category (watched/listened/read) is set per-instance via plugin
-    # config, so we look it up at run-time and call the resolver with the
-    # matching canonical name.  On a fresh install (machine 2) the target
-    # field in media state may be absent; the resolver adopts the existing
-    # definition rather than creating a duplicate.
-    canonical = CATEGORY_TO_CANONICAL[category]
-    target_field = f"{category}_definition_id"
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr=target_field,
-                     spec=_GENERIC_DURATION_SPEC, canonical_name=canonical,
-                     state_save=_state_save)
-
     # --- Resolve path, parse, and import ------------------------------------
     resolved = library.resolve(path_raw)
     events = list(parse_media_csv(
@@ -141,6 +124,8 @@ PLUGIN = Plugin(
     kind="manual",
     collect_mode="historical",
     run=_run_generic_csv,
+    record_data_types=media_destinations(),
+    record_pending=media_pending,
     description=(
         "Imports any CSV of media events — IFTTT exports, Pipedream "
         "dumps, hand-crafted spreadsheets. You configure which columns "
@@ -149,9 +134,7 @@ PLUGIN = Plugin(
     ),
     default_interval=None,
     category="other",
-    # canonical_definition_name is intentionally absent: the canonical identity
-    # depends on the runtime config value of "category", not on the Plugin
-    # definition itself.  See CATEGORY_TO_CANONICAL and _run_generic_csv.
+    # The v1 destination slot follows the configured media category.
     required_credentials=(),
     required_settings=(
         Setting(
@@ -175,7 +158,7 @@ PLUGIN = Plugin(
             kind="enum",
             enum_values=("watched", "listened", "read"),
             help=(
-                "Which canonical annotation to write to — 'watched' "
+                "Which data type to write to — 'watched' "
                 "for video, 'listened' for audio, 'read' for text/books."
             ),
         ),
@@ -190,7 +173,7 @@ PLUGIN = Plugin(
                 "columns hold the timestamp, title, and subtitle "
                 "(advanced options live in `config.toml` — defaults "
                 "match common IFTTT/Pipedream exports). Each row "
-                "becomes a Fulcra annotation."
+                "becomes a Fulcra event."
             ),
         ),
         SetupStep(
@@ -220,7 +203,7 @@ PLUGIN = Plugin(
             title="Where should we write these events?",
             body_md=(
                 "We can write to your existing Watched/Listened/Read "
-                "annotation (whichever matches your category) or "
+                "data type (whichever matches your category) or "
                 "create a new one."
             ),
             annotation_type="duration",

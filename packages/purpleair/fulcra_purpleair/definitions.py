@@ -1,20 +1,8 @@
-"""The six per-measure Fulcra definitions a PurpleAir reading writes to.
-
-Fulcra ships no air-quality metrics, so each measure becomes its own
-NumericAnnotation definition (find-or-create by canonical name via
-``RunContext.resolved_definition_id``), mirroring the per-marker track
-pattern from fulcra-labs. One reading fans out to up to six records, each
-carrying its own unit; over time every PurpleAir sensor's PM2.5 (etc.)
-lands on the same track so it reads as one time series in Context Web.
-"""
+"""Versioned per-measure v1 Metric specifications for PurpleAir."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-# Every PurpleAir definition is a NumericAnnotation. The resolver needs only
-# the annotation_type in the expected_spec; the unit rides on each record.
-NUMERIC_EXPECTED_SPEC: dict = {"annotation_type": "NumericAnnotation"}
-
+from fulcra_common.data_types import DataTypeSpec
 
 @dataclass(frozen=True)
 class MetricDef:
@@ -30,14 +18,10 @@ class MetricDef:
     reading_attr: str
     description: str
 
-    def create_extra(self) -> dict:
-        """Fields merged into the definition POST body ONLY on first create.
-
-        Kept to ``description`` — the unit is authoritative per-record via
-        ``wire.build_typed_record(unit=...)``, so we don't second-guess the
-        definition-create schema with a unit key it may not accept.
-        """
-        return {"description": self.description}
+    def data_type_spec(self) -> DataTypeSpec:
+        return DataTypeSpec(key=f"collect.purpleair.{self.key}.v1", base_type="Metric",
+                            name=self.canonical_name, description=self.description,
+                            aggregation="discrete", unit=self.unit)
 
 
 METRICS: tuple[MetricDef, ...] = (

@@ -31,6 +31,9 @@ def _in_memory_keyring(monkeypatch):
         del store[(service, key)]
 
     import fulcra_collect.credentials as _creds_mod
+    # The production macOS adapter bypasses keyring methods. Keep this
+    # fixture on the hermetic backend as well as replacing its operations.
+    monkeypatch.setattr(_creds_mod, "_uses_macos_keychain", lambda: False)
     monkeypatch.setattr(_creds_mod.keyring, "set_password", _set)
     monkeypatch.setattr(_creds_mod.keyring, "get_password", _get)
     monkeypatch.setattr(_creds_mod.keyring, "delete_password", _delete)
@@ -41,10 +44,14 @@ def _in_memory_keyring(monkeypatch):
 # trakt_oauth_handler
 # ---------------------------------------------------------------------------
 
-def test_trakt_oauth_handler_exchanges_code_for_tokens(mocker, _in_memory_keyring):
+@pytest.mark.parametrize("legacy_secret", [None, "the-client-secret"])
+def test_trakt_oauth_handler_exchanges_code_for_tokens(
+    mocker, _in_memory_keyring, legacy_secret,
+):
     from fulcra_collect import credentials as _creds
     _creds.set_secret("trakt", "client_id", "the-client-id")
-    _creds.set_secret("trakt", "client_secret", "the-client-secret")
+    if legacy_secret:
+        _creds.set_secret("trakt", "client_secret", legacy_secret)
 
     mock_response = mocker.Mock()
     mock_response.json.return_value = {
@@ -71,6 +78,7 @@ def test_trakt_oauth_handler_exchanges_code_for_tokens(mocker, _in_memory_keyrin
     assert tokens["refresh_token"] == "REFRESH-TOKEN"
     assert tokens["expires_in"] == "7776000"
     assert tokens["created_at"] == "1234567890"
+    assert tokens["redirect_uri"] == "http://localhost/cb"
 
     # Confirm the request body included the expected fields
     call_kwargs = mock_client.post.call_args[1]
@@ -78,12 +86,14 @@ def test_trakt_oauth_handler_exchanges_code_for_tokens(mocker, _in_memory_keyrin
     assert sent["code"] == "AUTH-CODE"
     assert sent["code_verifier"] == "verifier"
     assert sent["client_id"] == "the-client-id"
-    assert sent["client_secret"] == "the-client-secret"
+    # PKCE sign-in never sends a secret, including one stored by an old setup.
+    assert "client_secret" not in sent
     assert sent["grant_type"] == "authorization_code"
+    assert sent["redirect_uri"] == "http://localhost/cb"
 
 
 def test_trakt_oauth_handler_missing_credentials_raises(_in_memory_keyring):
-    """When client_id / client_secret are not in the keychain, raise RuntimeError."""
+    """A missing Client ID still requires completing the credentials step."""
     from fulcra_media.trakt_oauth import trakt_oauth_handler
     with pytest.raises(RuntimeError, match="not configured"):
         trakt_oauth_handler(
@@ -92,6 +102,37 @@ def test_trakt_oauth_handler_missing_credentials_raises(_in_memory_keyring):
             code_verifier="V",
             redirect_uri="http://localhost/cb",
         )
+
+
+def test_trakt_oauth_handler_rejects_missing_pkce_verifier(mocker, _in_memory_keyring):
+    from fulcra_collect import credentials as _creds
+    from fulcra_media.trakt_oauth import trakt_oauth_handler
+
+    _creds.set_secret("trakt", "client_id", "cid")
+    _creds.set_secret("trakt", "client_secret", "legacy-secret")
+    client = mocker.patch("httpx.Client")
+    with pytest.raises(RuntimeError, match="PKCE"):
+        trakt_oauth_handler(
+            plugin_id="trakt", code="code", code_verifier="", redirect_uri="http://localhost/cb",
+        )
+    client.assert_not_called()
+
+
+def test_authorize_url_preserves_pkce_state_and_exact_redirect():
+    from urllib.parse import parse_qs, urlsplit
+    from fulcra_media.trakt_oauth import trakt_authorize_url
+
+    url = urlsplit(trakt_authorize_url(
+        "cid", "http://127.0.0.1:9292/api/oauth/trakt/callback", "state-token", "challenge",
+    ))
+    assert (url.scheme, url.netloc, url.path) == (
+        "https", "auth.trakt.tv", "/oauth/authorize",
+    )
+    assert parse_qs(url.query) == {
+        "response_type": ["code"], "client_id": ["cid"], "state": ["state-token"],
+        "redirect_uri": ["http://127.0.0.1:9292/api/oauth/trakt/callback"],
+        "code_challenge": ["challenge"], "code_challenge_method": ["S256"],
+    }
 
 
 def test_trakt_oauth_handler_uses_trakt_token_endpoint(mocker, _in_memory_keyring):
@@ -118,7 +159,7 @@ def test_trakt_oauth_handler_uses_trakt_token_endpoint(mocker, _in_memory_keyrin
         redirect_uri="http://localhost/cb",
     )
     posted_url = mock_client.post.call_args[0][0]
-    assert posted_url == TRAKT_TOKEN_ENDPOINT
+    assert posted_url == TRAKT_TOKEN_ENDPOINT == "https://auth.trakt.tv/oauth/token"
 
 
 # ---------------------------------------------------------------------------

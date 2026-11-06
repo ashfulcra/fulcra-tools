@@ -1,0 +1,81 @@
+title = "Fulcra public schema identifiers"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+# A: InitializationWitness local-storage address.
+# Provenance: packages/attention/chrome/src/relayless/v1AuthStorage.ts:13
+[[rules.allowlists]]
+description = "InitializationWitness local-storage address"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^relaylessV1Initialization$''']
+paths = [
+  '''(?:^|/)packages/attention/chrome/src/relayless/v1AuthStorage\.ts$''',
+]
+
+# B: Shared replay-exclusion schema identity.
+# Provenance: packages/attention/chrome/src/relayless/v1Journal.ts:237
+# Provenance: packages/fulcra-common/fulcra_common/record_exclusions_contract.json:3
+[[rules.allowlists]]
+description = "Shared replay-exclusion schema identity"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^collect\.record\-exclusions\.v1$''']
+paths = [
+  '''(?:^|/)packages/attention/chrome/src/relayless/v1Journal\.ts$''',
+  '''(?:^|/)packages/fulcra\-common/fulcra_common/record_exclusions_contract\.json$''',
+]
+
+# C: Synthetic datatype/destination fixture identity.
+# Provenance: packages/collect/tests/test_v1_destinations.py:23
+# Provenance: packages/fulcra-common/tests/test_data_types.py:152
+[[rules.allowlists]]
+description = "Synthetic datatype/destination fixture identity"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^collect\.synthetic\.v1$''']
+paths = [
+  '''(?:^|/)packages/collect/tests/test_v1_destinations\.py$''',
+  '''(?:^|/)packages/fulcra\-common/tests/test_data_types\.py$''',
+]
+
+# D: Original Day One Journal schema identity.
+# Provenance: packages/dayone/fulcra_dayone/v1.py:24
+# Provenance: packages/dayone/tests/test_v1.py:31
+[[rules.allowlists]]
+description = "Original Day One Journal schema identity"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^dayone\.journal\.v1$''']
+paths = [
+  '''(?:^|/)packages/dayone/fulcra_dayone/v1\.py$''',
+  '''(?:^|/)packages/dayone/tests/test_v1\.py$''',
+]
+
+# E: Opt-in unified Day One Journal schema identity.
+# Provenance: packages/dayone/fulcra_dayone/v1.py:70
+# Provenance: packages/dayone/tests/test_history_v1.py:27
+[[rules.allowlists]]
+description = "Opt-in unified Day One Journal schema identity"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^dayone\.journal\.v2$''']
+paths = [
+  '''(?:^|/)packages/dayone/fulcra_dayone/v1\.py$''',
+  '''(?:^|/)packages/dayone/tests/test_history_v1\.py$''',
+]
+
+# F: Synthetic creation-receipt schema fixture identity.
+# Provenance: packages/fulcra-common/tests/test_creation_receipts.py:26
+[[rules.allowlists]]
+description = "Synthetic creation-receipt schema fixture identity"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^collect\.synthetic\.receipt\.v1$''']
+paths = [
+  '''(?:^|/)packages/fulcra\-common/tests/test_creation_receipts\.py$''',
+]

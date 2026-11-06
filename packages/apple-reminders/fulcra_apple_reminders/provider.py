@@ -45,13 +45,15 @@ class AppleRemindersProvider:
     name = "apple-reminders"
     namespace = "eventkit"
 
-    def __init__(self, *, timeout=60, runner=None):
+    def __init__(self, *, timeout=60, runner=None, still_allowed=None):
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Reminders timeout must be positive and finite.")
         self.timeout = min(timeout, 60)
         self._run = runner or subprocess.run
+        self._guard = still_allowed or (lambda: None)
 
     def _call(self, operation, **fields):
+        self._guard()
         app_bin = Path(sys.executable).parent
         bundled = getattr(sys, "frozen", False) or (
             app_bin.name == "MacOS" and app_bin.parent.name == "Contents"
@@ -76,6 +78,7 @@ class AppleRemindersProvider:
             ) from None
         except OSError:
             raise ProviderError("The Reminders worker could not start.") from None
+        self._guard()
         try:
             response = json.loads(process.stdout)
             if (

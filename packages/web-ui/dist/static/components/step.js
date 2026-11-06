@@ -34,7 +34,7 @@
 //   5. FulcraStepBase declares step/ctx with `hasChanged: () => true`
 //      so the child re-renders even when the references are identical
 //      (Alpine mutates ctx in place).
-import { FulcraStepBase, nothing } from "./_base.js";
+import { FulcraStepBase, html, nothing } from "./_base.js";
 
 class FulcraStep extends FulcraStepBase {
   constructor() {
@@ -74,7 +74,39 @@ class FulcraStep extends FulcraStepBase {
     }
     child.step = this.step;
     child.ctx = this.ctx;
-    return child;
+    const c = this.ctx;
+    const fields = c?.credential_access_fields || [];
+    return html`
+      ${fields.length ? html`
+        <section aria-label="Saved credential access" class="mb-4 p-3 rounded border border-amber-300">
+          <h3 class="font-semibold">Check saved access</h3>
+          ${fields.map(field => html`
+            <div class="my-2">
+              <span class="font-medium">${field.label || field.key}</span>
+              ${field.recovery === "trakt_reconnect" ? html`
+                <p role="status">The old Trakt sign-in cannot be read. Reconnect once to replace it with one saved sign-in. Original items are kept.</p>
+                <button type="button" @click=${() => c.startOAuth()}
+                        ?disabled=${c._credAccessBusy} class="underline">Reconnect Trakt</button>
+                <p role="status">${c.oauthStatus || ""}</p>
+              ` : field.status === "access_required" && field.recovery !== "quiet" ? html`
+                <p role="status">Saved access needs your approval for this app.</p>
+                <button type="button" @click=${() => c.authorizeCredential(field.key)}
+                        ?disabled=${c._credAccessBusy} class="underline">Allow Keychain access</button>
+                <p class="text-xs">Choose Always Allow in macOS to remember this app.</p>
+              ` : html`
+                <p role="status">${field.status === "pending" ? "The saved access check is pending."
+                  : field.status === "changed" ? "Saved access changed during the check."
+                  : "Saved access could not be checked."} Your saved item has been kept.</p>
+                <button type="button" @click=${() => c.checkCredentialAccess()}
+                        ?disabled=${c._credAccessBusy} class="underline">Check again (quiet)</button>
+              `}
+            </div>
+          `)}
+          ${c._credAccessError ? html`<p role="alert">${c._credAccessError}</p>` : nothing}
+        </section>
+      ` : nothing}
+      ${child}
+    `;
   }
 }
 customElements.define("fulcra-step", FulcraStep);

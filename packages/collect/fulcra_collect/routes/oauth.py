@@ -90,6 +90,16 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             )
         redirect_uri = f"{base_url}/api/oauth/{plugin_id}/callback"
         state, _verifier, challenge = start_flow(plugin_id, redirect_uri)
+        trakt_attempt = None
+        if plugin_id == "trakt":
+            from ..trakt_source import Owner, KeychainStore
+            from ..oauth import _bind_trakt_flow, complete_flow
+            try:
+                trakt_attempt = Owner(KeychainStore()).begin_authorization(state, _verifier, redirect_uri)
+                _bind_trakt_flow(state, trakt_attempt)
+            except Exception:
+                complete_flow(state)
+                raise HTTPException(409, "Trakt source setup unavailable; restart sign-in") from None
         response: dict = {
             "state": state,
             "code_challenge": challenge,
@@ -101,7 +111,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         # a new tab without knowing the plugin's OAuth endpoint or client_id.
         if plugin.oauth_authorize_url is not None:
             from .. import credentials as _creds
-            client_id = _creds.get_secret(plugin_id, "client_id") or ""
+            client_id = (trakt_attempt.values["client_id"] if trakt_attempt is not None
+                         else _creds.get_secret(plugin_id, "client_id") or "")
             response["authorize_url"] = plugin.oauth_authorize_url(
                 client_id, redirect_uri, state, challenge
             )
@@ -117,7 +128,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         from ..oauth import complete_flow
         from .. import credentials as _creds
         if error:
-            return HTMLResponse(_oauth_failure_html(error), status_code=400)
+            return HTMLResponse(_oauth_failure_html("Trakt authorization declined" if plugin_id == "trakt" else error), status_code=400)
         if not code or not state:
             return HTMLResponse(
                 _oauth_failure_html("missing code or state"), status_code=400
@@ -132,6 +143,18 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             return HTMLResponse(
                 _oauth_failure_html("plugin not found or no handler"), status_code=400
             )
+        if plugin_id == "trakt":
+            try:
+                if pending.trakt_attempt is None:
+                    raise RuntimeError('missing owned authorization')
+                def exchange(payload):
+                    return plugin.oauth_handler(plugin_id=plugin_id, code=payload['code'],
+                        code_verifier=payload['code_verifier'], redirect_uri=payload['redirect_uri'],
+                        _client_id=payload['client_id'])
+                pending.trakt_attempt.exchange(code, exchange)
+            except Exception:
+                return HTMLResponse(_oauth_failure_html("Trakt sign-in could not be verified; restart sign-in"), status_code=409)
+            return HTMLResponse(_oauth_success_html(plugin_id), status_code=200)
         try:
             tokens = plugin.oauth_handler(
                 plugin_id=plugin_id,

@@ -233,6 +233,8 @@ def fetch_diary(
     user_id: str,
     *,
     transport: httpx.BaseTransport | None = None,
+    scan_report=None,
+    strict_scan=False,
 ) -> Iterator[NormalizedEvent]:
     """Yield NormalizedEvents for `user_id`'s 'read' shelf entries.
 
@@ -241,8 +243,18 @@ def fetch_diary(
     confidence-downgrade behavior are honored. Skips entries with no usable
     timestamp at all (no <user_read_at> AND no <pubDate>).
     """
+    if strict_scan:
+        from .poll_scan import fail
+        if not isinstance(user_id, str) or not re.fullmatch(r"[0-9]+", user_id):
+            fail()
     feed_url = feed_url_for(user_id)
-    parsed = generic_rss.fetch_feed(feed_url, transport=transport)
+    parsed = generic_rss.fetch_feed(feed_url, transport=transport, scan_report=scan_report, strict_scan=strict_scan)
+    if strict_scan:
+        from .poll_scan import normalize_feed_rows
+        yield from normalize_feed_rows(parsed, report=scan_report,
+            normalizer=lambda entry: _normalize_entry_goodreads(entry, feed_meta=parsed.feed, feed_url=feed_url, user_id=user_id),
+            malformed=lambda entry: bool(entry.get("user_read_at")) and _parse_rss_datetime(entry["user_read_at"]) is None)
+        return
     feed_meta = parsed.feed or {}
     for entry in parsed.entries:
         ev = _normalize_entry_goodreads(

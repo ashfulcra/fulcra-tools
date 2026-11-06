@@ -15,6 +15,7 @@
 // All side-effecting deps (sign-in runner, token store, whoami, tab opener)
 // are injectable so the test can drive the flow without chrome.* / network.
 
+import {v1HeldMode,v1Display,v1Command} from "../relayless/v1AuthClient";
 import { useEffect, useRef, useState } from "react";
 import { startDeviceSignIn } from "../relayless/signIn";
 import { TokenStore } from "../relayless/tokenStore";
@@ -103,6 +104,10 @@ export function SignIn(props: SignInProps) {
   useEffect(() => {
     let cancelled = false;
     async function check() {
+      try{if(await v1HeldMode()){
+        const display=await v1Display();if(cancelled||!mounted.current)return;
+        setPhase(['committed','paused'].includes(display.status)?{kind:'signedin',label:display.label??display.accountId}:display.status==='held'?{kind:'error',message:display.code}:{kind:'idle'});return;
+      }}catch(error){if(!cancelled&&mounted.current)setPhase({kind:'error',message:errorMessage(error)});return;}
       let token: string | null = null;
       try {
         token = await tokenStore.getValidAccessToken();
@@ -142,6 +147,11 @@ export function SignIn(props: SignInProps) {
           openUrl(verificationUriComplete);
         },
       });
+      if(await v1HeldMode()){
+        const display=await v1Display();if(!mounted.current)return;
+        if(!['committed','paused'].includes(display.status))throw new Error(display.code);
+        setPhase({kind:'signedin',label:display.label??display.accountId});return;
+      }
       // Resolved → tokens are stored. Surface signed-in + resolve a label.
       if (!mounted.current) return;
       let token: string | null = null;
@@ -173,6 +183,10 @@ export function SignIn(props: SignInProps) {
   }
 
   async function signOut(): Promise<void> {
+    try{if(await v1HeldMode()){
+      const display=await v1Command('signout');if(display.status!=='disconnected'){setPhase({kind:'error',message:display.code});return;}
+      if(mounted.current)setPhase({kind:'idle'});return;
+    }}catch(error){if(mounted.current)setPhase({kind:'error',message:errorMessage(error)});return;}
     await tokenStore.clear();
     await clearResolved();
     // Clear the client-side dedup set too: source_id omits account/definition,

@@ -1,0 +1,621 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "url-subseconds",
+      "event": {
+        "url": "https://example.com/article?id=42",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.29a1df25d7b52081",
+      "record": {
+        "id": "3fc17f68-857f-5621-9bc9-4a69809e6d96",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.29a1df25d7b52081"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — https://example.com/article?id=42",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/article?id=42",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "category-null-fields",
+      "event": {
+        "url": null,
+        "title": null,
+        "og_description": null,
+        "favicon_url": null,
+        "category": "Work",
+        "chrome_identity": null,
+        "og_type": null,
+        "lang": null,
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time": "2026-05-18T14:05:00Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "fixture-browser-a",
+        "identityLabel": null
+      },
+      "source_id": "com.fulcra.attention.v3.bc6a57ead898f476",
+      "record": {
+        "id": "ebae45cd-edc7-50b8-8259-36310fcba502",
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time": "2026-05-18T14:05:00Z",
+        "sources": [
+          "com.fulcra.attention.v3.bc6a57ead898f476"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Attention: Work",
+        "title": null,
+        "service": "web",
+        "category": "Work",
+        "url": null,
+        "og_description": null,
+        "favicon_url": null,
+        "parent_source_id": null,
+        "duration_seconds": 300.0,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": null,
+          "chrome_identity": null,
+          "og_type": null,
+          "lang": null,
+          "device": "fixture-browser-a",
+          "device_label": null
+        }
+      }
+    },
+    {
+      "name": "unicode-offset",
+      "event": {
+        "url": "https://example.com/p",
+        "title": "日本語 🦉",
+        "og_description": "café",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T09:00:00.125-05:00",
+        "end_time": "2026-05-18T09:01:00.625-05:00",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "fixture-browser-b",
+        "identityLabel": "Synthetic 日本語"
+      },
+      "source_id": "com.fulcra.attention.v3.901aa3bfc1478fa8",
+      "record": {
+        "id": "571f77fe-997e-5021-837f-9c097d4a7a69",
+        "start_time": "2026-05-18T14:00:00.125Z",
+        "end_time": "2026-05-18T14:01:00.625Z",
+        "sources": [
+          "com.fulcra.attention.v3.901aa3bfc1478fa8"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "日本語 🦉 — https://example.com/p",
+        "title": "日本語 🦉",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/p",
+        "og_description": "café",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 60.5,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "fixture-browser-b",
+          "device_label": "Synthetic 日本語"
+        }
+      }
+    },
+    {
+      "name": "pre-epoch",
+      "event": {
+        "url": "https://example.com/p",
+        "title": "",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "1969-12-31T23:59:59.500Z",
+        "end_time": "1970-01-01T00:00:00.250Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.ee75fe8ebe8a5530",
+      "record": {
+        "id": "59843ca4-baa7-5ea7-83bf-d1ed61709ec0",
+        "start_time": "1969-12-31T23:59:59.500Z",
+        "end_time": "1970-01-01T00:00:00.250Z",
+        "sources": [
+          "com.fulcra.attention.v3.ee75fe8ebe8a5530"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "https://example.com/p",
+        "title": "",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/p",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 0.75,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "distinct-installation",
+      "event": {
+        "url": "https://example.com/article?id=42",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "fixture-browser-b",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.e36afb4defe9f0ec",
+      "record": {
+        "id": "4018ca3f-7204-536d-bb60-c85a5ba9b5d9",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.e36afb4defe9f0ec"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — https://example.com/article?id=42",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/article?id=42",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "fixture-browser-b",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "distinct-destination",
+      "event": {
+        "url": "https://example.com/article?id=42",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/22222222-3333-4444-8555-666666666666",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.29a1df25d7b52081",
+      "record": {
+        "id": "21bd3733-699c-55c8-9812-7d4bfdeb069b",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.29a1df25d7b52081"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — https://example.com/article?id=42",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/article?id=42",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "prepared-dns-query",
+      "event": {
+        "url": "https://xn--bcher-kva.example:8443/a%20b/%E2%98%83?x=%E2%98%83&x=a+b&empty=",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.a4173823b0cc93fc",
+      "record": {
+        "id": "443e762b-9994-592f-ac57-41821787830b",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.a4173823b0cc93fc"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — https://xn--bcher-kva.example:8443/a%20b/%E2%98%83?x=%E2%98%83&x=a+b&empty=",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "https://xn--bcher-kva.example:8443/a%20b/%E2%98%83?x=%E2%98%83&x=a+b&empty=",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "xn--bcher-kva.example",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "prepared-ipv4",
+      "event": {
+        "url": "http://127.0.0.1:8080/a",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.321258b5ae086e5a",
+      "record": {
+        "id": "4096ac84-4e33-58e0-aa32-51c2713c9e72",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.321258b5ae086e5a"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — http://127.0.0.1:8080/a",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "http://127.0.0.1:8080/a",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "127.0.0.1",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "prepared-localhost",
+      "event": {
+        "url": "http://localhost:0/",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.f6e7e42435140c8e",
+      "record": {
+        "id": "01c654b3-2c3a-5394-8eee-9913d3c756da",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.f6e7e42435140c8e"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — http://localhost:0/",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "http://localhost:0/",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "localhost",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "prepared-path-punctuation",
+      "event": {
+        "url": "https://example.com/a!$&'()*+,;=:@-_.~//b%2fc",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.0cfd1bbcd7b54ff5",
+      "record": {
+        "id": "cc6d1f45-05eb-55b0-9626-50cae60a6736",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.0cfd1bbcd7b54ff5"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — https://example.com/a!$&'()*+,;=:@-_.~//b%2fc",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/a!$&'()*+,;=:@-_.~//b%2fc",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    },
+    {
+      "name": "prepared-null-query-key",
+      "event": {
+        "url": "https://example.com/a?=value&x=%00&x=%F0%9F%90%88",
+        "title": "Example Article",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "category": null,
+        "chrome_identity": null,
+        "og_type": "article",
+        "lang": "en",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "client": "fulcra-attention-synthetic/1"
+      },
+      "context": {
+        "dataType": "Event/11111111-2222-4333-8444-555555555555",
+        "tagIds": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "identitySlug": "work-mbp-chrome",
+        "identityLabel": "Synthetic Browser A"
+      },
+      "source_id": "com.fulcra.attention.v3.c24c72f24a04d6c8",
+      "record": {
+        "id": "60260f00-5016-5c85-a78f-02478e187c39",
+        "start_time": "2026-05-18T14:00:00.500Z",
+        "end_time": "2026-05-18T14:05:00.900Z",
+        "sources": [
+          "com.fulcra.attention.v3.c24c72f24a04d6c8"
+        ],
+        "tags": [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        ],
+        "note": "Example Article — https://example.com/a?=value&x=%00&x=%F0%9F%90%88",
+        "title": "Example Article",
+        "service": "web",
+        "category": null,
+        "url": "https://example.com/a?=value&x=%00&x=%F0%9F%90%88",
+        "og_description": "A description",
+        "favicon_url": "https://example.com/favicon.ico",
+        "parent_source_id": null,
+        "duration_seconds": 300.4,
+        "external_ids": {
+          "client": "fulcra-attention-synthetic/1",
+          "host": "example.com",
+          "chrome_identity": null,
+          "og_type": "article",
+          "lang": "en",
+          "device": "work-mbp-chrome",
+          "device_label": "Synthetic Browser A"
+        }
+      }
+    }
+  ]
+}

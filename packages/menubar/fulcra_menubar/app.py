@@ -146,6 +146,7 @@ class FulcraMenubarApp(rumps.App):
             self._prefs_controller = make_preferences_controller(
                 model=self.model, client=self.client, centre=self.notifications,
             )
+        self._prefs_controller.refresh_annotations()
         if tab is not None:
             self._prefs_controller.select_tab(tab)
         self._prefs_controller.window().makeKeyAndOrderFront_(None)

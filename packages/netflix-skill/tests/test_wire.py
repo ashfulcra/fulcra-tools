@@ -1,48 +1,40 @@
-import json
+"""Native codec vectors; actual main transport/readback is in test_native."""
+from fulcra_common.v1 import record_id_for
+from fulcra_netflix.native import build_netflix_record
+
+DEST = "Event/11111111-2222-4333-8444-555555555555"
 
 
-def test_build_record_wire_shape(ni, fixtures_dir):
-    ev = list(ni.parse_slim(fixtures_dir / "slim.csv"))[2]
-    rec = ni.build_record(ev, def_id="abc-123")
-    assert rec["specversion"] == 1
-    md = rec["metadata"]
-    assert md["data_type"] == "DurationAnnotation"
-    assert md["recorded_at"] == {
-        "start_time": "2024-03-01T12:00:00Z",
-        "end_time": "2024-03-01T12:00:01Z",
-    }
-    assert md["tags"] == []
-    assert md["source"][0] == ev.det_id
-    assert md["source"][-1] == "com.fulcradynamics.annotation.abc-123"
-    assert md["content_type"] == "application/json"
-    payload = json.loads(rec["data"])
-    assert payload["title"] == ev.title
-    assert payload["note"] == ev.note
-    assert payload["external_ids"]["content_fingerprint"] == ev.fingerprint
-    assert payload["external_ids"]["timestamp_confidence"] == "low"
-    # canonical bytes: data is sorted-keys
-    assert rec["data"] == json.dumps(payload, sort_keys=True)
+def test_native_slim_fields_and_canonical_identity(ni, fixtures_dir):
+    event = list(ni.parse_slim(fixtures_dir / "slim.csv"))[2]
+    row = build_netflix_record(event, DEST, "slim")
+    assert row["id"] == record_id_for(DEST, event.det_id)
+    assert row["start_time"] == "2024-03-01T12:00:00Z"
+    assert row["end_time"] == "2024-03-01T12:00:01Z"
+    assert row["sources"] == [event.det_id] and row["tags"] == []
+    assert row["title"] == event.title and row["note"] == event.note
+    assert row["external_ids"] == {**event.external,
+        "content_fingerprint": event.fingerprint, "timestamp_confidence": "low"}
+    assert row["duration_seconds"] == 1 and type(row["duration_seconds"]) is int
+    assert row["service"] == "netflix" and row["importer"] == "netflix-slim"
+    assert row["category"] == "watched" and row["timestamp_confidence"] == "low"
+    assert "data" not in row and "metadata" not in row
 
 
-def test_encode_batch_jsonl(ni, fixtures_dir):
-    evs = list(ni.parse_slim(fixtures_dir / "slim.csv"))[:2]
-    body = ni.encode_batch([ni.build_record(e, def_id="d") for e in evs])
-    lines = body.decode().split("\n")
-    assert len(lines) == 2
-    for line in lines:
-        json.loads(line)  # every line standalone JSON
+def test_native_rich_preserves_colon_movie_and_provenance(ni, fixtures_dir):
+    event = next(e for e in ni.parse_rich(fixtures_dir / "gdpr.csv") if "Dune" in e.note)
+    row = build_netflix_record(event, DEST, "rich")
+    assert row["id"] == record_id_for(DEST, event.det_id)
+    assert row["title"] == row["note"] == "Dune: Part Two"
+    assert row["external_ids"]["profile"] == "User"
+    assert row["external_ids"]["device_type"] == "TV"
+    assert row["external_ids"]["timestamp_confidence"] == "high"
+    assert row["duration_seconds"] == 9312 and type(row["duration_seconds"]) is int
+    assert row["start_time"] < row["end_time"]
 
 
-def test_build_record_wire_shape_rich_variant(ni, fixtures_dir):
-    ev = [e for e in ni.parse_rich(fixtures_dir / "gdpr.csv") if "Dune" in e.note][0]
-    rec = ni.build_record(ev, def_id="abc-123")
-    md = rec["metadata"]
-    assert md["recorded_at"]["start_time"] == ni.iso_z(ev.start)
-    assert md["recorded_at"]["end_time"] == ni.iso_z(ev.end)
-    # recorded_at consistency: end - start round-trips through the wire strings
-    assert md["recorded_at"]["start_time"] < md["recorded_at"]["end_time"]
-    payload = json.loads(rec["data"])
-    assert payload["external_ids"]["profile"] == "User"
-    assert payload["external_ids"]["device_type"] == "TV"
-    assert payload["external_ids"]["timestamp_confidence"] == "high"
-    assert payload["duration_seconds"] == 9312
+def test_legacy_positive_helpers_are_retired(ni):
+    for name in ("build_record", "encode_batch", "ensure_watched_def", "get_token",
+                 "make_api_client", "post_batch", "readback_verify", "PartialPostError",
+                 "_classify_http_error"):
+        assert not hasattr(ni, name)

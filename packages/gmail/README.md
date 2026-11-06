@@ -162,7 +162,7 @@ rule version and backfill window. It is not a full historical replay command.
 The pipeline reads back the directive before marking its relay action complete,
 but the recipient still needs its normal queue read and reconciliation to act
 on it. **A required relay with no working backend remains incomplete and holds
-the cursor**; set `relay_team` and install/configure coord-engine, or use a
+the cursor**; set `relay_team` and configure that team, or use a
 file-only rule.
 
 ### Privacy
@@ -277,3 +277,42 @@ workspace installation. The package registers the `gmail` plugin; it has no
 standalone Gmail CLI.
 
 The rule builder loads its script from an authenticated same-origin endpoint. Search, labeling, derivation, chip, save, edit, enable/disable and delete controls use delegated listeners rather than inline handlers, preserving Collect’s strict script CSP.
+
+
+### Account and delivery (development branch)
+
+Collect uses its own sign-in for every Files request and relay effect. Missing
+sign-in, changed principal, disabled source, changed settings/epoch or preview
+mode stops delivery. Google reads check current source authorization before and
+after token refresh, each page and message response. Request hooks recheck after
+potentially blocking credential lookups. A disconnected source remains fail-soft
+across its rules so other healthy accounts can proceed. The pipeline checks again
+before export, ledger receipts and cursor advancement. Exported effects and
+receipts share the registry transaction with account removal, plus Collect's
+account/config leases. These checks preserve the read-only Gmail scope.
+
+The app now bundles [coord-engine](../coord-engine/README.md), with SDK
+`fulcra-api>=0.1.56`, and invokes its
+canonical `tell` implementation with an explicit Collect-bound Files/record
+transport. It has no subprocess or inherited CLI-credential fallback. The SDK's
+standalone record command preserves the team's configured companion datatype,
+API version, source aliases and tags; Collect does not retype that shared stream.
+A cancellation latch stops subsequent effects even when the engine catches an
+optional companion/presence failure. Relay-done requires exact emitted-file
+readback with matching directive identity and content; it does not wait for
+search-index reconciliation. Retry identity and the outbox key remain unchanged.
+
+Private delivery state lives below `gmail-delivery-v1/<destination-hash>/gmail/`.
+The hash binds the Fulcra account, action set and, for relay rules, team and
+recipient. Source account IDs, selected-email Files paths and canonical relay
+identities retain their existing meaning. Old source-only ledgers/cursors remain
+on disk as evidence and are never silently adopted as delivery proof. A newly
+selected target starts with the normal rule backfill window; this is not a full
+historical migration. Health reads only the selected destination's scopes.
+
+[Collect Files HTTP](../collect/fulcra_collect/files_io.py) is shared with Notes.
+API calls use fresh Collect credentials; signed storage uses a separate client
+without bearer credentials or automatic redirects. Unknown, partial or ambiguous
+listings fail closed. Each HTTP call has a capped timeout and streamed response
+size; several calls can be needed per effect, so this is not a whole-poll time
+bound. Real Google/account cutover and packaged app QA remain release gates.

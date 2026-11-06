@@ -149,3 +149,13 @@ def save(st: PluginState) -> None:
         last_yield_at=st.last_yield_at.isoformat() if st.last_yield_at else None,
         newest_item_at=st.newest_item_at,
     )
+
+
+def record_service_failure(plugin_id: str, *, when: datetime, error: str) -> None:
+    """Atomically change run status only; never rewrite a worker's progress.
+
+    The caller owns scope fencing and exactly-once process observation. A failed
+    commit acknowledgement must not cause this increment to be retried blindly.
+    """
+    db.record_service_failure(db.open(), plugin_id=plugin_id,
+                              when=when.isoformat(), error=error)

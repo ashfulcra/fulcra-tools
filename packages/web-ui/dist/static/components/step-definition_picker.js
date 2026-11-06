@@ -47,7 +47,7 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
         </div>
 
         ${loading
-          ? html`<div class="text-slate-400 text-sm animate-pulse">Loading your Fulcra annotations…</div>`
+          ? html`<div class="text-slate-400 text-sm animate-pulse">${c.dpIsV1 ? "Loading your Fulcra data types…" : "Loading your Fulcra annotations…"}</div>`
           : nothing}
 
         ${error && !loading
@@ -57,7 +57,7 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
         ${!loading && defs.length > 0
           ? html`
               <div class="space-y-2">
-                <p class="text-xs text-slate-500 font-medium">Choose an existing annotation or create a new one:</p>
+                <p class="text-xs text-slate-500 font-medium">${c.dpIsV1 ? "Choose an existing data type or use a matching one:" : "Choose an existing annotation or create a new one:"}</p>
                 ${defs.map((def) => this._renderDefCard(def, c, /*other=*/ false))}
               </div>`
           : nothing}
@@ -65,13 +65,17 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
         ${!loading && defs.length === 0 && otherDefs.length === 0 && !error
           ? html`
               <div class="text-sm text-slate-500 bg-slate-50 border border-slate-200 rounded p-3">
-                No Fulcra annotations found. A new one will be created on first run.
+                ${c.dpIsV1 ? "No matching Fulcra data types found. Continue to create or verify a matching data type during setup." : "No Fulcra annotations found. A new one will be created on first run."}
               </div>`
           : nothing}
 
         ${!loading && otherDefs.length > 0 ? this._renderOtherDefs(otherDefs, c) : nothing}
 
-        ${defs.length > 0 || otherDefs.length > 0 ? this._renderCreateNewFooter(c) : nothing}
+        ${c.dpIsV1 && c.dpLegacyMapping && !loading && !error
+          ? html`<div class="text-sm text-slate-500">Choose a v1 data type for this source. Your previous annotation selection is retained for migration.</div>`
+          : nothing}
+
+        ${!loading && !error && (c.dpIsV1 || defs.length > 0 || otherDefs.length > 0) ? this._renderCreateNewFooter(c) : nothing}
       </div>
     `;
   }
@@ -89,7 +93,7 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
       : "text-xs text-slate-500 mt-0.5";
     const subtitleText = other
       ? `(${def.annotation_type} annotation) · created ${c.dpHumanDate(def.created_at)}`
-      : `${def.annotation_type} · created ${c.dpHumanDate(def.created_at)}`;
+      : `${c.dpIsV1 ? def.base_type : def.annotation_type} · created ${c.dpHumanDate(def.created_at)}`;
 
     return html`
       <div class=${cardClasses} @click=${() => c.dpSelectDef(def)}>
@@ -126,7 +130,7 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
         ${def._preview && def._preview.length > 0
           ? html`
               <div class="space-y-0.5">
-                <div class="text-xs text-slate-500 font-medium mb-1">Recent entries:</div>
+                <div class="text-xs text-slate-500 font-medium mb-1">${c.dpIsV1 ? "Latest entry (past 30 days):" : "Recent entries:"}</div>
                 ${def._preview.map(
                   (entry) => html`
                     <div class="text-xs text-slate-600 truncate">${c.dpEntryLabel(entry)}</div>`
@@ -159,11 +163,13 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
   }
 
   _renderCreateNewFooter(c) {
-    const canonical = c.plugin_contract?.canonical_definition_name;
+    const canonical = c.dpIsV1 ? c.dpV1Name : c.plugin_contract?.canonical_definition_name;
     const buttonClass = c.dpForceNew
       ? "px-4 py-2 rounded border text-sm font-medium transition-colors border-emerald-500 bg-emerald-50 text-emerald-700"
       : "px-4 py-2 rounded border text-sm font-medium transition-colors border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400";
-    const label = c.dpForceNew
+    const label = c.dpIsV1
+      ? `${c.dpForceNew ? "✓ " : "+ "}Use or create matching ${canonical ? `'${canonical}' ` : ""}data type`
+      : c.dpForceNew
       ? canonical
         ? `✓ Will create a new '${canonical}' annotation on first run`
         : "✓ Will create a new annotation on first run"
@@ -175,18 +181,19 @@ class FulcraStepDefinitionPicker extends FulcraStepBase {
       <div class="pt-1">
         <!-- Outline button — promoted from a text link 2026-05-26 so the
              "create new" path is as visually weighty as the cards above. -->
-        <button @click=${() => c.dpChooseForceNew()} class=${buttonClass}>
+        <button @click=${() => c.dpChooseForceNew()} ?disabled=${c.nextPending} class=${buttonClass}>
           <span>${label}</span>
         </button>
         ${c.dpForceNew
           ? html`
               <div class="pt-2">
-                <label class="block text-xs text-slate-500 mb-1">Annotation name (you can change this):</label>
+                <label class="block text-xs text-slate-500 mb-1">${c.dpIsV1 ? "Data type name (you can change this):" : "Annotation name (you can change this):"}</label>
                 <input type="text"
+                       ?disabled=${c.nextPending}
                        .value=${c.dpNewName || ""}
                        @input=${(e) => (c.dpNewName = e.target.value)}
                        class="w-full px-3 py-2 text-sm border border-slate-300 rounded focus:outline-none focus:border-violet-500"
-                       placeholder=${canonical || "My annotation"}>
+                       placeholder=${canonical || (c.dpIsV1 ? "My data type" : "My annotation")}>
               </div>`
           : nothing}
       </div>

@@ -27,12 +27,15 @@ function formatRemaining(ms: number): string {
  * so the same `pausedUntil > now` check works uniformly.
  */
 export function PauseControl() {
+  const [ready,setReady]=useState(false);
+  const [held,setHeld]=useState(false);
+  const [busy,setBusy]=useState(false);
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
   const [pick, setPick] = useState<number | "indefinite">(15);
   const [tick, setTick] = useState(0);  // forces refresh of the countdown
 
   useEffect(() => {
-    void loadSettings().then((s) => setPausedUntil(s.pausedUntil));
+    void loadSettings().then((s) => {setPausedUntil(s.pausedUntil);setReady(true);}).catch(()=>setHeld(true));
   }, []);
 
   // Cheap countdown — every second, force a re-render so the
@@ -45,25 +48,30 @@ export function PauseControl() {
 
   // Lazy auto-resume in case the SW's sweep hasn't cleared it yet.
   useEffect(() => {
-    if (pausedUntil !== null && Date.now() >= pausedUntil) {
+    if (ready && !held && !busy && pausedUntil !== null && Date.now() >= pausedUntil) {
       void resume();
     }
-  }, [pausedUntil, tick]);
+  }, [pausedUntil, tick, ready, held, busy]);
 
   async function pause(): Promise<void> {
-    const cur = await loadSettings();
+    setBusy(true);try{const cur = await loadSettings();
     const until = pick === "indefinite"
       ? Number.MAX_SAFE_INTEGER
       : Date.now() + (pick as number) * 60_000;
     await saveSettings({ ...cur, pausedUntil: until });
     setPausedUntil(until);
+    }catch{setHeld(true);}finally{setBusy(false);}
   }
 
   async function resume(): Promise<void> {
-    const cur = await loadSettings();
+    setBusy(true);try{const cur = await loadSettings();
     await saveSettings({ ...cur, pausedUntil: null });
     setPausedUntil(null);
+    }catch{setHeld(true);}finally{setBusy(false);}
   }
+
+  if(held)return <div role="alert">Capture held: settings are unavailable.</div>;
+  if(!ready)return <div role="status">Loading capture settings…</div>;
 
   if (pausedUntil !== null && Date.now() < pausedUntil) {
     const remaining = pausedUntil - Date.now();
@@ -78,7 +86,7 @@ export function PauseControl() {
           <span className="muted" style={{ flex: 1 }}>
             Resumes {label}
           </span>
-          <button onClick={() => void resume()}>Resume now</button>
+          <button disabled={busy} onClick={() => void resume()}>Resume now</button>
         </div>
       </div>
     );
@@ -88,7 +96,7 @@ export function PauseControl() {
     <div className="section">
       <h2>Capture</h2>
       <div className="row" style={{ gap: 8 }}>
-        <select
+        <select disabled={busy}
           value={pick === "indefinite" ? "indefinite" : String(pick)}
           onChange={(e) => {
             const v = e.target.value;
@@ -102,7 +110,7 @@ export function PauseControl() {
             </option>
           ))}
         </select>
-        <button onClick={() => void pause()}>Pause</button>
+        <button disabled={busy} onClick={() => void pause()}>Pause</button>
       </div>
     </div>
   );

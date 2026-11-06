@@ -202,6 +202,11 @@ def test_supervisor_terminates_a_service_that_becomes_disabled():
 def test_shutdown_terminates_the_service_process_group_on_posix(monkeypatch):
     class GroupProc(FakeProc):
         pid = 4242
+        returncode = None
+
+        def wait(self, *, timeout):
+            self.returncode = -signal.SIGKILL
+            return self.returncode
 
     killed = []
     proc = GroupProc()
@@ -216,7 +221,7 @@ def test_shutdown_terminates_the_service_process_group_on_posix(monkeypatch):
 
     sup.shutdown_all()
 
-    assert killed == [(4242, signal.SIGTERM)]
+    assert killed == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
     assert proc.terminated is False
 
 

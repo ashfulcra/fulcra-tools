@@ -13,6 +13,11 @@ is refreshed to match, so future drift stays a `diff`, not archaeology).
 Prior stamps: 2026-07-16 on 0.1.38, 2026-07-13 on 0.1.36, 2026-07-07/08 on
 0.1.35.
 
+**Targeted true-v1 mutation checks, 2026-10-23:** custom Event/Metric same-ID
+updates and native Event tombstone/replay behavior were verified separately;
+see [true v1 custom record mutations](#true-v1-custom-record-mutations). This
+does not refresh the older whole-platform verification stamp above.
+
 **Drift since 2026-07-16 (0.1.38 → 0.1.40) — additive; no rewrite trigger:**
 
 - **API surface: zero path/method changes across the whole window** (53
@@ -201,15 +206,16 @@ raw endpoints below are tier-2 material and background for reading old code.
   says nothing about what deletion does to the deleted record itself — whether a
   tombstoned record still appears on its own type's event route was not tested
   here, and the API documents neither behaviour. There
-  is still **no update/replace verb**: correct a record by deleting and
-  re-recording, or by writing a superseding one.
+  is still **no dedicated update/replace verb**. Same-ID true-v1 ingest behavior
+  is covered by the newer [mutation checks](#true-v1-custom-record-mutations).
 - **Lib:** `record_data_type(data_type, records, api_version="v1alpha1")` takes
   a list of dicts and returns `{"upload_id": …}`; `validate_records(...)`
   pre-flights them against the schema, returning
   `(index, message, ValidationError)` tuples. **There is no delete-record lib
   method** — the CLI composes it, so lib callers write the `DeletedRecord`
-  themselves via `record_data_type`, and the `Base/<uuid>` shorthand is CLI-only
-  (the lib wants a base type plus an explicit `sources` entry).
+  themselves via `record_data_type`. For legacy annotation definitions, the
+  `Base/<uuid>` shorthand is CLI-only (the lib wants a base type plus an
+  explicit `sources` entry); true-v1 custom destinations have separate semantics.
 
 **Tier 2 — records (and what the CLI does under the hood).** Two ingest write
 paths. The typed endpoint is **live round-trip verified 2026-07-08** and is what
@@ -270,9 +276,8 @@ the OpenAPI (spec-confirmed, not re-round-tripped):
   envelope differences vs the typed body: legacy uses `source` (singular key)
   not `sources`, carries the payload as a JSON **string** in `data` rather than a
   top-level `note`, and rides `data_type` inside `metadata`.
-- **Still no replace/update at any tier** — a record is appended, then
-  tombstoned by a `DeletedRecord`. Corrections are a delete plus a re-record, or
-  a superseding record; nothing edits in place.
+- **No dedicated replace/update verb** — do not infer immutable record behavior
+  from the available HTTP methods. The true-v1 checks below show same-ID updates.
 - The Agent-Tasks annotation writer in **fulcra-common** resolves its **tags** and
   annotation-**definitions** through the public `fulcra` CLI (`fulcra tag
   get/create`, `fulcra catalog`, `fulcra data-type create`) — coord is a
@@ -286,6 +291,51 @@ the OpenAPI (spec-confirmed, not re-round-tripped):
   write/read-back round trip is three commands with one identifier. `<range>`
   is two ISO8601 timestamps or one relative interval (`"1 day"`, `"3h"`).
   Tier 2 via `/data/v1alpha1/event/{data_type}`.
+
+### True v1 custom record mutations
+
+The v1 catalog retains server metadata such as `created_at`, but did not retain
+the `fulcra_tools.key` sent in a custom type's creation metadata in a synthetic
+check on October 23, 2026. Its `record_spec` contained only the base `type`, not
+the custom schema fragment. Fetch the served `/v1/schema` and preserve explicit
+account-scoped bindings; do not infer a missing destination from a marker/name
+miss after a rename.
+
+Synthetic round trips on **2026-10-23**, with `fulcra-api` 0.1.56, verified:
+
+- `POST /ingest/v1/record/Event/<UUID>?api_version=v1` with the same explicit
+  record UUID updates its content and timestamp, leaving one updated row in a
+  covering time window. Separate same-ID Metric value and timestamp updates
+  also leave one updated row; the timestamp check retained an untouched control.
+- `GET /data/v1/catalog/DeletedRecord/v1/schema` returns the tombstone schema:
+  required `record_id`, optional UUID `id` and optional `data_type`.
+  `POST /ingest/v1/record/DeletedRecord?api_version=v1` with a stable tombstone
+  `id`, target `record_id` and base `data_type: "Event"` or `"Metric"` removes
+  the corresponding custom record from both exact-ID and covering-window reads.
+  Separate Event and Metric checks retained an untouched control record.
+  **The 201 response preceded query visibility of the deletion**;
+  verify absence before reporting completion.
+- Re-ingesting that same target UUID **after verified deletion revived it**.
+  Reposting the original stable Event tombstone after that replay removed the
+  revived target again; exact-ID/window absence and the control were rechecked.
+  A tombstone therefore does not permanently prevent replay. Collect migration
+  and Undo need a durable replay disposition checked by every writer, plus
+  controlled old-writer cutoff; a receipt or local dedup claim is insufficient.
+- Both catalog versions of `DeletedRecord` remain `class: "tombstone"`,
+  `recordable: true`, `queryable: false`. An exact tombstone-ID query through
+  `/data/v1/records` returned 404. Keep an independent audit/disposition record;
+  the native tombstone stream cannot be enumerated to rebuild it.
+- A separate owned synthetic custom Event, using Collect's replay-exclusion
+  schema, remained queryable by its exact ID while the native-deleted target
+  was absent. This verifies the independent policy primitive; writer/UI
+  integration remains tracked by Collect's migration plan.
+
+The full Collect media schema also round-tripped Unicode text, explicit nullable
+fields, nested zero/false/null values, source provenance and two tag UUIDs in
+their submitted order. These checks establish true-v1 Event/Metric deletion and
+same-ID update behavior; they do not prove legacy annotation read/deletion
+behavior. [Collect's migration status](docs/collect-v1.md) separates verified
+API behavior from application paths still awaiting conversion.
 
 ## Tags (tiers 1 & 2)
 
@@ -311,6 +361,12 @@ curl -sS -X POST https://api.fulcradynamics.com/user/v1alpha1/tag \
   the tag already exists**, which is a benign outcome for any
   provision-if-absent flow (list first, reuse, and never create a second tag
   with the same name — two ids for one label splits its timeline in half).
+- **New tag names are 1–30 characters** (OpenAPI and a rejected 32-character
+  synthetic name verified 2026-10-23). Collect retains an existing owned tag's
+  identity through its private account/name binding, including renames. New
+  overlong/slashed source labels use a stable short tag name; the complete
+  source label remains in the record. Existing long names are looked up before
+  generating a replacement name.
 - **A record's `tags` must be tag UUIDs, never names.** The ingest endpoint
   validates them as uuids and rejects the whole write otherwise, so anything
   that tags records at volume resolves names to uuids **once**, out of band,

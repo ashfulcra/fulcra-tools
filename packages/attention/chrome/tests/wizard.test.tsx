@@ -49,6 +49,13 @@ vi.mock("../src/relayless/ensureDefinition", () => ({
   createAttentionDestination: (...a: unknown[]) => ensureImpl.createAttentionDestination(...(a as [])),
 }));
 
+// Source-only UI fixtures: fence runtime effects before importing real callers.
+await vi.hoisted(async () => {
+  const { IDBFactory } = await import("fake-indexeddb");
+  vi.stubGlobal("indexedDB", new IDBFactory());
+  vi.stubGlobal("fetch", () => { throw new Error("External network forbidden in wizard tests"); });
+});
+
 import { Wizard } from "../src/wizard/Wizard";
 import { saveSettings, loadSettings } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
@@ -336,4 +343,145 @@ describe("Wizard destination step — relayless", () => {
     expect(container.textContent).toContain("boom-save");
     expect(container.textContent).not.toContain("Scan your history");
   });
+});
+
+test('held-mode wizard completion says local retention and both drains disabled',async()=>{
+ await chrome.storage.local.set({attentionAuthMode:'v1-held'});
+ vi.mocked(chrome.runtime.sendMessage).mockImplementation(async(message:any)=>({version:1,ok:true,result:message.command==='settings-read'?DEFAULT_SETTINGS:{status:'committed'}}));
+ const {container,root}=await mount(<Wizard/>);
+ try{await clickButton(container,'Skip wizard');await act(async()=>{await Promise.resolve();await Promise.resolve();});expect(container.textContent).toContain('Both drains are disabled');expect(container.textContent).not.toContain('showing up in Fulcra immediately');}finally{await act(async()=>root.unmount());}
+});
+
+
+// Candidate success is a synthetic page message, never production listing proof.
+const candidateAccount = "11111111-2222-4333-8444-555555555555";
+const candidateId = "Event/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const candidateResult = () => ({ version: 1, status: "candidates", accountId: candidateAccount,
+  candidates: [{ id: candidateId, name: "Synthetic candidate" }] });
+
+async function heldCandidates(result: unknown | Promise<unknown>, accountId: unknown = candidateAccount) {
+  await chrome.storage.local.set({ attentionAuthMode: "v1-held", relaylessResolvedAttention: { definitionId: "legacy-evidence", tagIds: [] } });
+  vi.mocked(chrome.runtime.sendMessage).mockImplementation(async (message: any) => {
+    if (message.command === "settings-read") return { version: 1, ok: true, result: DEFAULT_SETTINGS };
+    if (message.command === "display") return { version: 1, ok: true, result: {
+      protocol: "attention-auth-v1", mode: "v1-held", status: "committed", code: "COMMITTED",
+      accountId, publicationId: "22222222-2222-4333-8444-555555555555", label: null, drains: "disabled",
+    } };
+    if (message.command === "destination-list") return { version: 1, ok: true, result: await result };
+    throw new Error("Unexpected candidate presentation command");
+  });
+  const mounted = await mount(<Wizard />);
+  await gotoAuthStep(mounted.container);
+  await clickButton(mounted.container, "Continue");
+  return mounted;
+}
+
+async function dispose(root: Root, container: HTMLElement) {
+  await act(async () => root.unmount());
+  container.remove();
+}
+
+test("synthetic v1 candidate response appears at the actual Wizard seam without selection or setup", async () => {
+  const info = vi.spyOn(console, "info").mockImplementation(() => {});
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const { container, root } = await heldCandidates(candidateResult());
+  try {
+    expect(container.textContent).toContain("Synthetic candidate");
+    expect(container.textContent).toContain(candidateId);
+    expect(container.textContent).toContain("Candidates only");
+    expect(container.textContent).toContain("Setup remains held");
+    expect(container.textContent).not.toContain("(current)");
+    expect(container.querySelector('input[type="radio"]:checked')).toBeNull();
+    await setTextInput(container, "Synthetic browser");
+    const next = [...container.querySelectorAll("button")].find(b => b.textContent?.includes("Continue"))!;
+    expect(next.disabled).toBe(true);
+    await clickButton(container, "Continue");
+    expect(container.textContent).not.toContain("Scan your history");
+    expect(vi.mocked(chrome.runtime.sendMessage).mock.calls.every(([m]) =>
+      !["destination-choose", "destination-create", "settings"].includes((m as any).command))).toBe(true);
+    expect((await chrome.storage.local.get("relaylessResolvedAttention")).relaylessResolvedAttention)
+      .toEqual({ definitionId: "legacy-evidence", tagIds: [] });
+    expect(tokenImpl.getValidAccessToken).not.toHaveBeenCalled();
+    expect(ensureImpl.listAttentionDestinations).not.toHaveBeenCalled();
+    for (const value of ["Synthetic candidate", candidateId, candidateAccount]) {
+      expect(JSON.stringify([...info.mock.calls, ...errors.mock.calls])).not.toContain(value);
+    }
+  } finally { await dispose(root, container); info.mockRestore(); errors.mockRestore(); }
+});
+
+test.each([
+  ["wrong version", { ...candidateResult(), version: 2 }],
+  ["wrong account", { ...candidateResult(), accountId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }],
+  ["missing account", { ...candidateResult(), accountId: null }],
+  ["bare id", { ...candidateResult(), candidates: [{ id: candidateId.slice(6), name: "Synthetic candidate" }] }],
+  ["Metric id", { ...candidateResult(), candidates: [{ id: candidateId.replace("Event/", "Metric/"), name: "Synthetic candidate" }] }],
+  ["duplicates", { ...candidateResult(), candidates: [...candidateResult().candidates, ...candidateResult().candidates] }],
+  ["too many", { ...candidateResult(), candidates: Array.from({length: 129}, (_, i) => ({id: `Event/aaaaaaaa-bbbb-4ccc-8ddd-${String(i).padStart(12,"0")}`, name: "Synthetic candidate"})) }],
+  ["total byte limit", { ...candidateResult(), candidates: Array.from({length: 128}, (_, i) => ({id: `Event/aaaaaaaa-bbbb-4ccc-8ddd-${String(i).padStart(12,"0")}`, name: "界".repeat(256)})) }],
+  ["long label", { ...candidateResult(), candidates: [{id: candidateId, name: "x".repeat(257)}] }],
+  ["control label", { ...candidateResult(), candidates: [{id: candidateId, name: "bad\nlabel"}] }],
+  ["surrogate label", { ...candidateResult(), candidates: [{id: candidateId, name: "\ud800"}] }],
+  ["secret field", { ...candidateResult(), access_token: "synthetic-secret-must-not-echo" }],
+  ["row extension", { ...candidateResult(), candidates: [{...candidateResult().candidates[0], schema: "synthetic-secret-must-not-echo"}] }],
+  ["legacy DTO", { status: "ok", destinations: [{id: "old", name: "Synthetic candidate", isAutoPick: true}] }],
+  ["held arbitrary code", { status: "held", code: "synthetic-secret-must-not-echo", destinations: [] }],
+])("malformed candidate response (%s) is static and cannot enable setup", async (_case, result) => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const {container, root} = await heldCandidates(result);
+  try {
+    expect(container.textContent).toContain("Candidate list unavailable");
+    expect(container.textContent).not.toContain("synthetic-secret-must-not-echo");
+    expect(container.textContent).not.toContain("Synthetic candidate");
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("synthetic-secret-must-not-echo");
+    expect(container.querySelector('input[type="radio"]:checked')).toBeNull();
+  } finally { await dispose(root, container); errors.mockRestore(); }
+});
+
+test.each([null, "not-an-account"])("candidate data cannot supply a missing/invalid current display account (%s)", async account => {
+  const {container, root} = await heldCandidates(candidateResult(), account);
+  try { expect(container.textContent).toContain("Candidate list unavailable"); expect(container.textContent).not.toContain("Synthetic candidate"); }
+  finally { await dispose(root, container); }
+});
+
+test.each(["back", "unmount"])("late synthetic candidate response after %s cannot publish or advance", async how => {
+  let resolve!: (value: unknown) => void;
+  const pending = new Promise<unknown>(r => {resolve = r;});
+  const {container, root} = await heldCandidates(pending);
+  if (how === "back") await clickButton(container, "Back");
+  else await dispose(root, container);
+  const before = vi.mocked(chrome.runtime.sendMessage).mock.calls.length;
+  await act(async () => { resolve(candidateResult()); await Promise.resolve(); await Promise.resolve(); });
+  expect(container.textContent).not.toContain("Synthetic candidate");
+  expect(vi.mocked(chrome.runtime.sendMessage).mock.calls.length).toBe(before);
+  expect((await chrome.storage.local.get("relaylessResolvedAttention")).relaylessResolvedAttention)
+    .toEqual({ definitionId: "legacy-evidence", tagIds: [] });
+  if (how === "back") await dispose(root, container);
+});
+
+
+test("account changes while candidate message is pending refuse stale display data", async () => {
+  let resolve!: (value: unknown) => void;
+  const {container, root} = await heldCandidates(new Promise(r => {resolve = r;}));
+  const original = vi.mocked(chrome.runtime.sendMessage).getMockImplementation()! as (message: unknown) => Promise<any>;
+  vi.mocked(chrome.runtime.sendMessage).mockImplementation(async (message: any) => {
+    const response = await original(message);
+    if (message.command === "display") response.result.accountId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    return response;
+  });
+  try {
+    await act(async () => {resolve(candidateResult()); await Promise.resolve(); await Promise.resolve();});
+    expect(container.textContent).toContain("Candidate list unavailable");
+    expect(container.textContent).not.toContain("Synthetic candidate");
+  } finally {await dispose(root, container);}
+});
+
+
+test.each([0, 128])("bounded candidate list of %s rows remains presentation only", async count => {
+  const candidates = Array.from({length: count}, (_, i) => ({id: `Event/aaaaaaaa-bbbb-4ccc-8ddd-${String(i).padStart(12,"0")}`, name: `Synthetic ${i}`}));
+  const {container, root} = await heldCandidates({...candidateResult(), candidates});
+  try {
+    expect(container.querySelectorAll('ul[aria-label="Destination candidates"] li')).toHaveLength(count);
+    expect(container.textContent).not.toContain("Candidate list unavailable");
+    expect(container.querySelector('input[type="radio"]')).toBeNull();
+  } finally {await dispose(root, container);}
 });

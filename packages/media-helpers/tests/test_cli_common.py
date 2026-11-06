@@ -28,7 +28,7 @@ def test_emit_result_json_writes_one_line_to_stdout():
         "skipped_existing": 0, "posted": 3, "verified": 0,
         "since_watermark": None, "new_watermark": None,
         "would_post": None,
-        "errors": [],
+        "errors": [], "cursor": None,
     }
 
 

@@ -73,13 +73,19 @@ def test_keyring_read_that_blocks_times_out(monkeypatch):
     monkeypatch.setattr(keyring, "get_password", _blocking_get)
 
     start = time.monotonic()
-    with pytest.raises(TimeoutError):
-        credentials._keyring_get("svc", "acct", timeout=0.3)
-    elapsed = time.monotonic() - start
-    assert elapsed < 2.0  # gave up promptly, didn't wait out the 5s block
+    try:
+        with pytest.raises(TimeoutError):
+            credentials._keyring_get("svc", "acct", timeout=0.3)
+        assert time.monotonic() - start < 2.0
+    finally:
+        blocking.set()
+        deadline = time.monotonic() + 1
+        while ("svc", "acct") in credentials._pending_reads and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert ("svc", "acct") not in credentials._pending_reads
 
 
-def test_get_user_secret_returns_none_on_blocked_read_without_caching(monkeypatch):
+def test_get_user_secret_raises_on_blocked_read_without_caching(monkeypatch):
     """A blocked keychain read degrades get_user_secret to None and must NOT
     cache that transient failure — a later read (once the prompt clears) must
     retry rather than return a stale 'absent'."""
@@ -95,9 +101,14 @@ def test_get_user_secret_returns_none_on_blocked_read_without_caching(monkeypatc
 
     monkeypatch.setattr(keyring, "get_password", _blocking_get)
     monkeypatch.setattr(credentials, "_KEYCHAIN_READ_TIMEOUT_S", 0.3)
-    assert credentials.get_user_secret("bearer-token") is None
+    with pytest.raises(TimeoutError):
+        credentials.get_user_secret("bearer-token")
     # Transient failure wasn't cached: the prompt "clears", reads succeed.
     blocking.set()
+    import time
+    deadline = time.monotonic() + 1
+    while credentials._pending_reads and time.monotonic() < deadline:
+        time.sleep(.001)
     monkeypatch.setattr(keyring, "get_password", lambda s, a: "real-token")
     assert credentials.get_user_secret("bearer-token") == "real-token"
 
@@ -131,7 +142,7 @@ def test_keyring_read_propagates_real_errors(monkeypatch):
 
     monkeypatch.setattr(keyring, "get_password", _boom)
     with pytest.raises(RuntimeError, match="keychain exploded"):
-        credentials._keyring_get("svc", "acct", timeout=1.0)
+        credentials._keyring_get("error-test", "acct", timeout=1.0)
 
 
 def test_secrets_are_namespaced_per_plugin():
@@ -245,4 +256,5 @@ def test_fresh_user_secret_fails_closed_on_blocked_keychain(monkeypatch):
     def blocked(*args):
         raise TimeoutError('synthetic blocked keychain')
     monkeypatch.setattr(credentials, '_keyring_get', blocked)
-    assert credentials.get_user_secret_fresh('bearer-token') is None
+    with pytest.raises(TimeoutError):
+        credentials.get_user_secret_fresh('bearer-token')

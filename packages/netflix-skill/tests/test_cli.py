@@ -1,107 +1,90 @@
+"""Pure local CLI and pre-runtime capability/option failures."""
+import builtins
 import json
-import httpx
+from pathlib import Path
+
+import pytest
 
 
-def run_main(ni, argv, handler, monkeypatch, capsys):
-    monkeypatch.setattr(ni, "get_token", lambda: "test-token")
-    monkeypatch.setattr(
-        ni, "make_api_client",
-        lambda token: httpx.Client(
-            transport=httpx.MockTransport(handler),
-            base_url="https://api.example.test",
-        ),
-    )
-    code = ni.main(argv)
-    out = capsys.readouterr().out.strip().splitlines()[-1]
-    return code, json.loads(out)
+def test_check_only_without_any_runtime_or_httpx(ni, fixtures_dir, monkeypatch, capsys):
+    from fulcra_netflix import loader
+
+    original = builtins.__import__
+    def denied(name, *args, **kwargs):
+        if name.startswith(("httpx", "fulcra_common", "fulcra_collect", "fulcra_media", "fulcra_netflix.native")):
+            raise ImportError("SECRET credential-canary")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", denied)
+    module = loader.load()
+    assert module.main([str(fixtures_dir / "gdpr.csv"), "--check-only", "--json"]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["would_post"] == 3 and env["posted"] == 0 and env["status"] == "checked"
 
 
-def _happy_handler(req):
-    if req.url.path == "/user/v1alpha1/annotation" and req.method == "GET":
-        return httpx.Response(200, json=[{
-            "id": "def-1", "name": "Watched",
-            "description": "com.fulcradynamics.annotation.media.watched",
-            "annotation_type": "duration"}])
-    if req.url.path == "/ingest/v1/record/batch":
-        return httpx.Response(200)
-    return httpx.Response(404)
-
-
-def test_main_happy_path_envelope(ni, fixtures_dir, monkeypatch, capsys):
-    code, env = run_main(
-        ni, [str(fixtures_dir / "slim.csv"), "--json", "--no-verify"],
-        _happy_handler, monkeypatch, capsys)
-    assert code == 0
-    assert env["ok"] is True
-    assert env["importer"] == "netflix"
-    assert env["variant"] == "slim"
-    assert env["total"] == 5 and env["posted"] == 5
-    assert env["errors"] == []
-    assert set(env) >= {"importer", "ok", "total", "posted",
-                        "skipped_existing", "verified", "would_post", "errors"}
-
-
-def test_main_check_only(ni, fixtures_dir, monkeypatch, capsys):
-    code, env = run_main(
-        ni, [str(fixtures_dir / "gdpr.csv"), "--json", "--check-only"],
-        _happy_handler, monkeypatch, capsys)
-    assert code == 0
-    assert env["would_post"] == 3 and env["posted"] == 0
-
-
-def test_main_parse_error_envelope(ni, tmp_path, monkeypatch, capsys):
-    p = tmp_path / "junk.csv"; p.write_text("a,b\n1,2\n")
-    code, env = run_main(ni, [str(p), "--json"], _happy_handler, monkeypatch, capsys)
-    assert code == 2
-    assert env["ok"] is False
-    assert env["errors"][0]["stage"] == "parse"
-
-
-def test_main_unreadable_path_envelope(ni, tmp_path, monkeypatch, capsys):
-    # A directory path raises IsADirectoryError (an OSError subclass) when
-    # opened for reading — this must produce the JSON envelope with stage
-    # "args" and exit 2, not an uncaught traceback. Using a directory here
-    # (rather than a chmod-0o000 file) keeps the test portable and safe to
-    # run as root, where permission bits are ignored.
-    code, env = run_main(ni, [str(tmp_path), "--json"], _happy_handler, monkeypatch, capsys)
-    assert code == 2
-    assert env["ok"] is False
+@pytest.mark.parametrize("args", [["--no-verify"], ["--no-verify", "--check-only"],
+    ["--data-type", "Metric/11111111-2222-4333-8444-555555555555"],
+    ["--data-type", "Event/not-a-uuid"]])
+def test_invalid_options_before_auth_or_source(ni, tmp_path, monkeypatch, capsys, args):
+    from fulcra_collect import standalone_v1
+    def forbidden(*args, **kwargs):
+        pytest.fail("runtime/source entered")
+    monkeypatch.setattr(standalone_v1, "standalone_runtime", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    assert ni.main([str(tmp_path / "missing"), "--json", *args]) == 2
+    env = json.loads(capsys.readouterr().out)
     assert env["errors"][0]["stage"] == "args"
 
 
-def test_main_auth_failure_envelope(ni, fixtures_dir, monkeypatch, capsys):
-    def handler(req):
-        return httpx.Response(401, json={"detail": "bad token"})
-    code, env = run_main(ni, [str(fixtures_dir / "slim.csv"), "--json"],
-                         handler, monkeypatch, capsys)
-    assert code == 2
-    assert env["errors"][0]["stage"] == "auth"
+@pytest.mark.parametrize("fault", ["adapter-old", "adapter-bool", "shared-old", "shared-bool",
+    "namespace", "callable", "builder", "progress", "adapter-missing"])
+def test_missing_or_incompatible_runtime_before_auth_source(ni, tmp_path, monkeypatch, capsys, fault):
+    from fulcra_collect import standalone_v1
+    from fulcra_collect.v1_outbox import V1RecordOutbox
+    from fulcra_common import v1
+    from fulcra_netflix import native
+    def forbidden(*args, **kwargs):
+        pytest.fail("runtime/source entered")
+    monkeypatch.setattr(standalone_v1, "standalone_runtime", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    if fault.startswith("adapter-") and fault != "adapter-missing":
+        monkeypatch.setattr(native, "CONTRACT_VERSION", True if fault.endswith("bool") else 0)
+    elif fault.startswith("shared-"):
+        monkeypatch.setattr(standalone_v1, "STANDALONE_RUNTIME_VERSION", True if fault.endswith("bool") else 0)
+    elif fault == "namespace":
+        monkeypatch.setattr(standalone_v1, "standalone_namespace_supported", lambda _: False)
+    elif fault == "callable":
+        monkeypatch.setattr(V1RecordOutbox, "pending_destinations", None)
+    elif fault == "builder":
+        monkeypatch.setattr(v1, "build_event_record", None)
+    elif fault == "progress":
+        monkeypatch.setattr(V1RecordOutbox, "progress", None)
+    else:
+        original = builtins.__import__
+        def denied(name, *args, **kwargs):
+            if name == "fulcra_netflix":
+                raise ImportError("SECRET credential-canary")
+            return original(name, *args, **kwargs)
+        monkeypatch.setattr(builtins, "__import__", denied)
+    assert ni.main([str(tmp_path / "empty.csv"), "--json"]) == 2
+    output = capsys.readouterr()
+    env = json.loads(output.out)
+    assert env["errors"][0]["stage"] == "runtime" and "SECRET" not in output.out + output.err
 
 
-def test_main_partial_batch_failure_reports_truthful_posted_count(
-        ni, fixtures_dir, monkeypatch, capsys):
-    # slim.csv has 5 records. Force a tiny chunk size (2) so the run splits
-    # into 3 batch POSTs ([2, 2, 1]); the SECOND POST 500s. The first chunk
-    # (2 records) already landed, so the envelope must report posted == 2,
-    # not 0 — a partial-failure run must not lie about what made it to the
-    # server.
-    monkeypatch.setattr(ni, "CHUNK_SIZE", 2)
-    posts = []
-    def handler(req):
-        if req.url.path == "/user/v1alpha1/annotation" and req.method == "GET":
-            return httpx.Response(200, json=[{
-                "id": "def-1", "name": "Watched",
-                "description": "com.fulcradynamics.annotation.media.watched",
-                "annotation_type": "duration"}])
-        if req.url.path == "/ingest/v1/record/batch":
-            posts.append(1)
-            if len(posts) == 2:
-                return httpx.Response(500)
-            return httpx.Response(200)
-        return httpx.Response(404)
-    code, env = run_main(ni, [str(fixtures_dir / "slim.csv"), "--json"],
-                         handler, monkeypatch, capsys)
-    assert code == 2
-    assert env["ok"] is False
-    assert env["posted"] == 2
-    assert env["errors"][0]["stage"] == "post"
+@pytest.mark.parametrize("source", ["a,b\n1,2\n", "Title,Date\nSECRET,SECRET\n"])
+def test_pure_parse_error_is_sanitized(ni, tmp_path, capsys, source):
+    path = tmp_path / "synthetic.csv"
+    path.write_text(source)
+    assert ni.main([str(path), "--json", "--check-only"]) == 2
+    output = capsys.readouterr()
+    assert "SECRET" not in output.out + output.err
+    assert json.loads(output.out)["errors"][0]["stage"] == "parse"
+
+
+@pytest.mark.parametrize("args", [["--SECRET"], ["--data-type"]])
+def test_syntactic_option_errors_have_one_sanitized_json(ni, tmp_path, capsys, args):
+    assert ni.main([str(tmp_path / "missing"), "--json", *args]) == 2
+    output = capsys.readouterr()
+    env = json.loads(output.out)
+    assert not env["ok"] and env["errors"][0]["stage"] == "args"
+    assert "SECRET" not in output.out + output.err

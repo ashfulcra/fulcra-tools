@@ -6,26 +6,23 @@ from datetime import timedelta
 from fulcra_collect.plugin import Credential, Plugin, RunContext, SetupStep
 
 from ..deezer_health import deezer_health_check
+from ..collect_v1 import media_destinations, media_pending
+from ..daemon_poll import daemon_poll
 from ..fulcra import FulcraClient
 from ..importers import deezer as deezer_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ._common import (
     DURATION_SPEC,
-    ensure_media_def,
     newest_event_iso,
     run_scheduled_import,
 )
 
 
-# Same structure as LASTFM_LISTENED_SPEC and SPOTIFY_EXTENDED_LISTENED_SPEC —
-# all three plugins produce "Listened" Duration annotations against the same
-# shared definition. Kept as a distinct constant so the resolver call below is
-# self-documenting and so spec-shape tests are local to this plugin.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 DEEZER_LISTENED_SPEC: dict = DURATION_SPEC
 
 
+@daemon_poll
 def _run_deezer(ctx: RunContext) -> None:
     """Fetch the authenticated user's Deezer play history and import it.
 
@@ -40,24 +37,15 @@ def _run_deezer(ctx: RunContext) -> None:
             "deezer: credential 'access-token' is not set — "
             "run `fulcra-collect set-credential deezer access-token`"
         )
+    ctx._daemon_poll.select("listened", "deezer", ["deezer"], secret_key="access-token")
     creds = {"access_token": access_token}
-
-    # Ensure the "Listened" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # listened_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Listened" definition
-    # rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="listened_definition_id",
-                     spec=DEEZER_LISTENED_SPEC, canonical_name="Listened",
-                     state_save=_state_save)
 
     run_scheduled_import(
         ctx,
         fetch=lambda since: deezer_importer.fetch_history(
-            creds, since=since, max_pages=None
+            creds, since=since, max_pages=ctx._daemon_poll.max_pages, **ctx._daemon_poll.strict
         ),
-        normalize=deezer_importer.normalize_history,
+        normalize=lambda raw: deezer_importer.normalize_history(raw, **ctx._daemon_poll.strict),
         tag="deezer",
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
@@ -71,9 +59,11 @@ PLUGIN = Plugin(
     kind="scheduled",
     collect_mode="live_polled",
     run=_run_deezer,
+    record_data_types=media_destinations("listened"),
+    record_pending=media_pending,
     description=(
         "Polls your Deezer listening history every 2 hours and records "
-        "each track as a 'Listened' annotation. Requires a Deezer OAuth "
+        "each track as a 'Listened' data type. Requires a Deezer OAuth "
         "access token (free Deezer dev account)."
     ),
     default_interval=timedelta(hours=2),
@@ -97,7 +87,7 @@ PLUGIN = Plugin(
             body_md=(
                 "Deezer exposes your listening history through its "
                 "Web API. We poll it every 2 hours and record each "
-                "track you finish as a 'Listened' annotation in Fulcra."
+                "track you finish as a 'Listened' data type in Fulcra."
             ),
         ),
         SetupStep(
@@ -133,7 +123,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Deezer listens?",
             body_md=(
-                "We can write to your existing 'Listened' annotation "
+                "We can write to your existing 'Listened' data type "
                 "or create a new one."
             ),
             annotation_type="duration",

@@ -4,11 +4,11 @@ from __future__ import annotations
 from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext, Setting, SetupStep
 
 from .. import webhook_receiver
+from ..collect_v1 import media_destinations, media_pending, media_run
 from ..fulcra import FulcraClient
 from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
-from ._common import DURATION_SPEC, ensure_media_def
+from ._common import DURATION_SPEC
 
 
 # Loopback addresses that are safe to bind without a bearer token.
@@ -16,11 +16,11 @@ from ._common import DURATION_SPEC, ensure_media_def
 # Note: the CLI does not currently include "::1" in the guard; we match it exactly.
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
-# Same structure as NETFLIX_WATCHED_SPEC and all other Watched plugins — they
-# all share the same definition.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 MEDIA_WEBHOOK_WATCHED_SPEC: dict = DURATION_SPEC
 
 
+@media_run
 def _run_media_webhook(ctx: RunContext) -> None:
     """Long-running Plex/Jellyfin webhook receiver.
 
@@ -28,9 +28,8 @@ def _run_media_webhook(ctx: RunContext) -> None:
     forever.  Refuses to start on a non-loopback host without a bearer token,
     mirroring the `fulcra-media webhook` CLI's safety check.
 
-    Resolves the "Watched" definition at startup (before the receive loop
-    begins) so the service works standalone on a fresh machine that has never
-    run `fulcra-attention bootstrap` or another Watched-producing plugin.
+    Proves its owned v1 Watched destination before accepting events. Existing
+    annotation selections require an explicit v1 mapping from setup.
     """
     host: str = ctx.config.get("host", "127.0.0.1")
     port: int = int(ctx.config.get("port", 8765))
@@ -46,21 +45,10 @@ def _run_media_webhook(ctx: RunContext) -> None:
             "or bind on 127.0.0.1."
         )
 
-    # Ensure the "Watched" annotation definition is known before entering the
-    # receive loop.  On a fresh machine where the user only enables media-webhook
-    # (no fulcra-attention bootstrap, no other Watched-producing plugin) the
-    # media state has no watched_definition_id, so the service couldn't start.
-    # The shared resolver adopts Machine 1's existing "Watched" definition rather
-    # than creating a duplicate — the same multi-machine guarantee every other
-    # Watched plugin gets.  After a supervisor restart the cached state makes
-    # this call fast (no network round-trip needed).
     media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="watched_definition_id",
-                     spec=MEDIA_WEBHOOK_WATCHED_SPEC,
-                     canonical_name="Watched",
-                     state_save=_state_save)
 
-    client = FulcraClient()
+    client = FulcraClient(collect_context=ctx)
+    client.prepare_media(("watched",))
     server = webhook_receiver.make_server(
         host=host,
         port=port,
@@ -70,7 +58,10 @@ def _run_media_webhook(ctx: RunContext) -> None:
         log_stream=None,
     )
     ctx.log.info("media webhook receiver listening on %s:%s", host, port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 PLUGIN = Plugin(
@@ -79,10 +70,12 @@ PLUGIN = Plugin(
     kind="service",
     collect_mode="live_continuous",
     run=_run_media_webhook,
+    record_data_types=media_destinations("watched"),
+    record_pending=media_pending,
     description=(
         "Captures what you watch on Plex or Jellyfin by running a tiny "
         "local HTTP server that your media server POSTs playback events "
-        "to. Runs continuously as a service — one annotation per session. "
+        "to. Runs continuously as a service — one event per session. "
         "Plex Pass is required for Plex webhooks; Jellyfin works on any tier."
     ),
     category="video",
@@ -99,6 +92,7 @@ PLUGIN = Plugin(
     required_credentials=(
         Credential(
             key="bearer-token",
+            required=False,
             label="Webhook bearer token",
             help=(
                 "Required when Plex/Jellyfin runs on a different machine "
@@ -110,6 +104,13 @@ PLUGIN = Plugin(
         ),
     ),
     required_settings=(
+        Setting(
+            key="port",
+            label="Receiver port",
+            kind="port",
+            default=8765,
+            help="Choose an unused local TCP port (1–65535). Use the same port in your Plex/Jellyfin webhook URL.",
+        ),
         Setting(
             key="host",
             label="Bind address",
@@ -153,7 +154,7 @@ PLUGIN = Plugin(
             body_md=(
                 "media-webhook is a tiny HTTP server. Configure Plex or "
                 "Jellyfin to POST playback events to it; we write a "
-                "'Watched' annotation per session. Plex Pass is required "
+                "'Watched' data type per session. Plex Pass is required "
                 "to use Plex webhooks; Jellyfin webhooks need no paid tier."
             ),
         ),
@@ -161,10 +162,10 @@ PLUGIN = Plugin(
             kind="permission_request",
             title="Allow a local webhook server",
             body_md=(
-                "We'll bind a local HTTP server on port 8765 (default "
+                "We'll bind a local HTTP server on a port you choose (8765 by default; "
                 "`127.0.0.1`, or `0.0.0.0` if you're configuring this "
                 "from a Plex/Jellyfin server on another machine). The "
-                "next step lets you pick which."
+                "next step lets you choose the receiver port and server location."
             ),
         ),
         SetupStep(
@@ -177,7 +178,7 @@ PLUGIN = Plugin(
                 "NAS, a separate desktop, a home server) and will POST "
                 "events to this Mac over your LAN."
             ),
-            settings_keys=("setup_topology",),
+            settings_keys=("port", "setup_topology"),
         ),
         SetupStep(
             kind="input",
@@ -199,6 +200,7 @@ PLUGIN = Plugin(
             kind="external_action",
             title="Wire up your media server",
             body_md=(
+                "Replace `8765` in the URLs below with the receiver port you chose above.\n\n"
                 "**Plex:** open the **Plex Web app while signed in as the "
                 "server's admin account** (this is the account that owns "
                 "the server, not just any account with access). Go to "
@@ -217,6 +219,7 @@ PLUGIN = Plugin(
             kind="external_action",
             title="Wire up your media server (cross-machine)",
             body_md=(
+                "Replace `8765` in the URLs below with the receiver port you chose above.\n\n"
                 "**You're using cross-machine mode**, so we need two "
                 "extra pieces:\n\n"
                 "1. Find this Mac's LAN IP — **System Settings -> "
@@ -245,7 +248,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your watches?",
             body_md=(
-                "We can write to your existing 'Watched' annotation or "
+                "We can write to your existing 'Watched' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

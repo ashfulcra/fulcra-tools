@@ -4,6 +4,8 @@
 // the onboarding wizard. Kept separate from the React UI so it can be
 // unit-tested against the chrome.history stub.
 
+import {v1HeldMode} from "../relayless/v1AuthClient";
+import {loadSettings} from "../storage";
 import { scrubUrl } from "../scrub";
 
 /**
@@ -143,6 +145,10 @@ export async function fetchAndGroupHistory(opts: {
   daysBack: number;
   maxResults: number;
 }): Promise<DomainGroup[]> {
+  if(await v1HeldMode()){
+    const settings=await loadSettings();
+    if(!settings.enabled||settings.pausedUntil!==null&&Date.now()<settings.pausedUntil)throw new Error("Attention capture consent closed; history was not read");
+  }
   const startTime = Date.now() - opts.daysBack * 24 * 60 * 60 * 1000;
   const items = await chrome.history.search({
     text: "",

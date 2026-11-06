@@ -157,3 +157,30 @@ def test_concurrent_begin_and_complete_lose_no_write(tmp_path, keychain):
     nonces = final.get("nonces", {})
     assert session1.state not in nonces        # N1 consumed
     assert box["begin"].state in nonces        # N2 preserved
+
+
+def test_delivery_barrier_orders_cross_instance_account_removal(tmp_path, keychain):
+    """Removal waits for an exported effect and its receipt, then revokes it."""
+    from concurrent.futures import TimeoutError
+    import pytest
+    path = tmp_path / "registry.json"
+    seed = JsonFileStore(path)
+    seed.write({"accounts": [{"account_id": "synthetic", "email": "synthetic@example.test",
+        "added_at": "synthetic-generation", "status": "active"}], "nonces": {}})
+    active = AccountRegistry(store=JsonFileStore(path), keychain=keychain)
+    remover = AccountRegistry(store=JsonFileStore(path), keychain=keychain)
+    started = threading.Event()
+    def remove():
+        started.set()
+        return remover.remove_account("synthetic")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with active.delivery_scope("synthetic", "synthetic-generation"):
+            future = pool.submit(remove)
+            assert started.wait(timeout=1)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.05)
+            assert active.get_account("synthetic") is not None
+        assert future.result(timeout=1)
+    with pytest.raises(RuntimeError, match="authorization changed"):
+        with active.delivery_scope("synthetic", "synthetic-generation"):
+            pytest.fail("removed source acquired a delivery lease")

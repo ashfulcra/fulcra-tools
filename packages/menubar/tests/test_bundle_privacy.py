@@ -1,5 +1,6 @@
 """Release bundles must not retain paths from the build machine."""
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,10 @@ SCRIPT = Path(__file__).parents[1] / 'scripts' / 'sanitize_bundle.py'
 
 
 def _module():
+    # Match direct script execution so sibling shared scanner imports also work
+    # when this regression file runs alone, without another test's sys.path.
+    if str(SCRIPT.parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location('sanitize_bundle', SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -17,8 +17,10 @@ import time
 from pathlib import Path
 
 from fulcra_collect.plugin import Permission, Plugin, RunContext, Setting, SetupStep
+from fulcra_collect.v1_session import CollectRecordSession
 
-from . import report
+from . import report, vaultio
+from .collect_io import CollectNotesFiles, NotesConsent
 from .notestore import AccessDeniedError, DEFAULT_GROUP_CONTAINER
 from .sync import load_state, run_reconcile, run_sync
 
@@ -38,11 +40,29 @@ def _container(ctx: RunContext) -> Path:
 
 def run(ctx: RunContext) -> None:
     mode = str(ctx.config.get("mode", "sync")).strip().lower()
-    if mode == "reconcile":
-        return _run_reconcile(ctx)
-    if mode == "writeback":
-        return _run_writeback(ctx)
-    dry_run = bool(ctx.config.get("dry_run", False))
+    if mode not in {"sync", "reconcile", "writeback"}:
+        raise ValueError("Choose sync, reconcile or writeback for Apple Notes")
+    dry_run = ctx.config.get("dry_run", mode == "writeback")
+    if type(dry_run) is not bool:
+        raise ValueError("Preview only must be on or off")
+    if mode == "writeback" and ctx.config.get("writeback_enabled") is not True:
+        raise RuntimeError("Experimental writeback is disabled. It requires separate explicit opt-in.")
+    if mode == "sync" and dry_run:
+        return _run_sync(ctx, consent=NotesConsent(ctx))
+    # Local-only preview reads no cloud state. Reconcile/writeback do read
+    # Files, even in preview, so require an explicit current Collect principal.
+    with CollectRecordSession(ctx) as session:
+        consent = NotesConsent(ctx, session)
+        with CollectNotesFiles(session) as files:
+            if mode == "reconcile":
+                return _run_reconcile(ctx, files=files, consent=consent)
+            if mode == "writeback":
+                return _run_writeback(ctx, files=files, consent=consent)
+            return _run_sync(ctx, files=files, consent=consent)
+
+
+def _run_sync(ctx, *, files=vaultio, consent=None):
+    dry_run = ctx.config.get("dry_run", False)
     limit = ctx.config.get("limit")
     started = time.monotonic()
     try:
@@ -53,6 +73,7 @@ def run(ctx: RunContext) -> None:
             max_attachment_mb=int(ctx.config.get("max_attachment_mb", 25)),
             log=ctx.log,
             progress=lambda **kw: ctx.progress(**kw),
+            files=files, still_allowed=consent.guard if consent else None,
         )
     except Exception as exc:
         # A crashed run must leave evidence, not just a state-db outcome.
@@ -147,14 +168,16 @@ PLUGIN = Plugin(
 )
 
 
-def _run_reconcile(ctx: RunContext) -> None:
-    """Report what changed on each side. Writes nothing, needs no consent."""
+def _run_reconcile(ctx: RunContext, *, files=vaultio, consent=None) -> None:
+    """Report changes without editing notes; reads honor account/source consent."""
     started = time.monotonic()
     try:
         result = run_reconcile(
             container=_container(ctx), log=ctx.log,
             limit=int(ctx.config["limit"]) if ctx.config.get("limit") else None,
-            download_all=bool(ctx.config.get("download_all", False)))
+            download_all=bool(ctx.config.get("download_all", False)), files=files,
+            still_allowed=consent.guard if consent else None,
+            namespace=getattr(files, "namespace", None))
     except Exception as exc:
         report.write({"ok": False, "mode": "reconcile",
                       "error": f"{type(exc).__name__}: {exc}",
@@ -173,7 +196,7 @@ def _run_reconcile(ctx: RunContext) -> None:
                      "the remaining %s notes", result["notes_remaining"])
 
 
-def _run_writeback(ctx: RunContext) -> None:
+def _run_writeback(ctx: RunContext, *, files=vaultio, consent=None) -> None:
     """Push vault-side edits back into Apple Notes.
 
     Dry-run unless explicitly disabled: this is the only path in the plugin
@@ -187,7 +210,9 @@ def _run_writeback(ctx: RunContext) -> None:
     dry_run = bool(ctx.config.get("dry_run", True))
     try:
         # Reserve time for fresh per-candidate checks and AppleScript writes.
-        result = run_reconcile(container=_container(ctx), log=ctx.log, deadline_s=300)
+        result = run_reconcile(container=_container(ctx), log=ctx.log, deadline_s=300,
+            files=files, still_allowed=consent.guard if consent else None,
+            namespace=getattr(files, "namespace", None))
     except Exception as exc:
         report.write({"ok": False, "mode": "writeback", "dry_run": dry_run,
                       "error": f"{type(exc).__name__}: {exc}",
@@ -212,6 +237,8 @@ def _run_writeback(ctx: RunContext) -> None:
     if dry_run and not ctx.config.get("probe_automation"):
         available, why = None, "not probed (dry run; set probe_automation to check)"
     else:
+        if consent:
+            consent.guard()
         available, why = writeback.probe()
     if available is False and not dry_run:
         report.write({"ok": False, "mode": "writeback",
@@ -220,9 +247,11 @@ def _run_writeback(ctx: RunContext) -> None:
         raise RuntimeError(f"apple-notes writeback blocked: {why}")
 
     changes = [reconcile_change(c) for c in result["changes"]]
-    state = load_state(log=ctx.log)
+    state = load_state(log=ctx.log, files=files)
     with __import__("tempfile").TemporaryDirectory() as td:
-        snap = _snapshot_for(ctx, td)
+        if consent:
+            consent.guard()
+        snap = _snapshot_for(ctx, td, still_allowed=consent.guard) if consent else _snapshot_for(ctx, td)
         notes_by_uuid = {n.uuid: n for n in snap[0]}
         attachments_by_note: dict[str, list] = {}
         for att in snap[1]:
@@ -236,6 +265,8 @@ def _run_writeback(ctx: RunContext) -> None:
     written, failures = 0, []
     stopped_early, remaining = False, 0
     for index, (change, note) in enumerate(allowed):
+        if consent:
+            consent.guard()
         # One unit has bounded snapshot, vault read, and AppleScript timeouts;
         # leave ample headroom before Collect's 900-second worker limit.
         if time.monotonic() - started >= 600:
@@ -243,14 +274,19 @@ def _run_writeback(ctx: RunContext) -> None:
             break
         try:
             vault_body = _revalidated_body_for(
-                change, ctx=ctx, state=state, expected_pk=note.pk)
+                change, ctx=ctx, state=state, expected_pk=note.pk, files=files,
+                still_allowed=consent.guard if consent else None)
         except ValueError as exc:
             refused.append((change, str(exc)))
             continue
         except Exception as exc:
             failures.append({"uuid": change.uuid, "error": f"{type(exc).__name__}: {exc}"})
             continue
-        res = writeback.write_note_body(note.pk, vault_body, dry_run=dry_run)
+        if consent:
+            with consent.mutation_scope(mutating=not dry_run):
+                res = writeback.write_note_body(note.pk, vault_body, dry_run=dry_run)
+        else:
+            res = writeback.write_note_body(note.pk, vault_body, dry_run=dry_run)
         if res.ok and not res.skipped:
             written += 1
         elif not res.ok:
@@ -281,16 +317,23 @@ def reconcile_change(raw: dict):
                   detail=raw.get("detail", ""))
 
 
-def _snapshot_for(ctx: RunContext, td: str):
+def _snapshot_for(ctx: RunContext, td: str, *, still_allowed=None):
     from pathlib import Path as _P
 
     from . import notestore
+    guard = still_allowed or (lambda: None)
+    guard()
     snap = notestore.snapshot(_container(ctx) / "NoteStore.sqlite", _P(td))
+    guard()
     with notestore.NoteStore(snap) as store:
-        return store.notes(), store.attachments()
+        notes = store.notes()
+        guard()
+        attachments = store.attachments()
+        guard()
+        return notes, attachments
 
 
-def _revalidated_body_for(change, *, ctx, state, expected_pk) -> str:
+def _revalidated_body_for(change, *, ctx, state, expected_pk, files=vaultio, still_allowed=None) -> str:
     """A scan discovers candidates; fresh three-way evidence authorizes a write.
 
     Take a new Apple snapshot for each candidate, after reading its vault body.
@@ -298,7 +341,6 @@ def _revalidated_body_for(change, *, ctx, state, expected_pk) -> str:
     """
     from . import reconcile as _r
     from . import render
-    from . import vaultio as _v
     from .body import BodyDecodeError, decode
     from .sync import _links_from_state
     import tempfile
@@ -306,7 +348,9 @@ def _revalidated_body_for(change, *, ctx, state, expected_pk) -> str:
     entry = state.get("notes", {}).get(change.uuid)
     if not entry or entry.get("path") != change.path:
         raise ValueError("sync baseline changed; reconcile again")
-    text = _v.read_text(f"/vault/{change.path}")
+    guard = still_allowed or (lambda: None)
+    guard()
+    text = files.read_text(f"/vault/{change.path}")
     if (text.count(render.OPEN_FENCE) != 1 or text.count(render.CLOSE_FENCE) != 1
             or text.index(render.OPEN_FENCE) > text.index(render.CLOSE_FENCE)):
         raise ValueError("owner fence missing or ambiguous; refusing writeback")
@@ -314,7 +358,8 @@ def _revalidated_body_for(change, *, ctx, state, expected_pk) -> str:
     if body is None:
         raise ValueError("owner fence missing; refusing writeback")
     with tempfile.TemporaryDirectory() as td:
-        notes, all_attachments = _snapshot_for(ctx, td)
+        notes, all_attachments = (_snapshot_for(ctx, td, still_allowed=guard)
+                                 if still_allowed else _snapshot_for(ctx, td))
         note = next((n for n in notes if n.uuid == change.uuid), None)
         attachments = [a for a in all_attachments if a.note_uuid == change.uuid]
     if note is None:

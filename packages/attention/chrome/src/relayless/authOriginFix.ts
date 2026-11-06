@@ -53,7 +53,29 @@ export async function registerAuth0OriginStrip(
   dnr: typeof chrome.declarativeNetRequest = chrome.declarativeNetRequest,
   extensionId: string = chrome.runtime.id,
 ): Promise<void> {
-  const rule: chrome.declarativeNetRequest.Rule = {
+  const rule = auth0OriginStripRule(extensionId);
+
+  try {
+    await dnr.updateDynamicRules({
+      removeRuleIds: [AUTH0_ORIGIN_STRIP_RULE_ID],
+      addRules: [rule],
+    });
+    log.info("register", "registered Auth0 Origin-strip DNR rule", {
+      ruleId: AUTH0_ORIGIN_STRIP_RULE_ID,
+      host: AUTH0_HOST,
+      extensionId,
+    });
+  } catch (err) {
+    log.error("register", "failed to register Auth0 Origin-strip DNR rule", {
+      ruleId: AUTH0_ORIGIN_STRIP_RULE_ID,
+      error: String(err),
+    });
+  }
+}
+
+/** Canonical rule used by setup and read-protection inspection. */
+export function auth0OriginStripRule(extensionId: string): chrome.declarativeNetRequest.Rule {
+  return {
     id: AUTH0_ORIGIN_STRIP_RULE_ID,
     priority: 1,
     action: {
@@ -78,21 +100,4 @@ export async function registerAuth0OriginStrip(
       ],
     },
   };
-
-  try {
-    await dnr.updateDynamicRules({
-      removeRuleIds: [AUTH0_ORIGIN_STRIP_RULE_ID],
-      addRules: [rule],
-    });
-    log.info("register", "registered Auth0 Origin-strip DNR rule", {
-      ruleId: AUTH0_ORIGIN_STRIP_RULE_ID,
-      host: AUTH0_HOST,
-      extensionId,
-    });
-  } catch (err) {
-    log.error("register", "failed to register Auth0 Origin-strip DNR rule", {
-      ruleId: AUTH0_ORIGIN_STRIP_RULE_ID,
-      error: String(err),
-    });
-  }
 }

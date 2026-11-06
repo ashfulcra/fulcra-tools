@@ -1,0 +1,11 @@
+def _locked(self):
+        with self._lease('source.lock'):
+            try:
+                journal = _read_json(self.root / 'journal.json', private=True)
+            except FileNotFoundError:
+                journal = {'version': 1, 'sources': {}, 'attempts': {}, 'consumed': {}}
+            if (not isinstance(journal, dict) or set(journal) != {'version', 'sources', 'attempts', 'consumed'}
+                    or type(journal['version']) is not int or journal['version'] != 1
+                    or any(not isinstance(journal[k], dict) for k in ('sources', 'attempts', 'consumed'))):
+                _hold()
+            yield journal

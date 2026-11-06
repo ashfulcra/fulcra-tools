@@ -8,6 +8,8 @@
 // verification URL + user code while polling proceeds.
 
 import { FulcraOidc, type FetchFn } from "./oidc";
+import {readAuthMode} from "./v1AuthMode";
+import {startV1DeviceSignIn} from "./v1AuthClient";
 import { TokenStore } from "./tokenStore";
 import { registerAuth0OriginStrip } from "./authOriginFix";
 import type { StorageArea } from "./storageArea";
@@ -45,6 +47,7 @@ export interface SignInResult {
 export async function startDeviceSignIn(
   opts: StartDeviceSignInOpts,
 ): Promise<SignInResult> {
+  if(await readAuthMode(opts.storage)==='v1-held')return startV1DeviceSignIn(opts.onPrompt);
   // Ensure the Auth0 Origin-strip DNR rule is LIVE before the first Auth0
   // request. On a cold-woken SW the boot-time fire-and-forget registration may
   // not have settled yet; awaiting here (registration is idempotent) prevents

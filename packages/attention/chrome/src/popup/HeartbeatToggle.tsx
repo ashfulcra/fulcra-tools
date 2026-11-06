@@ -15,16 +15,18 @@ import {
  */
 export function HeartbeatToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [held,setHeld]=useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     void (async () => {
-      const [s, hasPerm] = await Promise.all([
+      try{const [s, hasPerm] = await Promise.all([
         loadSettings(),
         hasHeartbeatPermission(),
       ]);
       // The honest state: enabled = settings says yes AND Chrome agrees.
       setEnabled(s.heartbeatEnabled && hasPerm);
+      }catch{setHeld(true);}
     })();
   }, []);
 
@@ -33,12 +35,15 @@ export function HeartbeatToggle() {
     try {
       const actual = await setHeartbeatEnabled(want);
       setEnabled(actual);
+    } catch {
+      setHeld(true);
     } finally {
       setBusy(false);
     }
   }
 
-  if (enabled === null) return null;  // still loading
+  if(held)return <div role="alert">AFK detection held: settings are unavailable.</div>;
+  if(enabled===null)return <div role="status">Loading AFK detection settings…</div>;
 
   return (
     <div className="section">

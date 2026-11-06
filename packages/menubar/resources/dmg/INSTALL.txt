@@ -1,7 +1,7 @@
 Fulcra Collect — beta install
 ==============================
 
-These instructions cover Fulcra Collect 0.1.4 beta for Apple silicon Macs.
+These instructions cover Fulcra Collect beta for Apple silicon Macs.
 
 This disk image contains two pieces:
 
@@ -53,7 +53,7 @@ uploading or changing tasks. To start syncing, return to setup, turn Preview
 only off, and choose Enable & start sync. Completion then syncs both ways for
 ordinary tasks. Recurring tasks must be completed in Reminders or Todoist.
 
-4. Copy a folder or meeting transcripts (0.1.4)
+4. Copy a folder or meeting transcripts
 -----------------------------------------------
 For documents or an Obsidian vault, choose Local folders and Obsidian in the
 dashboard, then Set up. For transcript exports, choose Meeting transcript
@@ -68,7 +68,7 @@ start sync. Collect checks document folders every six hours and transcript
 folders every fifteen minutes. It leaves the originals alone. Removing a
 file from your Mac does not remove its Fulcra copy.
 
-5. Copy selected Notion pages (0.1.4)
+5. Copy selected Notion pages
 --------------------------------------
 A Notion workspace owner must create an internal connection with Read content
 access. They must also grant that connection access to each page you want

@@ -1,3 +1,9 @@
+> **Historical design — superseded for native import on 2026-10-24.** This
+> document preserves the original annotation workflow. The current
+> [package contract](../README.md) and [agent guide](../skills/fulcra-netflix/SKILL.md)
+> describe installed v1 Event authority, exact readback and optional legacy sharing.
+> Native sharing, release and historical conversion remain separate gates.
+
 # fulcra-netflix skill — design
 
 **Date:** 2026-07-03

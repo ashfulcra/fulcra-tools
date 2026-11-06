@@ -5,29 +5,24 @@ from datetime import timedelta
 
 from fulcra_collect.plugin import Credential, Plugin, RunContext, Setting, SetupStep
 
+from ..collect_v1 import media_destinations, media_pending
+from ..daemon_poll import daemon_poll
 from ..fulcra import FulcraClient
 from ..importers.lastfm import fetch_recent_tracks, normalize_history
 from ..lastfm_health import lastfm_health_check
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ._common import (
     DURATION_SPEC,
-    ensure_media_def,
     newest_event_iso,
     run_scheduled_import,
 )
 
 
-# The Fulcra annotation definition shape for the "Listened" DurationAnnotation.
-# Passed to ctx.resolved_definition_id as the expected_spec so the shared
-# resolver can verify an adopted definition has the right structure, or create
-# a new one when none exists. Mirrors the payload produced by
-# wire.duration_definition_payload (the bootstrap CLI path) — annotation_type
-# and measurement_spec are the two axes that _spec_matches compares.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 LASTFM_LISTENED_SPEC: dict = DURATION_SPEC
 
 
+@daemon_poll
 def _run_lastfm(ctx: RunContext) -> None:
     api_key = ctx.credentials.get("api-key")
     if not api_key:
@@ -44,26 +39,15 @@ def _run_lastfm(ctx: RunContext) -> None:
         raise RuntimeError("lastfm: setting 'username' is not set — "
                            "run `fulcra-collect set-setting lastfm username <your-lastfm-handle>` "
                            "or re-run the Last.fm setup wizard from the dashboard.")
+    ctx._daemon_poll.select("listened", "lastfm", ["lastfm", username], secret_key="api-key")
     creds = {"api_key": api_key, "username": username}
 
-    # Ensure the "Listened" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # listened_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Listened" definition
-    # rather than creating a duplicate — giving the same multi-machine dedup
-    # guarantee that bootstrap provides without requiring bootstrap to have
-    # been run on every machine.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="listened_definition_id",
-                     spec=LASTFM_LISTENED_SPEC, canonical_name="Listened",
-                     state_save=_state_save)
-
-    # Delegate to the shared helper; `since` (watermark - 1h) is computed
+    # Delegate to the shared helper; `since` (watermark - 24h) is computed
     # there so it stays consistent with the Deezer plugin.
     run_scheduled_import(
         ctx,
-        fetch=lambda since: fetch_recent_tracks(creds, since=since, max_pages=None),
-        normalize=normalize_history,
+        fetch=lambda since: fetch_recent_tracks(creds, since=since, max_pages=ctx._daemon_poll.max_pages, **ctx._daemon_poll.strict),
+        normalize=lambda raw: normalize_history(raw, **ctx._daemon_poll.strict),
         tag="lastfm",
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
@@ -77,6 +61,8 @@ PLUGIN = Plugin(
     kind="scheduled",
     collect_mode="live_polled",
     run=_run_lastfm,
+    record_data_types=media_destinations("listened"),
+    record_pending=media_pending,
     description=(
         "Captures your music listening history via Last.fm — the universal "
         "scrobble aggregator that catches Spotify, Apple Music, Tidal, and "
@@ -149,7 +135,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your scrobbles?",
             body_md=(
-                "We can write to your existing 'Listened' annotation or "
+                "We can write to your existing 'Listened' data type or "
                 "create a new one."
             ),
             annotation_type="duration",
