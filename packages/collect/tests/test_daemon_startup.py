@@ -98,3 +98,71 @@ def test_serve_menubar_option_preserves_other_startup_and_shutdown(
         *expected_menu, "dispatch", "tick wait", "dispatch",
         "control shutdown", "workers shutdown",
     ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX daemon signals")
+@pytest.mark.parametrize("phase", ["running", "startup"])
+def test_daemon_sigterm_unwinds_owned_cleanup(tmp_path, phase):
+    import signal
+    import time
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                              start_new_session=True)
+    ready = tmp_path / "ready"
+    cleaned = tmp_path / "cleaned"
+    script = tmp_path / "daemon_child.py"
+    script.write_text("""import os,signal,sys,time,socket,subprocess,types
+from pathlib import Path
+os.environ['FULCRA_COLLECT_HOME']=sys.argv[1]
+os.environ['FULCRA_ACCESS_TOKEN']='synthetic'
+import keyring
+def deny(*a,**k):raise AssertionError('native/auth/network forbidden')
+for n in ['get_password','set_password','delete_password']:setattr(keyring,n,deny)
+socket.create_connection=deny
+from fulcra_collect import cli as cm,daemon as dm,credentials,ssl_bootstrap,supervisor
+from fulcra_collect.config import Config
+from fulcra_collect.registry import RegistryResult
+for n in ['get_user_secret','get_user_secret_fresh','get_secret']:setattr(credentials,n,deny)
+ssl_bootstrap.ensure_ca_bundle=lambda:None
+dm.acquire_daemon_lease=lambda p:object()
+dm._db.open=lambda:None
+dm.threading.Thread.start=lambda self:None
+class Control:
+ def __init__(self,*a):pass
+ def serve_forever(self):pass
+ def shutdown(self):pass
+dm.ControlServer=Control
+def web(d):
+ if sys.argv[5]=='startup':
+  Path(sys.argv[2]).write_text('ready')
+  time.sleep(60)
+ return ('http://synthetic.invalid',None)
+sys.modules['fulcra_collect.web']=types.SimpleNamespace(serve=web)
+class Supervisor:
+ def shutdown_all(self):
+  os.kill(int(sys.argv[4]),signal.SIGTERM)
+  Path(sys.argv[3]).write_text('cleanup')
+supervisor.ServiceSupervisor=Supervisor
+d=dm.Daemon(registry=RegistryResult(),config=Config(),launch_menubar=False)
+d._dispatch_tick=lambda *a,**k:Path(sys.argv[2]).write_text('ready')
+cm.Daemon=lambda **k:d
+cm.cli(['daemon','--no-menubar'],standalone_mode=False)
+""")
+    env = dict(os.environ, FULCRA_COLLECT_HOME=str(tmp_path), FULCRA_ACCESS_TOKEN="synthetic")
+    proc = subprocess.Popen([sys.executable, str(script), str(tmp_path), str(ready),
+                             str(cleaned), str(worker.pid), phase], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 6
+        while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert ready.exists(), proc.communicate(timeout=2)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        assert cleaned.exists(), "SIGTERM bypassed daemon cleanup"
+        assert proc.returncode == 0
+        worker.wait(timeout=3)
+    finally:
+        for child in [proc, worker]:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=3)

@@ -852,3 +852,30 @@ def test_fingerprint_falls_back_for_non_object_jwt_payload():
     malformed for our purposes; it must not crash the pre-flight."""
     token = _fake_jwt_payload(["not", "a", "dict"], "array")
     assert Daemon._account_identity(token) == f"tok:{token}"
+
+
+def test_manual_run_budget_reaches_runner_without_duplicate_dispatch(collect_home, monkeypatch):
+    import threading
+    from fulcra_collect import runner
+    entered, release = threading.Event(), threading.Event()
+    seen = []
+    def fake_run(*a, **kw):
+        seen.append(kw["timeout_s"])
+        entered.set()
+        release.wait(timeout=3)
+    monkeypatch.setattr(runner, "run", fake_run)
+    d = Daemon(registry=_registry(), config=Config())
+    try:
+        assert d.handle_request({"cmd": "run", "plugin": "dayone", "timeout_s": 7200})["started"]
+        assert entered.wait(timeout=2)
+        assert not d.handle_request({"cmd": "run", "plugin": "dayone", "timeout_s": 7200})["started"]
+        assert seen == [7200]
+    finally:
+        release.set()
+
+
+def test_manual_run_budget_rejects_unbounded_or_ambiguous_values(collect_home):
+    d = Daemon(registry=_registry(), config=Config())
+    d._trigger = lambda *a, **k: (_ for _ in ()).throw(AssertionError("invalid dispatch"))
+    for value in [True, "7200", 0, -1, 7201, float("inf")]:
+        assert not d.handle_request({"cmd": "run", "plugin": "dayone", "timeout_s": value})["ok"]

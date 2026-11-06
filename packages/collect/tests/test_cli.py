@@ -220,3 +220,12 @@ def test_cli_bootstraps_ca_before_daemon_serve(monkeypatch, tmp_path):
     result = CliRunner().invoke(cli, ["daemon"])
     assert result.exit_code == 0
     assert observed == [(str(bundle), str(bundle))]
+
+
+def test_run_accepts_a_bounded_manual_backfill_budget(monkeypatch, collect_home):
+    requests = []
+    monkeypatch.setattr("fulcra_collect.cli.send_request", lambda path, request:
+                        requests.append(request) or {"ok": True})
+    result = CliRunner().invoke(cli, ["run", "trakt", "--timeout-seconds", "7200"])
+    assert result.exit_code == 0, result.output
+    assert requests == [{"cmd": "run", "plugin": "trakt", "timeout_s": 7200}]

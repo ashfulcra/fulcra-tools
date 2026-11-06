@@ -14,6 +14,7 @@ import selectors
 import time
 import subprocess
 import sys
+from threading import Event, Thread
 from pathlib import Path
 from contextlib import contextmanager
 from functools import lru_cache
@@ -324,7 +325,32 @@ def _communicate(proc, packet: bytes, deadline: float) -> bytes:
     return bytes(stdout)
 
 
+@contextmanager
+def _requester_lifetime():
+    """A quiet helper must not survive the process owning its private pipe.
+
+    No foreign PID or process group is signalled. A write interrupted by owner
+    death remains UNKNOWN to the original publication/no-replay journal.
+    """
+    parent = os.getppid()
+    complete = Event()
+    def watch():
+        while not complete.wait(.1):
+            if parent == 1 or os.getppid() != parent:
+                os._exit(70)
+    Thread(target=watch, name="keychain-owner-lifetime", daemon=True).start()
+    try:
+        yield
+    finally:
+        complete.set()
+
+
 def child_main() -> int:
+    with _requester_lifetime():
+        return _child_request()
+
+
+def _child_request() -> int:
     """One private-pipe read; the process-wide legacy flag is child-local."""
     response = {'status': 'unavailable'}
     rc = 1

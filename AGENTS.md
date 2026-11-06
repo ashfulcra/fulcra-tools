@@ -3559,3 +3559,14 @@ cross-process refresh lease serializes rotating grants. SDK polling loops are
 not used. Run the auth suites and `node --test packages/web-ui/tests/*.test.cjs`
 when changing these paths. Packaged, signed Keychain/restart QA is still required
 before release; source tests do not establish that evidence.
+
+Daemon CLI SIGTERM must unwind startup and running-loop ownership cleanup.
+Quiet Keychain helper lifetime is bound to the private-pipe requester; owner
+death exits the helper itself, never a reused foreign process group. Retain
+UNKNOWN for interrupted writes and the existing consumed-grant no-replay journal.
+
+Controlled manual backfills may use `fulcra-collect run PLUGIN
+--timeout-seconds N` (integer 1–7200). The ordinary scheduled budget and shared
+in-flight guard remain unchanged. Keep the captured full source scope until
+its original pending batches reconcile; restoring a live range cannot credit
+earlier historical coverage or silently rebind pending work.

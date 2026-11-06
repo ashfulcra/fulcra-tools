@@ -295,7 +295,7 @@ class Daemon:
         if cmd == "status":
             return self._status()
         if cmd == "run":
-            return self._run(request.get("plugin", ""))
+            return self._run(request.get("plugin", ""), timeout_s=request.get("timeout_s"))
         if cmd == "reload":
             self.config = config_mod.load()
             return {"ok": True}
@@ -992,15 +992,18 @@ class Daemon:
             },
         }
 
-    def _run(self, plugin_id: str) -> dict:
+    def _run(self, plugin_id: str, *, timeout_s: int | None = None) -> dict:
         if plugin_id not in self.registry.plugins:
             return {"ok": False, "error": f"unknown plugin {plugin_id!r}"}
-        started = self._trigger(plugin_id)
+        if timeout_s is not None and (type(timeout_s) is not int or not 1 <= timeout_s <= 7200):
+            return {"ok": False, "error": "Manual timeout must be an integer from 1 through 7200 seconds"}
+        started = (self._trigger(plugin_id) if timeout_s is None
+                   else self._trigger(plugin_id, timeout_s=timeout_s))
         if started:
             return {"ok": True, "started": True}
         return {"ok": True, "started": False, "note": "already running"}
 
-    def _trigger(self, plugin_id: str) -> bool:
+    def _trigger(self, plugin_id: str, *, timeout_s: int = runner.DEFAULT_TIMEOUT_S) -> bool:
         """Fire one run of a plugin in a background thread — non-blocking,
         so a long run never stalls the tick loop or the control socket.
 
@@ -1018,7 +1021,7 @@ class Daemon:
                     plugin_id, runner.worker_command(plugin_id),
                     now=datetime.now(timezone.utc),
                     on_spawn=lambda proc: self._register_proc(plugin_id, proc),
-                    daemon=self,
+                    daemon=self, timeout_s=timeout_s,
                 )
             finally:
                 with self._inflight_lock:
@@ -1286,81 +1289,87 @@ class Daemon:
 
         from .supervisor import ServiceSupervisor
 
-        # Open the unified state db before anything else touches state —
-        # this runs schema migrations (including the one-shot import of
-        # legacy state/<id>.json files into the plugin_state table) so
-        # the very first state.load() call below sees a populated db.
-        # Idempotent: a subsequent open() in this thread is a cache hit.
-        try:
-            _db.open()
-        except Exception:
-            logging.getLogger("fulcra_collect").exception(
-                "state.db open/migrate failed; the daemon cannot run "
-                "without a working state store",
-            )
-            raise
-
-        server = ControlServer(_control_socket_path(), self.handle_request)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-
-        # Account-switch pre-flight: invalidate cached def_ids + tag_ids
-        # across all plugin state when the bearer-token's account changed
-        # since the daemon last booted, so the user doesn't see orphaned
-        # "Run failed: <422>" on their first dashboard open. Run on a
-        # background thread AFTER the control socket is bound (above): it
-        # reads the keychain, which on macOS can block on an ACL prompt,
-        # and that must never delay reachability. See the note in __init__.
-        def _fingerprint_preflight() -> None:
-            try:
-                self._check_account_fingerprint()
-            except Exception:
-                logging.getLogger("fulcra_collect.daemon").exception(
-                    "account-fingerprint pre-flight failed"
-                )
-        threading.Thread(target=_fingerprint_preflight, daemon=True).start()
-
-        # Start the HTTP server alongside the UDS control server
-        try:
-            from .web import serve as _web_serve
-            _web_url, _web_thread = _web_serve(self)
-            self._web_url = _web_url
-            logging.getLogger("fulcra_collect").info("web UI: %s", _web_url)
-        except Exception:
-            logging.getLogger("fulcra_collect").exception(
-                "web UI failed to start; the daemon will keep running without it",
-            )
-
-        # Best-effort launch of the macOS menubar app so the user gets a
-        # status icon without needing a separate command. Non-fatal —
-        # see menubar_launcher.try_launch_menubar docstring.
-        if self._launch_menubar:
-            try:
-                from . import menubar_launcher
-                menubar_launcher.try_launch_menubar()
-            except Exception:
-                # try_launch_menubar already swallows its own errors; this
-                # outer guard is for the import itself in case the module
-                # fails to load on a weird platform.
-                logging.getLogger("fulcra_collect").exception(
-                    "menubar auto-launch hook crashed (non-fatal)",
-                )
-
+        server = None
         supervisor = ServiceSupervisor()
         try:
+            # Open the unified state db before anything else touches state —
+            # this runs schema migrations (including the one-shot import of
+            # legacy state/<id>.json files into the plugin_state table) so
+            # the very first state.load() call below sees a populated db.
+            # Idempotent: a subsequent open() in this thread is a cache hit.
+            try:
+                _db.open()
+            except Exception:
+                logging.getLogger("fulcra_collect").exception(
+                    "state.db open/migrate failed; the daemon cannot run "
+                    "without a working state store",
+                )
+                raise
+
+            server = ControlServer(_control_socket_path(), self.handle_request)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+
+            # Account-switch pre-flight: invalidate cached def_ids + tag_ids
+            # across all plugin state when the bearer-token's account changed
+            # since the daemon last booted, so the user doesn't see orphaned
+            # "Run failed: <422>" on their first dashboard open. Run on a
+            # background thread AFTER the control socket is bound (above): it
+            # reads the keychain, which on macOS can block on an ACL prompt,
+            # and that must never delay reachability. See the note in __init__.
+            def _fingerprint_preflight() -> None:
+                try:
+                    self._check_account_fingerprint()
+                except Exception:
+                    logging.getLogger("fulcra_collect.daemon").exception(
+                        "account-fingerprint pre-flight failed"
+                    )
+            threading.Thread(target=_fingerprint_preflight, daemon=True).start()
+
+            # Start the HTTP server alongside the UDS control server
+            try:
+                from .web import serve as _web_serve
+                _web_url, _web_thread = _web_serve(self)
+                self._web_url = _web_url
+                logging.getLogger("fulcra_collect").info("web UI: %s", _web_url)
+            except Exception:
+                logging.getLogger("fulcra_collect").exception(
+                    "web UI failed to start; the daemon will keep running without it",
+                )
+
+            # Best-effort launch of the macOS menubar app so the user gets a
+            # status icon without needing a separate command. Non-fatal —
+            # see menubar_launcher.try_launch_menubar docstring.
+            if self._launch_menubar:
+                try:
+                    from . import menubar_launcher
+                    menubar_launcher.try_launch_menubar()
+                except Exception:
+                    # try_launch_menubar already swallows its own errors; this
+                    # outer guard is for the import itself in case the module
+                    # fails to load on a weird platform.
+                    logging.getLogger("fulcra_collect").exception(
+                        "menubar auto-launch hook crashed (non-fatal)",
+                    )
+
             while True:
                 now = datetime.now(timezone.utc)
                 self._dispatch_tick(supervisor, now=now)
                 time.sleep(tick_seconds)
         finally:
-            server.shutdown()
-            supervisor.shutdown_all()
-            # Terminate any still-running scheduled-run worker processes so
-            # they do not survive as orphans after the daemon exits.
-            with self._inflight_lock:
-                procs = list(self._inflight_procs.values())
-            for proc in procs:
+            try:
+                if server is not None:
+                    server.shutdown()
+            finally:
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+                    supervisor.shutdown_all()
+                finally:
+                    # Terminate any still-running scheduled-run worker processes so
+                    # they do not survive as orphans after the daemon exits.
+                    with self._inflight_lock:
+                        procs = list(self._inflight_procs.values())
+                    for proc in procs:
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=5)
+                        except Exception:
+                            pass

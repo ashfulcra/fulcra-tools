@@ -9,6 +9,9 @@ import json
 import logging
 import os
 import shutil
+import signal
+import threading
+from contextlib import contextmanager
 import sys
 
 import click
@@ -71,6 +74,22 @@ def _stderr_is_a_tty() -> bool:
     return sys.stderr.isatty()
 
 
+@contextmanager
+def _daemon_termination():
+    """Make launchd SIGTERM unwind owned daemon resources, then restore it."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def stop(signum, frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 @cli.command()
 @click.option("--no-menubar", is_flag=True,
               help="Skip native menubar auto-launch; other daemon startup is unchanged.")
@@ -90,7 +109,8 @@ def daemon(no_menubar: bool) -> None:
             err=True,
         )
     try:
-        Daemon(launch_menubar=not no_menubar).serve()
+        with _daemon_termination():
+            Daemon(launch_menubar=not no_menubar).serve()
     except DaemonAlreadyRunning:
         click.echo("daemon startup refused: profile lease busy", err=True)
         raise click.exceptions.Exit(75) from None
@@ -128,9 +148,14 @@ def status() -> None:
 
 @cli.command()
 @click.argument("plugin_id")
-def run(plugin_id: str) -> None:
+@click.option("--timeout-seconds", type=click.IntRange(1, 7200), default=None,
+              help="Bound this manual run (maximum two hours); scheduled runs retain their normal budget.")
+def run(plugin_id: str, timeout_seconds: int | None) -> None:
     """Trigger one run of a plugin now."""
-    reply = send_request(_socket_path(), {"cmd": "run", "plugin": plugin_id})
+    request = {"cmd": "run", "plugin": plugin_id}
+    if timeout_seconds is not None:
+        request["timeout_s"] = timeout_seconds
+    reply = send_request(_socket_path(), request)
     if not reply.get("ok"):
         raise click.ClickException(reply.get("error", "run failed"))
     click.echo(f"triggered: {plugin_id}")

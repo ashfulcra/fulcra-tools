@@ -1375,3 +1375,21 @@ CLI renewal compatibility path serves only pre-upgrade credentials with no
 committed owned-auth revision; the next successful interactive sign-in retires
 that authority. Actual packaged/signed Keychain and restart QA remains a release
 gate; these source-level contracts do not claim a production cutover.
+
+### Daemon and quiet-helper shutdown
+
+The CLI translates SIGTERM into normal unwinding, including startup failures,
+so the control socket, service supervisor and scheduled workers run their owned
+cleanup. The previous signal handler is restored afterward. Quiet Keychain
+helpers monitor their requesting parent's lifetime and exit when it dies; they
+never signal another PID or process group. A terminated credential write has no
+success acknowledgement and remains UNKNOWN under the existing no-replay
+journal. This development change still requires signed-installer acceptance.
+
+For a controlled historical catch-up, `fulcra-collect run trakt --timeout-seconds 7200` grants that one manual run up to two hours. The same
+daemon in-flight guard prevents overlap; ordinary and scheduled runs retain
+their fifteen-minute budget. This does not change source selection, HTTP scan
+limits or credentials. Reconcile pending outboxes before changing a saved
+range, preserve the original settings, and restore the live range only after
+the backfill's pending records are verified. A longer budget does not establish
+legacy export completeness or authorize replay of uncertain uploads.

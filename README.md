@@ -214,6 +214,10 @@ The 0.1.4 Mac beta is signed and notarized. It bundles 26 plugin entries,
 including local folders, meeting transcript exports, and selected Notion pages.
 Each source needs its own setup; Notion live verification is still pending.
 
+The development branch adds stable Trakt credential storage, owned shutdown
+cleanup, and a bounded manual backfill budget. These changes are not in the
+0.1.4 download; publication awaits the verified replacement installer.
+
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)
 covers sign-in and source permissions. The app includes its Python runtime;
