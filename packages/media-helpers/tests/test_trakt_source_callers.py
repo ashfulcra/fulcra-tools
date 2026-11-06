@@ -721,21 +721,21 @@ def test_actual_cli_prompt_revocation_prevents_current_import(caller, monkeypatc
 def test_actual_worker_captured_profile_cannot_change_during_hydration(caller, monkeypatch):
     if caller.mode != 'keychain':
         pytest.skip('ordinary daemon capture')
-    from fulcra_collect import config, credentials
+    from fulcra_collect import config, trakt_source
     caller.info['source'] = 'ok'
-    original = credentials.get_secret
+    original = trakt_source.KeychainStore.snapshot
     selected = config.profile_path()
     other = caller.configured.tmp / 'copied-profile'
     other.mkdir()
     (other / 'config.toml').write_bytes((selected / 'config.toml').read_bytes())
     changed = []
-    def sample(plugin, key):
-        result = original(plugin, key)
+    def sample(store):
+        result = original(store)
         if not changed:
             changed.append(True)
             monkeypatch.setenv('FULCRA_COLLECT_HOME', str(other))
         return result
-    monkeypatch.setattr(credentials, 'get_secret', sample)
+    monkeypatch.setattr(trakt_source.KeychainStore, 'snapshot', sample)
     outcome, _ = caller.worker()
     assert outcome == 'error'
     assert caller.info['gets'] == []

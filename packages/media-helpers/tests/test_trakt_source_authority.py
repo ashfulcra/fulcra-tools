@@ -116,14 +116,18 @@ def test_late_refresh_quarantined_after_edit(owner):
 
 def test_worker_unknown_optional_is_not_absence(contained, monkeypatch):
     from fulcra_collect import config, credentials, worker
+    from fulcra_collect import trakt_source
     from fulcra_collect.plugin import Plugin, Credential
     cfg = config.load()
     monkeypatch.setattr(worker.config, 'load', lambda: cfg)
-    def get(_, key):
+    monkeypatch.setattr(trakt_source, '_os_user_root', lambda: contained.root)
+    def get(_, key, **kwargs):
+        if key == trakt_source.KeychainStore.bundle_key:
+            return None
         if key == 'client_secret':
             raise TimeoutError('synthetic unknown')
         return 'synthetic'
-    monkeypatch.setattr(credentials, 'get_secret', get)
+    monkeypatch.setattr(credentials, '_keyring_get', get)
     plugin = Plugin(id='trakt', name='synthetic', kind='manual', collect_mode='historical', run=lambda _: pytest.fail('UNKNOWN entered worker'),
                     required_credentials=(Credential('client_id', 'id', ''), Credential('client_secret', 'secret', '', required=False)))
     import io
@@ -131,7 +135,7 @@ def test_worker_unknown_optional_is_not_absence(contained, monkeypatch):
     assert worker.run_plugin(plugin, out=out) == 'error'
     result = json.loads(out.getvalue())
     assert result['code'] == 'keychain_pending'
-    assert result['credential_error'] == {'stage': 'credential_hydration', 'scope': 'plugin',
+    assert result['credential_error'] == {'stage': 'trakt_legacy_migration', 'scope': 'plugin',
                                          'key': 'client_secret', 'availability': 'pending'}
 
 
