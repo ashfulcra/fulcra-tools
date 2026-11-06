@@ -201,6 +201,22 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     assert 'uv cpython' not in str(caught.value)
 
 
+def test_snapshot_timeout_producer_names_app_and_preserves_io_uncertainty(tmp_path, monkeypatch):
+    from fulcra_media.importers import apple_tv
+    import subprocess
+    (tmp_path / 'Cache.db').write_bytes(b'synthetic')
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+    monkeypatch.setattr(apple_tv.subprocess, 'run', timeout)
+    with pytest.raises(apple_tv.SnapshotError) as caught:
+        apple_tv._snapshot_db(tmp_path)
+    message = str(caught.value)
+    assert 'Fulcra Collect' in message
+    assert 'I/O' in message
+    assert 'uv cpython' not in message
+    assert 'lacks Full Disk Access' not in message
+
+
 def test_snapshot_timeout_is_fast_fail():
     """The snapshot deadline must stay short. This cache is ~1-2MB (a healthy
     clonefile is sub-second); a copy that runs seconds means the daemon's

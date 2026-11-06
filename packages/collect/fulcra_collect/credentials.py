@@ -13,6 +13,7 @@ import math
 import subprocess
 import threading
 import sys
+import time
 from threading import Lock
 from contextlib import contextmanager
 from uuid import UUID
@@ -330,8 +331,32 @@ def get_user_secret(key: str) -> str | None:
 
 
 def get_user_secret_fresh(key: str) -> str | None:
-    """Bounded keychain read for account-bound workers, bypassing process cache."""
-    return _keyring_get(_USER_SERVICE, key)
+    """Fresh quiet observation, with bounded rechecks of transient pending reads.
+
+    A long import performs many guarded reads. One slow native helper is not
+    a missing grant. Rechecks start new observations, never reuse late results,
+    request UI, retry mutations or cross a credential transition.
+    """
+    revision = credential_revision()
+    deadline = time.monotonic() + 15
+    first_pending = None
+    for attempt in range(3):
+        if attempt:
+            if deadline - time.monotonic() < _KEYCHAIN_READ_TIMEOUT_S + .05:
+                break
+            time.sleep(.05)
+        if credential_revision() != revision:
+            raise CredentialStateChanged('Credential state changed during quiet recheck.')
+        try:
+            value = _keyring_get(_USER_SERVICE, key)
+            if credential_revision() != revision:
+                raise CredentialStateChanged('Credential state changed during quiet recheck.')
+            return value
+        except (TimeoutError, KeychainReadPending) as exc:
+            if first_pending is None:
+                first_pending = exc
+    assert first_pending is not None
+    raise first_pending
 
 
 def user_secret_availability(key: str) -> dict:
