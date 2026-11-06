@@ -113,7 +113,9 @@ class Daemon:
         # them. Both are guarded by `_inflight_lock`.
         self._inflight: set[str] = set()
         self._inflight_procs: dict[str, subprocess.Popen] = {}
-        self._inflight_lock = threading.Lock()
+        self._inflight_lock = threading.RLock()
+        self._closing = threading.Event()
+        self._run_threads: set[threading.Thread] = set()
         # Versions are cheap to compute but only at startup; the
         # menubar's About pane calls `version` every time the tab opens.
         self._version_snapshot = self._build_version_snapshot()
@@ -431,6 +433,23 @@ class Daemon:
                                    # without a live keychain; tests
                                    # monkeypatch has_secret on this module
         out: dict[str, str] = {}
+        if plugin_id == 'trakt':
+            try:
+                values = credentials.get_plugin_credentials(plugin)
+                return {'ok': True, 'credentials': {
+                    cred.key: 'set' if values.get(cred.key) else 'missing'
+                    for cred in plugin.required_credentials}}
+            except Exception as exc:
+                availability = credentials.read_availability_error(exc)
+                detail = self._validated_credential_error(plugin_id, getattr(exc, 'detail', None))
+                recovery = 'quiet'
+                if detail and availability == 'access_required':
+                    recovery = ('trakt_reconnect' if detail['stage'] == 'trakt_legacy_migration'
+                                else 'bundle_authorize')
+                return {'ok': False, 'credentials': {
+                    cred.key: availability for cred in plugin.required_credentials},
+                    **credentials.credential_failure(availability),
+                    'credential_error': detail, 'credential_recovery': recovery}
         for cred in plugin.required_credentials:
             try:
                 present = (credentials.has_user_secret(cred.key)
@@ -1011,25 +1030,50 @@ class Daemon:
         in-flight for this plugin (the in-flight guard prevents concurrent
         duplicate runs of the same scheduled plugin). Overridden in tests."""
         with self._inflight_lock:
-            if plugin_id in self._inflight:
+            if self._closing.is_set() or plugin_id in self._inflight:
                 return False
             self._inflight.add(plugin_id)
-
-        def _work() -> None:
+            def _work() -> None:
+                try:
+                    runner.run(
+                        plugin_id, runner.worker_command(plugin_id),
+                        now=datetime.now(timezone.utc),
+                        on_spawn=lambda proc: self._register_proc(plugin_id, proc),
+                        daemon=self, timeout_s=timeout_s,
+                    )
+                finally:
+                    with self._inflight_lock:
+                        self._inflight.discard(plugin_id)
+                        self._inflight_procs.pop(plugin_id, None)
+                        self._run_threads.discard(threading.current_thread())
+            # Non-daemon ownership retains the profile lease even if cleanup
+            # cannot join a launch operation within its bounded wait.
+            thread = threading.Thread(target=_work, daemon=False)
+            self._run_threads.add(thread)
             try:
-                runner.run(
-                    plugin_id, runner.worker_command(plugin_id),
-                    now=datetime.now(timezone.utc),
-                    on_spawn=lambda proc: self._register_proc(plugin_id, proc),
-                    daemon=self, timeout_s=timeout_s,
-                )
-            finally:
-                with self._inflight_lock:
-                    self._inflight.discard(plugin_id)
-                    self._inflight_procs.pop(plugin_id, None)
-
-        threading.Thread(target=_work, daemon=True).start()
+                thread.start()
+            except BaseException:
+                self._run_threads.discard(thread)
+                self._inflight.discard(plugin_id)
+                raise
         return True
+
+    @contextmanager
+    def _worker_launch_scope(self):
+        # Scope capture may finish after shutdown begins. Check admission at
+        # the actual Popen boundary, atomically with registering its child.
+        with self._inflight_lock:
+            yield not self._closing.is_set()
+
+    def _shutdown_workers(self):
+        with self._inflight_lock:
+            self._closing.set()
+            threads = tuple(self._run_threads)
+        deadline = time.monotonic() + 5
+        for thread in threads:
+            thread.join(max(0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            raise RuntimeError('Owned worker shutdown remains pending; profile lease retained')
 
     def _register_proc(self, plugin_id: str, proc: subprocess.Popen) -> None:
         """Track a worker Popen so `serve`'s shutdown can terminate it."""
@@ -1078,6 +1122,11 @@ class Daemon:
             return None
         if detail['stage'] == 'collect_account' and detail['scope'] == 'user' and detail['key'] == 'bearer-token':
             return {**detail, 'recovery': 'settings'}
+        if plugin_id == 'trakt' and detail['scope'] == 'plugin':
+            from .trakt_source import KeychainStore, _FIELDS
+            if ((detail['stage'] == 'credential_hydration' and detail['key'] == KeychainStore.bundle_key)
+                    or (detail['stage'] == 'trakt_legacy_migration' and detail['key'] in _FIELDS)):
+                return {**detail, 'recovery': 'configure'}
         if detail['stage'] == 'credential_hydration':
             for cred in self.registry.plugins[plugin_id].required_credentials:
                 scope = 'user' if getattr(cred, 'user_level', False) else 'plugin'
@@ -1356,6 +1405,10 @@ class Daemon:
                 self._dispatch_tick(supervisor, now=now)
                 time.sleep(tick_seconds)
         finally:
+            # Close admission before stopping control/server threads. Existing
+            # runners observe cancellation and own termination plus reaping.
+            with self._inflight_lock:
+                self._closing.set()
             try:
                 if server is not None:
                     server.shutdown()
@@ -1363,13 +1416,4 @@ class Daemon:
                 try:
                     supervisor.shutdown_all()
                 finally:
-                    # Terminate any still-running scheduled-run worker processes so
-                    # they do not survive as orphans after the daemon exits.
-                    with self._inflight_lock:
-                        procs = list(self._inflight_procs.values())
-                    for proc in procs:
-                        try:
-                            proc.terminate()
-                            proc.wait(timeout=5)
-                        except Exception:
-                            pass
+                    self._shutdown_workers()

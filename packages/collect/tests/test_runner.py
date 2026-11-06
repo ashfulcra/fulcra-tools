@@ -116,7 +116,16 @@ def test_exited_worker_descendant_cannot_hold_pipe_past_deadline(
         _python_worker("import time;time.sleep(30)"), start_new_session=True,
     )
     try:
-        proc.wait(timeout=2)  # Leader is demonstrably dead before the drain.
+        # Observe exit without reaping: its reserved process-group identity
+        # must remain owned until the pipe drain's group cleanup finishes.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            observed = subprocess.run(['ps', '-o', 'stat=', '-p', str(proc.pid)],
+                                      capture_output=True, text=True)
+            if observed.stdout.lstrip().startswith('Z'):
+                break
+            time.sleep(.01)
+        assert observed.stdout.lstrip().startswith('Z')
         started = time.monotonic()
         with pytest.raises(subprocess.TimeoutExpired) as caught:
             runner._bounded_communicate(proc, timeout_s=.2)

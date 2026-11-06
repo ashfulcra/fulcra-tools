@@ -3570,3 +3570,5 @@ Controlled manual backfills may use `fulcra-collect run PLUGIN
 in-flight guard remain unchanged. Keep the captured full source scope until
 its original pending batches reconcile; restoring a live range cannot credit
 earlier historical coverage or silently rebind pending work.
+
+Collect shutdown closes scheduled-worker admission at the Popen/registration boundary and retains accepted launch threads until their owned children are terminated and reaped. Cancellation remains a shutdown condition, not source success. Keep process-group identity reserved through TERM/KILL, and never signal a reaped process identity. Trakt status and hydration sample one tuple per operation; retain physical bundle/legacy error origin through worker validation. Absent-bundle legacy denial routes to explicit reconnect, not bundle authorization or per-field grants. Current bundle denial permits one grant; pending/changed access permits quiet recheck only. Do not widen logical credential write routes to accept the physical bundle key.

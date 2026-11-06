@@ -81,6 +81,7 @@ def test_legacy_reads_are_readonly_and_first_edit_preserves_original_items(backe
 def test_field_authorization_targets_one_bundle_not_six_items(backend, monkeypatch):
     source, values, items, reads, writes, write = backend
     from fulcra_collect import credentials
+    items[source.KeychainStore.bundle_key] = json.dumps({'version': 1, 'values': values, 'unknown_fields': []})
     authorizations = []
     monkeypatch.setattr(credentials, '_authorize_item',
                         lambda service, key: authorizations.append((service, key)) or True)
@@ -127,3 +128,73 @@ def test_explicit_reconnect_preserves_inaccessible_legacy_items_without_promptin
     assert authorization.values['access_token'] is None
     assert {key: items[key] for key in original} == original
     assert [key for key, _ in writes] == ['credential-bundle-v1']
+
+
+@pytest.mark.parametrize('legacy,availability', [(False, 'access_required'), (False, 'pending'),
+                                                (True, 'access_required'), (True, 'pending')])
+def test_physical_read_origin_survives_hydration_status_and_recovery(backend, monkeypatch, legacy, availability):
+    source, values, items, reads, writes, write = backend
+    from fulcra_collect import credentials
+    from fulcra_collect.config import Config
+    from fulcra_collect.daemon import Daemon
+    from fulcra_collect.plugin import Plugin, Credential
+    from fulcra_collect.registry import RegistryResult
+    key = 'created_at' if legacy else source.KeychainStore.bundle_key
+    def read(service, field, **kwargs):
+        reads.append(field)
+        if field == key:
+            if availability == 'pending':
+                raise TimeoutError('synthetic')
+            raise credentials.KeychainAccessRequired('synthetic')
+        return items.get(field)
+    monkeypatch.setattr(credentials, '_keyring_get', read)
+    plugin = Plugin(id='trakt', name='Trakt', kind='manual', collect_mode='historical', run=lambda _: None,
+                    required_credentials=[Credential(key=k, label=k, help='Synthetic credential') for k in ['client_id', 'access_token']])
+    registry = RegistryResult()
+    registry.plugins['trakt'] = plugin
+    daemon = Daemon(registry=registry, config=Config())
+    with pytest.raises(credentials.CredentialReadError) as caught:
+        credentials.get_plugin_credentials(plugin)
+    detail = caught.value.detail
+    assert detail == {'stage': 'trakt_legacy_migration' if legacy else 'credential_hydration',
+                      'scope': 'plugin', 'key': key, 'availability': availability}
+    recovery = daemon._validated_credential_error('trakt', detail)
+    assert recovery and recovery['recovery'] == 'configure'
+    reads.clear()
+    status = daemon._credential_status('trakt')
+    assert status['credential_error'] == recovery
+    assert reads.count(source.KeychainStore.bundle_key) == 1
+    assert all(value == availability for value in status['credentials'].values())
+    assert status['credential_recovery'] == (
+        'trakt_reconnect' if legacy and availability == 'access_required'
+        else 'bundle_authorize' if not legacy and availability == 'access_required' else 'quiet')
+    assert writes == []
+
+
+def test_hydration_reads_one_current_bundle_per_operation(backend):
+    source, values, items, reads, writes, write = backend
+    from fulcra_collect import credentials
+    from fulcra_collect.plugin import Plugin, Credential
+    items[source.KeychainStore.bundle_key] = json.dumps({'version': 1, 'values': values, 'unknown_fields': []})
+    plugin = Plugin(id='trakt', name='Trakt', kind='manual', collect_mode='historical', run=lambda _: None,
+                    required_credentials=[Credential(key=k, label=k, help='Synthetic credential') for k in ['client_id', 'access_token']])
+    assert credentials.get_plugin_credentials(plugin) == {k: values[k] for k in ['client_id', 'access_token']}
+    assert reads == [source.KeychainStore.bundle_key]
+
+
+def test_stale_authorize_never_requests_grants_for_absent_bundle(backend, monkeypatch):
+    source, values, items, reads, writes, write = backend
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, '_authorize_item', lambda *a: pytest.fail('absent bundle approval'))
+    assert source.KeychainStore().authorize('client_id') is False
+
+
+def test_current_denied_bundle_can_be_authorized_once(backend, monkeypatch):
+    source, values, items, reads, writes, write = backend
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, '_keyring_get', lambda *a, **k: (_ for _ in ()).throw(
+        credentials.KeychainAccessRequired('synthetic')))
+    calls = []
+    monkeypatch.setattr(credentials, '_authorize_item', lambda *a: calls.append(a) or True)
+    assert source.KeychainStore().authorize('client_id') is True
+    assert calls == [('fulcra-collect:trakt', source.KeychainStore.bundle_key)]

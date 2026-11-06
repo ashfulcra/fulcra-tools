@@ -162,7 +162,15 @@ def _keyring_get(service: str, account: str, *, timeout: float | None = None,
 def get_plugin_credentials(plugin) -> dict[str, str | None]:
     """Hydrate declared scopes quietly; unused optional credentials stay optional."""
     values = {}
+    if plugin.id == 'trakt':
+        from .trakt_source import KeychainStore
+        snapshot = KeychainStore().snapshot()
+        # One atomic tuple per operation, not five independent native reads.
+        values = {cred.key: snapshot.get(cred.key) for cred in plugin.required_credentials
+                  if not getattr(cred, 'user_level', False)}
     for cred in plugin.required_credentials:
+        if cred.key in values:
+            continue
         try:
             values[cred.key] = (get_user_secret_fresh(cred.key) if getattr(cred, "user_level", False)
                                 else get_secret(plugin.id, cred.key))

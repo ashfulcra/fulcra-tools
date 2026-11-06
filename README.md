@@ -255,3 +255,5 @@ Changes go through a PR and an independent review by a different agent identity.
 The review handshake lives on the bus; a GitHub comment alone does not satisfy
 it. [`AGENTS.md`](AGENTS.md) has the full conventions, including how to log work,
 request review, and close tasks with evidence.
+
+The Collect development branch also closes the accepted-worker shutdown race and preserves Trakt bundle versus legacy-item recovery guidance. These fixes are not claims about the current public 0.1.4 installer; final signing, notarization and upgrade verification remain release gates.

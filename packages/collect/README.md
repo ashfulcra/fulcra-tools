@@ -1393,3 +1393,5 @@ limits or credentials. Reconcile pending outboxes before changing a saved
 range, preserve the original settings, and restore the live range only after
 the backfill's pending records are verified. A longer budget does not establish
 legacy export completeness or authorize replay of uncertain uploads.
+
+Development shutdown and credential recovery: shutdown closes admission at the actual worker launch boundary. Accepted runner threads retain ownership through cancellation, process-group termination and child reaping; the daemon profile stays owned until they exit. Services receive bounded TERM/KILL cleanup before ownership is cleared. Reaped child identities are never signalled. Trakt hydration and status read one complete credential tuple per operation. Recovery preserves the physical failed item: a denied legacy item with a positively absent bundle offers explicit Trakt reconnect, keeping originals; a current bundle offers one app grant. Pending/changed reads offer quiet recheck. Logical credential mutation routes remain closed to the physical bundle key. These source changes require separate signed-upgrade and release acceptance.

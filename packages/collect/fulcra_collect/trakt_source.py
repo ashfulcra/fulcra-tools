@@ -328,7 +328,7 @@ class KeychainStore:
             return credentials._keyring_get('fulcra-collect:trakt', key)
         except (credentials.keyring.errors.KeyringError, TimeoutError) as exc:
             raise credentials.CredentialReadError(exc, stage='credential_hydration',
-                scope='plugin', key=self.bundle_key) from exc
+                scope='plugin', key=key) from exc
 
     def _decode_bundle(self, raw):
         bundle = _decode(raw)
@@ -370,6 +370,7 @@ class KeychainStore:
             from .credentials import CredentialReadError
             if isinstance(exc, CredentialReadError):
                 exc.legacy_migration_required = True
+                exc.detail['stage'] = 'trakt_legacy_migration'
             raise
         _values(values, complete=False)
         # Reads never migrate or mutate credentials. The first explicit edit
@@ -404,6 +405,14 @@ class KeychainStore:
         from . import credentials
         # All logical fields share one application grant. Never authorize each
         # legacy item again, including nonsecret token timing metadata.
+        # A stale UI must not prompt for an absent bundle while the hold is a
+        # different legacy item. Reconnect is the explicit migration route.
+        try:
+            if self._read(self.bundle_key) is None:
+                return False
+        except credentials.CredentialReadError as exc:
+            if exc.detail['availability'] != 'access_required':
+                raise
         return credentials._authorize_item('fulcra-collect:trakt', self.bundle_key)
 
     def set(self, key, value):

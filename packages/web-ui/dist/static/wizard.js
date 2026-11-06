@@ -170,10 +170,15 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     //   • _submitInputs skips overwriting with an empty string
     _credPresent: {},
     _credStatus: {},
+    _credRecovery: null,
     _credAccessBusy: false,
     _credAccessError: "",
     _credReadEpoch: 0,
     get credential_access_fields() {
+      if (this.plugin_id === 'trakt' && this._credRecovery) {
+        const key = Object.keys(this.credsMap)[0];
+        return key ? [{key, label: 'Trakt sign-in', status: this._credStatus[key], recovery: this._credRecovery}] : [];
+      }
       return Object.values(this.credsMap).map(field => ({...field, status: this._credStatus[field.key]}))
         .filter(field => ["access_required", "pending", "changed", "unavailable"].includes(field.status));
     },
@@ -313,6 +318,9 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         const resp = await api(`/api/plugin/${this.plugin_id}/credentials`);
         if (!applies()) return;
         const credMap = (resp && resp.credentials) ? resp.credentials : {};
+        this._credRecovery = this.plugin_id === 'trakt'
+          && ['trakt_reconnect', 'bundle_authorize', 'quiet'].includes(resp?.credential_recovery)
+          ? resp.credential_recovery : null;
         this._credStatus = {};
         this._credPresent = {};
         for (const key of Object.keys(this.credsMap)) {
@@ -326,6 +334,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         // Transport failures keep access unverified, never missing.
         this._credPresent = {};
         this._credStatus = Object.fromEntries(Object.keys(this.credsMap).map(key => [key, "unavailable"]));
+        this._credRecovery = this.plugin_id === 'trakt' ? 'quiet' : null;
       }
     },
 

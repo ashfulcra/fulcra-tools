@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -91,6 +92,28 @@ def _kill(proc: object) -> None:
         proc.kill()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — retain ownership and keep waiting for poll
         logging.getLogger("fulcra_collect.supervisor").error("owned service worker could not be killed")
+
+
+def stop_owned_processes(processes, *, grace_s=.2):
+    """The sole reaper stops exact owned children/groups before relinquishing them.
+
+    Do not poll/reap between group TERM and KILL: the unreaped leader keeps
+    that group identity reserved while descendants close inherited pipes.
+    Completed/reaped objects are never group-signalled.
+    """
+    pending = [proc for proc in processes if getattr(proc, 'returncode', None) is None]
+    for proc in pending:
+        _terminate(proc)
+    if pending:
+        time.sleep(grace_s)
+    for proc in pending:
+        if getattr(proc, 'returncode', None) is None:
+            _kill(proc)
+    for proc in pending:
+        try:
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeError('Owned worker termination remains UNKNOWN') from None
 
 
 class ServiceSupervisor:
@@ -256,8 +279,7 @@ class ServiceSupervisor:
 
     def shutdown_all(self) -> None:
         """Terminate every supervised process (called on daemon shutdown)."""
-        for proc in list(self._procs.values()):
-            _terminate(proc)
+        stop_owned_processes(list(self._procs.values()), grace_s=2)
         self._procs.clear()
         self._revisions.clear()
         self._stopping.clear()

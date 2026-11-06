@@ -339,3 +339,5 @@ Leaving and returning starts a fresh check; a late response from the previous
 visit cannot authorize the new one or unblock another step.
 
 OAuth callback completion runs from static/oauth-complete.js under the same strict script CSP as the wizard. Plugin identifiers are read from inert HTML data attributes.
+
+Trakt saved-access recovery uses one panel for its credential bundle. A denied legacy item while the bundle is absent offers **Reconnect Trakt** through the existing explicit OAuth flow, preserving originals. A denied current bundle offers one **Allow Keychain access** action; pending or changed reads offer only a quiet check. Configure does not start per-field approval batches. Development source behavior is distinct from signed installer acceptance.

@@ -83,7 +83,12 @@ class FulcraStep extends FulcraStepBase {
           ${fields.map(field => html`
             <div class="my-2">
               <span class="font-medium">${field.label || field.key}</span>
-              ${field.status === "access_required" ? html`
+              ${field.recovery === "trakt_reconnect" ? html`
+                <p role="status">The old Trakt sign-in cannot be read. Reconnect once to replace it with one saved sign-in. Original items are kept.</p>
+                <button type="button" @click=${() => c.startOAuth()}
+                        ?disabled=${c._credAccessBusy} class="underline">Reconnect Trakt</button>
+                <p role="status">${c.oauthStatus || ""}</p>
+              ` : field.status === "access_required" && field.recovery !== "quiet" ? html`
                 <p role="status">Saved access needs your approval for this app.</p>
                 <button type="button" @click=${() => c.authorizeCredential(field.key)}
                         ?disabled=${c._credAccessBusy} class="underline">Allow Keychain access</button>

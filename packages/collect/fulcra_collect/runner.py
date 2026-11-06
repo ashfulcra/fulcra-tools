@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import selectors
-import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -26,6 +25,10 @@ DEFAULT_TIMEOUT_S = 15 * 60
 MAX_STDOUT_CAPTURE_BYTES = 4 * 1024 * 1024
 MAX_STDERR_CAPTURE_BYTES = 512 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+
+
+class WorkerCancelled(Exception):
+    """Daemon shutdown cancelled this owned launch/run."""
 
 
 class _TailCapture:
@@ -60,7 +63,7 @@ class _CapturedOutput:
 
 
 def _bounded_communicate(
-    proc: subprocess.Popen, *, timeout_s: float,
+    proc: subprocess.Popen, *, timeout_s: float, cancelled=None,
 ) -> _CapturedOutput:
     """Bound child exit and both EOFs by one deadline for this owned run.
 
@@ -83,10 +86,12 @@ def _bounded_communicate(
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, capture)
             while selector.get_map():
+                if cancelled is not None and cancelled.is_set():
+                    raise WorkerCancelled()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(getattr(proc, "args", "worker"), timeout_s)
-                for key, _ in selector.select(remaining):
+                for key, _ in selector.select(min(remaining, .1) if cancelled is not None else remaining):
                     try:
                         chunk = os.read(key.fd, _READ_CHUNK_BYTES)
                     except BlockingIOError:
@@ -98,23 +103,29 @@ def _bounded_communicate(
                         key.fileobj.close()
             # EOF is independent of child exit: a worker can close both
             # streams and keep running. Spend only the remaining run budget.
-            proc.wait(timeout=max(0, deadline - time.monotonic()))
+            while True:
+                if cancelled is not None and cancelled.is_set():
+                    raise WorkerCancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(getattr(proc, 'args', 'worker'), timeout_s)
+                try:
+                    proc.wait(timeout=min(remaining, .1) if cancelled is not None else remaining)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancelled is None:
+                        raise
+            completed = True  # Reaped: never signal this process group's old identity.
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(getattr(proc, "args", "worker"), timeout_s)
-        completed = True
     except subprocess.TimeoutExpired:
         timed_out = True
     finally:
         if not completed:
             # This also runs for pipe/setup/wait failures and cancellation.
-            # Cleanup must not replace the original exception or timeout.
-            try:
-                if os.name == "posix":
-                    os.killpg(proc.pid, signal.SIGKILL)
-                else:  # pragma: no cover - Collect's shipped app is macOS
-                    proc.kill()
-            except OSError:
-                pass
+            # Failed termination remains UNKNOWN instead of releasing ownership.
+            from .supervisor import stop_owned_processes
+            stop_owned_processes([proc])
             try:
                 proc.wait(timeout=.5)
             except (OSError, subprocess.TimeoutExpired):
@@ -190,20 +201,23 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     newest_observed_at: datetime | None = None
     spawned = False
     try:
-        proc = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # Plugins may start helper processes (for example, a CLI used to
-            # write to an external service). Give each run its own process
-            # group so a timeout stops the whole run rather than leaving a
-            # grandchild working after Collect records "timeout".
-            start_new_session=(os.name == "posix"),
-        )
-        spawned = True
-        if on_spawn is not None:
-            on_spawn(proc)
-        captured = _bounded_communicate(proc, timeout_s=timeout_s)
+        launch_scope = getattr(daemon, '_worker_launch_scope', None)
+        with launch_scope() if launch_scope is not None else nullcontext(True) as allowed:
+            if not allowed:
+                raise WorkerCancelled()
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                # Give each run its own process group so timeout/cancellation
+                # can stop descendants before the sole runner reaps the leader.
+                start_new_session=(os.name == "posix"),
+            )
+            spawned = True
+            if on_spawn is not None:
+                on_spawn(proc)
+        captured = _bounded_communicate(proc, timeout_s=timeout_s,
+                                       cancelled=getattr(daemon, '_closing', None))
         stdout = captured.stdout.decode("utf-8", errors="replace")
         stderr = captured.stderr.decode("utf-8", errors="replace")
         if captured.stderr_truncated:
@@ -251,6 +265,8 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
             # normal worker exceptions before it reaches state or the UI.
             from .worker import _scrub_secrets
             error = _scrub_secrets(stderr.strip())
+    except WorkerCancelled:
+        return 'error'  # Cancellation is not a source failure or an empty success.
     except subprocess.TimeoutExpired:
         outcome = "timeout"
         error = f"worker exceeded {timeout_s:.0f}s"

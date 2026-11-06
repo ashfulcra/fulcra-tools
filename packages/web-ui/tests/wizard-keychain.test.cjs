@@ -51,6 +51,37 @@ test('pending saved access offers only a quiet check',async()=>{
   await rendered.callbacks[0]();
   assert.deepEqual(calls,[['/api/plugin/lastfm/credentials','GET']]);
 });
+test('Trakt legacy hold offers one reconnect instead of ineffective field grants',async()=>{
+  const calls=[];const w=wizard(async(url,opts)=>{
+    calls.push([url,opts?.method||'GET']);
+    return {credentials:{'api-key':'access_required',created_at:'access_required'},credential_recovery:'trakt_reconnect'};
+  });
+  w.plugin_id='trakt';w.credsMap.created_at={key:'created_at',label:'Issue time'};
+  await w._loadCredentialStatus();
+  w.startOAuth=async()=>calls.push(['oauth-start','POST']);
+  const rendered=credentialPanel(w);
+  assert.match(rendered.text,/Reconnect Trakt/);
+  assert.doesNotMatch(rendered.text,/Always Allow|Allow Keychain access/);
+  assert.equal(w.credential_access_fields.length,1);
+  await rendered.callbacks[0]();
+  assert.deepEqual(calls,[['/api/plugin/trakt/credentials','GET'],['oauth-start','POST']]);
+});
+test('Trakt current bundle uses one action; pending bundle offers a quiet check',async()=>{
+  let pending=false;const calls=[];const w=wizard(async(url,opts)=>{
+    calls.push([url,opts?.method||'GET']);
+    return {credentials:{'api-key':pending?'pending':'access_required',created_at:pending?'pending':'access_required'},
+      credential_recovery:pending?'quiet':'bundle_authorize'};
+  });
+  w.plugin_id='trakt';w.credsMap.created_at={key:'created_at',label:'Issue time'};
+  await w._loadCredentialStatus();
+  assert.equal(w.credential_access_fields.length,1);
+  assert.match(credentialPanel(w).text,/Allow Keychain access/);
+  pending=true;await w._loadCredentialStatus();
+  const rendered=credentialPanel(w);
+  assert.doesNotMatch(rendered.text,/Always Allow|Reconnect Trakt/);
+  await rendered.callbacks[0]();
+  assert.ok(calls.every(([,method])=>method==='GET'));
+});
 test('timed-out explicit access does not tell the user to approve again',async()=>{
   const w=wizard(async(url)=>url.endsWith('/authorize')?{ok:false,code:'keychain_pending'}:{credentials:{'api-key':'pending'}});
   await w.authorizeCredential('api-key');
