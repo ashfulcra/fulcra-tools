@@ -45,7 +45,7 @@ def test_parse_db_includes_play_count():
     assert "play_count" in e.external_ids
 
 
-def test_older_library_without_cleaned_title_imports_and_previews(tmp_path):
+def test_older_library_without_optional_metadata_imports_and_previews(tmp_path):
     import shutil
     import sqlite3
     from types import SimpleNamespace
@@ -55,13 +55,17 @@ def test_older_library_without_cleaned_title_imports_and_previews(tmp_path):
     original = {event.deterministic_id for event in parse_db(path)}
     with sqlite3.connect(path) as db:
         db.execute('ALTER TABLE ZMTEPISODE DROP COLUMN ZCLEANEDTITLE')
+        db.execute('ALTER TABLE ZMTEPISODE DROP COLUMN ZDURATION')
     events = list(parse_db(path))
     assert {event.deterministic_id for event in events} == original
     assert all(event.external_ids['episode_title'] for event in events)
+    assert all(event.start_time == event.end_time for event in events)
+    assert all(event.external_ids['duration_seconds'] is None for event in events)
     result = apple_podcasts_health_check(SimpleNamespace(config={'db_path': str(path)}))
     assert result.ok is True
     assert '2 played episodes' in result.summary
     assert len(result.preview) == 2
+    assert 'duration' in result.summary
 
 
 def test_find_timemachine_snapshots_constructs_paths(tmp_path, mocker):

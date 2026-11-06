@@ -900,3 +900,7 @@ Trakt worker hydration samples the saved credential tuple once. Tests inject tim
 Apple Podcasts import and setup preview support libraries without the optional `ZCLEANEDTITLE` column by selecting `ZTITLE` through one shared schema check. Existing episode IDs and play-time filters stay the same; missing required title metadata remains a failed read. Apple TV snapshot errors name the installed Fulcra Collect app for Full Disk Access and distinguish a possible I/O stall from a confirmed permission denial.
 
 The underlying TV cache snapshot timeout uses the same installed-app access guidance as the plugin error. A timeout remains possible I/O or access failure; it is not proof that a new grant is missing.
+
+Some Podcasts libraries also omit `ZDURATION`. Import the known last-played timestamp as a point Event when duration is absent or null, retaining `duration_seconds: null` in source metadata. Never invent a listening interval. Known durations keep their existing interval encoding and stable source IDs; setup preview explains the absent-duration case.
+
+When the same Podcast play already has a verified positive duration, a later source snapshot without duration retains that interval and its enrichment. The source play ID and known endpoint must agree; conflicting or malformed prior intervals require reconciliation. An earlier invented interval without a reported duration supplies no such evidence and becomes a point event. Raw source snapshots retain the unavailable metadata separately.

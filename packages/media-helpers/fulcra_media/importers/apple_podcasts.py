@@ -57,6 +57,12 @@ def episode_title_expression(conn: sqlite3.Connection) -> str:
     return 'COALESCE(e.ZCLEANEDTITLE, e.ZTITLE)' if 'ZCLEANEDTITLE' in columns else 'e.ZTITLE'
 
 
+def episode_duration_expression(conn: sqlite3.Connection) -> str:
+    """Confirmed absence is unknown duration, never an invented interval."""
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(ZMTEPISODE)')}
+    return 'e.ZDURATION' if 'ZDURATION' in columns else 'NULL'
+
+
 def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
     """Yield one NormalizedEvent per completed episode in the DB snapshot.
 
@@ -120,13 +126,14 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
         # original ZPLAYSTATE=3 + playhead/duration check missed everything
         # — every episode in a real library matched 0 rows.
         title = episode_title_expression(conn)
+        duration = episode_duration_expression(conn)
         cur.execute(f"""
             SELECT
               e.ZUUID,
               e.ZLASTDATEPLAYED,
               p.ZTITLE,
               {title},
-              e.ZDURATION,
+              {duration},
               COALESCE(e.ZPLAYCOUNT, 0)
             FROM ZMTEPISODE e
             JOIN ZMTPODCAST p ON p.Z_PK = e.ZPODCAST
@@ -137,7 +144,9 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
         for zuuid, mac_last, show_title, ep_title, duration_s, play_count in cur.fetchall():
             unix_last = mac_last + MAC_EPOCH_OFFSET
             end = datetime.fromtimestamp(unix_last, tz=timezone.utc)
-            dur_seconds = max(int(duration_s or 1), 1)
+            # Some library versions retain only the last-played endpoint.
+            # Represent it as a point instead of inventing listening time.
+            dur_seconds = max(int(duration_s or 1), 1) if duration_s is not None else 0
             start = end - timedelta(seconds=dur_seconds)
             fp = content_fingerprint("podcast", show=show_title or "", title=ep_title or "")
             # Apple Podcasts' ZLASTDATEPLAYED is when the episode FINISHED.

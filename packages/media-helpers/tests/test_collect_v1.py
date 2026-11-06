@@ -118,6 +118,57 @@ def setup(tmp_path, monkeypatch):
     return MediaRecordWriter(ctx, session), ctx, session, kv, receipts
 
 
+@pytest.mark.parametrize('prior_duration', [None, 60])
+def test_missing_podcast_duration_preserves_proven_interval_but_not_old_guess(setup, prior_duration):
+    from dataclasses import replace
+    writer, ctx, session, kv, receipts = setup
+    prior = event(importer='apple-podcasts', category='listened', extras=(),
+                  timestamp_confidence='medium', external_ids={'zuuid': 'episode', 'duration_seconds': prior_duration})
+    if prior_duration is None:
+        prior = replace(prior, start_time=prior.end_time - timedelta(seconds=1))
+    writer.run_import([prior])
+    original = deepcopy(session.rows)
+    session.posts.clear()
+    unknown = replace(prior, start_time=prior.end_time,
+                      external_ids={'zuuid': 'episode', 'duration_seconds': None})
+    writer.run_import([unknown])
+    if prior_duration:
+        assert session.rows == original
+        assert session.posts == []
+    else:
+        assert len(session.posts) == 1
+        assert next(iter(session.rows.values()))['duration_seconds'] == 0
+
+
+def test_unknown_duration_does_not_retarget_a_proven_podcast_interval(setup):
+    from dataclasses import replace
+    writer, ctx, session, kv, receipts = setup
+    prior = event(importer='apple-podcasts', category='listened', extras=(),
+                  timestamp_confidence='medium', external_ids={'zuuid': 'episode', 'duration_seconds': 60})
+    writer.run_import([prior])
+    original = deepcopy(session.rows)
+    changed = replace(prior, start_time=prior.end_time + timedelta(seconds=1),
+                      end_time=prior.end_time + timedelta(seconds=1),
+                      external_ids={'zuuid': 'episode', 'duration_seconds': None})
+    with pytest.raises(ValueError, match='duration'):
+        writer.run_import([changed])
+    assert session.rows == original
+
+
+def test_unknown_duration_refuses_malformed_existing_podcast_span(setup):
+    from dataclasses import replace
+    writer, ctx, session, kv, receipts = setup
+    prior = event(importer='apple-podcasts', category='listened', extras=(),
+                  timestamp_confidence='medium', external_ids={'zuuid': 'episode', 'duration_seconds': 60})
+    writer.run_import([prior])
+    next(iter(session.rows.values()))['duration_seconds'] = True
+    original = deepcopy(session.rows)
+    with pytest.raises(ValueError, match='duration'):
+        writer.run_import([replace(prior, start_time=prior.end_time,
+            external_ids={'zuuid': 'episode', 'duration_seconds': None})])
+    assert session.rows == original
+
+
 @pytest.mark.parametrize("revived", [False, True])
 def test_source_replay_obeys_exclusion_before_existing_or_upload_shortcuts(setup, revived):
     from fulcra_media.v1 import build_media_record

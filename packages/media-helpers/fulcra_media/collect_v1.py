@@ -7,6 +7,7 @@ CLI/plugin call sites are switched separately with their setup/readback paths.
 from __future__ import annotations
 
 import json
+import math
 import hashlib
 from collections import defaultdict
 from contextlib import nullcontext
@@ -133,6 +134,36 @@ def _preserve_enrichment(current, record, declared):
     merged = {**{key: deepcopy(value) for key, value in current.items() if key in declared}, **record}
     merged["tags"] = list(dict.fromkeys([*tags, *record["tags"]]))
     merged["external_ids"] = _external_ids(external, record["external_ids"])
+    if (record.get('importer') == current.get('importer') == 'apple-podcasts'
+            and record['external_ids'].get('duration_seconds') is None
+            and isinstance(record['external_ids'].get('zuuid'), str)
+            and record['external_ids']['zuuid'] == external.get('zuuid')
+            and external.get('duration_seconds') is not None):
+        # A host/schema with no duration must not erase a previously proved
+        # interval for this same source play. Unknown source fields remain in
+        # the raw capture; canonical enrichment can retain stronger evidence.
+        prior = external['duration_seconds']
+        try:
+            valid_prior = type(prior) in (int, float) and math.isfinite(prior)
+        except OverflowError:
+            valid_prior = False
+        if not valid_prior:
+            raise ValueError('existing podcast duration is malformed; reconcile before writing')
+        if prior > 0:
+            try:
+                start = datetime.fromisoformat(current['start_time'].replace('Z', '+00:00'))
+                end = datetime.fromisoformat(current['end_time'].replace('Z', '+00:00'))
+                incoming_end = datetime.fromisoformat(record['end_time'].replace('Z', '+00:00'))
+                if (start.tzinfo is None or end.tzinfo is None or incoming_end.tzinfo is None
+                        or end != incoming_end or (end - start).total_seconds() != max(int(prior), 1)
+                        or type(current.get('duration_seconds')) not in (int, float)
+                        or current.get('duration_seconds') != (end - start).total_seconds()):
+                    raise ValueError
+            except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+                raise ValueError('existing podcast duration conflicts with this play; reconcile before writing') from None
+            merged['start_time'] = current['start_time']
+            merged['duration_seconds'] = current['duration_seconds']
+            merged['external_ids']['duration_seconds'] = prior
     # Recomputed time-bucket fingerprints are source-owned. Other old source
     # identities/bindings remain provenance when the source record is updated.
     merged["sources"] = list(dict.fromkeys([*record["sources"],

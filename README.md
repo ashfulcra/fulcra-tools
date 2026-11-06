@@ -261,3 +261,5 @@ The Collect development branch also closes the accepted-worker shutdown race and
 Pending the next installer publication, development Apple Podcasts readers also handle older libraries without cleaned-title metadata; Apple TV runtime errors direct installed users to the app’s Full Disk Access grant. Current public-download limits above still apply.
 
 Development long-history recovery also rechecks transient pending account-credential reads quietly under a fixed budget, without requesting access or replaying credential writes. This follow-up still needs acceptance in its own frozen installer.
+
+The development Podcasts compatibility fix also preserves unknown durations as point events at their known play timestamps. It does not substitute guessed listening time for missing source metadata.

@@ -25,7 +25,9 @@ from pathlib import Path
 
 from fulcra_collect.plugin import HealthResult
 
-from .importers.apple_podcasts import MAC_EPOCH_OFFSET, episode_title_expression
+from .importers.apple_podcasts import (
+    MAC_EPOCH_OFFSET, episode_duration_expression, episode_title_expression,
+)
 
 # The same glob pattern the permission_check uses — keep them in sync. We
 # don't import it from collect_plugins.py to avoid a circular import (this
@@ -80,6 +82,7 @@ def apple_podcasts_health_check(ctx) -> HealthResult:
         try:
             cur = conn.cursor()
             title = episode_title_expression(conn)
+            duration_missing = episode_duration_expression(conn) == 'NULL'
             # Same WHERE as parse_db so the count matches what Run will
             # import. See the comment block in importers/apple_podcasts.py
             # for why ZPLAYCOUNT > 0 is the durable completion signal.
@@ -138,6 +141,8 @@ def apple_podcasts_health_check(ctx) -> HealthResult:
                 summary=(
                     f"Found {count} played episode"
                     f"{'s' if count != 1 else ''} ready to import."
+                    + (" This library has no duration metadata; plays import as point events."
+                       if duration_missing else "")
                 ),
                 preview=preview,
             )
