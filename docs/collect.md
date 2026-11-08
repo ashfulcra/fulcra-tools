@@ -151,7 +151,7 @@ or retry behavior.
 
 **Reading it back:** authorized agents can read imported records through the
 Fulcra CLI, REST API, or supported MCP tools. Notes and email bodies are files,
-so use Fulcra Files access for those; `get-records` queries annotations and
+so use Fulcra Files access for those; `get-records` queries supported record datatypes and
 `data-updates` reports changes. [`FULCRA-PRIMITIVES.md`](../FULCRA-PRIMITIVES.md)
 maps the available interfaces and their authentication requirements. Collect
 is one producer of this context, and is not needed by the agents reading it.
