@@ -81,6 +81,7 @@ class TodoistProvider:
         load_state: Callable[[str], dict | None] | None = None,
         save_state: Callable[[str, dict], object] | None = None,
         dry_run: bool = False,
+        still_allowed: Callable[[], None] | None = None,
     ):
         if not isinstance(token, str) or not token.strip() or any(c.isspace() for c in token):
             raise TodoistError("Connect Todoist with a valid API token.")
@@ -113,6 +114,7 @@ class TodoistProvider:
         self._load_state = load_state
         self._save_state = save_state
         self._dry_run = dry_run
+        self._guard = still_allowed or (lambda: None)
         self._loaded_observations: set[str] = set()
         self._persisted_active_seen: dict[str, datetime] = {}
         self._snapshot_active_seen: dict[str, datetime] | None = None
@@ -127,6 +129,7 @@ class TodoistProvider:
         self.close()
 
     def _request(self, method: str, path: str, *, missing_ok=False, **kwargs):
+        self._guard()
         remaining_s = self._deadline - time.monotonic()
         if self._remaining <= 0 or remaining_s <= 0:
             raise TodoistError("Todoist read budget exhausted; snapshot is incomplete.")
@@ -135,17 +138,20 @@ class TodoistProvider:
             with self._client.stream(
                 method, _API + path, timeout=min(self._timeout_s, remaining_s), **kwargs
             ) as response:
+                self._guard()
                 if response.status_code == 404 and missing_ok:
                     return None
                 if not 200 <= response.status_code < 300:
                     raise TodoistError(f"Todoist request failed (HTTP {response.status_code}).")
                 content = bytearray()
                 for chunk in response.iter_bytes():
+                    self._guard()
                     if time.monotonic() >= self._deadline:
                         raise TodoistError("Todoist read budget exhausted; snapshot is incomplete.")
                     content.extend(chunk)
                     if len(content) > _MAX_RESPONSE_BYTES:
                         raise TodoistError("Todoist response exceeds the safe read limit.")
+                self._guard()
                 value = json.loads(content)
                 if not isinstance(value, dict):
                     raise TodoistError("Todoist returned an invalid response.")
@@ -202,6 +208,7 @@ class TodoistProvider:
         for task_id, stamp in observed.items():
             if self._persisted_active_seen.get(task_id) == stamp:
                 continue
+            self._guard()
             value = {"schema": "todoist-observation/v1", "active_updated_at": stamp.isoformat()}
             try:
                 result = self._save_state(self._observation_key(task_id), value)
@@ -209,6 +216,7 @@ class TodoistProvider:
                     raise ValueError("Observation save failed")
             except Exception:
                 raise TodoistError("Todoist observation could not be saved safely.") from None
+            self._guard()
             self._persisted_active_seen[task_id] = stamp
 
     def _pages(self, path: str, key: str, **params) -> list[dict]:

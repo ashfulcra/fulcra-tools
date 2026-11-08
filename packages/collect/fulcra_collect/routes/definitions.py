@@ -228,6 +228,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         """
         if plugin_id not in daemon.registry.plugins:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
+        if daemon.registry.plugins[plugin_id].record_data_types is not None:
+            raise HTTPException(409, "This source uses v1 data types; choose its v1 destination.")
         if not body.definition_id and not body.force_new:
             raise HTTPException(400, "body must include definition_id or force_new=true")
         from .. import state as _state_mod
@@ -294,9 +296,10 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         daemon method's structured ``code`` returns are translated back
         into ``HTTPException`` via the shared map.
 
-        Note the success payload's ``rebound: false`` — plugin bindings
-        and quick-record favorites cleared by the delete are NOT
-        re-established; the caller must re-bind in plugin settings.
+        Note the success payload's ``rebound: false`` — legacy plugin
+        bindings cleared by the delete are NOT re-established; the caller
+        must re-bind them in plugin settings. Both favorites stores and v1
+        destination bindings are preserved by definition deletion/restore.
         """
         fulcra_token_or_401()
         result = daemon._restore_definition(def_id)
@@ -340,6 +343,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         re-resolve (adopt an existing matching definition, or create one)."""
         if plugin_id not in daemon.registry.plugins:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
+        if daemon.registry.plugins[plugin_id].record_data_types is not None:
+            raise HTTPException(409, "This source uses v1 data types; reconfigure its v1 destination.")
         from .. import state as _state_mod
         st = _state_mod.load(plugin_id)
         st.definition_id = None

@@ -29,10 +29,14 @@ class FulcraTokenBody(BaseModel):
 
 
 class CliDeviceCodeBody(BaseModel):
-    """Body for POST /api/fulcra/auth/cli_login_poll — the opaque device
-    code returned by cli_login_start. Treated as a secret: routes must
-    never log it un-masked."""
+    """Protocol 2 completion; codes never enter logs or persistent storage."""
     device_code: str
+    attempt_id: str | None = None
+    protocol: int | None = None
+
+
+class AuthCancelBody(BaseModel):
+    attempt_id: str
 
 
 class DefinitionBindBody(BaseModel):

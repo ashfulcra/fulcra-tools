@@ -27,6 +27,10 @@
 		FCA000000000000000000033 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000030 /* DeviceIdentity.swift */; };
 		FCA00000000000000000000A /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
 		FCA000000000000000000007 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
+		FCA000000000000000000302 /* V1Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000301 /* V1Wire.swift */; };
+		FCA000000000000000000303 /* V1Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000301 /* V1Wire.swift */; };
+		FCA000000000000000000304 /* V1Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000301 /* V1Wire.swift */; };
+		FCA000000000000000000306 /* V1WireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000305 /* V1WireTests.swift */; };
 		FCA00000000000000000000D /* Ingest.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000E /* Ingest.swift */; };
 		FCA00000000000000000000B /* SentSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA00000000000000000000C /* SentSet.swift */; };
 		0DAEBD5D2FD5D984008ADF6D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */; };
@@ -157,6 +161,8 @@
 		FCA000000000000000000030 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
 		FCA000000000000000000009 /* EnsureDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnsureDefinition.swift; sourceTree = "<group>"; };
 		FCA000000000000000000008 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
+		FCA000000000000000000301 /* V1Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V1Wire.swift; sourceTree = "<group>"; };
+		FCA000000000000000000305 /* V1WireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V1WireTests.swift; sourceTree = "<group>"; };
 		FCA00000000000000000000E /* Ingest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingest.swift; sourceTree = "<group>"; };
 		FCA00000000000000000000C /* SentSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentSet.swift; sourceTree = "<group>"; };
 		0DAEBD5C2FD5D984008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
@@ -292,6 +298,7 @@
 				FCA000000000000000000030 /* DeviceIdentity.swift */,
 				FCA000000000000000000009 /* EnsureDefinition.swift */,
 				FCA000000000000000000008 /* Wire.swift */,
+				FCA000000000000000000301 /* V1Wire.swift */,
 				FCA00000000000000000000E /* Ingest.swift */,
 				FCA00000000000000000000C /* SentSet.swift */,
 				0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */,
@@ -334,6 +341,7 @@
 			isa = PBXGroup;
 			children = (
 				FCA00000000000000000004B /* DeviceIdentityTests.swift */,
+				FCA000000000000000000305 /* V1WireTests.swift */,
 				FCA000000000000000000064 /* DestinationViewModelTests.swift */,
 				FCA00000000000000000004C /* EnsureDefinitionTests.swift */,
 				FCA00000000000000000004D /* IngestTests.swift */,
@@ -576,6 +584,7 @@
 				FCA000000000000000000021 /* Sharing.swift in Sources */,
 				FCA00000000000000000000A /* EnsureDefinition.swift in Sources */,
 				FCA000000000000000000007 /* Wire.swift in Sources */,
+				FCA000000000000000000302 /* V1Wire.swift in Sources */,
 				FCA00000000000000000000D /* Ingest.swift in Sources */,
 				FCA00000000000000000000B /* SentSet.swift in Sources */,
 			);
@@ -589,6 +598,7 @@
 				0DAEBD7F2FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
 				FCA000000000000000000101 /* NativeBridge.swift in Sources */,
 				FCA000000000000000000102 /* Wire.swift in Sources */,
+				FCA000000000000000000303 /* V1Wire.swift in Sources */,
 				FCA000000000000000000103 /* EnsureDefinition.swift in Sources */,
 				FCA000000000000000000104 /* KeychainStore.swift in Sources */,
 				FCA000000000000000000105 /* Sharing.swift in Sources */,
@@ -606,6 +616,7 @@
 				0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
 				FCA000000000000000000109 /* NativeBridge.swift in Sources */,
 				FCA00000000000000000010A /* Wire.swift in Sources */,
+				FCA000000000000000000304 /* V1Wire.swift in Sources */,
 				FCA00000000000000000010B /* EnsureDefinition.swift in Sources */,
 				FCA00000000000000000010C /* KeychainStore.swift in Sources */,
 				FCA00000000000000000010D /* Sharing.swift in Sources */,
@@ -619,6 +630,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA000000000000000000306 /* V1WireTests.swift in Sources */,
 				FCA000000000000000000065 /* DestinationViewModelTests.swift in Sources */,
 				FCA00000000000000000004F /* DeviceIdentityTests.swift in Sources */,
 				FCA000000000000000000050 /* EnsureDefinitionTests.swift in Sources */,

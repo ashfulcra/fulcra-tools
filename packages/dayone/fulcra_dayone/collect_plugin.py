@@ -18,12 +18,14 @@ from datetime import timedelta
 from pathlib import Path
 
 from fulcra_collect.plugin import Permission, Plugin, RunContext, Setting, SetupStep
+from fulcra_collect.v1_outbox import has_pending_records
+from fulcra_collect.v1_session import CollectRecordSession
 
-from .client import DayOneFulcraClient
-from .convert import to_event
+from .collect_v1 import JournalWriter, PENDING_KEY
 from .filter import select
 from .readers import read
 from .readers.local_db import find_database
+from .v1 import JOURNAL_SPEC
 
 
 _FULL_DISK_ACCESS_PERMISSION = Permission(
@@ -57,21 +59,24 @@ def run(ctx: RunContext) -> None:
     source = Path(path_setting) if path_setting else None
     db_path = Path(ctx.config["db_path"]) if ctx.config.get("db_path") else None
 
-    entries = read(source, local_db=local_db, db_path=db_path)
-    selected = select(entries)  # plan 1a imports all entries; filters are a 1b concern
-    ctx.progress(stage="read", count=len(selected))
-    if not selected:
-        return
-
-    events = [to_event(e) for e in selected]
-    client = DayOneFulcraClient()
-    definition_id = client.ensure_journal_definition()
-    tag_names = sorted({t for e in selected for t in getattr(e, "tags", ())})
-    tag_id_for = {name: client.ensure_tag(name) for name in tag_names}
-    result = client.run_import(events, definition_id=definition_id,
-                               tag_id_for=tag_id_for)
-    ctx.progress(stage="imported", posted=result.posted,
-                 skipped=result.skipped_existing)
+    preview = ctx.config.get("preview_only", False)
+    if type(preview) is not bool:
+        raise ValueError("Preview only must be on or off")
+    # Establish captured Collect consent before touching source data. Pending
+    # batches drain before a new source read, never under another account/epoch.
+    with CollectRecordSession(ctx) as session:
+        writer = JournalWriter(ctx, session)
+        if not preview:
+            writer.resume()
+        session.guard(mutating=not preview)
+        entries = read(source, local_db=local_db, db_path=db_path)
+        session.guard(mutating=not preview)
+        selected = select(entries)
+        ctx.progress(stage="read", count=len(selected))
+        result = writer.run_import(selected, preview=preview)
+        ctx.progress(stage="preview" if preview else "imported", posted=0 if preview else result.posted,
+            would_post=result.posted if preview else 0, verified=result.verified,
+            skipped=result.skipped_existing, excluded=writer.excluded_count)
 
 
 def dayone_permission_check(ctx: RunContext) -> dict:
@@ -122,16 +127,22 @@ PLUGIN = Plugin(
     collect_mode="live_polled",
     run=run,
     description=(
-        "Imports your Day One journal entries as Journal annotations. Pick "
+        "Imports your Day One journal entries as Journal events. Pick "
         "between live-app mode (reads the running Day One database every 6 "
         "hours; needs Full Disk Access) or a one-time export ZIP. New "
-        "entries become moment annotations in Fulcra."
+        "entries become moment events in Fulcra. Already imported entries stay unchanged."
     ),
     default_interval=timedelta(hours=6),
     category="journal",
     canonical_definition_name="Journal",
+    record_data_types=lambda _settings: {"journal": JOURNAL_SPEC},
+    record_pending=lambda ctx: has_pending_records(ctx, key=PENDING_KEY),
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_settings=(
+        Setting(
+            key="preview_only", label="Preview only", kind="toggle", default=False,
+            help="Read and compare selected entries without creating metadata or uploading records.",
+        ),
         Setting(
             key="local_db",
             label="Mode",
@@ -222,10 +233,11 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Day One entries?",
             body_md=(
-                "We can write to your existing 'Journal' annotation or "
-                "create a new one."
+                "Choose an owned v1 Journal event destination or create one. "
+                "An existing annotation selection needs an explicit v1 mapping."
             ),
             annotation_type="moment",
+            record_slot="journal",
         ),
         SetupStep(
             kind="done",

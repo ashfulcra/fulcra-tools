@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fulcra-csv-importer"
 version = "0.1.0"
-description = "Import any CSV stream into Fulcra as annotations, with column mapping and dedup."
+description = "Import any CSV stream into Fulcra as v1 Event/Metric records with column mapping."
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
@@ -13,10 +13,12 @@ dependencies = [
     "dateparser>=1.2",
     # Shared Fulcra API client (sibling package in this monorepo).
     "fulcra-common",
+    "fulcra-collect",
 ]
 
 [tool.uv.sources]
 fulcra-common = { workspace = true }
+fulcra-collect = { workspace = true }
 
 [project.scripts]
 fulcra-csv = "fulcra_csv.cli:cli"

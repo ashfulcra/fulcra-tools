@@ -24,7 +24,10 @@ export interface PageMeta {
   lang: string | null;
 }
 
-export function extractPageMeta(pageUrl: string): PageMeta {
+export function extractPageMeta(pageUrl: string, expectedDocumentUrl: string | null = null): PageMeta {
+  // Held capture can race a navigation while executeScript is pending. Check
+  // inside the actual document before reading any replacement page metadata.
+  if(expectedDocumentUrl!==null&&document.URL!==expectedDocumentUrl)return {title:null,og_description:null,og_type:null,favicon_url:null,lang:null};
   // Self-contained: everything below references only `pageUrl`, `document`,
   // and `URL`. Do NOT factor any part of this out to a module-level helper
   // — that would survive bundling as an out-of-scope reference and throw

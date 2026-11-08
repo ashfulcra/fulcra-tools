@@ -5,13 +5,17 @@ build-backend = "hatchling.build"
 [project]
 name = "fulcra-netflix-skill"
 version = "0.1.0"
-description = "Agent skill + vendored importer: onboard a user onto Fulcra, import their Netflix viewing history as a Watched annotation, and share it to the movie-night pool."
+description = "Netflix history parser and installed native Watched Event importer."
 requires-python = ">=3.11"
-# Deliberately dependency-free: the shipped artifact is the skill folder
-# (SKILL.md + a PEP 723 self-contained import script that agents run with
-# `uv run`). The package exists so the monorepo's test tooling covers the
-# script; runtime users never install it.
-dependencies = []
+dependencies = ["fulcra-common", "fulcra-collect", "fulcra-media-helpers"]
+
+[project.scripts]
+fulcra-netflix = "fulcra_netflix.loader:main"
+
+[tool.uv.sources]
+fulcra-common = { workspace = true }
+fulcra-collect = { workspace = true }
+fulcra-media-helpers = { workspace = true }
 
 [project.optional-dependencies]
 dev = [

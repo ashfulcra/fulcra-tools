@@ -7,22 +7,20 @@ from datetime import timedelta
 from fulcra_collect.plugin import Plugin, RunContext, Setting, SetupStep
 
 from ..feed_plugin_health import letterboxd_health_check
+from ..collect_v1 import media_destinations, media_pending
+from ..daemon_poll import daemon_poll
 from ..fulcra import FulcraClient
 from ..importers import letterboxd as lb_importer
-from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
-from ..state import save as _state_save
 from ._common import (
     DURATION_SPEC,
-    ensure_media_def,
     newest_event_iso,
     rss_import_and_advance,
     rss_since,
 )
 
 
-# Same structure as NETFLIX_WATCHED_SPEC — all Watched plugins share the same
-# definition.
+# Legacy spec alias retained for imports; v1 setup uses media_destinations.
 LETTERBOXD_WATCHED_SPEC: dict = DURATION_SPEC
 
 
@@ -54,6 +52,7 @@ def _extract_letterboxd_username(raw: str) -> str:
     )
 
 
+@daemon_poll
 def _run_letterboxd(ctx: RunContext) -> None:
     raw_username = ctx.config.get("username")
     if not raw_username:
@@ -62,24 +61,13 @@ def _run_letterboxd(ctx: RunContext) -> None:
             f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
         )
     username = _extract_letterboxd_username(raw_username)
-    max_entries: int | None = ctx.config.get("max_entries")
 
-    # Ensure the "Watched" annotation definition is known before importing.
-    # On a fresh install (machine 2) the media state file may have no
-    # watched_definition_id because bootstrap was never run on this machine.
-    # The shared resolver adopts Machine 1's existing "Watched" definition
-    # rather than creating a duplicate.
-    media_state = _state_load(STATE_PATH)
-    ensure_media_def(ctx, media_state, attr="watched_definition_id",
-                     spec=LETTERBOXD_WATCHED_SPEC,
-                     canonical_name="Watched",
-                     state_save=_state_save)
-
+    ctx._daemon_poll.select("watched", "letterboxd", ["letterboxd", username, lb_importer.feed_url_for(username)])
     since = rss_since(ctx)
-    all_events = list(lb_importer.fetch_diary(username))
+    all_events = list(lb_importer.fetch_diary(username, **ctx._daemon_poll.strict))
     rss_import_and_advance(
         ctx, all_events, tag="letterboxd", since=since,
-        max_entries=max_entries,
+        max_entries=ctx._daemon_poll.max_entries,
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
         newest_iso=newest_event_iso,
@@ -92,10 +80,12 @@ PLUGIN = Plugin(
     kind="scheduled",
     collect_mode="live_polled",
     run=_run_letterboxd,
+    record_data_types=media_destinations("watched"),
+    record_pending=media_pending,
     health_check=letterboxd_health_check,
     description=(
         "Polls your public Letterboxd diary RSS feed every 12 hours. "
-        "Each diary entry becomes a 'Watched' annotation in Fulcra. "
+        "Each diary entry becomes a 'Watched' data type in Fulcra. "
         "Only needs your Letterboxd username (no API key)."
     ),
     default_interval=timedelta(hours=12),
@@ -121,7 +111,7 @@ PLUGIN = Plugin(
             body_md=(
                 "Letterboxd publishes your public film diary as an RSS "
                 "feed. We poll it every 12 hours and record each entry "
-                "as a 'Watched' annotation. No API key needed — just "
+                "as a 'Watched' data type. No API key needed — just "
                 "your username."
             ),
         ),
@@ -149,7 +139,7 @@ PLUGIN = Plugin(
             kind="definition_picker",
             title="Where should we write your Letterboxd diary?",
             body_md=(
-                "We can write to your existing 'Watched' annotation or "
+                "We can write to your existing 'Watched' data type or "
                 "create a new one."
             ),
             annotation_type="duration",

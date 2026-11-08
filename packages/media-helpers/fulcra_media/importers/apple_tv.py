@@ -169,13 +169,11 @@ def _snapshot_db(cache_dir: Path) -> Path:
                 raise SnapshotError(
                     f"Apple TV cache snapshot timed out after "
                     f"{SNAPSHOT_TIMEOUT_SECONDS}s copying {candidate.name} "
-                    f"({size_mb:.0f}MB) — the reading process lacks Full Disk "
-                    f"Access, so opening the TV service's group container "
-                    f"blocks. Fix: grant FDA to the daemon's interpreter "
-                    f"(System Settings > Privacy & Security > Full Disk "
-                    f"Access, add the resolved uv cpython binary, toggle on) "
-                    f"and restart the daemon. This run is skipped; the next "
-                    f"scheduled run retries."
+                    f"({size_mb:.0f}MB). I/O may be stalled or Full Disk Access "
+                    f"may be unavailable. For the installed app, check Fulcra "
+                    f"Collect from Applications in System Settings > Privacy "
+                    f"& Security > Full Disk Access, then restart Collect. "
+                    f"For a source install, check the terminal app that starts it."
                 ) from exc
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or b"").decode(errors="replace").strip()

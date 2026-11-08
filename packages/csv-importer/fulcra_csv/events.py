@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-# Allowed values for annotation_type. Maps to Fulcra's recorded_at shape:
-# duration -> {start_time, end_time}; instant -> {start_time} only.
+# Source timing semantics retained for parser consumers. The v1 codec emits
+# equal start/end timestamps for instant observations.
 DURATION = "duration"
 INSTANT = "instant"
 VALID_TYPES = {DURATION, INSTANT}
@@ -26,8 +26,8 @@ class ColumnMap:
     requirements; everything else is optional metadata.
 
     extras: ((col, key), ...) — lift CSV column into external_ids[key]
-    data_fields: ((col, key), ...) — lift CSV column into the top-level
-        annotation data payload (alongside note, title, value)
+    data_fields: ((col, key), ...) — preserve source fields in a dictionary.
+        The standalone v1 codec nests it under csv_data_fields.
     """
     timestamp: str = "timestamp"
     end_time: str | None = None  # required for duration unless duration_seconds is set
@@ -61,13 +61,12 @@ def coerce_value(raw: str, value_type: str) -> Any:
 
 @dataclass
 class GenericEvent:
-    """A single row from a CSV, normalized for annotation ingest.
+    """A normalized source row shared by CSV and media parser consumers.
 
     `end_time` is None for instant annotations; required for duration.
     `value` is the measurement value (None for non-measurement events).
-    `data_fields` are extra fields written into the annotation data payload
-    (i.e. data.<key> = <val>) — distinct from external_ids which are nested
-    under data.external_ids.
+    `data_fields` and `external_ids` are separate source dictionaries. The
+    standalone v1 codec preserves both as declared nested enrichment maps.
     """
     start_time: datetime
     note: str

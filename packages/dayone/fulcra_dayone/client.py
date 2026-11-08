@@ -1,80 +1,28 @@
-"""Fulcra client for fulcra-dayone — adds the Journal definition bootstrap.
+"""Explicit CLI entrypoint for the shared v1 JournalWriter.
 
-Subclasses fulcra_csv.FulcraClient so it inherits run_import, ensure_tag,
-the httpx client, and auth from fulcra-common.
+API migration: annotation-definition/bootstrap and GenericEvent import methods
+are retired. Use ``with client.open(invocation_settings) as writer`` and pass
+original DayOneEntry values to JournalWriter after calling writer.resume().
 """
-from __future__ import annotations
+from contextlib import contextmanager
 
-from typing import Any
+from fulcra_common.client import BaseFulcraClient
+from fulcra_collect.standalone_v1 import standalone_runtime
 
-from fulcra_common import ImportResult
-from fulcra_common import wire
-from fulcra_csv.events import GenericEvent
-from fulcra_csv.fulcra import FulcraClient
-
-JOURNAL_DEFINITION_NAME = "Journal"
-
-# A Day One entry is a point-in-time annotation. In Fulcra's model the
-# annotation *definition* type for that is "moment" (the enum has no
-# "instant" — the valid values are boolean/duration/moment/numeric/
-# people/scale), and the recorded events read back under the
-# "MomentAnnotation" data type. csv-importer's GenericEvent still calls
-# the point-in-time event shape INSTANT; that internal name only controls
-# the recorded_at shape (a bare scalar timestamp, vs a duration's
-# {start_time, end_time} range) and never reaches the API.
-JOURNAL_ANNOTATION_TYPE = "moment"
-JOURNAL_DATA_TYPE = "MomentAnnotation"
+from .collect_v1 import JournalWriter
 
 
-class DayOneFulcraClient(FulcraClient):
-    USER_AGENT = "fulcra-dayone/0.1"
-    # Fulcra's write endpoints answer 303 See Other, pointing at the newly
-    # created resource (POST-redirect-GET) — the annotation-definition POST
-    # and the tag POST/lookup all do this. Follow the redirect rather than
-    # raise on it. csv-importer's FulcraClient sets this False because it
-    # percent-encodes tag names and resolves them without a redirect; that
-    # is a csv-importer detail, not one fulcra-dayone should inherit. True
-    # is the BaseFulcraClient default; httpx still strips the Authorization
-    # header on any cross-origin hop, so following same-host 303s is safe.
-    FOLLOW_REDIRECTS = True
+class DayOneFulcraClient(BaseFulcraClient):
+    USER_AGENT = 'fulcra-dayone/v1'
 
-    def ensure_journal_definition(self) -> str:
-        """Return the id of the live "Journal" moment-annotation
-        definition, creating it if none exists. If duplicates exist,
-        returns the oldest by created_at — so every run converges on the
-        same definition."""
-        r = self._client().get(
-            "/user/v1alpha1/annotation", headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        matches = [
-            d for d in r.json()
-            if d.get("name") == JOURNAL_DEFINITION_NAME
-            and d.get("annotation_type") == JOURNAL_ANNOTATION_TYPE
-            and not d.get("deleted_at")
-        ]
-        if matches:
-            matches.sort(key=lambda d: d.get("created_at") or "")
-            return matches[0]["id"]
-        body = wire.moment_definition_payload(
-            name=JOURNAL_DEFINITION_NAME,
-            description="Day One journal entries.",
-            tags=[],
-        )
-        r = self._client().post(
-            "/user/v1alpha1/annotation", json=body,
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        return r.json()["id"]
+    @contextmanager
+    def open(self, settings):
+        with standalone_runtime('cli-dayone', settings, client=self,
+                transport=self._transport, identity_transport=self._transport) as (ctx, session):
+            yield JournalWriter(ctx, session)
 
-    def run_import(self, events: list[GenericEvent], **kwargs: Any) -> ImportResult:
-        """Import journal entries, targeting the MomentAnnotation data type.
+    def ensure_journal_definition(self):
+        raise RuntimeError('Annotation API retired: use open(settings) with the v1 JournalWriter')
 
-        Day One entries land as `MomentAnnotation` events; both the
-        dedup-readback and the ingest must use that data type. (The
-        inherited default would pick `InstantAnnotation`, which Fulcra
-        does not expose — querying it 404s.)
-        """
-        kwargs.setdefault("data_type", JOURNAL_DATA_TYPE)
-        return super().run_import(events, **kwargs)
+    def run_import(self, *_args, **_kwargs):
+        raise RuntimeError('GenericEvent API retired: pass DayOneEntry values to the v1 JournalWriter')

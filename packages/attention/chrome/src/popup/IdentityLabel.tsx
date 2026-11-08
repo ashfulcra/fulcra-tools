@@ -1,3 +1,4 @@
+import {v1HeldMode} from "../relayless/v1AuthClient";
 import { useEffect, useState } from "react";
 import { loadSettings, saveSettings } from "../storage";
 import { TokenStore } from "../relayless/tokenStore";
@@ -22,16 +23,19 @@ export function IdentityLabel(props: {
 
   const [label, setLabel] = useState("");
   const [saved, setSaved] = useState(false);
+  const [error,setError]=useState<string|null>(null);
 
   useEffect(() => {
-    void loadSettings().then((s) => setLabel(s.identityLabel ?? ""));
+    void loadSettings().then((s) => setLabel(s.identityLabel ?? "")).catch(()=>setError("Settings held"));
   }, []);
 
   async function save() {
+    setError(null);try{
     const trimmed = label.trim();
     const next = trimmed === "" ? null : trimmed;
     const cur = await loadSettings();
     await saveSettings({ ...cur, identityLabel: next });
+    if(await v1HeldMode()){setSaved(true);setTimeout(()=>setSaved(false),1500);return;}
     // Re-tag the cached Attention resolution. No-op (null) when not yet
     // onboarded — the persisted label is still picked up on the next flush.
     const ensureOpts: EnsureOpts = {
@@ -45,6 +49,7 @@ export function IdentityLabel(props: {
     }
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
+    }catch(e){setError(e instanceof Error?e.message:"Settings held");}
   }
 
   return (
@@ -63,6 +68,7 @@ export function IdentityLabel(props: {
         />
         <button onClick={() => void save()}>Save</button>
       </div>
+      {error&&<span role="alert">{error}</span>}
       {saved && <span className="saved-flash">✓ Saved</span>}
     </div>
   );

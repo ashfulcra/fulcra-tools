@@ -27,16 +27,14 @@ identical.
 ``rule_id``. Never a subject, address, snippet, or body.
 
 The coord invocation is injected as a ``run(argv) -> (rc, stdout)`` callable so
-the whole leg is unit-testable without a real bus. Production shells out to the
-installed ``coord-engine`` binary (see :func:`_subprocess_run`).
+the whole leg is unit-testable without a real bus. Collect injects the bundled
+engine with its captured authenticated transport and exact-file readback.
+There is no implicit subprocess or default credential fallback.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
-import shutil
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -45,13 +43,6 @@ from .rules import Rule
 
 _log = logging.getLogger("fulcra_gmail.relay")
 
-#: Default coord-engine binary (matches the installed uv-tool shim).
-DEFAULT_COORD_BINARY = "coord-engine"
-#: Absolute-path override for the coord-engine binary.
-_COORD_BIN_ENV = "FULCRA_COORD_ENGINE_BIN"
-#: Where coord-engine actually installs, in resolution order. The daemon's
-#: launchd PATH covers none of these, so they must be searched explicitly.
-_FALLBACK_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
 #: Directive sender identity — opaque, non-PII.
 RELAY_SENDER = "gmail-relay"
 #: Fallback priority when a relay rule omits ``relay_priority``.
@@ -111,114 +102,26 @@ class RelayEmitterProtocol(Protocol):
     def exists(self, directive: "RelayDirective") -> bool: ...
 
 
-def resolve_coord_binary(binary: str = DEFAULT_COORD_BINARY) -> str:
-    """Resolve ``binary`` to an absolute path, or raise with an actionable message.
-
-    A bare ``coord-engine`` is NOT safe to exec from the daemon. Collect runs
-    under **launchd**, which hands it a minimal PATH (``/usr/bin:/bin:…``) that
-    excludes ``~/.local/bin`` — where the uv-tool shim lives. So the bare name
-    resolves in an interactive shell (and in a hand-run worker) while raising
-    ``FileNotFoundError`` inside the daemon: every relay poll fails, and the
-    all-polls-failed guard then takes the whole plugin down. Resolve to an
-    absolute path here instead of trusting the inherited PATH.
-
-    Order: ``FULCRA_COORD_ENGINE_BIN`` → an already-absolute ``binary`` →
-    ``PATH`` → the known install dirs.
-    """
-    override = os.environ.get(_COORD_BIN_ENV)
-    if override:
-        return override
-    if os.path.isabs(binary):
-        return binary
-    found = shutil.which(binary)
-    if found:
-        return found
-    for d in _FALLBACK_BIN_DIRS:
-        candidate = os.path.join(os.path.expanduser(d), binary)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    searched = ", ".join(_FALLBACK_BIN_DIRS)
-    raise FileNotFoundError(
-        f"{binary!r} not found: the gmail relay needs it to deliver directives. "
-        f"Looked on PATH and in {searched}. Install coord-engine, or set "
-        f"{_COORD_BIN_ENV} to its absolute path. NOTE: the collect daemon runs "
-        f"under launchd with a minimal PATH, so adding a directory to your "
-        f"shell PATH is not enough."
-    )
-
-
-def _subprocess_env(resolved_binary: str) -> dict[str, str]:
-    """Env for the coord-engine subprocess with the install dirs ON ``PATH``.
-
-    Resolving the coord-engine binary to an absolute path is not enough: coord-
-    engine ITSELF shells out to ``fulcra-api`` for its bus transport, by bare
-    name. The collect daemon runs under launchd with a minimal PATH
-    (``/usr/bin:/bin:…``) that excludes ``~/.local/bin``, so that inner exec
-    fails — ``TransportError: exec failed: … No such file or directory:
-    'fulcra-api'`` — and every relay emit fails silently while the plugin still
-    reports success (observed: ~5 days of relay silence, 07-16→07-21, the
-    contiguous frontier frozen). Prepend the resolved binary's own directory
-    plus the known install dirs to PATH so coord-engine's child processes
-    resolve too. This is the code-side guard; a daemon PATH set in launchd is
-    the deployment-side one, and either alone suffices.
-    """
-    env = dict(os.environ)
-    prepend = [os.path.dirname(resolved_binary)] + [
-        os.path.expanduser(d) for d in _FALLBACK_BIN_DIRS
-    ]
-    existing = env.get("PATH", "")
-    parts = [p for p in prepend if p] + ([existing] if existing else [])
-    # De-dup while preserving order.
-    seen: set[str] = set()
-    ordered = [p for p in os.pathsep.join(parts).split(os.pathsep)
-               if p and not (p in seen or seen.add(p))]
-    env["PATH"] = os.pathsep.join(ordered)
-    return env
-
-
-def _subprocess_run(binary: str) -> Callable[[list[str]], tuple[int, str]]:
-    """Return a ``run(argv)`` that shells out to the coord-engine binary.
-
-    Resolution is lazy (first call, then cached): resolving at construction
-    would let a missing coord-engine break plugin startup even for operators
-    whose rules never relay.
-    """
-    resolved: list[str] = []
-    env_cache: list[dict[str, str]] = []
-
-    def _run(argv: list[str]) -> tuple[int, str]:
-        if not resolved:
-            resolved.append(resolve_coord_binary(binary))
-            env_cache.append(_subprocess_env(resolved[0]))
-        proc = subprocess.run(  # noqa: S603 — resolved binary, non-shell
-            [resolved[0], *argv],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env_cache[0],
-        )
-        return proc.returncode, proc.stdout
-    return _run
-
-
 class CoordEngineRelayEmitter:
     """Emits + reads back relay directives through coord-engine.
 
     ``team`` is the coord space the directive lands in. ``run`` is the injected
-    invocation seam (default: the installed ``coord-engine`` binary).
+    invocation seam. Collect explicitly injects its authenticated engine adapter.
     """
 
     def __init__(
         self,
         team: str,
         *,
-        run: Callable[[list[str]], tuple[int, str]] | None = None,
-        binary: str = DEFAULT_COORD_BINARY,
+        run: Callable[[list[str]], tuple[int, str]],
         sender: str = RELAY_SENDER,
+        readback: Callable[[str, RelayDirective], bool] | None = None,
     ) -> None:
         self._team = team
-        self._run = run if run is not None else _subprocess_run(binary)
+        self._run = run
         self._sender = sender
+        self._readback = readback
+        self._emitted_slugs: dict[RelayDirective, str] = {}
 
     def emit(self, directive: RelayDirective) -> RelayResult:
         """Deliver the directive via ``coord-engine tell``.
@@ -246,17 +149,23 @@ class CoordEngineRelayEmitter:
                          rc, directive.outbox_key)
             return RelayResult(ok=False, reason=f"tell_rc_{rc}")
         slug = _parse_slug(out)
+        if not slug:
+            return RelayResult(ok=False, reason="unverified_slug")
+        self._emitted_slugs[directive] = slug
         _log.debug("gmail relay: emitted outbox=%s slug=%s", directive.outbox_key, slug)
         return RelayResult(ok=True, slug=slug)
 
     def exists(self, directive: RelayDirective) -> bool:
         """Readback-verify the canonical directive exists (B3).
 
-        Searches the team for the opaque ``outbox_key`` (embedded in the
-        directive title) and confirms at least one matching directive. Returns
-        ``False`` on any coord failure so the caller does NOT mark relay done on
-        an unverifiable delivery.
+        Collect reads the exact emitted slug through its bound transport.
+        An explicitly injected compatibility runner can use a healthy search
+        response, but only a row matching that emitted slug/title/recipient
+        counts. Empty envelopes and degraded markers never confirm delivery.
         """
+        slug = self._emitted_slugs.get(directive)
+        if self._readback is not None:
+            return bool(slug and self._readback(slug, directive))
         rc, out = self._run(["search", self._team, directive.outbox_key, "--json"])
         if rc != 0:
             return False
@@ -264,7 +173,24 @@ class CoordEngineRelayEmitter:
             rows = json.loads(out or "[]")
         except (ValueError, TypeError):
             return False
-        return bool(rows)
+        if isinstance(rows, dict):
+            if rows.get("contract") != 2 or rows.get("health") != "DATA" or rows.get("degraded") != []:
+                return False
+            rows = rows.get("rows")
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or str(row.get("type", "")).endswith("-degraded")
+            for row in rows
+        ):
+            return False
+        slug = self._emitted_slugs.get(directive)
+        if not slug:
+            return False
+        return any(
+            row.get("name", row.get("slug")) == slug
+            and row.get("title") == directive.title
+            and row.get("assignee") == directive.assignee
+            for row in rows
+        )
 
 
 def _parse_slug(stdout: str) -> str | None:

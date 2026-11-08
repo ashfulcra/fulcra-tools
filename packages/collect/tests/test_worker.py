@@ -76,6 +76,44 @@ def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
     assert events[-1]["watermark"] == "2026-05-22T12:00:00Z"
 
 
+def test_worker_keeps_independent_raw_consent_snapshot(collect_home: Path):
+    from fulcra_collect import config
+
+    cfg = config.load()
+    cfg.plugin_settings["snapshot"] = {"selected": ["original"], "dry_run": "false"}
+    config.save(cfg)
+    snapshots = []
+
+    def run(ctx):
+        ctx.config["selected"].append("runtime-only")
+        assert ctx.config["dry_run"] is False
+        snapshots.append(ctx._persisted_config)
+
+    plugin = Plugin(id="snapshot", name="Snapshot", kind="manual", collect_mode="historical",
+                    run=run, required_settings=(Setting("dry_run", "Preview", "toggle"),))
+    events = _run_capturing(plugin, collect_home)
+    assert events[-1]["outcome"] == "done"
+    assert snapshots == [{"selected": ["original"], "dry_run": "false"}]
+
+
+def test_worker_binds_durable_large_outboxes_without_expanding_cursor_kv(collect_home: Path):
+    import pytest
+    payload = {"synthetic": "x" * 100_000}
+    before = []
+
+    def run(ctx):
+        before.append(ctx.outbox_get("pending"))
+        with pytest.raises(ValueError, match="plugin KV value exceeds"):
+            ctx.kv_set("large_payload", payload)
+        ctx.outbox_set("pending", payload)
+        assert ctx.outbox_get("pending") == payload
+
+    plugin = Plugin(id="outbox", name="Outbox", kind="manual", collect_mode="historical", run=run)
+    assert _run_capturing(plugin, collect_home)[-1]["outcome"] == "done"
+    assert _run_capturing(plugin, collect_home)[-1]["outcome"] == "done"
+    assert before == [None, payload]
+
+
 def test_worker_carries_the_definition_id_set_by_the_plugin(collect_home: Path):
     """Important 1: definition_id written to ctx.state during the run must
     appear in the result event so the runner can persist it.  Mirrors the
@@ -257,7 +295,7 @@ def test_worker_isolates_plugin_stdout_from_event_stream(
     assert parsed[-1]["watermark"] == "2026-05-22T12:00:00Z"
 
 
-def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: Path):
+def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: Path, _in_memory_keyring):
     from fulcra_collect.plugin import Credential
     ran = []
     plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
@@ -271,7 +309,7 @@ def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: P
     assert "api-key" in events[-1]["error"]
 
 
-def test_worker_does_not_block_on_a_missing_optional_credential(collect_home: Path):
+def test_worker_does_not_block_on_a_missing_optional_credential(collect_home: Path, _in_memory_keyring):
     """A ``required=False`` credential is one that only some operating modes
     need (e.g. PurpleAir's api_key: cloud yes, LAN no). Its absence must NOT
     hard-block the run — run() is invoked and decides for itself."""
@@ -291,7 +329,7 @@ def test_worker_does_not_block_on_a_missing_optional_credential(collect_home: Pa
 def test_worker_reads_user_level_credentials_from_user_store(
         collect_home: Path, monkeypatch):
     """P3 #14: a Credential declared ``user_level=True`` lives in the
-    account-scoped keychain store (``get_user_secret``), not the
+    account-scoped keychain store (``get_user_secret_fresh``), not the
     plugin-scoped one — the daemon's set/status/delete paths already
     route by that flag. The worker built ctx.credentials from the
     plugin-scoped store only, so the first plugin declaring a required
@@ -300,7 +338,7 @@ def test_worker_reads_user_level_credentials_from_user_store(
     from fulcra_collect.plugin import Credential
 
     monkeypatch.setattr(
-        "fulcra_collect.credentials.get_user_secret",
+        "fulcra_collect.credentials.get_user_secret_fresh",
         lambda key: "user-scoped-tok" if key == "bearer-token" else None,
     )
     monkeypatch.setattr(
@@ -332,7 +370,7 @@ def test_worker_missing_user_level_credential_still_fails_fast(
     from fulcra_collect.plugin import Credential
 
     monkeypatch.setattr(
-        "fulcra_collect.credentials.get_user_secret", lambda key: None)
+        "fulcra_collect.credentials.get_user_secret_fresh", lambda key: None)
     monkeypatch.setattr(
         "fulcra_collect.credentials.get_secret", lambda plugin_id, key: None)
 
@@ -498,7 +536,7 @@ def test_set_credential_writes_to_declared_scope(
     from fulcra_collect.plugin import Credential
 
     monkeypatch.setattr(
-        "fulcra_collect.credentials.get_user_secret", lambda key: "u-val")
+        "fulcra_collect.credentials.get_user_secret_fresh", lambda key: "u-val")
     monkeypatch.setattr(
         "fulcra_collect.credentials.get_secret", lambda pid, key: "p-val")
     writes: list[tuple] = []

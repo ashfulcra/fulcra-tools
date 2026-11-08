@@ -29,6 +29,7 @@
 // The resolved {definitionId, tagIds} is cached in extension local storage so
 // it is resolved ONCE (a cloud round-trip), not on every flush.
 
+import {assertLegacyAuth} from "./v1AuthMode";
 import { API_BASE } from "./config";
 import type { FetchFn } from "./oidc";
 import {
@@ -176,6 +177,7 @@ interface DefinitionRow {
 export async function ensureAttentionDefinitionAndTags(
   opts: EnsureOpts,
 ): Promise<ResolvedAttention> {
+  await assertLegacyAuth(opts.storage);
   const storage = storageFor(opts);
 
   // Cache hit — already resolved on this profile. No network.
@@ -210,6 +212,7 @@ export async function ensureAttentionDefinitionAndTags(
 export async function listAttentionDestinations(
   opts: EnsureOpts,
 ): Promise<AttentionDestination[]> {
+  await assertLegacyAuth(opts.storage);
   const ctx = await apiCtx(opts);
   const matches = await findAttentionDefinitionRows(ctx);
   return matches.map((d, i) => ({
@@ -231,6 +234,7 @@ export async function chooseAttentionDestination(
   definitionId: string,
   identityLabel?: string | null,
 ): Promise<ResolvedAttention> {
+  await assertLegacyAuth(opts.storage);
   const storage = storageFor(opts);
   const ctx = await apiCtx(opts);
   const tagIds = await resolveAttentionTagIds(ctx, identityLabel);
@@ -251,6 +255,7 @@ export async function createAttentionDestination(
   name: string = ATTENTION_DEFINITION_NAME,
   identityLabel?: string | null,
 ): Promise<ResolvedAttention> {
+  await assertLegacyAuth(opts.storage);
   const storage = storageFor(opts);
   const ctx = await apiCtx(opts);
   const tagIds = await resolveAttentionTagIds(ctx, identityLabel);
@@ -273,6 +278,7 @@ export async function updateIdentity(
   opts: EnsureOpts,
   label: string | null,
 ): Promise<ResolvedAttention | null> {
+  await assertLegacyAuth(opts.storage);
   const storage = storageFor(opts);
   const cached = await readCache(storage);
   if (!cached) return null; // nothing to re-tag yet; caller persists the label
@@ -291,6 +297,7 @@ export async function updateIdentity(
 export async function clearResolvedAttention(
   storage: StorageArea = defaultLocalStorageArea(),
 ): Promise<void> {
+  await assertLegacyAuth(storage);
   await storage.remove(RESOLVED_KEY);
 }
 

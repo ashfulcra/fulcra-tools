@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import shutil
+import os
 
 
 def _test_only_payloads(packages: Path) -> list[Path]:
@@ -30,7 +31,7 @@ def _test_only_payloads(packages: Path) -> list[Path]:
     )
 
 
-def sanitize(app: Path, *, home: Path | None = None, check_only: bool = False) -> None:
+def _cleanup(app: Path, *, check_only: bool = False) -> None:
     packages = app / 'Contents' / 'Resources' / 'app_packages'
     if (not packages.is_dir() or any(p.is_symlink() for p in
             (app, app / 'Contents', app / 'Contents/Resources', packages))):
@@ -78,28 +79,48 @@ def sanitize(app: Path, *, home: Path | None = None, check_only: bool = False) -
     for path in loose_bytecode:
         if path.exists():
             path.unlink()
-    # Reject this builder's home in all dependencies and binary metadata.
-    # Generic /home/ strings also occur in public URLs and upstream SDKs;
-    # the tracked-source privacy guard reviews other home-directory names.
-    prefixes = (str(home or Path.home()),)
-    markers = [value.encode(encoding) for value in prefixes
-               for encoding in ('utf-8', 'utf-16-le', 'utf-16-be')]
-    findings = 0
-    for path in app.rglob('*'):
-        values = [str(path.relative_to(app)).encode()]
-        if path.is_symlink():
-            values.append(str(path.readlink()).encode())
-        elif path.is_file():
-            values.append(path.read_bytes())
-        if any(marker in value for value in values for marker in markers):
-            findings += 1
-    if findings:
-        raise RuntimeError(f'Personal home path remains in {findings} bundle entries; paths are redacted')
+
+
+def sanitize(app: Path, *, home: Path | None = None, check_only: bool = False,
+             phase: str = 'raw', provenance_receipt: Path | None = None,
+             expected=None, markers: tuple[str, ...] | None = None):
+    from bundle_provenance import scan_bundle
+    if provenance_receipt is not None or expected is not None:
+        from bundle_provenance_stages import ReceiptRef, sanitize_stage
+        if expected is None or provenance_receipt is None:
+            raise RuntimeError('UNKNOWN: independent current invocation/head required')
+        if Path(app).absolute() != expected.app:
+            raise RuntimeError('UNKNOWN: independent app scope differs')
+        head = expected.head
+        ref = ReceiptRef(Path(provenance_receipt).absolute(), head.digest, head.generation, head.stage, head.predecessor)
+        return sanitize_stage(expected, ref, phase=phase, check_only=check_only)
+    if phase != 'raw':
+        raise RuntimeError('UNKNOWN: transformed phase requires current provenance authority')
+    _cleanup(app, check_only=check_only)
+    selected_markers = markers or tuple(dict.fromkeys(value for value in
+        (str(home or Path.home()), os.environ.get('COLLECT_QA_ROOT'), os.environ.get('RUNNER_TEMP')) if value))
+    result = scan_bundle(app, selected_markers)
+    if result.status != 'COMPLETE' or result.privacy_rejections:
+        raise RuntimeError(f'Personal home path remains in {result.privacy_rejections} bundle entries or scan is UNKNOWN; paths are redacted')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('app', type=Path)
     parser.add_argument('--check-only', action='store_true')
+    parser.add_argument('--phase', choices=('raw', 'postbuild', 'signed'), default='raw')
+    parser.add_argument('--provenance-receipt', type=Path)
     args = parser.parse_args()
-    sanitize(args.app, check_only=args.check_only)
+    try:
+        if args.provenance_receipt is not None:
+            from bundle_provenance_stages import expected_from_environment, advance, context_json
+            expected = expected_from_environment()
+            if args.app.absolute() != expected.app:
+                raise RuntimeError('UNKNOWN: app scope differs from current invocation')
+            ref = sanitize(args.app, check_only=args.check_only, phase=args.phase,
+                           provenance_receipt=args.provenance_receipt, expected=expected)
+            print(context_json(advance(expected, ref)))
+        else:
+            sanitize(args.app, check_only=args.check_only, phase=args.phase)
+    except RuntimeError:
+        parser.exit(1, 'UNKNOWN: privacy/provenance check failed; paths are redacted\n')

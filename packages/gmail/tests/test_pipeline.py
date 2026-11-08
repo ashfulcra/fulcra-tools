@@ -90,6 +90,86 @@ def _deps(tmp_path, *, relay=None):
     return ledger, files, relay
 
 
+@pytest.mark.parametrize("revoke_at", ["before", "file", "relay"])
+def test_effect_consent_revocation_never_publishes_later_delivery_barriers(tmp_path, revoke_at):
+    ledger, files, relay = _deps(tmp_path)
+    allowed = [revoke_at != "before"]
+    def guard():
+        if not allowed[0]:
+            raise RuntimeError("synthetic consent changed")
+    original_upload, original_emit = files._api.upload_file, relay.emit
+    def upload(*a, **kw):
+        result = original_upload(*a, **kw)
+        if revoke_at == "file":
+            allowed[0] = False
+        return result
+    def emit(*a, **kw):
+        result = original_emit(*a, **kw)
+        if revoke_at == "relay":
+            allowed[0] = False
+        return result
+    files._api.upload_file, relay.emit = upload, emit
+    with pytest.raises(RuntimeError, match="consent changed"):
+        process_message(_msg("synthetic", 1600000000000), rule=_rule(), account_id="acct-1", ledger=ledger,
+            files_writer=files, relay_emitter=relay, still_allowed=guard)
+    done = ledger.remaining_actions("synthetic", "receipts", 1, [ACTION_FILE, ACTION_RELAY])
+    assert done == ([ACTION_RELAY] if revoke_at == "relay" else [ACTION_FILE, ACTION_RELAY])
+    assert len(files._api.uploads) == int(revoke_at != "before")
+    assert len(relay.emits) == int(revoke_at == "relay")
+
+
+def test_poll_rechecks_consent_after_source_reads_before_any_delivery_or_cursor(tmp_path):
+    ledger, files, relay = _deps(tmp_path)
+    cursors = CursorStore("acct-1", root=tmp_path)
+    allowed = [True]
+    def guard():
+        if not allowed[0]:
+            raise RuntimeError("synthetic consent changed")
+    class Client:
+        def list_message_ids(self, q):
+            return ["synthetic"]
+        def get_message(self, identifier):
+            allowed[0] = False
+            return _msg(identifier, 1600000000000)
+    with pytest.raises(RuntimeError, match="consent changed"):
+        poll_account_rule(client=Client(), rule=_rule(), account_id="acct-1", ledger=ledger,
+            cursors=cursors, files_writer=files, relay_emitter=relay, still_allowed=guard)
+    assert not files._api.uploads and not relay.emits
+    assert cursors.get("receipts", 1) is None and not ledger.entries()
+
+
+def test_all_effects_and_delivery_commits_hold_the_injected_mutation_scope(tmp_path):
+    from contextlib import contextmanager
+    ledger, files, relay = _deps(tmp_path)
+    cursors = CursorStore("acct-1", root=tmp_path)
+    held = [0]
+    @contextmanager
+    def scope():
+        held[0] += 1
+        try:
+            yield
+        finally:
+            held[0] -= 1
+    def leased(original):
+        def call(*a, **kw):
+            assert held[0] > 0, "effect or delivery fact escaped its consent lease"
+            return original(*a, **kw)
+        return call
+    files._api.upload_file = leased(files._api.upload_file)
+    relay.emit, relay.exists = leased(relay.emit), leased(relay.exists)
+    ledger._append_unlocked = leased(ledger._append_unlocked)
+    cursors.set = leased(cursors.set)
+    class Client:
+        def list_message_ids(self, q):
+            return ["synthetic"]
+        def get_message(self, identifier):
+            return _msg(identifier, 1600000000000)
+    result = poll_account_rule(client=Client(), rule=_rule(), account_id="acct-1", ledger=ledger,
+        cursors=cursors, files_writer=files, relay_emitter=relay,
+        still_allowed=lambda: None, mutation_scope=scope)
+    assert result.processed == 1 and result.cursor == 1600000000 and held[0] == 0
+
+
 def _visible_directive_count(relay):
     return len(relay.visible)
 

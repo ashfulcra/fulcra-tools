@@ -12,11 +12,10 @@
  *   --fa-purple-2    #9b7cff   (purple hover/link)
  *   --fa-edge        #e4ebf3   (hairline borders)
  *
- * Fonts: Rubik for UI; Noto Sans Mono for code/url tags (matching the
- * live site's heading + code stack).
+ * Fonts: locally installed Rubik / Noto Sans Mono with platform fallbacks.
+ * No remote font or stylesheet dependency.
  */
 
-@import url("https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
 
 :root {
   color-scheme: light;

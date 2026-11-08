@@ -150,8 +150,13 @@ class _RetryingClient:
         ``_refresh_failed`` flag is already set.
         """
         from . import credentials as _creds
+        from httpx import Headers
 
-        fresh = _creds.refresh_fulcra_access_token()
+        headers = Headers(self._inner.headers)
+        headers.update(kwargs.get("headers") or {})
+        authorization = headers.get("Authorization", "")
+        expected = authorization[7:] if authorization.lower().startswith("bearer ") else ""
+        fresh = _creds.refresh_fulcra_access_token(expected_token=expected)
         if not fresh:
             return None
         self._inner.headers["Authorization"] = f"Bearer {fresh}"
@@ -417,12 +422,14 @@ def build_app(daemon) -> FastAPI:
         menubar,
         oauth,
         plugins,
+        record_destinations,
         status as status_routes,
     )
     for module in (
         status_routes,
         plugins,
         definitions,
+        record_destinations,
         fulcra_auth,
         oauth,
         activity,

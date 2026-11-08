@@ -25,3 +25,11 @@ def test_some_pinned_returns_only_pinned():
     )
     assert state == "list"
     assert [d["id"] for d in defs] == ["a", "c"]
+
+
+def test_group_labels_preserve_known_and_unknown_types():
+    from fulcra_menubar.popover.quick_record import _group_label
+    assert _group_label("moment") == "Moments"
+    assert _group_label("duration") == "Durations"
+    assert _group_label("custom_type") == "Custom_Type"
+    assert _group_label("") == "Other"

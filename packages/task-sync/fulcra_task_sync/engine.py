@@ -31,13 +31,32 @@ class SyncResult:
     partial: bool = False
 
 
-def _bounded(iterable, maximum):
+def _bounded(iterable, maximum, guard=lambda: None):
+    guard()
+    # Exact built-ins are already materialized and iteration performs no I/O.
+    # Keep fresh consent at both boundaries without a keychain lookup per row.
+    # Subclasses and lazy/custom iterables retain checks around every next().
+    if type(iterable) in (list, tuple):
+        if len(iterable) > maximum:
+            raise SyncConflict('snapshot cap')
+        result = list(iterable)
+        guard()
+        if len(result) > maximum:
+            raise SyncConflict('snapshot cap')
+        return result
     result = []
-    for value in iterable:
+    iterator = iter(iterable)
+    while True:
+        guard()
+        try:
+            value = next(iterator)
+        except StopIteration:
+            guard()
+            return result
+        guard()
         if len(result) >= maximum:
             raise SyncConflict('snapshot cap')
         result.append(value)
-    return result
 
 
 def _valid_task(task):
@@ -67,7 +86,7 @@ def run_sync(provider, selected_ids, vault, load_state, save_state, *, dry_run=F
     def guard(collection_id=None):
         if time.monotonic() >= deadline:
             raise _Stopped('deadline')
-        if not dry_run and still_selected and set(still_selected()) != selected:
+        if still_selected and set(still_selected()) != selected:
             raise _Stopped('selection changed')
         if collection_id is not None and collection_id not in selected:
             raise _Stopped('selection changed')
@@ -76,21 +95,25 @@ def run_sync(provider, selected_ids, vault, load_state, save_state, *, dry_run=F
         guard()
         # Provider implementations must themselves bound blocking calls. Materialize
         # the entire snapshot before any source, file or checkpoint mutation.
-        collections = _bounded(provider.collections(), MAX_TASKS)
+        collections = _bounded(provider.collections(), MAX_TASKS, guard)
         allowed = {c.id for c in collections if c.writable}
         if not selected <= allowed:
             raise SyncConflict('selected collection unavailable or read-only')
-        tasks = _bounded(provider.tasks(selected), MAX_TASKS)
+        tasks = _bounded(provider.tasks(selected), MAX_TASKS, guard)
         snapshot = {}
         for task in tasks:
             _valid_task(task)
             if task.id in snapshot or task.collection_id not in selected:
                 raise SyncConflict('invalid source snapshot')
             snapshot[task.id] = task
+        guard()
         namespace = getattr(provider, 'namespace', None)
-        if not isinstance(namespace, str) or not namespace or not vault.namespace:
+        guard()
+        destination_namespace = vault.namespace
+        guard()
+        if not isinstance(namespace, str) or not namespace or not destination_namespace:
             raise SyncConflict('account identity missing')
-        store = StateStore([vault.namespace, namespace, provider.name],
+        store = StateStore([destination_namespace, namespace, provider.name],
                            [sorted(selected), selection_epoch], load_state, save_state,
                            guard, dry_run=dry_run)
         ids = sorted(set(snapshot) | set(store.ids))
@@ -161,7 +184,8 @@ def _baseline(task):
 
 def _sync_task(provider, vault, task, previous, store, guard, result, dry_run, mutation_scope):
     path = task_path(provider.name, task.id)
-    versions = _bounded(vault.versions(path), MAX_VERSIONS)
+    guard(task.collection_id)
+    versions = _bounded(vault.versions(path), MAX_VERSIONS, guard)
     if len(set(versions)) != len(versions) or any(not isinstance(v, str) or not v
             or len(v.encode()) > MAX_VERSION_BYTES for v in versions):
         raise SyncConflict('invalid versions')
@@ -220,6 +244,7 @@ def _sync_task(provider, vault, task, previous, store, guard, result, dry_run, m
         else:
             if len(seen | set(versions)) >= MAX_VERSIONS or len(trusted) >= MAX_VERSIONS:
                 raise SyncConflict('no checkpoint capacity for completion')
+            guard(task.collection_id)
             fresh = provider.get_task(task.id)
             if fresh is None:
                 raise SyncConflict('source disappeared')
@@ -242,7 +267,9 @@ def _sync_task(provider, vault, task, previous, store, guard, result, dry_run, m
             with mutation_scope():
                 guard(fresh.collection_id)
                 provider.complete(fresh.id, fresh.revision, fresh.collection_id)
+            guard(fresh.collection_id)
             confirmed = provider.get_task(fresh.id)
+            guard(fresh.collection_id)
             if (confirmed is None or not confirmed.completed or confirmed.id != fresh.id
                     or confirmed.collection_id != fresh.collection_id):
                 raise SyncConflict('completion unconfirmed')

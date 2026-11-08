@@ -1,32 +1,12 @@
-"""Preferences → Annotations tab — manage annotation definitions.
+"""Preferences: protocol2 account-scoped track pins and legacy track management.
 
-Mirrors the web UI's /?route=settings page in scope:
-
-  - Bulk favorites: a per-row NSSwitch toggles the def's pinned-in-
-    quick-record status. Edits write through the existing
-    set_quick_record_favorites UDS command. We read the live favorites
-    set inside the toggle handler so concurrent edits from the popover
-    star or the web UI don't get clobbered by stale state.
-  - Per-row soft-delete: a Delete button on each row triggers an
-    NSAlert confirmation, then calls DaemonClient.delete_definition
-    (SP2 task 2). On success we remove the row from the inner view
-    immediately so the user gets visual feedback; the daemon's quick-
-    record cache is busted server-side so the next list call won't
-    resurrect it.
-
-Created as part of SP2 (drift audit 2026-05-27). Q1 answer:
-"New Preferences tab + per-row '…'" — this tab is the bulk view; the
-popover quick-record '…' menu (SP2 task 4) is the per-row affordance.
-Q4 answer: simple NSAlert confirmation (no two-step undo).
-
-Layout note: the sibling tabs use _TAB_H = 440 (the NSTabView in
-window.py is HEIGHT-22 = 458pt tall; 440 is the historical content
-height). We match that here rather than the 480 in the original plan
-draft so spacing reads consistent across tabs.
+One complete handshake supplies choices, account/epoch and favorite revision.
+Pin changes are additive CAS diffs off the UI thread, with explicit logical
+response checks. Definition deletion remains a separate legacy management action.
 """
 from __future__ import annotations
 
-import logging
+from threading import Thread
 from typing import Any
 
 from AppKit import (  # type: ignore[import-not-found]
@@ -42,11 +22,13 @@ from AppKit import (  # type: ignore[import-not-found]
 )
 
 from .._definition_delete import show_delete_alert
-from .._objc_targets import attach as _attach
+from .._dispatch import on_main_thread
+from ..quick_record_client import native_client
+from .._refresh_view import refresh_view
+from .._objc_targets import attach as _attach, detach_view
 from ..daemon_client import DaemonClient
 from ..theme import colors, typography
 
-_log = logging.getLogger("fulcra_menubar.preferences.annotations")
 
 _TAB_W = 640.0
 _TAB_H = 440.0
@@ -71,7 +53,7 @@ def make_annotations_tab(*, client: DaemonClient) -> NSView:
         client: DaemonClient used to fetch definitions + favorites and
             to call delete_definition.
     """
-    view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, _TAB_W, _TAB_H))
+    view = refresh_view(NSMakeRect(0, 0, _TAB_W, _TAB_H))
     # Paint the root view white so dark-mode system chrome can't bleed
     # through a transparent container — same fix applied to sibling tabs.
     view.setWantsLayer_(True)
@@ -106,51 +88,59 @@ def make_annotations_tab(*, client: DaemonClient) -> NSView:
     scroll.setBorderType_(0)
     scroll.setDrawsBackground_(False)
 
-    # Pull fresh data each time the tab is built. quick_record_list
-    # returns {"definitions": [...]}, get_quick_record_favorites returns
-    # {"ok": True, "favorites": [def_id, ...]}.
-    try:
-        defs_reply = client.quick_record_list()
-    except Exception as exc:  # daemon-unavailable / socket error
-        _log.warning("quick_record_list failed: %s", exc)
-        defs_reply = {"definitions": []}
-    try:
-        favs_reply = client.get_quick_record_favorites()
-    except Exception as exc:
-        _log.warning("get_quick_record_favorites failed: %s", exc)
-        favs_reply = {"favorites": []}
-
-    defs = list((defs_reply or {}).get("definitions", []) or [])
-    favs = set((favs_reply or {}).get("favorites", []) or [])
-
-    inner_h = max(len(defs) * _ROW_H + 8.0, SCROLL_H)
-    inner = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, _TAB_W, inner_h))
-    inner.setWantsLayer_(True)
-    inner.layer().setBackgroundColor_(colors.bg().CGColor())
-
-    # Render rows top-down (high y first, then descend by _ROW_H).
-    y = inner_h - _ROW_H
-    for d in defs:
-        def_id = d.get("id", "")
-        if not def_id:
-            continue
-        row = _make_def_row(d, favs, client, y_in_inner=y)
-        inner.addSubview_(row)
-        y -= _ROW_H
-
-    # Empty-state hint when there are no defs (e.g., brand-new account).
-    if not defs:
-        empty = NSTextField.labelWithString_(
-            "No annotation definitions yet. Create one from Quick Record "
-            "in the popover, or in the Fulcra web UI."
-        )
-        empty.setFont_(typography.small())
-        empty.setTextColor_(colors.text_tertiary())
-        empty.setFrame_(NSMakeRect(16, inner_h - 40, _TAB_W - 32, 18))
-        inner.addSubview_(empty)
-
+    inner = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, _TAB_W, SCROLL_H))
     scroll.setDocumentView_(inner)
     view.addSubview_(scroll)
+    feedback = NSTextField.labelWithString_("Loading tracks…")
+    feedback.setFont_(typography.small())
+    feedback.setFrame_(NSMakeRect(16, 0, _TAB_W - 32, 20))
+    view.addSubview_(feedback)
+    state = {"workflow": None, "loading": False, "generation": 0, "refresh_pending": False}
+
+    def refresh(error=False):
+        state["generation"] += 1
+        if state["loading"]:
+            state["refresh_pending"] = True
+            return
+        state["loading"] = True
+        generation = state["generation"]
+        feedback.setStringValue_("Pin change failed; refreshing before retry." if error else "Loading tracks…")
+        def load():
+            try:
+                if state["workflow"] is None:
+                    state["workflow"] = native_client(client)
+                snapshot, failed = state["workflow"].bootstrap(), False
+            except Exception:
+                snapshot, failed = None, True
+            @on_main_thread
+            def apply():
+                state["loading"] = False
+                if generation != state["generation"] or state["refresh_pending"]:
+                    state["refresh_pending"] = False
+                    refresh(error)
+                    return
+                for child in list(inner.subviews()):
+                    detach_view(child)
+                    child.removeFromSuperview()
+                if failed:
+                    feedback.setStringValue_("Could not load tracks. Reopen Preferences or reconnect in Collect.")
+                    return
+                definitions = snapshot["definitions"]
+                inner_h = max(len(definitions) * _ROW_H + 8.0, SCROLL_H)
+                inner.setFrame_(NSMakeRect(0, 0, _TAB_W, inner_h))
+                y = inner_h - _ROW_H
+                for definition in definitions:
+                    row = _make_def_row(definition, set(snapshot["favorites"]), client,
+                        workflow=state["workflow"], snapshot=snapshot, on_changed=refresh, y_in_inner=y)
+                    inner.addSubview_(row)
+                    y -= _ROW_H
+                feedback.setStringValue_("Pin change failed; review the refreshed tracks before retrying." if error
+                    else "" if definitions else "No moment or duration tracks yet. Create one in Fulcra.")
+            apply()
+        Thread(target=load, daemon=True, name="collect-favorite-choices").start()
+
+    view._refresh_callback = refresh
+    refresh()
     return view
 
 
@@ -160,6 +150,7 @@ def _make_def_row(
     client: DaemonClient,
     *,
     y_in_inner: float,
+    workflow, snapshot, on_changed,
 ) -> NSView:
     """Build a single row in the Annotations list.
 
@@ -204,31 +195,22 @@ def _make_def_row(
     fav_switch.setState_(1 if pinned else 0)
 
     def on_pin_toggle(sender):
-        # Read current favorites with NO empty-set fallback — a transient
-        # daemon hiccup must not result in writing an empty / singleton
-        # list over the user's real favorites. Same orphan-state hazard
-        # as feedback_account_switch_caches.md: stale/empty state from a
-        # failed read getting written back authoritatively.
-        try:
-            cur = client.get_quick_record_favorites() or {}
-        except Exception as exc:
-            _log.warning(
-                "favorites read failed during pin toggle (%s): %s; "
-                "reverting switch, not writing.",
-                def_id, exc,
-            )
-            sender.setState_(0 if sender.state() else 1)
-            return
-        favs_now = set(cur.get("favorites", []) or [])
-        if sender.state():
-            favs_now.add(def_id)
-        else:
-            favs_now.discard(def_id)
-        try:
-            client.set_quick_record_favorites(list(favs_now))
-        except Exception as exc:
-            _log.warning("set_quick_record_favorites failed (%s): %s", def_id, exc)
-            sender.setState_(0 if sender.state() else 1)
+        desired = bool(sender.state())
+        sender.setEnabled_(False)
+        def save():
+            try:
+                workflow.change_pin(def_id, pinned=desired, view=snapshot)
+                failed = False
+            except Exception:
+                failed = True
+            @on_main_thread
+            def finish():
+                if failed:
+                    sender.setState_(1 if pinned else 0)
+                sender.setEnabled_(True)
+                on_changed(failed)
+            finish()
+        Thread(target=save, daemon=True, name="collect-favorite-change").start()
 
     _attach(fav_switch, on_pin_toggle)
     row.addSubview_(fav_switch)
@@ -259,8 +241,10 @@ def _make_def_row(
             # row have LOWER y values, and closing the gap means
             # shifting them UP — which in unflipped Cocoa coords means
             # ADDING _ROW_H to their y origin.
+            on_changed()
             parent = row.superview()
             my_y = row.frame().origin.y
+            detach_view(row)
             row.removeFromSuperview()
             if parent is not None:
                 for sibling in list(parent.subviews()):

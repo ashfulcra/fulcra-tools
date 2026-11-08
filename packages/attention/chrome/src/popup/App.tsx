@@ -8,6 +8,8 @@ import { PauseControl } from "./PauseControl";
 import { HeartbeatToggle } from "./HeartbeatToggle";
 import { Banner } from "./Banner";
 import { CategoryEditor } from "./CategoryEditor";
+import {v1HeldMode} from "../relayless/v1AuthClient";
+import {loadCaptureStatus,type CaptureStatus} from "../storage";
 import { loadSettings } from "../storage";
 
 import markUrl from "../assets/fulcra-mark.png";
@@ -23,14 +25,24 @@ function openWizard() {
   void chrome.tabs.create({ url: chrome.runtime.getURL("wizard.html") });
 }
 
+function HeldCaptureStatus(){
+ const [status,setStatus]=useState<CaptureStatus|null>(null),[unknown,setUnknown]=useState(false);
+ useEffect(()=>{let stopped=false;void loadCaptureStatus().then(value=>{if(!stopped)setStatus(value);}).catch(()=>{if(!stopped)setUnknown(true);});return ()=>{stopped=true;};},[]);
+ return <div role="status" className="section"><h2>Capture held locally</h2><p>Both drains are disabled. No upload is confirmed.</p>{unknown?<p>Retention UNKNOWN; preserve active input.</p>:status?<p>{status.retained} locally retained: {status.held} held, {status.active} active, {status.prepared} awaiting journal acknowledgement, {status.enqueued} journal-verified pending.{status.legacyObservation!=='complete'?' Legacy observation is incomplete.':''}</p>:<p>Loading retention status…</p>}</div>;
+}
 export function App() {
+  const [heldMode,setHeldMode]=useState<boolean|null>(null);
+  const [settingsHeld,setSettingsHeld]=useState(false);
   const [onboarded, setOnboarded] = useState<boolean | null>(null);
 
   useEffect(() => {
-    void loadSettings().then((s) => {
-      setOnboarded(s.onboarded);
-    });
+    void Promise.all([loadSettings(),v1HeldMode()]).then(([s,held]) => {
+      setHeldMode(held);setOnboarded(s.onboarded);
+    }).catch(()=>setSettingsHeld(true));
   }, []);
+
+  if(settingsHeld)return <div role="alert">Attention held: settings are unavailable.</div>;
+  if(onboarded===null)return <div role="status">Loading settings…</div>;
 
   // First-run prompt: until the wizard has been completed, show a
   // single-purpose card that does the bare-minimum (open the wizard
@@ -66,11 +78,10 @@ export function App() {
         <h1>Fulcra Attention</h1>
         <span className="sub">v0.1</span>
       </header>
-      <Banner />
+      {heldMode?<HeldCaptureStatus/>:<Banner />}
       <SignIn />
       <PauseControl />
-      <Counts />
-      <LiveStream />
+      {!heldMode&&<><Counts /><LiveStream /></>}
       <CategoryEditor />
       <IgnoreList />
       <HeartbeatToggle />

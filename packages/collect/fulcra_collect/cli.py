@@ -9,6 +9,9 @@ import json
 import logging
 import os
 import shutil
+import signal
+import threading
+from contextlib import contextmanager
 import sys
 
 import click
@@ -17,6 +20,7 @@ from . import config as config_mod
 from . import credentials, registry, ssl_bootstrap, worker
 from .control import send_request
 from .daemon import Daemon
+from .daemon_lease import DaemonAlreadyRunning, DaemonLeaseUnavailable
 from .plugin import validate_setting_value
 
 
@@ -70,8 +74,26 @@ def _stderr_is_a_tty() -> bool:
     return sys.stderr.isatty()
 
 
+@contextmanager
+def _daemon_termination():
+    """Make launchd SIGTERM unwind owned daemon resources, then restore it."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def stop(signum, frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 @cli.command()
-def daemon() -> None:
+@click.option("--no-menubar", is_flag=True,
+              help="Skip native menubar auto-launch; other daemon startup is unchanged.")
+def daemon(no_menubar: bool) -> None:
     """Run the hub core in the foreground (the launchd/systemd entrypoint)."""
     _configure_logging()
     # When launched interactively (not under launchd), print a one-line hint
@@ -86,7 +108,15 @@ def daemon() -> None:
             "~/Library/LaunchAgents/com.fulcra.collect.plist`.",
             err=True,
         )
-    Daemon().serve()
+    try:
+        with _daemon_termination():
+            Daemon(launch_menubar=not no_menubar).serve()
+    except DaemonAlreadyRunning:
+        click.echo("daemon startup refused: profile lease busy", err=True)
+        raise click.exceptions.Exit(75) from None
+    except DaemonLeaseUnavailable:
+        click.echo("daemon startup refused: profile lease unavailable", err=True)
+        raise click.exceptions.Exit(1) from None
 
 
 @cli.command()
@@ -118,9 +148,14 @@ def status() -> None:
 
 @cli.command()
 @click.argument("plugin_id")
-def run(plugin_id: str) -> None:
+@click.option("--timeout-seconds", type=click.IntRange(1, 7200), default=None,
+              help="Bound this manual run (maximum two hours); scheduled runs retain their normal budget.")
+def run(plugin_id: str, timeout_seconds: int | None) -> None:
     """Trigger one run of a plugin now."""
-    reply = send_request(_socket_path(), {"cmd": "run", "plugin": plugin_id})
+    request = {"cmd": "run", "plugin": plugin_id}
+    if timeout_seconds is not None:
+        request["timeout_s"] = timeout_seconds
+    reply = send_request(_socket_path(), request)
     if not reply.get("ok"):
         raise click.ClickException(reply.get("error", "run failed"))
     click.echo(f"triggered: {plugin_id}")
@@ -306,6 +341,12 @@ def set_setting(plugin_id: str, key: str, value: str) -> None:
 def set_credential(plugin_id: str, key: str) -> None:
     """Store a plugin secret in the OS keychain (prompts, hidden input)."""
     value = click.prompt(f"{plugin_id}/{key}", hide_input=True)
+    if plugin_id == "trakt":
+        from .trakt_source import Owner, KeychainStore
+        result = Owner(KeychainStore()).edit(key, value)
+        suffix = "" if result['ready'] else " (stored; source incomplete)"
+        click.echo(f"stored {plugin_id}/{key}{suffix}")
+        return
     config_mod.invalidate_plugin_work(plugin_id)
     credentials.set_secret(plugin_id, key, value)
     click.echo(f"stored {plugin_id}/{key}")
@@ -324,8 +365,9 @@ def _worker(plugin_id: str) -> None:
 
 @cli.command()
 def doctor() -> None:
-    """Run a pre-flight diagnostic — checks the ten things that most often
-    go wrong during first-run onboarding and prints OK / WARN / FAIL for each.
+    """Check installation, auth and liveness with explicit coverage limits.
+
+    Prints OK / WARN / FAIL for each diagnostic row.
 
     Exits 0 when there are no FAILs, 1 otherwise. Output is copy/pasteable
     into a bug report or support thread.
@@ -474,54 +516,10 @@ def doctor() -> None:
         _row("Fulcra data liveness (last hour)", "FAIL",
              "skipped — data-updates unavailable (see above)")
 
-    # ── 5b. Typed-ingest schema drift (wire shape vs served schema) ──────────
-    # The typed endpoint (POST /ingest/v1/record/{type}) silently strips keys
-    # not in the served schema and defaults missing ones (live-verified
-    # 2026-07-08), so a drift between what wire.build_typed_record emits and
-    # what /data/v1/catalog serves loses data WITHOUT ever erroring. Fetch the
-    # served Moment + Numeric schemas and check a canned wire sample of each.
-    # Feature-detect: a 404/absent catalog endpoint is a WARN (older API),
-    # never a FAIL; signed-out is a WARN like the liveness row above.
-    if signed_in is False:
-        _row("typed-ingest schema drift", "WARN",
-             "skipped — not signed in (fix: fulcra auth login; "
-             "see 'fulcra CLI reachable' above)")
-    else:
-        from datetime import UTC, datetime
-
-        from fulcra_common import wire
-        from fulcra_common.client import BaseFulcraClient
-        from fulcra_common.schema_check import (
-            check_payload_against_schema,
-            fetch_record_schema,
-        )
-
-        _sample_ts = datetime(2026, 1, 1, tzinfo=UTC)
-        _samples = {
-            "MomentAnnotation": wire.build_typed_record(
-                base_type="MomentAnnotation", start_time=_sample_ts,
-                note="doctor probe", source_id="com.fulcra.doctor.probe",
-                definition_id="doctor-probe-def", tags=["doctor"]),
-            "NumericAnnotation": wire.build_typed_record(
-                base_type="NumericAnnotation", start_time=_sample_ts,
-                source_id="com.fulcra.doctor.probe", value=1.0, unit="count"),
-        }
-        try:
-            client = BaseFulcraClient()
-            problems: list[str] = []
-            for base_type, sample in _samples.items():
-                schema = fetch_record_schema(client, base_type)
-                problems.extend(
-                    f"{base_type}: {p}"
-                    for p in check_payload_against_schema(sample, schema))
-            if problems:
-                _row("typed-ingest schema drift", "FAIL", "; ".join(problems))
-            else:
-                _row("typed-ingest schema drift", "OK",
-                     "wire shape matches served schema")
-        except Exception as exc:  # noqa: BLE001 — 404/network/auth: feature-detect
-            _row("typed-ingest schema drift", "WARN",
-                 f"typed-ingest schema endpoint unavailable: {exc}")
+    # ── 5b. V1 destination coverage (static diagnostic limit) ───────────────
+    _row("V1 destination validation", "WARN",
+         "not checked by doctor; configured writers own schema validation "
+         "and delivery readback")
 
     # ── 6. Daemon control socket reachable ───────────────────────────────────
     sock = config_mod.config_dir() / "control.sock"

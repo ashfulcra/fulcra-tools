@@ -14,6 +14,16 @@ to collect. A unique module name on the tests dir's sys.path avoids that.
 """
 from __future__ import annotations
 
+import base64
+import json
+
+
+def synthetic_account_token(account="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", *, exp=4102444800, marker="synthetic"):
+    """Unsigned principal/expiry fixture, never an authentic bearer token."""
+    payload = base64.urlsafe_b64encode(json.dumps({"fulcradynamics.com/userid": account,
+        "exp": exp, "test_marker": marker}).encode()).decode().rstrip("=")
+    return "synthetic." + payload + ".signature"
+
 
 class FakeHttpxResponse:
     """Minimal stand-in for ``httpx.Response``: a fixed JSON body, a settable

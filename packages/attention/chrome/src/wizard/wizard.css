@@ -1,7 +1,6 @@
 /* Wizard — full-tab page with the same fulcra.ai-on-white palette as
  * the popup and options. Sized for a comfortable desktop reading column. */
 
-@import url("https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
 
 :root {
   color-scheme: light;

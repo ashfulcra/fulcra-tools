@@ -26,6 +26,7 @@ addopts = "--import-mode=importlib"
 # pytest fixtures).  Module names are package-prefixed to avoid sys.path
 # shadowing between packages.  Only packages that have helper modules listed.
 pythonpath = [
+    ".",
     "packages/collect/tests",
     "packages/apple-notes/tests/helpers",
     "packages/coord-engine/tests",
@@ -35,4 +36,5 @@ pythonpath = [
     "packages/fde-engine/tests",
     "packages/labs/tests",
     "packages/media-helpers/tests",
+    "packages/menubar/tests",
 ]

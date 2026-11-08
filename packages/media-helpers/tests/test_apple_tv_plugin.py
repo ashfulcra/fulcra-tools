@@ -156,7 +156,7 @@ class _FakeResult:
 
 
 class _FakeClient:
-    def __init__(self):
+    def __init__(self, **_kwargs):
         self.calls = {}
 
     def ensure_tag(self, name, state):
@@ -170,7 +170,7 @@ class _FakeClient:
 def test_plugin_run_parses_cache_and_imports(monkeypatch, tmp_path):
     fake_client = _FakeClient()
     monkeypatch.setattr("fulcra_media.plugins.apple_tv.FulcraClient",
-                        lambda: fake_client)
+                        lambda **_kwargs: fake_client)
     monkeypatch.setattr("fulcra_media.plugins.apple_tv._state_load",
                         lambda path: _bootstrapped_media_state())
     monkeypatch.setattr(
@@ -178,10 +178,9 @@ def test_plugin_run_parses_cache_and_imports(monkeypatch, tmp_path):
         lambda cache_dir: ["ev-apple-tv"])
 
     ctx = _make_ctx({"cache_dir": str(tmp_path)})
-    APPLE_TV_PLUGIN.run(ctx)
+    APPLE_TV_PLUGIN.run.__wrapped__(ctx)
 
     assert fake_client.calls["imported"] == ["ev-apple-tv"]
-    assert fake_client.calls["ensure_tag"] == "apple-tv"
 
 
 def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
@@ -196,8 +195,26 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     monkeypatch.setattr(
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
-    with pytest.raises(RuntimeError, match="Full Disk Access"):
-        APPLE_TV_PLUGIN.run(_make_ctx({}))
+    with pytest.raises(RuntimeError, match="Full Disk Access") as caught:
+        APPLE_TV_PLUGIN.run.__wrapped__(_make_ctx({}))
+    assert 'Fulcra Collect' in str(caught.value)
+    assert 'uv cpython' not in str(caught.value)
+
+
+def test_snapshot_timeout_producer_names_app_and_preserves_io_uncertainty(tmp_path, monkeypatch):
+    from fulcra_media.importers import apple_tv
+    import subprocess
+    (tmp_path / 'Cache.db').write_bytes(b'synthetic')
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+    monkeypatch.setattr(apple_tv.subprocess, 'run', timeout)
+    with pytest.raises(apple_tv.SnapshotError) as caught:
+        apple_tv._snapshot_db(tmp_path)
+    message = str(caught.value)
+    assert 'Fulcra Collect' in message
+    assert 'I/O' in message
+    assert 'uv cpython' not in message
+    assert 'lacks Full Disk Access' not in message
 
 
 def test_snapshot_timeout_is_fast_fail():

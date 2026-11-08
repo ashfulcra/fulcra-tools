@@ -70,6 +70,15 @@ class PreferencesController(NSWindowController):
     instead (see ``make_preferences_controller``).
     """
 
+    def refresh_annotations(self):
+        view = getattr(self, "_annotations_view", None)
+        if view is not None:
+            view.refresh()
+
+    def tabView_didSelectTabViewItem_(self, tabs, item):
+        if item.identifier() == "Annotations":
+            self.refresh_annotations()
+
     def select_tab(self, name):
         """Select the tab with the given name (no-op for unknown/None).
 
@@ -138,4 +147,6 @@ def make_preferences_controller(
 
     controller = PreferencesController.alloc().initWithWindow_(window)
     controller._tabs = tabs  # plain attribute; used by select_tab
+    controller._annotations_view = annotations_view
+    tabs.setDelegate_(controller)
     return controller

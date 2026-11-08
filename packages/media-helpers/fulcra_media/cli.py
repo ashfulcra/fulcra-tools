@@ -10,7 +10,6 @@ import httpx
 
 from . import state as state_mod
 from .cli_common import safe_exc_message
-from .fulcra import FulcraClient
 from .importers import netflix as netflix_importer
 from .wizards.netflix import walkthrough as netflix_walkthrough
 from .wizards.trakt import walkthrough as trakt_walkthrough
@@ -43,82 +42,37 @@ def cli(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-@cli.command(help="Create the Watched / Listened / Read annotation defs.")
-def bootstrap() -> None:
-    s = state_mod.load(STATE_PATH)
-    client = FulcraClient()
-    client.ensure_definitions(s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"watched={s.watched_definition_id} "
-        f"listened={s.listened_definition_id} "
-        f"read={s.read_definition_id}"
-    )
+@cli.command(help="Configure v1 media targets; retained legacy IDs require explicit Event/UUID mappings.")
+@click.option('--watched', default=None, metavar='Event/UUID')
+@click.option('--listened', default=None, metavar='Event/UUID')
+@click.option('--read', 'read_pin', default=None, metavar='Event/UUID')
+def bootstrap(watched, listened, read_pin) -> None:
+    from .media_config import configured_media
+    try:
+        with configured_media(STATE_PATH, bootstrap=True,
+                pins={'watched': watched, 'listened': listened, 'read': read_pin}) as run:
+            click.echo('v1 media configured for account=' + run.session.account_id)
+    except Exception as exc:
+        raise click.UsageError(safe_exc_message(exc)) from None
 
 
-@cli.command(help=(
-    "Soft-delete Watched and Listened defs and clear local state. "
-    "Events under the deleted defs stay visible in queries (Fulcra has no "
-    "per-event delete); the next bootstrap creates new defs whose UUIDs "
-    "naturally namespace fresh imports."
-))
-@click.option("--confirm", is_flag=True, required=False,
-              help="Required. Confirms you understand orphaned events stay visible.")
-@click.option("--keep-watched", is_flag=True, help="Don't soft-delete the Watched def.")
-@click.option("--keep-listened", is_flag=True, help="Don't soft-delete the Listened def.")
-@click.option("--keep-read", is_flag=True, help="Don't soft-delete the Read def.")
-def reset(confirm: bool, keep_watched: bool, keep_listened: bool,
-          keep_read: bool) -> None:
-    if not confirm:
-        raise click.UsageError(
-            "Pass --confirm. This soft-deletes the annotation definitions; "
-            "previously-ingested events stay visible in queries (Fulcra has no "
-            "per-event delete). To do a clean re-import, run `reset` then "
-            "`bootstrap` — the new defs get fresh UUIDs that namespace future "
-            "events apart from the orphaned ones."
-        )
-    s = state_mod.load(STATE_PATH)
-    client = FulcraClient()
-    deleted: list[str] = []
-    if s.watched_definition_id and not keep_watched:
-        if client.soft_delete_definition(s.watched_definition_id):
-            deleted.append(f"watched={s.watched_definition_id}")
-        s.watched_definition_id = None
-    if s.listened_definition_id and not keep_listened:
-        if client.soft_delete_definition(s.listened_definition_id):
-            deleted.append(f"listened={s.listened_definition_id}")
-        s.listened_definition_id = None
-    if s.read_definition_id and not keep_read:
-        if client.soft_delete_definition(s.read_definition_id):
-            deleted.append(f"read={s.read_definition_id}")
-        s.read_definition_id = None
-    # Watermarks are now meaningless; tag IDs survive (tags weren't deleted).
-    s.watermarks = {}
-    state_mod.save(s, STATE_PATH)
-    from . import twin_cache
-    twin_cache.clear()
-    click.echo("soft-deleted: " + (", ".join(deleted) or "(nothing — defs were absent)"))
-    click.echo("state cleared (including twin cache). Run `bootstrap` to create fresh definitions.")
+@cli.command(help="Retired. Preserve evidence; use bootstrap with explicit v1 mappings.")
+@click.option('--confirm', is_flag=True)
+@click.option('--keep-watched', is_flag=True)
+@click.option('--keep-listened', is_flag=True)
+@click.option('--keep-read', is_flag=True)
+def reset(confirm, keep_watched, keep_listened, keep_read) -> None:
+    raise click.UsageError('reset is retired; original data and evidence are preserved. '
+                           'Use fulcra-media bootstrap with explicit v1 Event/UUID mappings.')
 
 
 cli.add_command(setup_command, name="setup")
 
 
-@cli.command(help="Print the cached state.json contents.")
+@cli.command(help="Print cached v1 authority and retained legacy selections; no live verification.")
 def status() -> None:
-    s = state_mod.load(STATE_PATH)
-    click.echo(json.dumps(
-        {
-            "watched_definition_id": s.watched_definition_id,
-            "listened_definition_id": s.listened_definition_id,
-            "read_definition_id": s.read_definition_id,
-            "tag_ids": s.tag_ids,
-            "watermarks": s.watermarks,
-            "state_path": str(STATE_PATH),
-        },
-        indent=2,
-        sort_keys=True,
-    ))
+    from .media_config import cached_status
+    click.echo(json.dumps(cached_status(STATE_PATH), sort_keys=True))
 
 
 @cli.group(help="Interactive walkthroughs for requesting source data.")
@@ -155,23 +109,21 @@ wizard.add_command(jellyfin_walkthrough, name="jellyfin")
 @click.option("--json", "json_mode", is_flag=True, help="Single-line JSON output.")
 def import_netflix(path: str, check_only: bool, json_mode: bool) -> None:
     """Import a Netflix slim-variant CSV (local path or fulcra:/... URI)."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
-    resolved = resolve_or_emit("netflix", path, json_mode=json_mode)
-    if resolved is None:
-        return
-    s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id:
-        emit_result(
-            ImportEnvelope(
-                importer="netflix", ok=False,
-                errors=[{"stage": "setup", "message": "Run `fulcra-media bootstrap` first."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-    events = list(netflix_importer.parse_auto(resolved))
-    run_and_emit("netflix", events, s,
-                 tag_name="netflix", check_only=check_only, json_mode=json_mode)
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
+    from . import library
+    run = result = None
+    try:
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            resolved = Path(library.resolve(path))
+            events = list(netflix_importer.parse_auto(resolved))
+            result = run.import_events(events)
+        envelope = import_result_to_dict('netflix', result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope('netflix', stage='import', message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("trakt")
@@ -179,120 +131,120 @@ def import_netflix(path: str, check_only: bool, json_mode: bool) -> None:
               help="Mark >=N items sharing watched_at as timestamp_confidence: low")
 @click.option("--clusters", "cluster_spec", default=None, metavar="POLICY",
               help="Cluster handling: 'drop', 'sentinel:YYYY', 'keep', or 'ask'. "
-                   "Default 'ask' on TTY, errors otherwise.")
+                   "Omitted: ask on TTY; require a choice only when clusters exist otherwise.")
 @click.option("--check-only", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
 @click.option("--twin-policy",
               type=click.Choice(["ask", "auto-discard", "keep"]),
               default=None,
-              help="When a Trakt low-conf event has a high-conf twin in the local "
-                   "cache (same content_fingerprint, previously imported): "
-                   "ask (TTY default), auto-discard, or keep. "
-                   "Errors non-interactively without an explicit choice.")
+              help="Loose content twins from current input or verified owned records: "
+                   "ask (TTY default), auto-discard, or keep. Omitted JSON/non-TTY "
+                   "keeps and warns when candidates exist. Explicit ask requires a TTY without JSON.")
 def import_trakt(cluster_threshold: int, cluster_spec: str | None,
                  check_only: bool, json_mode: bool,
                  twin_policy: str | None) -> None:
     """Import Trakt watch history via the Trakt API."""
     from fulcra_csv import apply_cluster_policy
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
     from .importers import trakt as trakt_importer
-    s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id:
-        emit_result(
-            ImportEnvelope(importer="trakt", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
+
+    run = result = None
+    stage = "args"
+    interactive = not json_mode and click.get_text_stream("stdin").isatty()
     try:
-        items = list(trakt_importer.fetch_history())
-    except (RuntimeError, httpx.HTTPError) as exc:
-        emit_result(
-            ImportEnvelope(importer="trakt", ok=False,
-                           errors=[{"stage": "fetch", "message": safe_exc_message(exc)}]),
-            json_mode=json_mode,
-        )
+        _validate_cluster_spec(cluster_spec, cluster_threshold)
+        if not interactive and (twin_policy == "ask" or cluster_spec == "ask"):
+            raise ValueError("interactive choice requires a TTY without JSON")
+        stage = "setup"
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            from fulcra_collect.trakt_source import current_work_scope
+            with current_work_scope(run.ctx, run.session, run.ctx._media_local_authority):
+                stage = "auth"
+                from fulcra_collect.trakt_identity import CurrentIdentity, ProbeWindow
+                bounds = trakt_importer._ScanBounds()
+                initial_probe = ProbeWindow(bounds)
+                auth = trakt_importer.TraktAuth(_authority=run.ctx._trakt_authority,
+                                                _local=run.ctx._trakt_local)
+                binding = auth.binding
+                identity = CurrentIdentity(binding)
+                run.ctx._register_current_work_guard(identity.check_local_after_authority)
+                initial_probe.check()
+                headers = auth.headers(timeout=bounds.timeout(), _remaining=bounds.timeout)
+                initial_probe.check()
+                identity.observe(bounds, window=initial_probe, transport=None)
+                stage = "fetch"
+                items = list(trakt_importer.fetch_history_with_headers(
+                    headers, strict_scan=True, _bounds=bounds, _before_request=binding.check_before_source))
+                identity.observe(bounds, terminal=True)
+                events = list(trakt_importer.normalize_history(items, cluster_threshold=cluster_threshold))
+                identity.check_before_current()
+                stage = "args"
+                policy = _resolve_cluster_policy(events, cluster_spec=cluster_spec,
+                    cluster_size_threshold=cluster_threshold, interactive=interactive)
+                if policy:
+                    identity.check_before_current()
+                    events = apply_cluster_policy(events, policy)
+                stage = "import"
+                approval = None
+                choice = twin_policy
+                if choice in (None, "ask"):
+                    identity.check_before_current()
+                    offer = run.inspect_twins(events)
+                    if offer.pairs:
+                        if not interactive:
+                            click.echo(f"warning: {len(offer.pairs)} low-confidence events have "
+                                       "high-confidence twins; keeping them. Pass --twin-policy "
+                                       "auto-discard|keep to choose explicitly.", err=True)
+                            choice = "keep"
+                        else:
+                            for i, pair in enumerate(offer.pairs, 1):
+                                click.echo(f"{i}. {pair.incoming} ↔ {pair.high} "
+                                           f"[{pair.origin}; {pair.fingerprint}]", err=True)
+                            stage = "args"
+                            answer = click.prompt("Discard the offered low-confidence twins?",
+                                type=click.Choice(["yes", "no"]), default="yes")
+                            choice = "auto-discard" if answer == "yes" else "keep"
+                            approval = offer if answer == "yes" else None
+                    else:
+                        choice = "keep"
+                stage = "import"
+                identity.check_before_current()
+                result = run.import_events(events, twin_policy=choice, approved_twins=approval)
+                identity.check_before_current()
+        envelope = import_result_to_dict("trakt", result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except (Exception, click.Abort) as exc:
+        if isinstance(exc, (click.Abort, EOFError)):
+            stage = "args"
+        elif (stage == "fetch" and isinstance(exc, httpx.HTTPStatusError)
+              and exc.response.status_code in (401, 403)):
+            stage = "auth"
+        messages = {"args": "Invalid or cancelled Trakt import options.",
+                    "setup": "Unable to open configured media authority; preserve pending evidence.",
+                    "auth": "Unable to load or refresh Trakt credentials.",
+                    "fetch": "Unable to fetch or normalize Trakt history.",
+                    "import": "Unable to complete Trakt import; preserve pending evidence."}
+        from fulcra_collect.trakt_identity import MISMATCH
+        public_message = MISMATCH if str(exc) == MISMATCH else messages[stage]
+        envelope = media_failure_envelope("trakt", stage=stage, message=public_message,
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
+
+
+def _validate_cluster_spec(spec, threshold):
+    """Validate supplied syntax even when the source contains no clusters."""
+    from fulcra_csv import ClusterPolicy
+    if spec is None or spec == "ask":
         return
-    events = list(trakt_importer.normalize_history(items, cluster_threshold=cluster_threshold))
-
-    policy = _resolve_cluster_policy(
-        events, cluster_spec=cluster_spec,
-        cluster_size_threshold=cluster_threshold,
-    )
-    if policy:
-        before = len(events)
-        events = apply_cluster_policy(events, policy)
-        affected = before - len(events) if policy.action == "drop" else sum(
-            1 for e in events if e.external_ids.get("sentinel_applied")
-        )
-        if not json_mode:
-            click.echo(f"cluster policy '{policy.action}': {affected} events affected", err=True)
-
-    # Cross-batch twin dedup: low-conf events whose content_fingerprint matches
-    # a previously-imported high-conf event in the local twin cache.
-    events = _maybe_apply_twin_dedup(
-        events, twin_policy=twin_policy, json_mode=json_mode,
-    )
-
-    run_and_emit("trakt", events, s,
-                 tag_name="trakt", check_only=check_only, json_mode=json_mode)
-
-
-def _maybe_apply_twin_dedup(events: list,
-                            *, twin_policy: str | None,
-                            json_mode: bool) -> list:
-    """Look for low-conf events whose content_fingerprint matches a high-conf
-    entry in the local twin cache, then apply the user's chosen policy."""
-    from fulcra_csv import apply_twin_decisions, find_low_conf_twins
-    from . import twin_cache
-
-    cached = twin_cache.load_for_twin_lookup()
-    pairs = find_low_conf_twins(events, extra_pool=cached)
-    if not pairs:
-        return events
-
-    # Resolve the policy
-    spec = twin_policy
-    if spec is None:
-        if json_mode or not click.get_text_stream("stdin").isatty():
-            click.echo(
-                f"warning: {len(pairs)} low-conf events have high-conf twins in the "
-                "twin cache; pass --twin-policy ask|auto-discard|keep to handle them.",
-                err=True,
-            )
-            return events
-        spec = "ask"
-
-    if spec == "keep":
-        return events
-
-    if spec == "auto-discard":
-        to_drop = {twin_cache._source_id_of(low) for low, _high in pairs}
-        return apply_twin_decisions(events, to_drop)
-
-    # ask
-    click.echo(
-        f"\nDetected {len(pairs)} low-confidence events with high-confidence "
-        f"twins from previous imports.", err=True,
-    )
-    for i, (low, high) in enumerate(pairs[:5], start=1):
-        fp = low.external_ids.get("content_fingerprint", "?")
-        click.echo(
-            f"  {i}. {fp}  (low-conf {low.start_time.isoformat()} ↔ "
-            f"high-conf source {high.external_ids.get('importer', '?')})",
-            err=True,
-        )
-    if len(pairs) > 5:
-        click.echo(f"  ... and {len(pairs) - 5} more", err=True)
-
-    choice = click.prompt(
-        "Discard the low-confidence twins?",
-        type=click.Choice(["yes", "no"]), default="yes",
-    )
-    if choice == "yes":
-        to_drop = {twin_cache._source_id_of(low) for low, _high in pairs}
-        return apply_twin_decisions(events, to_drop)
-    return events
+    if spec in ("drop", "keep"):
+        ClusterPolicy(action=spec, cluster_size_threshold=threshold)
+        return
+    if spec.startswith("sentinel:"):
+        ClusterPolicy(action="sentinel", sentinel_year=int(spec.split(":", 1)[1]),
+                      cluster_size_threshold=threshold)
+        return
+    raise ValueError("invalid cluster policy")
 
 
 def _resolve_cluster_policy(
@@ -300,6 +252,7 @@ def _resolve_cluster_policy(
     *,
     cluster_spec: str | None,
     cluster_size_threshold: int,
+    interactive: bool | None = None,
 ):
     """Resolve --clusters into a ClusterPolicy. None means no cluster preprocessing.
 
@@ -311,6 +264,11 @@ def _resolve_cluster_policy(
     """
     from fulcra_csv import ClusterPolicy, cluster_size_of
 
+    _validate_cluster_spec(cluster_spec, cluster_size_threshold)
+    if interactive is None:
+        interactive = click.get_text_stream("stdin").isatty()
+    if cluster_spec == "ask" and not interactive:
+        raise ValueError("interactive cluster choice requires a TTY")
     cluster_count = sum(
         1 for e in events if cluster_size_of(e) >= cluster_size_threshold
     )
@@ -329,7 +287,7 @@ def _resolve_cluster_policy(
 
     spec = cluster_spec
     if spec is None:
-        if not click.get_text_stream("stdin").isatty():
+        if not interactive:
             raise click.UsageError(
                 f"Detected {cluster_count} cluster events on {len(cluster_dates)} dates "
                 f"(largest: {summary}). Pass --clusters drop|sentinel:YYYY|keep "
@@ -385,31 +343,24 @@ def _resolve_cluster_policy(
 @click.option("--json", "json_mode", is_flag=True)
 def import_apple_podcasts(db_path: str | None, check_only: bool, json_mode: bool) -> None:
     """Import Apple Podcasts listening history from the on-device SQLite DB."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
     from .importers import apple_podcasts as ap
-    if db_path is None:
-        db_path = str(ap.DEFAULT_DB_PATH)
-    s = state_mod.load(STATE_PATH)
-    if not s.listened_definition_id:
-        emit_result(
-            ImportEnvelope(importer="apple-podcasts", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
+    importer = "apple-podcasts"
+    stage = "import"
+    run = result = None
     try:
-        events = list(ap.parse_db(Path(db_path)))
-    except ap.SnapshotError as exc:
-        # On-device DB stalled/inaccessible — emit a clean error envelope
-        # instead of crashing with a traceback, so callers get structured JSON.
-        emit_result(
-            ImportEnvelope(importer="apple-podcasts", ok=False,
-                           errors=[{"stage": "snapshot", "message": str(exc)}]),
-            json_mode=json_mode,
-        )
-        return
-    run_and_emit("apple-podcasts", events, s,
-                 tag_name="apple-podcasts", check_only=check_only, json_mode=json_mode)
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'snapshot'
+            events = list(ap.parse_db(Path(db_path if db_path is not None else ap.DEFAULT_DB_PATH)))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("apple-podcasts-timemachine")
@@ -417,37 +368,35 @@ def import_apple_podcasts(db_path: str | None, check_only: bool, json_mode: bool
 @click.option("--json", "json_mode", is_flag=True)
 def import_apple_podcasts_timemachine(check_only: bool, json_mode: bool) -> None:
     """Recover Apple Podcasts replay history by walking Time Machine snapshots."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
     from .importers import apple_podcasts as ap
-    s = state_mod.load(STATE_PATH)
-    if not s.listened_definition_id:
-        emit_result(
-            ImportEnvelope(importer="apple-podcasts-timemachine", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
-    snapshots = ap.find_timemachine_snapshots()
-    if not snapshots:
-        emit_result(
-            ImportEnvelope(
-                importer="apple-podcasts-timemachine", ok=False,
-                errors=[{"stage": "fetch",
-                         "message": "No Time Machine backups with Apple Podcasts data found. "
-                                    "Verify tmutil listbackups + Time Machine mount + FDA."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-    if not json_mode:
-        click.echo(f"Walking {len(snapshots)} Time Machine snapshots...", err=True)
-    all_events = []
-    for snap in snapshots:
-        if not json_mode:
-            click.echo(f"  {snap}", err=True)
-        all_events.extend(ap.parse_db(snap))
-    run_and_emit("apple-podcasts-timemachine", all_events, s,
-                 tag_name="apple-podcasts", check_only=check_only, json_mode=json_mode)
+    importer = "apple-podcasts-timemachine"
+    stage = "import"
+    run = result = None
+    try:
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'fetch'
+            snapshots = ap.find_timemachine_snapshots()
+            if not snapshots:
+                raise RuntimeError('No Time Machine backups with Apple Podcasts data found. '
+                                   'Verify tmutil listbackups + Time Machine mount + FDA.')
+            if not json_mode:
+                click.echo(f"Walking {len(snapshots)} Time Machine snapshots...", err=True)
+            events = []
+            stage = 'snapshot'
+            for snap in snapshots:
+                if not json_mode:
+                    click.echo(f"  {snap}", err=True)
+                events.extend(ap.parse_db(snap))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("spotify-extended")
@@ -456,22 +405,27 @@ def import_apple_podcasts_timemachine(check_only: bool, json_mode: bool) -> None
 @click.option("--json", "json_mode", is_flag=True)
 def import_spotify_extended(path: str, check_only: bool, json_mode: bool) -> None:
     """Import Spotify Extended Streaming History from a GDPR-export zip."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
+    from . import library
     from .importers import spotify as sp
-    resolved = resolve_or_emit("spotify-extended", path, json_mode=json_mode)
-    if resolved is None:
-        return
-    s = state_mod.load(STATE_PATH)
-    if not s.listened_definition_id:
-        emit_result(
-            ImportEnvelope(importer="spotify-extended", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
-    events = list(sp.parse_extended_zip(resolved))
-    run_and_emit("spotify-extended", events, s,
-                 tag_name="spotify", check_only=check_only, json_mode=json_mode)
+    importer = "spotify-extended"
+    stage = "import"
+    run = result = None
+    try:
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'args'
+            resolved = Path(library.resolve(path))
+            stage = 'import'
+            events = list(sp.parse_extended_zip(resolved))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("youtube")
@@ -480,22 +434,27 @@ def import_spotify_extended(path: str, check_only: bool, json_mode: bool) -> Non
 @click.option("--json", "json_mode", is_flag=True)
 def import_youtube(path: str, check_only: bool, json_mode: bool) -> None:
     """Import a Google Takeout YouTube watch-history.json file."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
+    from . import library
     from .importers import youtube as yt
-    resolved = resolve_or_emit("youtube", path, json_mode=json_mode)
-    if resolved is None:
-        return
-    s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id:
-        emit_result(
-            ImportEnvelope(importer="youtube", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
-    events = list(yt.parse_takeout_json(resolved))
-    run_and_emit("youtube", events, s,
-                 tag_name="youtube", check_only=check_only, json_mode=json_mode)
+    importer = "youtube"
+    stage = "import"
+    run = result = None
+    try:
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'args'
+            resolved = Path(library.resolve(path))
+            stage = 'import'
+            events = list(yt.parse_takeout_json(resolved))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("generic-csv")
@@ -527,62 +486,38 @@ def import_generic_csv(
     check_only: bool, json_mode: bool,
 ) -> None:
     """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened."""
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
+    from . import library
     from fulcra_csv import ColumnMap
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
-    from .importers.generic_csv import parse_media_csv
-
-    resolved = resolve_or_emit(f"generic-csv:{service}", path, json_mode=json_mode)
-    if resolved is None:
-        return
-    s = state_mod.load(STATE_PATH)
-    target_def = (
-        s.watched_definition_id if category == "watched" else s.listened_definition_id
-    )
-    if not target_def:
-        emit_result(
-            ImportEnvelope(importer=f"generic-csv:{service}", ok=False,
-                           errors=[{"stage": "setup",
-                                    "message": f"Run bootstrap first; need {category} definition."}]),
-            json_mode=json_mode,
-        )
-        return
-
-    cm = ColumnMap(
-        timestamp=ts_col,
-        title=title_col,
-        subtitle=subtitle_col or None,
-        source_id=id_col or None,
-        duration_seconds=duration_col,
-        end_time=end_col,
-    )
-    if tz_name == "UTC":
-        from datetime import timezone as _tz
-        tz = _tz.utc
-    else:
-        from zoneinfo import ZoneInfo
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception as exc:
-            emit_result(
-                ImportEnvelope(importer=f"generic-csv:{service}", ok=False,
-                               errors=[{"stage": "args",
-                                        "message": f"unknown timezone {tz_name!r}: {exc}"}]),
-                json_mode=json_mode,
-            )
-            return
-
-    fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
-    from .importers.generic_csv import _FP_AUTO
-    fp_arg = _FP_AUTO if fingerprint == "auto" else fp_kind
-
-    events = list(parse_media_csv(
-        resolved,
-        service=service, category=category,
-        column_map=cm, tz=tz, confidence=confidence,
-        fingerprint_kind=fp_arg,
-    ))
-    run_and_emit(f"generic-csv:{service}", events, s,
-                 tag_name=service, check_only=check_only, json_mode=json_mode)
+    from .importers.generic_csv import parse_media_csv, _FP_AUTO
+    importer = f"generic-csv:{service}"
+    stage = "import"
+    run = result = None
+    try:
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'args'
+            resolved = Path(library.resolve(path))
+            cm = ColumnMap(timestamp=ts_col, title=title_col, subtitle=subtitle_col or None,
+                           source_id=id_col or None, duration_seconds=duration_col, end_time=end_col)
+            if tz_name == 'UTC':
+                from datetime import timezone
+                tz = timezone.utc
+            else:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(tz_name)
+            fp_arg = _FP_AUTO if fingerprint == 'auto' else (None if fingerprint == 'none' else fingerprint)
+            stage = 'import'
+            events = list(parse_media_csv(resolved, service=service, category=category,
+                column_map=cm, tz=tz, confidence=confidence, fingerprint_kind=fp_arg))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("spotify-ifttt")
@@ -597,32 +532,29 @@ def import_spotify_ifttt(path: str, tz_name: str, check_only: bool, json_mode: b
     Use this only for backfilling pre-Extended-history plays — for ongoing
     capture, prefer `import spotify-extended` (full ms_played data).
     """
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
+    from . import library
     from zoneinfo import ZoneInfo
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
     from .importers import spotify_ifttt as si
-    resolved = resolve_or_emit("spotify-ifttt", path, json_mode=json_mode)
-    if resolved is None:
-        return
-    s = state_mod.load(STATE_PATH)
-    if not s.listened_definition_id:
-        emit_result(
-            ImportEnvelope(importer="spotify-ifttt", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
+    importer = "spotify-ifttt"
+    stage = "import"
+    run = result = None
     try:
-        tz = ZoneInfo(tz_name)
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'args'
+            resolved = Path(library.resolve(path))
+            tz = ZoneInfo(tz_name)
+            stage = 'import'
+            events = list(si.parse_ifttt_zip(resolved, tz=tz))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
     except Exception as exc:
-        emit_result(
-            ImportEnvelope(importer="spotify-ifttt", ok=False,
-                           errors=[{"stage": "args", "message": f"unknown timezone {tz_name!r}: {exc}"}]),
-            json_mode=json_mode,
-        )
-        return
-    events = list(si.parse_ifttt_zip(resolved, tz=tz))
-    run_and_emit("spotify-ifttt", events, s,
-                 tag_name="spotify", check_only=check_only, json_mode=json_mode)
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("apple-takeout")
@@ -635,40 +567,39 @@ def import_apple_takeout(path: str, check_only: bool, json_mode: bool) -> None:
     Accepts the Playback Activity.csv file directly, or a path to the unzipped
     apple_data_export tree (we'll find the CSV inside).
     """
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
+    from .cli_common import emit_result, media_failure_envelope, import_result_to_dict
+    from .media_config import configured_media
+    from . import library
     from .importers import apple_takeout as at
-    resolved_path = resolve_or_emit("apple-takeout", path, json_mode=json_mode)
-    if resolved_path is None:
-        return
-    if resolved_path.is_dir():
-        candidates = list(resolved_path.rglob("Playback Activity.csv"))
-        if not candidates:
-            emit_result(
-                ImportEnvelope(importer="apple-takeout", ok=False,
-                               errors=[{"stage": "args",
-                                        "message": f"No 'Playback Activity.csv' under {resolved_path}"}]),
-                json_mode=json_mode,
-            )
-            return
-        resolved_path = candidates[0]
-    s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id:
-        emit_result(
-            ImportEnvelope(importer="apple-takeout", ok=False,
-                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
-            json_mode=json_mode,
-        )
-        return
-    events = list(at.parse_playback_csv(resolved_path))
-    run_and_emit("apple-takeout", events, s,
-                 tag_name="apple-tv", check_only=check_only, json_mode=json_mode)
+    importer = "apple-takeout"
+    stage = "import"
+    run = result = None
+    try:
+        with configured_media(STATE_PATH, check_only=check_only) as run:
+            stage = 'args'
+            resolved_path = Path(library.resolve(path))
+            if resolved_path.is_dir():
+                candidates = list(resolved_path.rglob('Playback Activity.csv'))
+                if not candidates:
+                    raise ValueError(f"No 'Playback Activity.csv' under {resolved_path}")
+                resolved_path = candidates[0]
+            stage = 'import'
+            events = list(at.parse_playback_csv(resolved_path))
+            stage = "import"
+            result = run.import_events(events)
+        envelope = import_result_to_dict(importer, result, since_watermark=None,
+            new_watermark=None, would_post=result.posted if check_only else None)
+    except Exception as exc:
+        envelope = media_failure_envelope(importer, stage=stage, message=safe_exc_message(exc),
+            run=run, result=result, check_only=check_only)
+    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("lastfm")
 @click.option("--since", "since_iso", default=None,
-              help="ISO 8601 datetime override; defaults to stored watermark.")
+              help="ISO 8601 datetime override; defaults to scoped private cursor (no legacy seed).")
 @click.option("--max-pages", default=None, type=int,
-              help="Cap pagination — useful for large first-run backfills.")
+              help="Cap pagination (1–10000); any configured cap withholds cursor.")
 @click.option("--check-only", is_flag=True,
               help="Don't post; just count new items and report.")
 @click.option("--json", "json_mode", is_flag=True,
@@ -683,107 +614,25 @@ def import_lastfm(
     json_mode: bool,
     watermark_overlap_hours: int,
 ) -> None:
-    """Import Last.fm scrobbles via user.getRecentTracks (public, API-key auth)."""
-    from datetime import datetime, timedelta, timezone
-    from . import watermarks
-    from .cli_common import emit_result, import_result_to_dict, ImportEnvelope
-    from .importers import lastfm as lastfm_importer
+    """Import a strict snapshot with the configured writer and scoped private cursor.
 
-    s = state_mod.load(STATE_PATH)
-    if not s.listened_definition_id:
-        emit_result(
-            ImportEnvelope(
-                importer="lastfm", ok=False,
-                errors=[{"stage": "setup", "message": "Run `fulcra-media bootstrap` first."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
+    Redirect/resource refusals fail the scan. Caps withhold progress; finite
+    snapshots cannot guarantee older history or late edits. No legacy seed.
+    """
+    from .poll_cli import run_poll
 
-    try:
-        creds = lastfm_importer.load_creds()
-    except FileNotFoundError:
-        emit_result(
-            ImportEnvelope(
-                importer="lastfm", ok=False,
-                errors=[{"stage": "auth",
-                         "message": f"Missing {lastfm_importer.CREDS_PATH}. "
-                                    "Run `fulcra-media wizard lastfm` for setup."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    # Resolve since: explicit flag > watermark > None (full backfill)
-    since: datetime | None = None
-    if since_iso:
-        try:
-            since = datetime.fromisoformat(
-                since_iso.replace("Z", "+00:00")
-            )
-            if since.tzinfo is None:
-                since = since.replace(tzinfo=timezone.utc)
-        except ValueError as exc:
-            emit_result(
-                ImportEnvelope(
-                    importer="lastfm", ok=False,
-                    errors=[{"stage": "args",
-                             "message": f"Invalid --since: {exc}"}],
-                ),
-                json_mode=json_mode,
-            )
-            return
-    else:
-        wm = watermarks.get_iso(s, "lastfm")
-        if wm is not None:
-            since = wm - timedelta(hours=watermark_overlap_hours)
-
-    since_str = since.isoformat() if since else None
-
-    # Fetch + normalize
-    try:
-        raw_tracks = list(lastfm_importer.fetch_recent_tracks(
-            creds, since=since, max_pages=max_pages,
-        ))
-    except (RuntimeError, httpx.HTTPError) as exc:
-        emit_result(
-            ImportEnvelope(
-                importer="lastfm", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-    events = list(lastfm_importer.normalize_history(raw_tracks))
-
-    # Ingest (or check-only)
-    client = FulcraClient()
-    if not check_only:
-        client.ensure_tag("lastfm", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s, check_only=check_only)
-
-    new_watermark_iso: str | None = None
-    if events and not check_only and result.posted > 0:
-        max_ts = max(e.start_time for e in events)
-        watermarks.set_iso(s, "lastfm", max_ts)
-        new_watermark_iso = max_ts.isoformat()
-    state_mod.save(s, STATE_PATH)
-
-    envelope = import_result_to_dict(
-        "lastfm", result,
-        since_watermark=since_str,
-        new_watermark=new_watermark_iso,
-        would_post=result.posted if check_only else None,
+    run_poll(
+        "lastfm", STATE_PATH, since_iso=since_iso,
+        check_only=check_only, json_mode=json_mode,
+        max_pages=max_pages, overlap=watermark_overlap_hours,
     )
-    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("deezer")
 @click.option("--since", "since_iso", default=None,
-              help="ISO 8601 datetime override; defaults to stored watermark.")
+              help="ISO 8601 datetime override; defaults to scoped private cursor (no legacy seed).")
 @click.option("--max-pages", default=None, type=int,
-              help="Cap pagination — useful for large first-run backfills.")
+              help="Cap pagination (1–10000); any configured cap withholds cursor.")
 @click.option("--check-only", is_flag=True,
               help="Don't post; just count new items and report.")
 @click.option("--json", "json_mode", is_flag=True,
@@ -798,138 +647,18 @@ def import_deezer(
     json_mode: bool,
     watermark_overlap_hours: int,
 ) -> None:
-    """Import Deezer listening history via /user/me/history (OAuth token)."""
-    from datetime import datetime, timedelta, timezone
-    from . import watermarks
-    from .cli_common import emit_result, import_result_to_dict, ImportEnvelope
-    from .importers import deezer as deezer_importer
+    """Import a strict snapshot with the configured writer and scoped private cursor.
 
-    s = state_mod.load(STATE_PATH)
-    if not s.listened_definition_id:
-        emit_result(
-            ImportEnvelope(
-                importer="deezer", ok=False,
-                errors=[{"stage": "setup", "message": "Run `fulcra-media bootstrap` first."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    try:
-        creds = deezer_importer.load_creds()
-    except FileNotFoundError:
-        emit_result(
-            ImportEnvelope(
-                importer="deezer", ok=False,
-                errors=[{"stage": "auth",
-                         "message": f"Missing {deezer_importer.CREDS_PATH}. "
-                                    "Run `fulcra-media wizard deezer` for setup."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    # Resolve since: explicit flag > watermark > None (full backfill)
-    since: datetime | None = None
-    if since_iso:
-        try:
-            since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
-            if since.tzinfo is None:
-                since = since.replace(tzinfo=timezone.utc)
-        except ValueError as exc:
-            emit_result(
-                ImportEnvelope(
-                    importer="deezer", ok=False,
-                    errors=[{"stage": "args", "message": f"Invalid --since: {exc}"}],
-                ),
-                json_mode=json_mode,
-            )
-            return
-    else:
-        wm = watermarks.get_iso(s, "deezer")
-        if wm is not None:
-            since = wm - timedelta(hours=watermark_overlap_hours)
-
-    since_str = since.isoformat() if since else None
-
-    try:
-        raw_tracks = list(deezer_importer.fetch_history(
-            creds, since=since, max_pages=max_pages,
-        ))
-    except (RuntimeError, httpx.HTTPError) as exc:
-        emit_result(
-            ImportEnvelope(
-                importer="deezer", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-    events = list(deezer_importer.normalize_history(raw_tracks))
-
-    client = FulcraClient()
-    if not check_only:
-        client.ensure_tag("deezer", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s, check_only=check_only)
-
-    new_watermark_iso: str | None = None
-    if events and not check_only and result.posted > 0:
-        max_ts = max(e.start_time for e in events)
-        watermarks.set_iso(s, "deezer", max_ts)
-        new_watermark_iso = max_ts.isoformat()
-    state_mod.save(s, STATE_PATH)
-
-    envelope = import_result_to_dict(
-        "deezer", result,
-        since_watermark=since_str,
-        new_watermark=new_watermark_iso,
-        would_post=result.posted if check_only else None,
-    )
-    emit_result(envelope, json_mode=json_mode)
-
-
-def _resolve_since(
-    since_iso: str | None,
-    *,
-    importer_name: str,
-    watermark_key: str,
-    state,
-    json_mode: bool,
-    watermark_overlap_hours: int = 1,
-):
-    """Resolve --since: explicit flag > watermark - overlap > None (full backfill).
-
-    Returns (since_dt, since_iso_str, did_emit_error). If did_emit_error is
-    True, the caller must return immediately — an envelope has already been
-    written.
+    Redirect/resource refusals fail the scan. Caps withhold progress; finite
+    snapshots cannot guarantee older history or late edits. No legacy seed.
     """
-    from datetime import datetime, timedelta, timezone
-    from . import watermarks
-    from .cli_common import emit_result, ImportEnvelope
+    from .poll_cli import run_poll
 
-    if since_iso:
-        try:
-            since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
-            if since.tzinfo is None:
-                since = since.replace(tzinfo=timezone.utc)
-        except ValueError as exc:
-            emit_result(
-                ImportEnvelope(
-                    importer=importer_name, ok=False,
-                    errors=[{"stage": "args",
-                             "message": f"Invalid --since: {exc}"}],
-                ),
-                json_mode=json_mode,
-            )
-            return None, None, True
-        return since, since.isoformat(), False
-
-    wm = watermarks.get_iso(state, watermark_key)
-    if wm is not None:
-        since = wm - timedelta(hours=watermark_overlap_hours)
-        return since, since.isoformat(), False
-    return None, None, False
+    run_poll(
+        "deezer", STATE_PATH, since_iso=since_iso,
+        check_only=check_only, json_mode=json_mode,
+        max_pages=max_pages, overlap=watermark_overlap_hours,
+    )
 
 
 @import_group.command("generic-rss")
@@ -939,9 +668,9 @@ def _resolve_since(
 @click.option("--category", type=click.Choice(["watched", "listened"]),
               required=True)
 @click.option("--since", "since_iso", default=None,
-              help="ISO 8601 datetime; defaults to per-feed watermark.")
+              help="ISO 8601 datetime; defaults to scoped private cursor (no legacy seed).")
 @click.option("--max-entries", default=None, type=int,
-              help="Cap how many entries to process from this fetch.")
+              help="Cap selected entries; any configured cap withholds cursor.")
 @click.option("--check-only", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
 def import_generic_rss(
@@ -949,89 +678,24 @@ def import_generic_rss(
     since_iso: str | None, max_entries: int | None,
     check_only: bool, json_mode: bool,
 ) -> None:
-    """Import any RSS/Atom feed as Watched/Listened events.
+    """Import a strict snapshot with the configured writer and scoped private cursor.
 
-    Per-feed watermarks (keyed off the feed URL) live in state.watermarks
-    so distinct feeds don't clobber each other.
+    Redirect/resource refusals fail the scan. Caps withhold progress; finite
+    snapshots cannot guarantee older history or late edits. No legacy seed.
     """
-    from . import watermarks
-    from .cli_common import (
-        emit_result, import_result_to_dict, ImportEnvelope,
+    from .poll_cli import run_poll
+
+    run_poll(
+        "generic-rss", STATE_PATH, since_iso=since_iso,
+        check_only=check_only, json_mode=json_mode,
+        feed_url=feed_url, service=service, category=category, max_entries=max_entries,
     )
-    from .importers import generic_rss as rss_importer
-
-    importer_label = f"generic-rss:{service}"
-    watermark_key = f"generic-rss:{feed_url}"
-
-    s = state_mod.load(STATE_PATH)
-    target_def = (
-        s.watched_definition_id if category == "watched"
-        else s.listened_definition_id
-    )
-    if not target_def:
-        emit_result(
-            ImportEnvelope(
-                importer=importer_label, ok=False,
-                errors=[{"stage": "setup",
-                         "message": f"Run `fulcra-media bootstrap` first; need {category} definition."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    since, since_str, err = _resolve_since(
-        since_iso, importer_name=importer_label,
-        watermark_key=watermark_key, state=s, json_mode=json_mode,
-    )
-    if err:
-        return
-
-    try:
-        all_events = list(rss_importer.normalize_feed(
-            feed_url, service=service, category=category,
-        ))
-    except (RuntimeError, httpx.HTTPError) as exc:
-        emit_result(
-            ImportEnvelope(
-                importer=importer_label, ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    # Client-side timestamp filter (most RSS feeds have no native since param).
-    if since is not None:
-        all_events = [e for e in all_events if e.start_time >= since]
-    if max_entries is not None:
-        all_events = all_events[:max_entries]
-
-    client = FulcraClient()
-    if not check_only:
-        client.ensure_tag(service, s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(all_events, s, check_only=check_only)
-
-    new_watermark_iso: str | None = None
-    if all_events and not check_only and result.posted > 0:
-        max_ts = max(e.start_time for e in all_events)
-        watermarks.set_iso(s, watermark_key, max_ts)
-        new_watermark_iso = max_ts.isoformat()
-    state_mod.save(s, STATE_PATH)
-
-    envelope = import_result_to_dict(
-        importer_label, result,
-        since_watermark=since_str,
-        new_watermark=new_watermark_iso,
-        would_post=result.posted if check_only else None,
-    )
-    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("letterboxd")
 @click.option("--username", required=True, help="Letterboxd username")
 @click.option("--since", "since_iso", default=None,
-              help="ISO 8601 datetime; defaults to stored watermark.")
+              help="ISO 8601 datetime; defaults to scoped private cursor (no legacy seed).")
 @click.option("--max-entries", default=None, type=int)
 @click.option("--check-only", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
@@ -1039,150 +703,45 @@ def import_letterboxd(
     username: str, since_iso: str | None, max_entries: int | None,
     check_only: bool, json_mode: bool,
 ) -> None:
-    """Import Letterboxd diary entries via the public RSS feed."""
-    from . import watermarks
-    from .cli_common import (
-        emit_result, import_result_to_dict, ImportEnvelope,
+    """Import a strict snapshot with the configured writer and scoped private cursor.
+
+    Redirect/resource refusals fail the scan. Caps withhold progress; finite
+    snapshots cannot guarantee older history or late edits. No legacy seed.
+    """
+    from .poll_cli import run_poll
+
+    run_poll(
+        "letterboxd", STATE_PATH, since_iso=since_iso,
+        check_only=check_only, json_mode=json_mode,
+        username=username, max_entries=max_entries,
     )
-    from .importers import letterboxd as lb
-
-    s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id:
-        emit_result(
-            ImportEnvelope(
-                importer="letterboxd", ok=False,
-                errors=[{"stage": "setup",
-                         "message": "Run `fulcra-media bootstrap` first."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    since, since_str, err = _resolve_since(
-        since_iso, importer_name="letterboxd",
-        watermark_key="letterboxd", state=s, json_mode=json_mode,
-    )
-    if err:
-        return
-
-    try:
-        all_events = list(lb.fetch_diary(username))
-    except (RuntimeError, httpx.HTTPError) as exc:
-        emit_result(
-            ImportEnvelope(
-                importer="letterboxd", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    if since is not None:
-        all_events = [e for e in all_events if e.start_time >= since]
-    if max_entries is not None:
-        all_events = all_events[:max_entries]
-
-    client = FulcraClient()
-    if not check_only:
-        client.ensure_tag("letterboxd", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(all_events, s, check_only=check_only)
-
-    new_watermark_iso: str | None = None
-    if all_events and not check_only and result.posted > 0:
-        max_ts = max(e.start_time for e in all_events)
-        watermarks.set_iso(s, "letterboxd", max_ts)
-        new_watermark_iso = max_ts.isoformat()
-    state_mod.save(s, STATE_PATH)
-
-    envelope = import_result_to_dict(
-        "letterboxd", result,
-        since_watermark=since_str,
-        new_watermark=new_watermark_iso,
-        would_post=result.posted if check_only else None,
-    )
-    emit_result(envelope, json_mode=json_mode)
 
 
 @import_group.command("goodreads")
 @click.option("--user-id", required=True,
               help="Your Goodreads numeric user id (the number in profile URL).")
 @click.option("--since", "since_iso", default=None,
-              help="ISO 8601 datetime; defaults to stored watermark.")
+              help="ISO 8601 datetime; defaults to scoped private cursor (no legacy seed).")
 @click.option("--max-entries", default=None, type=int,
-              help="Cap how many entries to process from this fetch.")
+              help="Cap selected entries; any configured cap withholds cursor.")
 @click.option("--check-only", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
 def import_goodreads(
     user_id: str, since_iso: str | None, max_entries: int | None,
     check_only: bool, json_mode: bool,
 ) -> None:
-    """Import Goodreads 'read' shelf entries via the public RSS feed."""
-    from . import watermarks
-    from .cli_common import (
-        emit_result, import_result_to_dict, ImportEnvelope,
+    """Import a strict snapshot with the configured writer and scoped private cursor.
+
+    Redirect/resource refusals fail the scan. Caps withhold progress; finite
+    snapshots cannot guarantee older history or late edits. No legacy seed.
+    """
+    from .poll_cli import run_poll
+
+    run_poll(
+        "goodreads", STATE_PATH, since_iso=since_iso,
+        check_only=check_only, json_mode=json_mode,
+        user_id=user_id, max_entries=max_entries,
     )
-    from .importers import goodreads as gr
-
-    watermark_key = f"goodreads:{user_id}"
-
-    s = state_mod.load(STATE_PATH)
-    if not s.read_definition_id:
-        emit_result(
-            ImportEnvelope(
-                importer="goodreads", ok=False,
-                errors=[{"stage": "setup",
-                         "message": "Run `fulcra-media bootstrap` first; "
-                                    "need read definition."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    since, since_str, err = _resolve_since(
-        since_iso, importer_name="goodreads",
-        watermark_key=watermark_key, state=s, json_mode=json_mode,
-    )
-    if err:
-        return
-
-    try:
-        all_events = list(gr.fetch_diary(user_id))
-    except (RuntimeError, httpx.HTTPError) as exc:
-        emit_result(
-            ImportEnvelope(
-                importer="goodreads", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    if since is not None:
-        all_events = [e for e in all_events if e.start_time >= since]
-    if max_entries is not None:
-        all_events = all_events[:max_entries]
-
-    client = FulcraClient()
-    if not check_only:
-        client.ensure_tag("goodreads", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(all_events, s, check_only=check_only)
-
-    new_watermark_iso: str | None = None
-    if all_events and not check_only and result.posted > 0:
-        max_ts = max(e.start_time for e in all_events)
-        watermarks.set_iso(s, watermark_key, max_ts)
-        new_watermark_iso = max_ts.isoformat()
-    state_mod.save(s, STATE_PATH)
-
-    envelope = import_result_to_dict(
-        "goodreads", result,
-        since_watermark=since_str,
-        new_watermark=new_watermark_iso,
-        would_post=result.posted if check_only else None,
-    )
-    emit_result(envelope, json_mode=json_mode)
 
 
 def _wait_for_webhook_health(server, server_thread, *, timeout: float = 5.0
@@ -1238,155 +797,121 @@ def _wait_for_webhook_health(server, server_thread, *, timeout: float = 5.0
                    "clean stderr for logs.")
 def webhook_serve(host: str, port: int, bearer_token: str | None,
                   json_mode: bool) -> None:
-    """Block and serve webhook requests until SIGINT/SIGTERM.
-
-    Validates that the watched annotation definition is set (run bootstrap
-    first), and that --host being non-loopback is paired with --bearer-token.
-    Emits a ready-line to stdout once the socket is bound, which is the
-    signal that a parent agent can stop waiting and start firing webhooks.
-    """
+    """Serve threaded HTTP with one private configured-v1 authority owner."""
     import json as _json
     import signal
     import sys
+    import threading
 
     from .cli_common import emit_result, ImportEnvelope
+    from .webhook_owner import MediaOwner, ServeLoop
     from .webhook_receiver import make_server
 
-    s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id:
-        emit_result(
-            ImportEnvelope(
-                importer="webhook", ok=False,
-                errors=[{"stage": "setup",
-                         "message": "Run `fulcra-media bootstrap` first; "
-                                    "the webhook receiver needs the watched "
-                                    "annotation definition to ingest events."}],
-            ),
-            json_mode=json_mode,
-        )
+    def fail(failed_stage, message):
+        envelope = ImportEnvelope(importer="webhook", ok=False, errors=[{
+            "stage": failed_stage, "message": message,
+        }])
+        try:
+            emit_result(envelope, json_mode=json_mode)
+        except Exception:
+            # A broken stdout must not bypass cleanup or turn exit 2 into 1.
+            # Best-effort stderr keeps the same scrubbed structured envelope.
+            from dataclasses import asdict
+            try:
+                click.echo(_json.dumps(asdict(envelope)), err=True)
+                sys.stderr.flush()
+            except Exception:
+                pass
+            raise click.exceptions.Exit(2) from None
+
+    if host not in ("127.0.0.1", "localhost") and not bearer_token:
+        fail("args", "non-loopback --host requires --bearer-token")
         return
 
-    if host != "127.0.0.1" and host != "localhost" and not bearer_token:
-        emit_result(
-            ImportEnvelope(
-                importer="webhook", ok=False,
-                errors=[{"stage": "args",
-                         "message": f"--host {host!r} is non-loopback; refusing "
-                                    "to start without --bearer-token. Either set "
-                                    "a token (openssl rand -hex 32) or bind on "
-                                    "127.0.0.1."}],
-            ),
-            json_mode=json_mode,
-        )
-        return
+    wake = threading.Event()
+    owner = MediaOwner(STATE_PATH, wake)
+    server = loop = None
+    previous = {}
+    stage = "setup"
+    failure = None
+    cleanup_failed = False
 
-    client = FulcraClient()
+    def handle(_signum, _frame):
+        wake.set()
+
     try:
-        server = make_server(
-            host=host, port=port, state=s, client=client,
-            bearer_token=bearer_token,
-            log_stream=sys.stderr if not json_mode else None,
-        )
-    except OSError as exc:
-        emit_result(
-            ImportEnvelope(
-                importer="webhook", ok=False,
-                errors=[{"stage": "bind",
-                         "message": f"failed to bind {host}:{port}: "
-                                    f"{safe_exc_message(exc)}"}],
-            ),
-            json_mode=json_mode,
-        )
-        return
-
-    bound_host, bound_port = server.server_address[:2]
-
-    # Install handlers before advertising readiness. A caller may signal the
-    # process immediately after reading the ready line; advertising first left
-    # a narrow race where SIGTERM used its default action and skipped the clean
-    # shutdown path.
-    import threading
-    stop_event = threading.Event()
-
-    def _handle(signum, _frame):
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, _handle)
-    signal.signal(signal.SIGINT, _handle)
-
-    # Graceful shutdown on SIGTERM/SIGINT. server.shutdown() must run on
-    # a different thread than serve_forever — signal handlers run on the
-    # main thread, but they only set a flag; we then call shutdown after
-    # serve_forever returns from the handler-induced exception. Simpler:
-    # run serve_forever on a background thread and block on a stop event.
-    server_thread = threading.Thread(
-        target=lambda: server.serve_forever(poll_interval=0.1),
-        name="fulcra-webhook", daemon=True,
-    )
-    server_thread.start()
-
-    # `HTTPServer` starts listening in its constructor, before
-    # `serve_forever()` enters its loop.  Advertising readiness before the
-    # loop served one request therefore left a shutdown race: a parent could
-    # read "ready", send SIGINT immediately, and call `server.shutdown()`
-    # before `serve_forever()` initialized its shutdown event.  Under load
-    # that wedges until CI kills the process.  A successful health request is
-    # positive evidence that the serve loop is running, not merely that the
-    # socket is listening.
-    if not _wait_for_webhook_health(server, server_thread):
-        server.server_close()
-        raise click.ClickException(
-            "webhook server thread exited before becoming ready"
-        )
-
-    # Emit the "ready" line only after the server has handled a request, so
-    # callers may safely signal it immediately. JSON mode writes one line;
-    # human mode prints a friendly banner.
-    ready_payload = {
-        "ok": True,
-        "stage": "ready",
-        "host": bound_host,
-        "port": bound_port,
-        "bearer_token_required": bool(bearer_token),
-    }
-    if json_mode:
-        click.echo(_json.dumps(ready_payload))
-    else:
-        click.echo(
-            f"fulcra-media webhook listening on http://{bound_host}:{bound_port}",
-            err=True,
-        )
-        click.echo(
-            "  POST /webhook   accept Plex multipart or Jellyfin JSON",
-            err=True,
-        )
-        click.echo("  GET  /health    liveness probe", err=True)
-        if bearer_token:
-            click.echo("  bearer-token: required (Authorization: Bearer ... "
-                       "or ?token=...)", err=True)
+        owner.start()
+        stage = "bind"
+        server = make_server(host=host, port=port, state=state_mod.State(), client=owner,
+                             bearer_token=bearer_token,
+                             log_stream=sys.stderr if not json_mode else None)
+        stage = "ready"
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.signal(signum, handle)
+        loop = ServeLoop(server, wake)
+        loop.start()
+        if not _wait_for_webhook_health(server, loop.thread):
+            raise RuntimeError("webhook health handshake failed")
+        while not loop.entered.wait(0.01):
+            if loop.done.is_set() or owner.failure is not None:
+                raise RuntimeError("webhook loop failed before readiness")
+        if owner.failure is not None or loop.done.is_set():
+            raise RuntimeError("webhook failed before readiness")
+        bound_host, bound_port = server.server_address[:2]
+        if json_mode:
+            click.echo(_json.dumps({"ok": True, "stage": "ready", "host": bound_host,
+                                    "port": bound_port,
+                                    "bearer_token_required": bool(bearer_token)}))
         else:
-            click.echo("  bearer-token: not set (loopback only)", err=True)
-
-    # Flush so the ready-line lands immediately even when stdout is a pipe.
-    sys.stdout.flush()
-    try:
-        stop_event.wait()
+            click.echo(f"fulcra-media webhook listening on http://{bound_host}:{bound_port}", err=True)
+        sys.stdout.flush()
+        stage = "shutdown"
+        wake.wait()
+        if owner.failure is not None or loop.failure is not None or loop.done.is_set():
+            raise RuntimeError("webhook owner or serve loop failed")
+    except BaseException as exc:
+        failure = exc
     finally:
-        server.shutdown()
-        server_thread.join(timeout=5)
-        server.server_close()
+        owner.stop_admission()
+        try:
+            if loop is not None:
+                loop.close()
+        except BaseException as exc:
+            cleanup_failed = True
+            failure = failure or exc
+        try:
+            if server is not None:
+                server.server_close()
+        except BaseException as exc:
+            cleanup_failed = True
+            failure = failure or exc
+        owner.close()
+        if owner.failure is not None or (loop is not None and loop.failure is not None):
+            failure = failure or owner.failure or loop.failure
+            cleanup_failed = cleanup_failed or owner.cleanup_failure is not None
+        for signum, handler in previous.items():
+            try:
+                signal.signal(signum, handler)
+            except BaseException as exc:
+                cleanup_failed = True
+                failure = failure or exc
 
-    # Emit a final summary so the parent gets a clean exit confirmation.
-    if json_mode:
-        summary = server.context.health()  # type: ignore[attr-defined]
+    if failure is not None:
+        # Exception details can include authority URLs/tokens or record payloads.
+        # Lifecycle diagnostics intentionally classify only the bounded stage.
+        fail("shutdown" if cleanup_failed else stage,
+             "webhook lifecycle failed; preserve original authority and pending evidence")
+        return
+    try:
+        summary = server.context.health()
         summary["stage"] = "shutdown"
-        click.echo(_json.dumps(summary))
-    else:
-        h = server.context.health()  # type: ignore[attr-defined]
-        click.echo(
-            f"shutdown: received={h['received']} posted={h['posted']}",
-            err=True,
-        )
+        if json_mode:
+            click.echo(_json.dumps(summary))
+        else:
+            click.echo(f"shutdown: received={summary['received']} posted={summary['posted']}", err=True)
+        sys.stdout.flush()
+    except Exception:
+        fail("shutdown", "webhook shutdown output failed")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: fulcra-lab-results
-description: "Parse a lab-report PDF (LabCorp, Quest, hospital labs — any provider) into one canonical Fulcra data track per marker (LDL-C, HbA1c, TSH, ferritin, …). You read the PDF; the fulcra-labs engine normalizes units, validates, and ingests. Verify-before-ingest: nothing is written without passing validation or explicit operator confirmation. Use when the operator says 'parse my labs', 'import my LabCorp/Quest results', or hands over a lab-report PDF."
+description: "Use when the operator asks to import lab-report PDF results from LabCorp, Quest, a hospital or another provider, or supplies a lab-report PDF for structured Fulcra history."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
@@ -34,11 +34,34 @@ passes validation (`ok`) or the operator explicitly confirms a flagged row.
 
 ## Where to start
 
-**Stateless — no probes.** Each PDF is a fresh, operator-gated transaction; there is no cross-session
-journey to resume into. The intermediate files (`pass_a.json`, `pass_b.json`, `agreed.json`) are ephemeral
-local scratch, and re-running any step on the same file is a server-side no-op (deterministic source ids),
-so an interrupted run simply restarts from Intake with the same PDF. The only prerequisites — an authed
-`fulcra` account and the `fulcra-labs` engine — are covered under Invocation above.
+The development importer writes owned v1 **Metric** records through the installed
+Collect runtime, using CLI authentication independently of the daemon. See the
+[package guide](../../packages/labs/README.md) for schema, install and status details;
+released app acceptance and historical conversion are separate.
+
+| Situation | Probe/action | What it establishes |
+|---|---|---|
+| Local extraction or review | `fulcra-labs markers --json`; `fulcra-labs check pass_a.json pass_b.json --json` | Local registry/comparison; no remote authority. |
+| Before real import or after interruption | `fulcra-labs status --json` | Authenticated account/profile local evidence; UNKNOWN/error holds, never clean zero. It does not drain pending or count remote observations. |
+| Retained legacy marker selected | Supply `--marker-target MARKER=Metric/UUID` for that canonical marker | Explicit new owned native mapping; never reinterpret an old NumericAnnotation ID. Repeat pins unchanged on recovery. |
+| Resume saved work | Re-run the live `ingest` with the same account/profile/pins | Original pending records recover before opening new JSON/PDF, even when new paths are missing/empty. Stop on a hold; never reset journals/outboxes. |
+| Preview new source | `fulcra-labs ingest agreed.json --source-doc report.pdf --dry-run --json` | Local validation/hash only, no auth/runtime/profile/DB/archive/recovery/target proof. |
+
+`FULCRA_COLLECT_HOME` selects the private runtime profile and its `cli-labs`
+namespace; `FULCRA_LABS_HOME` selects the retained cache/local PDF archive root.
+Keep the same runtime profile, CLI account and explicit pins while pending work
+exists. Paths, newly discovered markers and review selections do not rebind
+pending records. Account/pin/spec changes hold them. New markers without a
+selected legacy cache entry may use full owned-spec adoption/creation; corrupt
+legacy state is UNKNOWN and originals remain read-only.
+
+Interrupted imports are stateful. The whole eligible new multi-marker batch is
+schema-checked and durably staged before current record POSTs. Every actual
+pending target must pass fresh marker/spec/ownership/schema/Metric metadata proof;
+recovered payloads are checked per group. Unknown issued work is reconciled by
+exact reads without automatic resend. Keep extraction/PDF originals for review;
+recovery of already-staged payload does not need them. A later-group failure can
+retain verified complete-group lower bounds, not complete-batch success.
 
 ---
 
@@ -83,7 +106,7 @@ resolve it; if it's still ambiguous, show the operator the exact text and ask. A
 
 ### 4. Validate (dry run), confirm, then ingest
 
-Always dry-run first — it validates and prints a verdict per row without writing anything:
+Always dry-run first. It validates and optionally hashes the PDF locally; it creates no client/runtime state, archive or records and does not recover pending work:
 
 ```bash
 uv run fulcra-labs ingest agreed.json --source-doc report.pdf --dry-run --json
@@ -107,15 +130,50 @@ To push a *specific* reviewed row through (e.g. an implausible-but-real value th
 pass its marker key: `--yes-reviewed ldl-c,ferritin`. Never blanket-confirm review rows on the operator's
 behalf.
 
-The engine resolves-or-creates each marker's track on first use (idempotently), then writes each `ok`
-row. Re-running is safe: the deterministic source id makes a re-ingest a server-side no-op.
+For a selected retained legacy marker, add an explicit new mapping such as
+`--marker-target ferritin=Metric/00000000-0000-4000-8000-000000000001` (replace the
+illustrative UUID with the actual owned target). Repeat every provided pin on
+recovery. Unknown/duplicate canonical marker keys and incompatible targets hold.
+
+Native marker destinations use exact registry canonical units as immutable Metric
+metadata; records omit optional top-level `unit` and retain original `raw_unit`.
+The codec checks the validator's canonical unit rather than relabelling values.
+Exact served-schema proof precedes current staging. Upload acceptance alone is
+not success: every delivered record needs exact readback and guarded checkpoints.
+Exclusions do not count as verified observations.
+
+The unchanged source hash uses marker, collection time and six-significant-figure
+canonical value formatting. Corrections can create a new observation without
+removing the old one, but small value/provenance changes can retain identity.
+A conflicting existing current record holds before staging; unrelated extra
+top-level enrichment is allowed. Do not promise server-side no-ops or silently
+replace clinical data. Already-staged recovery retains its original payload and
+shared exact-delivery behavior; this is not a cross-host edit transaction.
 
 ### 5. Report back
 
-Summarize: markers ingested, tracks newly created vs adopted, the review/reject queue (with reasons and
-what you did about each), and any in-run dedupe skips. Point the operator at
-[Context Web](https://context.fulcradynamics.com) to browse the tracks. Use `fulcra-labs status` to show
-per-track observation counts.
+Report the actual aggregate current `outcome.ingested` and `excluded` complete-group
+lower bounds, review/reject reasons and in-run duplicate skips. Keep the separate
+`recovery` verified/excluded evidence separate; do not sum repeated invocations.
+`would_ingest` is preview intent. Unsupported marker attribution is explicitly
+UNKNOWN; do not invent per-marker counts or created/adopted totals. Nonzero JSON
+failures retain known progress and do not prove rejection or an empty destination.
+
+`fulcra-labs status --json` shows profile/account-scoped local evidence.
+`last_attempt` and legacy `last_attempt_evidence` are not success.
+`last_verified_ingest` is the local verified-observation/checkpoint time, not
+specimen or provider ingest time. Cached current counts describe `last completed current delivery` with
+`current_completed_at`; a newer `last_attempt` can describe a failed/empty attempt
+without relabelling those prior counts. `last_recovery` separately retains the latest recorded recovery attempt's complete
+or UNKNOWN lower bounds. Positive verified recovery can advance the local verified
+observation time despite later group failure; excluded-only recovery cannot.
+`--no-counts` omits current verified/excluded, retaining labelled recovery evidence.
+Legacy `numeric_annotation_tracks` counts cached tracks, not remote observations.
+Status identity/read failures are loud UNKNOWN. Ambiguous status COMMIT remains
+UNKNOWN; never repair it by reporting zero or erasing old evidence.
+
+Point the operator at [Context Web](https://context.fulcradynamics.com) to browse
+the owned native tracks. Actual app/source acceptance remains a separate QA gate.
 
 ---
 
@@ -126,7 +184,11 @@ per-track observation counts.
 - **Never convert or round in extraction.** Transcribe as printed; the engine converts.
 - **Never ingest a `review` or `reject` row without explicit operator confirmation** (and even then only
   `review` rows, via `--yes-reviewed`). `reject` rows never ingest.
-- **Medical data stays local.** Only the numeric values the operator confirms go to Fulcra. Source PDFs
-  are archived to `~/.config/fulcra-labs/documents/` on this machine only — never uploaded.
-- **Don't soft-delete tracks.** Fulcra has no per-event delete; cleanup is an operator decision.
+- **PDF bytes stay local.** Confirmed canonical values, collection time, raw value/unit,
+  range/flag, lab, marker, qualifier/report date, traceability note and source-document
+  token go to Fulcra. A supplied PDF is copied from one consistent byte snapshot to
+  `~/.config/fulcra-labs/documents/<sha256>.pdf` (`FULCRA_LABS_HOME` override),
+  after recovery and new-input admissibility. The archive can remain after a later
+  failure. The full `sha256:basename` token identifies it; the PDF is never uploaded.
+- **Preserve originals.** Do not delete legacy tracks, change replay policy or erase pending state as a retry strategy. Corrections and cleanup need an explicit disposition.
 - **Collection date is the event time**, not the report date.

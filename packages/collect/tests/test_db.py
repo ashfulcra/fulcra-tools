@@ -48,6 +48,34 @@ def test_wal_mode_is_enabled(collect_home):
     assert mode.lower() == "wal"
 
 
+def test_pending_record_store_is_plugin_scoped_and_preserves_old_value_on_rejection(collect_home):
+    conn = db.open()
+    payload = {"synthetic": "x" * 100_000}
+    db.set_record_outbox(conn, "one", "pending", payload)
+    assert db.get_record_outbox(conn, "one", "pending") == payload
+    assert db.get_record_outbox(conn, "two", "pending") is None
+    with pytest.raises(ValueError):
+        db.set_record_outbox(conn, "one", "pending", {"invalid": float("nan")})
+    assert db.get_record_outbox(conn, "one", "pending") == payload
+    with pytest.raises(ValueError):
+        db.set_record_outbox(conn, "one", "pending", {"large": "x" * (16 * 1024 * 1024)})
+    assert db.get_record_outbox(conn, "one", "pending") == payload
+
+
+def test_v8_imports_preexisting_small_pending_batches_and_retains_original_kv(collect_home):
+    conn = db.open()
+    conn.execute("DROP TABLE IF EXISTS record_outboxes")
+    conn.execute("DELETE FROM schema_version WHERE version >= 8")
+    payload = {"account_id": "synthetic", "groups": [{"records": []}]}
+    db.set_plugin_kv(conn, "synthetic", "v1_media_pending", payload)
+    db.set_plugin_kv(conn, "synthetic", "ordinary_cursor", "retained")
+    db.close_all()
+    conn = db.open()
+    assert db.get_record_outbox(conn, "synthetic", "v1_media_pending") == payload
+    assert db.get_plugin_kv(conn, "synthetic", "v1_media_pending") == payload
+    assert db.get_plugin_kv(conn, "synthetic", "ordinary_cursor") == "retained"
+
+
 def test_migrate_refuses_when_db_is_newer_than_binary(collect_home):
     """Older daemon binary against a db a newer binary wrote: refuse
     rather than silently dropping rows the binary doesn't understand."""
@@ -425,3 +453,38 @@ def test_plugin_kv_persists_across_worker_processes(collect_home):
         capture_output=True, text=True,
     )
     assert result.stdout.strip() == "12"
+
+
+def test_v9_dispatch_protocol_marker_retains_v8_pending_bytes(collect_home):
+    """The schema marker fences old writers without rewriting legacy payloads."""
+    conn = db.open()
+    conn.execute('DELETE FROM schema_version WHERE version >= 9')
+    outbox_raw = '{"account_id" : "synthetic", "groups" : [{"records": []}], "legacy": true}'
+    purple_raw = '{"account_id" : "synthetic", "items" : [{"records": {}}], "legacy": true}'
+    conn.execute('INSERT INTO record_outboxes VALUES (?,?,?,?)',
+                 ('synthetic', 'v1_pending', outbox_raw, 'synthetic'))
+    conn.execute('INSERT INTO plugin_kv (plugin_id,key,value_json,updated_at) VALUES (?,?,?,?)',
+                 ('purpleair', 'v1_pending', purple_raw, 'synthetic'))
+    db.close_all()
+    conn = db.open()
+    assert conn.execute('SELECT MAX(version) FROM schema_version').fetchone()[0] == 9
+    assert conn.execute('SELECT value_json FROM record_outboxes WHERE key=?', ('v1_pending',)).fetchone()[0] == outbox_raw
+    assert conn.execute('SELECT value_json FROM plugin_kv WHERE plugin_id=?', ('purpleair',)).fetchone()[0] == purple_raw
+
+
+def test_v8_binary_refuses_v9_dispatch_state_before_any_pending_write(collect_home, monkeypatch):
+    conn = db.open()
+    assert conn.execute('SELECT MAX(version) FROM schema_version').fetchone()[0] == 9
+    pending = {'groups': [{'records': []}], 'dispatch_version': 1,
+               'dispatch': {'synthetic': {'phase': 'issued'}}}
+    db.set_record_outbox(conn, 'synthetic', 'pending', pending)
+    raw = conn.execute('SELECT value_json FROM record_outboxes WHERE key=?', ('pending',)).fetchone()[0]
+    db.close_all()
+    # Simulate the unchanged pre-v9 binary's startup maximum and actual migrate
+    # gate. No plugin/worker state callback may run after this refused open.
+    monkeypatch.setattr(db, 'LATEST_VERSION', 8)
+    with pytest.raises(RuntimeError, match=r'schema version 9.*max 8'):
+        older_conn = db.open()
+        db.set_record_outbox(older_conn, 'synthetic', 'pending', {'groups': []})
+    with sqlite3.connect(str(collect_home / 'state.db')) as check:
+        assert check.execute('SELECT value_json FROM record_outboxes WHERE key=?', ('pending',)).fetchone()[0] == raw

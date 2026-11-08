@@ -117,3 +117,9 @@ Automatic token refresh does not clear that protection.
 Settings and account changes wait for an active task write to finish. Each new
 write checks your current selection and consent while holding a shared lock, so
 an older worker cannot start another write after the change takes effect.
+
+
+On the development branch, [captured Collect account and read consent](../task-sync/README.md#collect-account-and-read-consent-development-branch)
+also guards preview/source reads and supplies fresh credentials to every Files
+request. Task paths, completion generations and mutation leases are retained.
+Real source access on the destination Mac and packaged app QA remain release gates.

@@ -107,8 +107,12 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
     )
 
 
-def normalize_history(tracks: Iterable[dict]) -> Iterator[NormalizedEvent]:
+def normalize_history(tracks: Iterable[dict], *, scan_report=None, strict_scan=False) -> Iterator[NormalizedEvent]:
     """Filter + normalize a raw history payload. Drops malformed rows silently."""
+    if strict_scan:
+        from .poll_scan import normalize_api
+        yield from normalize_api(tracks, report=scan_report, source="deezer", normalizer=normalize_track)
+        return
     for t in tracks:
         ev = normalize_track(t)
         if ev is not None:
@@ -132,6 +136,8 @@ def fetch_history(
     max_pages: int | None = None,
     sleep_between_pages: float = 0.1,
     transport: httpx.BaseTransport | None = None,
+    scan_report=None,
+    strict_scan=False,
 ) -> Iterator[dict]:
     """Yield raw Deezer history dicts (newest first), paginating via `next`.
 
@@ -144,6 +150,10 @@ def fetch_history(
     sleep_between_pages: rate-limit hedge (50 req/5s → 100ms safe)
     transport: httpx transport override for tests
     """
+    if strict_scan:
+        from .poll_scan import deezer_rows
+        yield from deezer_rows(creds, report=scan_report, since=since, limit=limit, max_pages=max_pages, sleep=sleep_between_pages, transport=transport)
+        return
     since_ts = int(since.timestamp()) if since is not None else None
 
     next_url: str | None = DEEZER_HISTORY_URL

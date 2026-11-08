@@ -106,6 +106,15 @@ route on 2026-09-30, while visibility of the deleted source record was not teste
 
 ## Package index
 
+Collect's migration to v1 Event/Metric datatypes is in progress. The shared
+validation boundary is implemented; plugin conversion and the replacement
+installer are not yet released. A replacement installer must also verify
+background credential access across an upgrade. See the
+[migration status](docs/collect-v1.md).
+The development source consolidates Trakt credentials into one Keychain bundle;
+legacy items remain intact and ordinary reads never prompt or migrate them.
+This is not yet a claim about the published installer.
+
 Every directory under `packages/` is listed here. Each README covers that
 package’s setup, behavior, and limits. Install the pieces you need; the repository
 is not a requirement to run every piece together.
@@ -205,6 +214,10 @@ The 0.1.4 Mac beta is signed and notarized. It bundles 26 plugin entries,
 including local folders, meeting transcript exports, and selected Notion pages.
 Each source needs its own setup; Notion live verification is still pending.
 
+The development branch adds stable Trakt credential storage, owned shutdown
+cleanup, and a bounded manual backfill budget. These changes are not in the
+0.1.4 download; publication awaits the verified replacement installer.
+
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)
 covers sign-in and source permissions. The app includes its Python runtime;
@@ -225,6 +238,13 @@ workspace dependencies and runs the tests. It does not start Collect for you.
 See [`docs/TESTING.md`](docs/TESTING.md) for the development setup and platform
 requirements.
 
+The always-on [Linux selected-suite gate](.github/workflows/uv-workspace.yml)
+and [full macOS gate](.github/workflows/macos.yml) retain their test coverage and
+report interpreter/import paths plus per-test and slow-phase timings. Their
+finite budgets have completed-run evidence, without guaranteeing future runtime.
+A timed-out run is incomplete. See the
+[CI conventions](AGENTS.md#ci-and-workspace-membership).
+
 Every repository change must update the relevant READMEs in the same PR. Keep
 this package and skill index complete, and distinguish released behavior from
 work in progress. Examples and fixtures must be synthetic. Personal content,
@@ -235,3 +255,9 @@ Changes go through a PR and an independent review by a different agent identity.
 The review handshake lives on the bus; a GitHub comment alone does not satisfy
 it. [`AGENTS.md`](AGENTS.md) has the full conventions, including how to log work,
 request review, and close tasks with evidence.
+
+The development branch also fixes worker shutdown and credential recovery, supports
+older Podcasts libraries, and corrects the installed app's Full Disk Access
+guidance. Fresh account and Trakt-bundle reads share bounded quiet rechecking;
+media backfills avoid repeatedly checking unrelated earlier chunks. Native
+long-run acceptance and publication of the corrected installer remain open.

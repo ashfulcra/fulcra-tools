@@ -1,5 +1,5 @@
 """Daemon UDS command ``delete_definition`` — mirrors the HTTP route
-behaviour (clears plugin state, prunes favorites) but is reachable
+behaviour (clears legacy plugin state, preserves favorites) but is reachable
 via the local UDS socket so the menubar can call it.
 
 Why this test exists: the menubar's preferences/annotations_tab.py
@@ -109,6 +109,42 @@ def daemon_with_fake_fulcra(collect_home, _in_memory_keyring, monkeypatch):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("native_backend", [False, True], ids=["keyring", "macos-getter"])
+def test_in_memory_keyring_isolates_scopes_and_access_paths(
+    _in_memory_keyring, monkeypatch, native_backend,
+) -> None:
+    """Catch native reads bypassing the fake or conflating service/account keys."""
+    from fulcra_collect import credentials
+
+    monkeypatch.setattr(credentials, "_uses_macos_keychain", lambda: native_backend)
+    credentials.set_secret("alpha", "shared-key", "alpha-value")
+    credentials.set_secret("beta", "shared-key", "beta-value")
+    credentials.set_user_secret("shared-key", "user-value")
+    assert _in_memory_keyring == {
+        ("fulcra-collect:alpha", "shared-key"): "alpha-value",
+        ("fulcra-collect:beta", "shared-key"): "beta-value",
+        ("fulcra-collect:user", "shared-key"): "user-value",
+    }
+    assert credentials.get_secret("alpha", "shared-key") == "alpha-value"
+    assert credentials.get_secret("beta", "shared-key") == "beta-value"
+    assert credentials.get_user_secret("shared-key") == "user-value"
+    assert credentials.get_user_secret_fresh("shared-key") == "user-value"
+    assert credentials.authorize_secret("alpha", "shared-key") is True
+    assert credentials.authorize_user_secret("shared-key") is True
+    assert credentials.authorize_secret("alpha", "missing") is False
+
+    credentials.set_user_secret("shared-key", "replacement")
+    assert credentials.get_user_secret("shared-key") == "replacement"
+    credentials.delete_secret("alpha", "shared-key")
+    credentials.delete_secret("alpha", "shared-key")
+    credentials.delete_user_secret("shared-key")
+    credentials.delete_user_secret("shared-key")
+    assert credentials.get_secret("alpha", "shared-key") is None
+    assert credentials.get_user_secret_fresh("shared-key") is None
+    assert credentials.authorize_user_secret("shared-key") is False
+    assert _in_memory_keyring == {("fulcra-collect:beta", "shared-key"): "beta-value"}
+
 
 def test_delete_definition_uds_command(daemon_with_fake_fulcra) -> None:
     """The handle_request branch routes to _delete_definition."""
@@ -223,7 +259,7 @@ def test_delete_definition_refresh_on_401(
     # Stub the CLI-refresh helper: pretend the CLI minted a fresh token.
     refresh_calls = {"n": 0}
 
-    def _fake_refresh() -> str:
+    def _fake_refresh(**kwargs) -> str:
         refresh_calls["n"] += 1
         _creds_mod.set_user_secret("bearer-token", "fresh-token")
         return "fresh-token"

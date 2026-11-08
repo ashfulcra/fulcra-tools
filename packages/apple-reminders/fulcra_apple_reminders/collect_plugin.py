@@ -1,9 +1,8 @@
 """Selected Reminders lists with explicit access and completion consent."""
 from datetime import timedelta
-from functools import partial
-
-from fulcra_collect import config as collect_config
 from fulcra_collect.config_leases import task_mutation_scope
+from fulcra_collect.files_io import CollectFiles
+from fulcra_collect.v1_session import CollectRecordSession
 from fulcra_collect.plugin import Permission, Plugin, Setting, SetupStep
 from fulcra_task_sync.engine import run_sync
 from fulcra_task_sync.vault import FulcraVault
@@ -18,17 +17,6 @@ def selected_lists(value):
             or len(value) != len(set(value))):
         raise ValueError('Choose valid Reminders lists in Collect settings.')
     return set(value)
-
-
-def current_selection(epoch=None):
-    """Re-read user intent before writes; disabling or preview cancels mutations."""
-    config = collect_config.load()
-    settings = config.plugin_settings.get(PLUGIN_ID, {})
-    if (getattr(config, 'account_transition', False)
-            or PLUGIN_ID not in config.enabled or settings.get('dry_run', True) is not False
-            or (epoch is not None and config.plugin_epochs.get(PLUGIN_ID, '') != epoch)):
-        return set()
-    return selected_lists(settings.get('selected_lists', []))
 
 
 def permission_check(ctx):
@@ -53,18 +41,26 @@ def run(ctx):
     preview = ctx.config.get('dry_run', True)
     if type(preview) is not bool:
         raise ValueError('Preview only must be on or off.')
-    epoch = getattr(ctx, 'config_epoch', '')
-    provider = AppleRemindersProvider()
-    vault = FulcraVault(ctx.fulcra_token())
-    try:
-        result = run_sync(provider=provider, selected_ids=selected, vault=vault,
-                          load_state=ctx.kv_get, save_state=ctx.kv_set,
-                          dry_run=preview, still_selected=partial(current_selection, epoch=epoch),
-                          selection_epoch=epoch,
-                          mutation_scope=task_mutation_scope,
-                          deadline_s=600)
-    finally:
-        vault.close()
+    with CollectRecordSession(ctx) as session:
+        def selected_now():
+            session.guard()
+            return set(selected)
+        def io_guard(**kwargs):
+            session.guard(**kwargs)
+            selected_now()
+        selected_now()
+        provider = AppleRemindersProvider(still_allowed=selected_now)
+        with CollectFiles(session, guard=io_guard) as files:
+            vault = FulcraVault(bound_files=files)
+            try:
+                result = run_sync(provider=provider, selected_ids=selected, vault=vault,
+                    load_state=ctx.kv_get, save_state=ctx.kv_set,
+                    dry_run=preview, still_selected=selected_now,
+                    selection_epoch=session.epoch, mutation_scope=task_mutation_scope,
+                    deadline_s=600)
+                selected_now()
+            finally:
+                vault.close()
     ctx.progress(stage='partial' if result.partial else 'done',
                  remaining=result.remaining, errors=len(result.errors), **result.counts)
     if result.errors:

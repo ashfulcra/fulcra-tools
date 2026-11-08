@@ -49,11 +49,21 @@ the default cadence. Running and status inspection need a running daemon.
 
 ## What lands in Fulcra
 
-The plugin finds or creates these `NumericAnnotation` definitions by name and
-caches their IDs in Collect's plugin-scoped state. Each present measure becomes
-one record; missing values are omitted.
+On the v1 development branch, the plugin resolves owned, compatible v1
+`Metric/<UUID>` destinations with discrete aggregation and the units below.
+It uses Collect's sign-in; an absent or changed sign-in stops the run.
+The [migration status](../../docs/collect-v1.md) distinguishes this branch from
+the released app. Each present measure becomes one record; missing values are
+omitted, while a missing/incompatible destination fails the poll visibly.
 
-| Definition | Unit |
+The development writer checks the account's queryable replay exclusions before
+same-sample duplicate shortcuts and while reconciling pending measures. It
+repairs any observed revival with a native tombstone and verifies absence before
+progress. Excluded measures stay excluded and do not count as delivered. These
+checks use the shared local account mutation lease; native Undo UI and historical
+conversion/cutover remain separate migration gates.
+
+| Metric | Unit |
 |---|---|
 | PM2.5 | `ug/m3` |
 | PM10 | `ug/m3` |
@@ -63,7 +73,7 @@ one record; missing values are omitted.
 | Barometric Pressure | `hPa` |
 
 All configured sensors share these tracks. Their sensor IDs are encoded in
-source IDs, not separate per-sensor definitions. The plugin uses the sensor's
+source IDs, not separate per-sensor datatypes. The plugin uses the sensor's
 observation time when available. An absent cloud timestamp or absent/unparseable
 LAN timestamp falls back to fetch time, which weakens repeated-sample dedup.
 
@@ -81,13 +91,25 @@ LAN timestamp falls back to fetch time, which weakens repeated-sample dedup.
 - **Raw sensor values.** LAN parsing takes the channel-A `*_atm` particulate
   fields. Temperature is the onboard Fahrenheit reading; the plugin applies
   no temperature or humidity correction.
-- **Local dedup, limited delivery evidence.** A claim keyed by sensor ID and
-  observation second suppresses a repeated reading in this Collect state
-  database. POST failures release that claim for retry. The typed ingest path
-  has no server-side source-ID dedup, and this plugin does not read records back
-  to verify delivery. Separate Collect installations have separate claim stores.
-  Missing measures added later at the same timestamp can also be suppressed by
-  an already-claimed reading.
+- **Verified delivery with a durable outbox.** Each measure uses a stable UUID
+  derived from its v1 destination and `purpleair:<sensor>:<observation-second>:<measure>`
+  primary source ID. Exact ID readback compares every submitted field before a
+  receipt or observation cursor advances. Unchanged samples are skipped; a newly
+  available measure or corrected value at the same sample time can still land.
+  Pending samples survive a partial upload, timeout or indexing delay and are
+  reconciled before the next sensor fetch. An upload receipt alone is insufficient.
+  A pending outbox bound to a different account/configuration epoch blocks the
+  poll for explicit reconciliation; it is never silently reassigned or discarded.
+  New items retain `dispatch_version=1`, the original sample/scope binding, an
+  exact per-destination issued subset/body hash and positive exact source IDs.
+  The checkpoint is durable before the actual source POST. Issued absent or
+  partially visible measures remain UNKNOWN without another POST; later exact
+  readback can reconcile them. An exclusion cannot complete an uncertain issued
+  measure from absence unless the original source was positively observed.
+  Legacy items retain their original bytes and never assume a fresh attempt.
+  Native repair remains a separate durability gate. Follow Collect's
+  [upgrade and rollback rules](../collect/README.md) before opening this state
+  with another app version.
 - **Freshness is a status signal.** The plugin declares twelve-hour limits for
   silence since a yield and lag behind the newest source observation. These are
   separate from whether the worker exited successfully; they do not constitute
@@ -95,8 +117,11 @@ LAN timestamp falls back to fetch time, which weakens repeated-sample dedup.
 
 The API key goes into Collect's OS keychain. Mode, index, and sensor addresses
 are plaintext settings in `~/.config/fulcra-collect/config.toml`; cached
-definition IDs, dedup claims, and the last observation timestamp live in
-`state.db`. Sensor IDs, timestamps, and measurements are sent to your Fulcra
+v1 destination mappings, the pending outbox and verified observation cursor live
+in `state.db`. Legacy definition IDs/claims/cursors remain intact for historical
+conversion. The private `v1-type-creations.sqlite` journal in the same Collect
+home must accompany state during host migration; do not remove it to retry an
+uncertain datatype creation. Sensor IDs, timestamps, and measurements are sent to your Fulcra
 account, and IDs/readings can appear in local logs or connection previews.
 Local mode keeps acquisition on the LAN but still uploads to Fulcra; it is
 not an offline storage mode.

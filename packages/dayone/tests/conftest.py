@@ -25,3 +25,10 @@ def recording_transport():
     def make(handler: Callable[[httpx.Request], httpx.Response]) -> RecordingTransport:
         return RecordingTransport(handler)
     return make
+
+
+@pytest.fixture(autouse=True)
+def _no_external_http(monkeypatch):
+    """Ordinary Day One tests must explicitly inject a synthetic transport."""
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request',
+        lambda *_: pytest.fail('Day One test attempted external HTTP'))

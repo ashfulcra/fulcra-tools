@@ -16,6 +16,8 @@ import {
   defaultLocalStorageArea,
 } from "./storageArea";
 
+import {assertLegacyAuth} from "./v1AuthMode";
+
 const TOKEN_KEY = "relaylessTokens";
 
 /** Refresh when the access token is within this margin of expiry, so an
@@ -70,12 +72,14 @@ export class TokenStore {
 
   /** Read the persisted token set, or null if not signed in. */
   async get(): Promise<StoredTokens | null> {
+    await assertLegacyAuth(this.storage);
     const r = await this.storage.get(TOKEN_KEY);
     return (r[TOKEN_KEY] as StoredTokens | undefined) ?? null;
   }
 
   /** Persist a token set. */
   async set(tokens: StoredTokens): Promise<void> {
+    await assertLegacyAuth(this.storage);
     await this.storage.set({ [TOKEN_KEY]: tokens });
   }
 
@@ -104,6 +108,7 @@ export class TokenStore {
 
   /** Remove the token set (sign out). */
   async clear(): Promise<void> {
+    await assertLegacyAuth(this.storage);
     await this.storage.remove(TOKEN_KEY);
   }
 

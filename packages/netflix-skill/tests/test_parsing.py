@@ -5,9 +5,9 @@ import pytest
 
 
 def test_script_loads_and_declares_contract(ni):
-    assert ni.DEF_NAME == "Watched"
-    assert ni.DEF_MARKER == "com.fulcradynamics.annotation.media.watched"
-    assert ni.API_BASE.startswith("https://")
+    assert ni.INGEST_VERSION == 2
+    assert ni.CHUNK_SIZE == 500
+    assert ni.ADAPTER_CONTRACT_VERSION == 1
 
 
 def test_parse_netflix_date(ni):
@@ -29,7 +29,8 @@ def test_make_note_and_title(ni):
 
 
 def test_slim_det_id_matches_fulcra_media_scheme(ni):
-    # MUST equal fulcra-media's _det_id exactly (cross-tool dedup contract).
+    # Preserve fulcra-media's source hash vector; native UUIDs also bind the
+    # destination and exact payload matching is required before a no-POST skip.
     h = hashlib.sha256("4/12/23|BEEF: Season 1: Episode 2|0".encode()).hexdigest()
     assert ni.det_id_slim("4/12/23", "BEEF: Season 1: Episode 2", 0) == \
         f"com.fulcra.media.netflix.v2.{h[:16]}"

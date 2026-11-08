@@ -6,9 +6,9 @@ authorization code (plus the PKCE code_verifier) for access and refresh
 tokens, which the callback route then stores in the plugin's keychain
 namespace.
 
-The Trakt client_id and client_secret are expected to have been stored in
-the keychain already (via the "input" SetupStep that precedes the "oauth"
-step in TRAKT_PLUGIN.setup_steps).
+The Trakt client_id is expected in the keychain already (via the "input"
+SetupStep). PKCE sign-in does not send a client_secret, even for an app
+whose legacy secret remains stored for refreshing existing tokens.
 
 Why PKCE with Trakt?
   Trakt's /oauth/token endpoint accepts the code_verifier parameter as of
@@ -21,8 +21,8 @@ from urllib.parse import urlencode
 
 import httpx
 
-TRAKT_AUTHORIZE_ENDPOINT = "https://trakt.tv/oauth/authorize"
-TRAKT_TOKEN_ENDPOINT = "https://api.trakt.tv/oauth/token"
+TRAKT_AUTHORIZE_ENDPOINT = "https://auth.trakt.tv/oauth/authorize"
+TRAKT_TOKEN_ENDPOINT = "https://auth.trakt.tv/oauth/token"
 
 
 def trakt_authorize_url(
@@ -56,6 +56,7 @@ def trakt_oauth_handler(
     code: str,
     code_verifier: str,
     redirect_uri: str,
+    _client_id: str | None = None,
 ) -> dict[str, str]:
     """Exchange a Trakt authorization code for access + refresh tokens.
 
@@ -67,7 +68,7 @@ def trakt_oauth_handler(
 
     Returns a dict suitable for the callback route to persist:
       {"access_token": "...", "refresh_token": "...", "expires_in": "...",
-       "created_at": "..."}
+       "created_at": "...", "redirect_uri": "..."}
 
     Raises RuntimeError when the Trakt client credentials are not yet in
     the keychain (i.e., the user skipped the "Paste your credentials" step).
@@ -76,18 +77,18 @@ def trakt_oauth_handler(
     """
     from fulcra_collect import credentials as _creds
 
-    client_id = _creds.get_secret(plugin_id, "client_id")
-    client_secret = _creds.get_secret(plugin_id, "client_secret")
-    if not client_id or not client_secret:
+    if not code_verifier:
+        raise RuntimeError("trakt: PKCE verifier missing — restart Trakt sign-in")
+    client_id = _client_id if _client_id is not None else _creds.get_secret(plugin_id, "client_id")
+    if not client_id:
         raise RuntimeError(
-            "trakt: client_id / client_secret not configured — "
+            "trakt: client_id not configured — "
             "complete the 'Paste your Trakt OAuth credentials' step first"
         )
 
     payload = {
         "code": code,
         "client_id": client_id,
-        "client_secret": client_secret,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
         "code_verifier": code_verifier,
@@ -102,4 +103,5 @@ def trakt_oauth_handler(
         "refresh_token": body.get("refresh_token", ""),
         "expires_in": str(body.get("expires_in", "")),
         "created_at": str(body.get("created_at", "")),
+        "redirect_uri": redirect_uri,
     }

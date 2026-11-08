@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import os
 import re
 import tempfile
 import time
@@ -71,7 +72,7 @@ class SyncStats:
         return d
 
 
-def load_state(*, log, timeout: float = 60) -> dict:
+def load_state(*, log, timeout: float = 60, files=vaultio) -> dict:
     """Read sync state, distinguishing 'absent' from 'unreadable'.
 
     A transport failure must NOT be treated as an empty state: that would
@@ -79,7 +80,7 @@ def load_state(*, log, timeout: float = 60) -> dict:
     a successful first run. Absence is proven by MissingFile, nothing else.
     """
     try:
-        raw = vaultio.read_text(STATE_PATH, timeout=timeout)
+        raw = files.read_text(STATE_PATH, timeout=timeout)
     except vaultio.MissingFile:
         log.info("apple-notes: no sync state yet — treating as first run")
         return {"version": STATE_VERSION, "notes": {}, "attachments": {}}
@@ -97,7 +98,7 @@ def load_state(*, log, timeout: float = 60) -> dict:
     return data
 
 
-def save_state(state: dict, *, now: datetime) -> None:
+def save_state(state: dict, *, now: datetime, files=vaultio) -> None:
     """Persist sync state.
 
     ``updated_at`` is stamped at SAVE time, not from the run's start clock:
@@ -108,15 +109,15 @@ def save_state(state: dict, *, now: datetime) -> None:
     state["version"] = STATE_VERSION
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     state["run_started_at"] = now.isoformat()
-    vaultio.write_text(STATE_PATH, json.dumps(state, indent=1, sort_keys=True))
+    files.write_text(STATE_PATH, json.dumps(state, indent=1, sort_keys=True))
 
 
-def stat_missing(remote: str) -> bool:
+def stat_missing(remote: str, *, files=vaultio) -> bool:
     """True only when the file is positively absent."""
-    return vaultio.stat(remote) is None
+    return files.stat(remote) is None
 
 
-def write_index(stats: "SyncStats", *, now: datetime, total_notes: int) -> None:
+def write_index(stats: "SyncStats", *, now: datetime, total_notes: int, files=vaultio) -> None:
     """Write a small overview note so the import is discoverable in the vault.
 
     Deliberately does NOT touch vault/MAP.md or vault/LOG.md: on a vault
@@ -161,17 +162,17 @@ def write_index(stats: "SyncStats", *, now: datetime, total_notes: int) -> None:
         f"- {now.date().isoformat()} synced {total_notes} notes from Apple Notes",
         "",
     ])
-    vaultio.write_text(INDEX_PATH, markdown)
+    files.write_text(INDEX_PATH, markdown)
 
 
-def _mark_deleted_in_place(remote: str, *, now: datetime, log) -> bool:
+def _mark_deleted_in_place(remote: str, *, now: datetime, log, files=vaultio) -> bool:
     """Flip a vault note's apple-deleted flag without re-rendering it.
 
     The note is gone from Apple Notes, so its body cannot be regenerated --
     the vault copy is now the only copy, and this must not overwrite it.
     """
     try:
-        current = vaultio.read_text(remote)
+        current = files.read_text(remote)
     except vaultio.MissingFile:
         return False
     if re.search(r"^apple-deleted:\s*true\s*$", current, re.MULTILINE):
@@ -182,13 +183,13 @@ def _mark_deleted_in_place(remote: str, *, now: datetime, log) -> bool:
     updated = updated.rstrip("\n") + (
         f"\n- {now.date().isoformat()} note deleted in Apple Notes; "
         f"vault copy kept by {render.OWNER}\n")
-    vaultio.write_text(remote, updated)
+    files.write_text(remote, updated)
     return True
 
 
 def _sync_attachments(attachments, container: Path, state: dict, stats: SyncStats,
                       *, max_bytes: int, dry_run: bool, log,
-                      expired=None) -> tuple[dict[str, str], bool]:
+                      expired=None, files=vaultio, still_allowed=None) -> tuple[dict[str, str], bool]:
     """Upload each attachment's file once.
 
     Returns (attachment-id -> vault path, deadline_hit). The deadline is
@@ -197,7 +198,9 @@ def _sync_attachments(attachments, container: Path, state: dict, stats: SyncStat
     worker's kill deadline.
     """
     links: dict[str, str] = {}
+    guard = still_allowed or (lambda: None)
     for att in attachments:
+        guard()
         if expired is not None and expired():
             return links, True
         if not att.has_file:
@@ -222,33 +225,53 @@ def _sync_attachments(attachments, container: Path, state: dict, stats: SyncStat
         remote_rel = render.attachment_path(att.media_uuid, att.filename or local.name)
         remote = f"/vault/{remote_rel}"
         import hashlib
-        try:
-            with local.open("rb") as attachment_file:
-                fingerprint = hashlib.file_digest(attachment_file, "sha256").hexdigest()
-        except OSError as exc:
-            stats.attachments_failed += 1
-            stats.errors.append(f"attachment {att.media_uuid}: read failed: {exc}")
-            continue
-        if (known and known.get("sha256") == fingerprint
-                and known.get("path") == remote_rel):
-            stats.attachments_unchanged += 1
-            links[att.uuid] = remote_rel
-            continue
-        if dry_run:
+        # Hash and upload one private immutable snapshot. Reading the live
+        # attachment a second time can upload different bytes under an old hash.
+        with tempfile.NamedTemporaryFile(prefix="collect-notes-", suffix=local.suffix) as frozen:
+            try:
+                with local.open("rb") as attachment_file:
+                    before = os.fstat(attachment_file.fileno())
+                    digest, copied = hashlib.sha256(), 0
+                    while chunk := attachment_file.read(1024 * 1024):
+                        guard()
+                        copied += len(chunk)
+                        if copied > max_bytes:
+                            raise OverflowError
+                        frozen.write(chunk)
+                        digest.update(chunk)
+                    after = os.fstat(attachment_file.fileno())
+                    if (copied != before.st_size or any(getattr(before, key) != getattr(after, key)
+                            for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))):
+                        raise ValueError("attachment changed while taking its snapshot")
+                size, fingerprint = copied, digest.hexdigest()
+                frozen.flush()
+            except OverflowError:
+                stats.attachments_too_large += 1
+                continue
+            except (OSError, ValueError) as exc:
+                stats.attachments_failed += 1
+                stats.errors.append(f"attachment {att.media_uuid}: read failed: {exc}")
+                continue
+            if (known and known.get("sha256") == fingerprint
+                    and known.get("path") == remote_rel):
+                stats.attachments_unchanged += 1
+                links[att.uuid] = remote_rel
+                continue
+            if dry_run:
+                stats.attachments_uploaded += 1
+                stats.attachment_bytes += size
+                links[att.uuid] = remote_rel
+                continue
+            try:
+                files.upload_file(frozen.name, remote)
+            except vaultio.VaultIOError as exc:
+                stats.attachments_failed += 1
+                stats.errors.append(f"attachment {att.media_uuid}: {exc}")
+                continue
+            state["attachments"][att.media_uuid] = {"path": remote_rel, "size": size, "sha256": fingerprint}
             stats.attachments_uploaded += 1
             stats.attachment_bytes += size
             links[att.uuid] = remote_rel
-            continue
-        try:
-            vaultio.upload_file(str(local), remote)
-        except vaultio.VaultIOError as exc:
-            stats.attachments_failed += 1
-            stats.errors.append(f"attachment {att.media_uuid}: {exc}")
-            continue
-        state["attachments"][att.media_uuid] = {"path": remote_rel, "size": size, "sha256": fingerprint}
-        stats.attachments_uploaded += 1
-        stats.attachment_bytes += size
-        links[att.uuid] = remote_rel
     return links, False
 
 
@@ -256,13 +279,15 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
              limit: int | None = None, max_attachment_mb: int = 25,
              deadline_s: float = DEFAULT_DEADLINE_S,
              checkpoint_every: int = CHECKPOINT_EVERY,
-             log, progress=None) -> SyncStats:
+             log, progress=None, files=vaultio, still_allowed=None) -> SyncStats:
+    guard = still_allowed or (lambda: None)
+    guard()
     container = container or notestore.DEFAULT_GROUP_CONTAINER
     store_path = container / "NoteStore.sqlite"
     now = datetime.now(timezone.utc)
     stats = SyncStats()
 
-    state = load_state(log=log) if not dry_run else {
+    state = load_state(log=log, files=files) if not dry_run else {
         "version": STATE_VERSION, "notes": {}, "attachments": {}}
 
     started = time.monotonic()
@@ -272,10 +297,14 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
         return not dry_run and (time.monotonic() - started) > deadline_s
 
     with tempfile.TemporaryDirectory(prefix="apple-notes-") as td:
+        guard()
         snap = notestore.snapshot(store_path, Path(td))
+        guard()
         with notestore.NoteStore(snap) as store:
             notes = store.notes()
+            guard()
             attachments = store.attachments()
+        guard()
 
         stats.notes_seen = len(notes)
         by_note: dict[str, list] = {}
@@ -295,6 +324,7 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
         max_bytes = max_attachment_mb * 1024 * 1024
 
         for index, note in enumerate(notes, start=1):
+            guard()
             if progress and index % 100 == 0:
                 progress(stage="notes", done=index, total=len(notes))
 
@@ -320,7 +350,7 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
             links, deadline_hit = _sync_attachments(
                 note_attachments, container, state, stats,
                 max_bytes=max_bytes, dry_run=dry_run, log=log,
-                expired=expired)
+                expired=expired, files=files, still_allowed=guard)
             if deadline_hit:
                 # Stop BEFORE writing this note: its attachment set is
                 # incomplete, and writing it now would record it as synced
@@ -362,12 +392,12 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
             if not dry_run:
                 try:
                     try:
-                        existing = vaultio.read_text(f"/vault/{path_rel}")
+                        existing = files.read_text(f"/vault/{path_rel}")
                     except vaultio.MissingFile:
                         existing = None
                     if existing is not None:
                         markdown = render.merge_note(existing, markdown)
-                    vaultio.write_text(f"/vault/{path_rel}", markdown)
+                    files.write_text(f"/vault/{path_rel}", markdown)
                 except (vaultio.VaultIOError, ValueError) as exc:
                     stats.notes_failed += 1
                     stats.errors.append(f"note {note.uuid[:8]}: write failed: {exc}")
@@ -383,25 +413,26 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
                 }
                 processed_since_checkpoint += 1
                 if processed_since_checkpoint >= checkpoint_every:
-                    save_state(state, now=now)
+                    save_state(state, now=now, files=files)
                     processed_since_checkpoint = 0
             stats.notes_written += 1
 
         # Notes that vanished from the store: mark, never delete.
         if not dry_run and limit is None and not stats.stopped_early:
             for uuid, meta in list(state["notes"].items()):
+                guard()
                 if uuid in live_uuids or meta.get("deleted"):
                     continue
                 try:
                     if _mark_deleted_in_place(
-                            f"/vault/{meta['path']}", now=now, log=log):
+                            f"/vault/{meta['path']}", now=now, log=log, files=files):
                         stats.deletions_marked += 1
                         meta["deleted"] = True
                 except vaultio.VaultIOError as exc:
                     stats.errors.append(f"deletion mark {uuid[:8]}: {exc}")
 
         if not dry_run:
-            save_state(state, now=now)
+            save_state(state, now=now, files=files)
             # Only refresh the index on a pass that reached the end, so a
             # checkpointed partial run does not advertise a smaller library
             # than the vault actually holds.
@@ -412,12 +443,13 @@ def run_sync(*, container: Path | None = None, dry_run: bool = False,
                     # a run that found no changes must write nothing, or the
                     # sync is not idempotent and every scheduled pass churns
                     # the vault's history.
-                    if changed or stat_missing(INDEX_PATH):
+                    if changed or stat_missing(INDEX_PATH, files=files):
                         write_index(stats, now=now,
-                                    total_notes=len(state["notes"]))
+                                    total_notes=len(state["notes"]), files=files)
                 except vaultio.VaultIOError as exc:
                     stats.errors.append(f"index: {exc}")
 
+    guard()
     return stats
 
 
@@ -444,7 +476,8 @@ DEFAULT_RECONCILE_DEADLINE_S = 600
 def run_reconcile(*, container: Path | None = None, log,
                   limit: int | None = None, download_all: bool = False,
                   deadline_s: float = DEFAULT_RECONCILE_DEADLINE_S,
-                  checkpoint_path: Path | None = None) -> dict:
+                  checkpoint_path: Path | None = None, files=vaultio,
+                  still_allowed=None, namespace=None) -> dict:
     """Read a bounded portion of a resumable, body-free vault scan.
 
     Only ``complete: true`` returns a full classification. Checkpoints are
@@ -462,11 +495,15 @@ def run_reconcile(*, container: Path | None = None, log,
     checkpoint_path = Path(checkpoint_path or DEFAULT_RECONCILE_CHECKPOINT)
     with reconcile_checkpoint.locked(checkpoint_path):
         return _scan_reconcile(container=container, log=log, limit=limit,
-                               deadline=deadline, checkpoint_path=checkpoint_path)
+                               deadline=deadline, checkpoint_path=checkpoint_path,
+                               files=files, still_allowed=still_allowed, namespace=namespace)
 
 
 def _scan_reconcile(*, container: Path, log, limit: int | None,
-                    deadline: float, checkpoint_path: Path) -> dict:
+                    deadline: float, checkpoint_path: Path, files=vaultio,
+                    still_allowed=None, namespace=None) -> dict:
+    guard = still_allowed or (lambda: None)
+    guard()
     now = datetime.now(timezone.utc)
     state = None
     scope = None
@@ -478,6 +515,7 @@ def _scan_reconcile(*, container: Path, log, limit: int | None,
         return max(0.0, deadline - time.monotonic())
 
     def result(complete=False, changes=()):
+        guard()
         total = len(state["notes"]) if state is not None else None
         pending = total - len(observations) if total is not None else None
         if scope is not None:
@@ -500,23 +538,28 @@ def _scan_reconcile(*, container: Path, log, limit: int | None,
 
     if remaining() <= 0:
         return result()
-    state = load_state(log=log, timeout=min(60.0, remaining()))
-    scope = reconcile_checkpoint.scope_key(container, state)
+    state = load_state(log=log, timeout=min(60.0, remaining()), files=files)
+    guard()
+    scope = reconcile_checkpoint.scope_key(container, state, namespace=namespace)
     observations = reconcile_checkpoint.load(checkpoint_path, scope)
     observations = {uuid: obs for uuid, obs in observations.items() if uuid in state["notes"]}
     phase = "snapshot"
     if remaining() <= 0:
         return result()
     with tempfile.TemporaryDirectory(prefix="apple-notes-rec-") as td:
+        guard()
         snap = notestore.snapshot(container / "NoteStore.sqlite", Path(td),
                                   timeout=min(notestore.SNAPSHOT_TIMEOUT_S, remaining()))
+        guard()
         if remaining() <= 0:
             return result()
         with notestore.NoteStore(snap) as store:
             notes = store.notes()
+            guard()
             if remaining() <= 0:
                 return result()
             attachments = store.attachments()
+        guard()
 
     by_note = {}
     for att in attachments:
@@ -525,6 +568,7 @@ def _scan_reconcile(*, container: Path, log, limit: int | None,
     phase = "apple"
     apple = {}
     for note in notes:
+        guard()
         if remaining() <= 0:
             return result()
         try:
@@ -542,12 +586,13 @@ def _scan_reconcile(*, container: Path, log, limit: int | None,
     observed_this_run = 0
     try:
         for uuid, entry in state["notes"].items():
+            guard()
             if uuid in observations:
                 continue
             if remaining() <= 0 or (limit is not None and observed_this_run >= limit):
                 break
             try:
-                text = vaultio.read_text(f"/vault/{entry.get('path', '')}",
+                text = files.read_text(f"/vault/{entry.get('path', '')}",
                                          timeout=min(60.0, remaining()))
                 fetched += 1
             except vaultio.MissingFile:

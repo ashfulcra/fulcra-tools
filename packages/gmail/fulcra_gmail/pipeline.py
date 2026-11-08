@@ -27,6 +27,8 @@ never touch a logger, at any level.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,10 +43,9 @@ _log = logging.getLogger("fulcra_gmail.pipeline")
 
 #: Canonical effect order — file BEFORE relay (relay only after file-done).
 _CANONICAL_ACTIONS = (ACTION_FILE, ACTION_RELAY)
-# A relay message can need two coord subprocesses (emit + readback), each with
-# a 60-second timeout. Five effectful messages cap that worst-case work at ten
-# subprocess waits, leaving the 900-second collect worker enough room for Gmail
-# fetches, file writes, and clean result/checkpoint publication.
+# Bound effectful messages across all pairs in one worker run. Collect embeds
+# the engine with guarded HTTP and exact-file readback. This count is not a
+# wall-clock guarantee: a message may require several bounded transport calls.
 DEFAULT_MAX_EFFECTFUL_MESSAGES = 5
 
 
@@ -103,6 +104,8 @@ def process_message(
     files_writer: FilesWriter,
     relay_emitter: RelayEmitterProtocol | None,
     crash: Callable[[str], None] | None = None,
+    still_allowed=None,
+    mutation_scope=None,
 ) -> bool:
     """Run the ordered, ledger-barriered effect pipeline for one effective match.
 
@@ -111,6 +114,8 @@ def process_message(
     re-executed, so a file already written is never re-filed and a relay already
     delivered is never re-emitted (idempotent recovery).
     """
+    guard, scope = still_allowed or (lambda: None), mutation_scope or nullcontext
+    guard()
     message_id = str(message.get("id"))
     rid, rver = rule.id, rule.version
     required = required_actions(rule)
@@ -122,16 +127,20 @@ def process_message(
 
     if ACTION_FILE in remaining:
         selected = convert.to_selected_email(message)
-        result = files_writer.write(
-            account_id, message_id, message.get("internalDate"), selected
-        )
-        ledger.append(LedgerEntry.file_done(
-            account_id=account_id, message_id=message_id, rule_id=rid,
-            rule_version=rver, sha256=result.sha256, destination=result.path,
-        ))
+        with scope():
+            guard()
+            result = files_writer.write(
+                account_id, message_id, message.get("internalDate"), selected
+            )
+            guard()
+            ledger.append(LedgerEntry.file_done(
+                account_id=account_id, message_id=message_id, rule_id=rid,
+                rule_version=rver, sha256=result.sha256, destination=result.path,
+            ))
         _crash(crash, "after_file_done")
 
     if ACTION_RELAY in remaining:
+        guard()
         if relay_emitter is None:
             # The rule requires a relay but no backend is available (no coord
             # team configured). The message is INCOMPLETE — never marked done —
@@ -146,28 +155,33 @@ def process_message(
             )
             return False
         key = outbox_key(account_id, message_id, rid, rver)
-        ledger.ensure_relay_pending(LedgerEntry.relay_pending(
-            account_id=account_id, message_id=message_id, rule_id=rid,
-            rule_version=rver, outbox_key=key,
-        ))
-        _crash(crash, "after_relay_pending")
         directive = build_directive(key, rule)
-        emit = relay_emitter.emit(directive)
-        if not emit.ok:
-            _log.warning("gmail: relay emit failed for outbox %s (rule %s)", key, rid)
-            return False
-        _crash(crash, "after_relay_emit")
-        # B3 readback: confirm the canonical directive is visible before marking
-        # done — never claim a relay we can't verify.
-        if not relay_emitter.exists(directive):
-            _log.warning("gmail: relay readback failed for outbox %s (rule %s)", key, rid)
-            return False
-        ledger.append(LedgerEntry.relay_done(
-            account_id=account_id, message_id=message_id, rule_id=rid,
-            rule_version=rver, outbox_key=key,
-        ))
+        with scope():
+            guard()
+            ledger.ensure_relay_pending(LedgerEntry.relay_pending(
+                account_id=account_id, message_id=message_id, rule_id=rid,
+                rule_version=rver, outbox_key=key,
+            ))
+            _crash(crash, "after_relay_pending")
+            guard()
+            emit = relay_emitter.emit(directive)
+            if not emit.ok:
+                _log.warning("gmail: relay emit failed for outbox %s (rule %s)", key, rid)
+                return False
+            _crash(crash, "after_relay_emit")
+            guard()
+            # B3 readback precedes the durable done barrier.
+            if not relay_emitter.exists(directive):
+                _log.warning("gmail: relay readback failed for outbox %s (rule %s)", key, rid)
+                return False
+            guard()
+            ledger.append(LedgerEntry.relay_done(
+                account_id=account_id, message_id=message_id, rule_id=rid,
+                rule_version=rver, outbox_key=key,
+            ))
         _crash(crash, "after_relay_done")
 
+    guard()
     return not ledger.remaining_actions(message_id, rid, rver, required)
 
 
@@ -202,6 +216,8 @@ def poll_account_rule(
     crash: Callable[[str], None] | None = None,
     max_effectful_messages: int = DEFAULT_MAX_EFFECTFUL_MESSAGES,
     effect_budget: EffectBudget | None = None,
+    still_allowed=None,
+    mutation_scope=None,
 ) -> PollResult:
     """Run one contiguous-frontier poll for a single ``(account, rule)``.
 
@@ -212,13 +228,17 @@ def poll_account_rule(
     # ``now_epoch`` is accepted for test determinism / future window bounding;
     # the strict contiguous-frontier rule advances the cursor only through
     # observed done candidates, so wall-clock time is not consulted here.
+    guard, scope = still_allowed or (lambda: None), mutation_scope or nullcontext
+    guard()
     rid, rver = rule.id, rule.version
     budget = effect_budget or EffectBudget(max_effectful_messages)
     cursor = cursors.get(rid, rver)
 
     from .rules import build_query
     q = build_query(rule, cursor_epoch=cursor)
+    guard()
     ids = client.list_message_ids(q)
+    guard()
 
     # Refine candidates → effective matches (rejected ones vanish here).
     # A candidate id we could NOT resolve (get_message returned None or raised —
@@ -231,10 +251,12 @@ def poll_account_rule(
     effective: list[dict] = []
     unresolved = 0
     for message_id in ids:
+        guard()
         try:
             message = client.get_message(message_id)
         except Exception:  # noqa: BLE001 — any fetch error is a hole, not fatal
             message = None
+        guard()
         if message is None:
             unresolved += 1
             continue
@@ -251,6 +273,7 @@ def poll_account_rule(
     processed = 0
     budget_exhausted = False
     for message in effective:
+        guard()
         remaining = ledger.remaining_actions(
             str(message.get("id")), rid, rver, required_actions(rule),
         )
@@ -261,6 +284,7 @@ def poll_account_rule(
         done = process_message(
             message, rule=rule, account_id=account_id, ledger=ledger,
             files_writer=files_writer, relay_emitter=relay_emitter, crash=crash,
+            still_allowed=guard, mutation_scope=scope,
         )
         if done:
             processed += 1
@@ -274,7 +298,11 @@ def poll_account_rule(
             blocked = True
 
     if new_cursor is not None and new_cursor != cursor:
-        cursors.set(rid, rver, new_cursor)
+        with scope():
+            guard()
+            cursors.set(rid, rver, new_cursor)
+
+    guard()
 
     _log.debug(
         "gmail poll account=%s rule=%s candidates=%d effective=%d processed=%d "

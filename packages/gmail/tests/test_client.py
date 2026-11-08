@@ -39,6 +39,30 @@ def _client_for(make_registry, keychain, store, handler):
     return GmailClient(_ACCOUNT_ID, registry=registry, transport=transport), registry
 
 
+@pytest.mark.parametrize("revoke_at", ["refresh", "page", "401"])
+def test_request_consent_is_rechecked_after_refresh_pages_and_before_retry(make_registry, keychain, store, revoke_at):
+    _seed_account(keychain, store)
+    allowed, calls = [True], []
+    def guard():
+        if not allowed[0]:
+            raise RuntimeError("synthetic source consent changed")
+    def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "oauth2.googleapis.com":
+            if revoke_at == "refresh":
+                allowed[0] = False
+            return httpx.Response(200, json={"access_token": "synthetic-access"})
+        allowed[0] = False
+        if revoke_at == "401":
+            return httpx.Response(401)
+        return httpx.Response(200, json={"messages": [{"id": "synthetic"}], "nextPageToken": "second"})
+    transport = httpx.MockTransport(handler)
+    client = GmailClient(_ACCOUNT_ID, registry=make_registry(transport), transport=transport, still_allowed=guard)
+    with pytest.raises(RuntimeError, match="consent changed"):
+        client.list_message_ids("synthetic")
+    assert len(calls) == (1 if revoke_at == "refresh" else 2)
+
+
 def test_list_message_ids_paginates_to_exhaustion(make_registry, keychain, store):
     pages = {
         None: {"messages": [{"id": "m1"}, {"id": "m2"}], "nextPageToken": "p2"},
@@ -131,3 +155,23 @@ def test_invalid_grant_marks_auth_failed_and_does_not_raise(
     assert registry.get_account(_ACCOUNT_ID).status == STATUS_AUTH_FAILED
     # Token is retained (a re-auth rotates it) — fail-soft, not a purge.
     assert registry.get_refresh_token(_ACCOUNT_ID) == _REFRESH_TOKEN
+
+
+def test_revoke_during_credential_lookup_prevents_oauth_request(make_registry, keychain, store, monkeypatch):
+    _seed_account(keychain, store)
+    allowed, calls = [True], []
+    def guard():
+        if not allowed[0]:
+            raise RuntimeError('synthetic consent revoked')
+    transport = httpx.MockTransport(lambda request:calls.append(request) or httpx.Response(200, json={'access_token':'synthetic-access'}))
+    registry = make_registry(transport)
+    original = registry.client_credentials
+    def credentials():
+        values = original()
+        allowed[0] = False
+        return values
+    monkeypatch.setattr(registry, 'client_credentials', credentials)
+    client = GmailClient(_ACCOUNT_ID, registry=registry, transport=transport, still_allowed=guard)
+    with pytest.raises(RuntimeError, match='revoked'):
+        client.list_message_ids('synthetic')
+    assert not calls
