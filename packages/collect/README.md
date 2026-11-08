@@ -128,7 +128,8 @@ be overwritten by a newly fetched sample. They must not use CLI/environment auth
 fallback or reuse old annotation-definition IDs as v1 destinations. Keep
 `v1-type-creations.sqlite` with the private Collect home during cutover. The
 [coverage matrix](../../docs/collect-v1.md) tracks families still using legacy
-writers; the released app has not adopted this development branch yet.
+writers. The published 0.1.5 beta includes this Python record boundary;
+browser activation, complete historical conversion and host cutover remain open.
 
 New shared and PurpleAir pending envelopes also retain a versioned source
 dispatch checkpoint. The [controller](../fulcra-common/fulcra_common/record_delivery.py)
@@ -208,8 +209,8 @@ Generic setup sessions still cannot ingest a disabled source. Registered
 interactive contexts use shared account/settings leases; only first epoch
 registration needs an exclusive settings lease, with identity re-proved after
 the shared lease is released. Development native/web callers now use protocol2;
-obsolete unversioned commands refuse before auth/effects. Released 0.1.4 remains
-legacy until reviewed publication.
+obsolete unversioned commands refuse before auth/effects. These clients are
+included in 0.1.5; complete packaged interactive acceptance remains separate.
 
 [`QuickRecordActor`](fulcra_collect/quick_record_actor.py) is the opt-in executor
 for prepared choices. It freezes the action before effects and persists a
@@ -1394,6 +1395,6 @@ range, preserve the original settings, and restore the live range only after
 the backfill's pending records are verified. A longer budget does not establish
 legacy export completeness or authorize replay of uncertain uploads.
 
-Development shutdown and credential recovery: shutdown closes admission at the actual worker launch boundary. Accepted runner threads retain ownership through cancellation, process-group termination and child reaping; the daemon profile stays owned until they exit. Services receive bounded TERM/KILL cleanup before ownership is cleared. Reaped child identities are never signalled. Trakt hydration and status read one complete credential tuple per operation. Recovery preserves the physical failed item: a denied legacy item with a positively absent bundle offers explicit Trakt reconnect, keeping originals; a current bundle offers one app grant. Pending/changed reads offer quiet recheck. Logical credential mutation routes remain closed to the physical bundle key. These source changes require separate signed-upgrade and release acceptance.
+Shutdown and credential recovery in 0.1.5: shutdown closes admission at the actual worker launch boundary. Accepted runner threads retain ownership through cancellation, process-group termination and child reaping; the daemon profile stays owned until they exit. Services receive bounded TERM/KILL cleanup before ownership is cleared. Reaped child identities are never signalled. Trakt hydration and status read one complete credential tuple per operation. Recovery preserves the physical failed item: a denied legacy item with a positively absent bundle offers explicit Trakt reconnect, keeping originals; a current bundle offers one app grant. Pending/changed reads offer quiet recheck. Logical credential mutation routes remain closed to the physical bundle key. The published package has signed-upgrade quiet-access and notarized-artifact acceptance; source-specific and complete historical migration acceptance remain separate.
 
 Fresh Collect account and Trakt bundle reads share one boundary that makes at most three quiet observations within a 15-second recheck budget when a native read is pending. Each attempt bypasses the value cache and is fenced by the same credential revision; denial or a credential transition stops immediately. The existing per-read pending slot prevents stacking a still-running native call. Exhaustion retains the original pending failure. No approval, token grant or credential mutation is retried by this mechanism. This handles measured transient native-read failures during long history reconciliation; it does not certify historical completeness.

@@ -17,11 +17,17 @@ imports and saves progress between runs. This page is the installation guide;
 
 ### Mac app (Apple silicon)
 
-**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.5-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The current download is **0.1.4 beta**. It is signed,
-notarized, and includes Apple Notes, Apple Reminders, and Todoist.
-[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.4-macos-arm64).
+The current download is **0.1.5 beta**. It is signed,
+notarized and stapled, and includes Apple Notes, Apple Reminders, and Todoist.
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.5-macos-arm64).
+
+Version 0.1.5 adds guarded Event/Metric record writers, one Trakt credential
+bundle, bounded quiet credential checks, worker cleanup and older Podcasts
+database support. Existing annotation destinations require explicit v1 mapping.
+This release does not automatically convert historical annotations or deploy
+browser extensions; see the [migration limits](collect-v1.md).
 
 This release also bundles local folders, meeting transcript exports, and
 selected Notion pages. Notion needs a read-only internal connection and selected
@@ -94,8 +100,8 @@ separate browser extension.
 
 The [source guide](how-do-i-get-my-data.md) has permissions, credentials, import
 formats, and known gaps. These sources have different setup requirements and
-have not all been verified against every service or account. The 0.1.4 download
-includes `fulcra-api` 0.1.53; source installs use their own environment and
+have not all been verified against every service or account. The app includes
+its runtime and dependencies; source installs use their own environment and
 dependency lock.
 
 Apple Reminders and Todoist have passed live checks with disposable tasks:

@@ -1,15 +1,19 @@
 # Collect v1 migration status
 
-October 24, 2026: the shared v1 Event/Metric record boundary is implemented on
-the development branch, together with account-bound destination resolution and
+November 8, 2026: the published 0.1.5 beta includes the shared v1 Event/Metric
+record boundary, together with account-bound destination resolution and
 durable datatype-creation recovery. PurpleAir now uses the guarded Collect
 session and verified v1 Metric outbox on this branch. The 16 bundled media
 plugins and retained Spotify backfill entrypoint now use the guarded v1 Event
 runtime and setup. Standalone Day One and fourteen media import routes now use guarded v1
 paths on this source branch. The standalone media webhook server now shares
 guarded v1 authority too.
-**The released 0.1.4 app and remaining record-producing families have not switched yet.**
-This is intermediate source-only implementation, not rollout. Do not infer datatype version from an `/ingest/v1`
+**This is a partial rollout: browser v1 activation, source-host retirement and
+complete legacy historical conversion remain incomplete.** The
+[0.1.5 installer](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.5-macos-arm64)
+is signed, notarized and stapled, with quiet signed-upgrade access and matching
+anonymous download bytes verified. Source audit coverage below does not certify
+every provider or interactive flow. Do not infer datatype version from an `/ingest/v1`
 URL; legacy annotations use that path too.
 
 The shared setup API and picker now support owned v1 destination selection,
@@ -44,9 +48,9 @@ recovery checks bind the original target and timer window. Saved pending work is
 paginated beyond display caps, with old-epoch rows visible but unable to replay
 without explicit recovery. Drafts and asynchronous view results are account/epoch
 bound. Obsolete unversioned requests refuse before auth/effects, and their legacy
-record/sentinel writers have been removed. Released 0.1.4 remains legacy until a
-reviewed app publication. Explicit old-epoch reauthorization, packaged QA and
-host cutover remain release gates.
+record/sentinel writers have been removed. These clients are included in 0.1.5.
+Explicit old-epoch reauthorization, complete packaged interactive QA and host
+cutover remain incomplete acceptance work.
 
 The [design](superpowers/specs/2026-10-23-collect-v1-design.md) defines the
 record, historical conversion, cutover and release acceptance gates. The

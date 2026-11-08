@@ -306,6 +306,11 @@ under `skills/`, each package with its own README, build, and tests.
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
   pipeline), plus the importer packages (`dayone`, `csv-importer`,
   `media-helpers`, `attention`, `netflix-skill`, …).
+  The published Apple-silicon beta is 0.1.5, signed/notarized/stapled from
+  source `47fbe9a2d23d906a2f6b7c63710ca61199a69f2b`; its public asset bytes
+  match the qualified installer. Use the current download in `docs/collect.md`.
+  This package acceptance does not complete browser v1 activation, source-host
+  retirement, every interactive flow or complete legacy historical conversion.
 - **`fulcra-media webhook` readiness is a synchronization contract.** Its
   JSON `{"stage":"ready"}` lifecycle line is emitted only after the local
   `/health` endpoint has served a request, not merely after bind/listen. A
