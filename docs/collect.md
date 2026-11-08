@@ -17,11 +17,17 @@ imports and saves progress between runs. This page is the installation guide;
 
 ### Mac app (Apple silicon)
 
-**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Fulcra Collect for Mac](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.5-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The current download is **0.1.4 beta**. It is signed,
-notarized, and includes Apple Notes, Apple Reminders, and Todoist.
-[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.4-macos-arm64).
+The current download is **0.1.5 beta**. It is signed,
+notarized and stapled, and includes Apple Notes, Apple Reminders, and Todoist.
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.5-macos-arm64).
+
+Version 0.1.5 adds guarded Event/Metric record writers, one Trakt credential
+bundle, bounded quiet credential checks, worker cleanup and older Podcasts
+database support. Existing annotation destinations require explicit v1 mapping.
+This release does not automatically convert historical annotations or deploy
+browser extensions; see the [migration limits](collect-v1.md).
 
 This release also bundles local folders, meeting transcript exports, and
 selected Notion pages. Notion needs a read-only internal connection and selected
@@ -94,8 +100,8 @@ separate browser extension.
 
 The [source guide](how-do-i-get-my-data.md) has permissions, credentials, import
 formats, and known gaps. These sources have different setup requirements and
-have not all been verified against every service or account. The 0.1.4 download
-includes `fulcra-api` 0.1.53; source installs use their own environment and
+have not all been verified against every service or account. The app includes
+its runtime and dependencies; source installs use their own environment and
 dependency lock.
 
 Apple Reminders and Todoist have passed live checks with disposable tasks:
@@ -128,11 +134,13 @@ The app, background process, and plugins share the following packages.
 |---|---|
 | [`packages/collect`](../packages/collect) | **The Collect daemon** — local HTTP server on `127.0.0.1:9292` that hosts installed Collect plugins, runs scheduled imports, and exposes the wizard + dashboard UI. |
 | [`packages/web-ui`](../packages/web-ui) | The wizard + dashboard + settings **frontend** the daemon serves. Vanilla Alpine.js, no build step. |
-| [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records Moment annotations and surfaces daemon status. |
+| [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records native v1 Events and surfaces daemon status. |
 | [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** and definition/record helpers used by the importers. Independent coordination packages have their own clients. |
 
-Notes and selected emails are uploaded as **Fulcra Files**. Event importers
-write moments, durations, and numeric records through the annotations API.
+Notes and selected emails are uploaded as **Fulcra Files**. Collect's migrated
+Python record producers write native v1 Events and Metrics, with exact record
+readback through the supported datatype reads. Browser writers remain separate;
+their default v1 activation is incomplete.
 
 **Writing events:** record formats and delivery checks differ by importer.
 The typed endpoint does not deduplicate source IDs for callers, so importers
@@ -143,7 +151,7 @@ or retry behavior.
 
 **Reading it back:** authorized agents can read imported records through the
 Fulcra CLI, REST API, or supported MCP tools. Notes and email bodies are files,
-so use Fulcra Files access for those; `get-records` queries annotations and
+so use Fulcra Files access for those; `get-records` queries supported record datatypes and
 `data-updates` reports changes. [`FULCRA-PRIMITIVES.md`](../FULCRA-PRIMITIVES.md)
 maps the available interfaces and their authentication requirements. Collect
 is one producer of this context, and is not needed by the agents reading it.

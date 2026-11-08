@@ -128,7 +128,8 @@ be overwritten by a newly fetched sample. They must not use CLI/environment auth
 fallback or reuse old annotation-definition IDs as v1 destinations. Keep
 `v1-type-creations.sqlite` with the private Collect home during cutover. The
 [coverage matrix](../../docs/collect-v1.md) tracks families still using legacy
-writers; the released app has not adopted this development branch yet.
+writers. The published 0.1.5 beta includes this Python record boundary;
+browser activation, complete historical conversion and host cutover remain open.
 
 New shared and PurpleAir pending envelopes also retain a versioned source
 dispatch checkpoint. The [controller](../fulcra-common/fulcra_common/record_delivery.py)
@@ -208,8 +209,8 @@ Generic setup sessions still cannot ingest a disabled source. Registered
 interactive contexts use shared account/settings leases; only first epoch
 registration needs an exclusive settings lease, with identity re-proved after
 the shared lease is released. Development native/web callers now use protocol2;
-obsolete unversioned commands refuse before auth/effects. Released 0.1.4 remains
-legacy until reviewed publication.
+obsolete unversioned commands refuse before auth/effects. These clients are
+included in 0.1.5; complete packaged interactive acceptance remains separate.
 
 [`QuickRecordActor`](fulcra_collect/quick_record_actor.py) is the opt-in executor
 for prepared choices. It freezes the action before effects and persists a
@@ -999,7 +1000,8 @@ enforces this allowlist for core and plugin-mounted routes.
   the Fulcra account, bind one to a plugin, list a def's recent
   events, soft-delete a def.
 * **Fulcra auth** (`routes/fulcra_auth.py`) — set/clear the user-level
-  bearer token and offer explicit sign-in through the `fulcra` CLI.
+  bearer token and offer Collect-owned browser-link sign-in. The normal flow
+  does not adopt the CLI's independent credentials.
 * **OAuth** (`routes/oauth.py`) — `POST /api/oauth/{plugin_id}/start`
   and `GET /api/oauth/{plugin_id}/callback`. PKCE state lives in
   `oauth.py`; callbacks accept the provider's browser redirect without the
@@ -1373,8 +1375,9 @@ and stale renewal failures cannot relabel a newer successful sign-in.
 Manual tokens require an explicit new sign-in when expired. The principal-checked
 CLI renewal compatibility path serves only pre-upgrade credentials with no
 committed owned-auth revision; the next successful interactive sign-in retires
-that authority. Actual packaged/signed Keychain and restart QA remains a release
-gate; these source-level contracts do not claim a production cutover.
+that authority. The 0.1.5 signed upgrade retained quiet credential access;
+acceptance of every interactive sign-in/restart flow and production host cutover
+remains separate.
 
 ### Daemon and quiet-helper shutdown
 
@@ -1384,7 +1387,8 @@ cleanup. The previous signal handler is restored afterward. Quiet Keychain
 helpers monitor their requesting parent's lifetime and exit when it dies; they
 never signal another PID or process group. A terminated credential write has no
 success acknowledgement and remains UNKNOWN under the existing no-replay
-journal. This development change still requires signed-installer acceptance.
+journal. This behavior is included in the accepted signed/notarized 0.1.5
+installer; its publication does not complete host cutover or every lifecycle case.
 
 For a controlled historical catch-up, `fulcra-collect run trakt --timeout-seconds 7200` grants that one manual run up to two hours. The same
 daemon in-flight guard prevents overlap; ordinary and scheduled runs retain
@@ -1394,6 +1398,6 @@ range, preserve the original settings, and restore the live range only after
 the backfill's pending records are verified. A longer budget does not establish
 legacy export completeness or authorize replay of uncertain uploads.
 
-Development shutdown and credential recovery: shutdown closes admission at the actual worker launch boundary. Accepted runner threads retain ownership through cancellation, process-group termination and child reaping; the daemon profile stays owned until they exit. Services receive bounded TERM/KILL cleanup before ownership is cleared. Reaped child identities are never signalled. Trakt hydration and status read one complete credential tuple per operation. Recovery preserves the physical failed item: a denied legacy item with a positively absent bundle offers explicit Trakt reconnect, keeping originals; a current bundle offers one app grant. Pending/changed reads offer quiet recheck. Logical credential mutation routes remain closed to the physical bundle key. These source changes require separate signed-upgrade and release acceptance.
+Shutdown and credential recovery in 0.1.5: shutdown closes admission at the actual worker launch boundary. Accepted runner threads retain ownership through cancellation, process-group termination and child reaping; the daemon profile stays owned until they exit. Services receive bounded TERM/KILL cleanup before ownership is cleared. Reaped child identities are never signalled. Trakt hydration and status read one complete credential tuple per operation. Recovery preserves the physical failed item: a denied legacy item with a positively absent bundle offers explicit Trakt reconnect, keeping originals; a current bundle offers one app grant. Pending/changed reads offer quiet recheck. Logical credential mutation routes remain closed to the physical bundle key. The published package has signed-upgrade quiet-access and notarized-artifact acceptance; source-specific and complete historical migration acceptance remain separate.
 
 Fresh Collect account and Trakt bundle reads share one boundary that makes at most three quiet observations within a 15-second recheck budget when a native read is pending. Each attempt bypasses the value cache and is fenced by the same credential revision; denial or a credential transition stops immediately. The existing per-read pending slot prevents stacking a still-running native call. Exhaustion retains the original pending failure. No approval, token grant or credential mutation is retried by this mechanism. This handles measured transient native-read failures during long history reconciliation; it does not certify historical completeness.

@@ -129,9 +129,9 @@ development databases or future versions fail visibly without recreating empty
 state; preserve the original file for explicit recovery. This does not migrate
 or adopt the released app's unscoped favorites.
 
-**Released 0.1.4 remains legacy until a reviewed packaged release. Explicit
-old-epoch action/timer reauthorization, packaged interactive QA, and host cutover
-remain release gates.** Current old-epoch pending work is visible for recovery
+**The published 0.1.5 beta includes these clients, but explicit old-epoch
+action/timer reauthorization, complete packaged interactive QA and host cutover
+remain incomplete acceptance work.** Current old-epoch pending work is visible for recovery
 and cannot silently send under fresh consent. The actual AppKit popover and
 preferences have rendered successfully against synthetic daemon responses;
 that render does not prove signed-app permissions, real sources or cutover.
@@ -146,7 +146,11 @@ have passed disposable-task completion checks against real Fulcra Files.
 
 ## Build the .app
 
-The current beta bundle version is 0.1.4.
+The current beta bundle version is 0.1.5. The
+[published installer](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.5-macos-arm64)
+is Developer ID signed, notarized and stapled. Its signed upgrade retained
+quiet credential access, and the public download matches the qualified bytes.
+This does not certify every source, interactive flow or migration outcome.
 
 From the repository root on an Apple silicon Mac:
 

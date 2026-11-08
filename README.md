@@ -106,14 +106,13 @@ route on 2026-09-30, while visibility of the deleted source record was not teste
 
 ## Package index
 
-Collect's migration to v1 Event/Metric datatypes is in progress. The shared
-validation boundary is implemented; plugin conversion and the replacement
-installer are not yet released. A replacement installer must also verify
-background credential access across an upgrade. See the
+Collect's migration to v1 Event/Metric datatypes is in progress. The published
+0.1.5 beta includes the shared validation boundary and Python record producers,
+with verified signed-upgrade background credential access. Trakt credentials
+use one Keychain bundle; legacy items remain intact and ordinary reads never
+prompt or migrate them. Browser v1 activation, complete historical conversion
+and source-host retirement remain incomplete. See the
 [migration status](docs/collect-v1.md).
-The development source consolidates Trakt credentials into one Keychain bundle;
-legacy items remain intact and ordinary reads never prompt or migrate them.
-This is not yet a claim about the published installer.
 
 Every directory under `packages/` is listed here. Each README covers that
 package’s setup, behavior, and limits. Install the pieces you need; the repository
@@ -208,15 +207,16 @@ Use Collect when you want one of its connectors or a common place to schedule
 imports. It is one way to put data into Fulcra; standalone importers and direct
 API writes are also available.
 
-**[Download Collect 0.1.4 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.4-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
+**[Download Collect 0.1.5 beta for Apple silicon](https://github.com/ashfulcra/fulcra-tools/releases/download/collect-v0.1.5-macos-arm64/Fulcra-Collect-macOS-arm64.dmg)**
 
-The 0.1.4 Mac beta is signed and notarized. It bundles 26 plugin entries,
+The 0.1.5 Mac beta is signed, notarized and stapled. It bundles 26 plugin entries,
 including local folders, meeting transcript exports, and selected Notion pages.
 Each source needs its own setup; Notion live verification is still pending.
 
-The development branch adds stable Trakt credential storage, owned shutdown
-cleanup, and a bounded manual backfill budget. These changes are not in the
-0.1.4 download; publication awaits the verified replacement installer.
+This release adds stable Trakt credential storage, owned shutdown cleanup,
+a bounded manual backfill budget and support for older Podcasts libraries.
+[Release notes and checksums](https://github.com/ashfulcra/fulcra-tools/releases/tag/collect-v0.1.5-macos-arm64)
+describe upgrade requirements and remaining migration limits.
 
 Open the disk image, drag Collect into Applications, open it, and follow the
 setup prompts. The [installation guide](docs/collect.md#get-started-new-user)
@@ -256,8 +256,9 @@ The review handshake lives on the bus; a GitHub comment alone does not satisfy
 it. [`AGENTS.md`](AGENTS.md) has the full conventions, including how to log work,
 request review, and close tasks with evidence.
 
-The development branch also fixes worker shutdown and credential recovery, supports
-older Podcasts libraries, and corrects the installed app's Full Disk Access
-guidance. Fresh account and Trakt-bundle reads share bounded quiet rechecking;
-media backfills avoid repeatedly checking unrelated earlier chunks. Native
-long-run acceptance and publication of the corrected installer remain open.
+Collect 0.1.5 also corrects the installed app's Full Disk Access guidance. Fresh
+account and Trakt-bundle reads share bounded quiet rechecking; media backfills
+avoid repeatedly checking unrelated earlier chunks. The accepted installer was
+downloaded anonymously and matched the independently verified notarized bytes.
+This package acceptance does not complete browser deployment, host cutover or
+conversion of all historical annotations.

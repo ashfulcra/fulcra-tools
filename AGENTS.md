@@ -306,6 +306,11 @@ under `skills/`, each package with its own README, build, and tests.
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
   pipeline), plus the importer packages (`dayone`, `csv-importer`,
   `media-helpers`, `attention`, `netflix-skill`, …).
+  The published Apple-silicon beta is 0.1.5, signed/notarized/stapled from
+  source `47fbe9a2d23d906a2f6b7c63710ca61199a69f2b`; its public asset bytes
+  match the qualified installer. Use the current download in `docs/collect.md`.
+  This package acceptance does not complete browser v1 activation, source-host
+  retirement, every interactive flow or complete legacy historical conversion.
 - **`fulcra-media webhook` readiness is a synchronization contract.** Its
   JSON `{"stage":"ready"}` lifecycle line is emitted only after the local
   `/health` endpoint has served a request, not merely after bind/listen. A
@@ -2394,7 +2399,8 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   clicks; pending replies cannot change an observed record ID or datatype.
   Protocol2 socket replies are bounded at 8 MiB; requests and legacy replies stay
   at 64 KiB. Development native popover/preferences and web favorites now use
-  protocol2 by default; released 0.1.4 remains legacy until reviewed publication.
+  protocol2 by default and are included in the published 0.1.5 beta. Complete
+  packaged interactive acceptance and explicit old-epoch recovery remain separate.
   Unversioned commands/old authenticated HTTP routes return refresh-required
   before Collect auth or effects; their legacy serializers/sentinel Undo are
   removed. Native checks validate saved/observed action and timer proofs; local
@@ -3120,8 +3126,9 @@ release QA.
   batches and replay exclusions. It preserves import-once behavior and the
   case-sensitive legacy source hash; reruns do not overwrite cloud edits.
   Old annotation selections need explicit mapping. Preview creates no metadata
-  or receipts. Attachments remain unuploaded; signed app publication and historical
-  conversion remain pending. The [standalone CLI](packages/dayone/README.md#standalone-v1-authority-and-recovery-development-branch)
+  or receipts. Attachments remain unuploaded. The writer is included in the
+  published 0.1.5 app; source-specific live acceptance and historical conversion
+  remain separate. The [standalone CLI](packages/dayone/README.md#standalone-v1-authority-and-recovery-development-branch)
   now shares the v1 writer with explicit CLI/env auth and fresh API account proof;
   Collect authentication remains strict and separate. `--destination Event/<UUID>`
   selects an owned compatible target; legacy bare IDs require explicit mapping.
