@@ -134,11 +134,13 @@ The app, background process, and plugins share the following packages.
 |---|---|
 | [`packages/collect`](../packages/collect) | **The Collect daemon** — local HTTP server on `127.0.0.1:9292` that hosts installed Collect plugins, runs scheduled imports, and exposes the wizard + dashboard UI. |
 | [`packages/web-ui`](../packages/web-ui) | The wizard + dashboard + settings **frontend** the daemon serves. Vanilla Alpine.js, no build step. |
-| [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records Moment annotations and surfaces daemon status. |
+| [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records native v1 Events and surfaces daemon status. |
 | [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** and definition/record helpers used by the importers. Independent coordination packages have their own clients. |
 
-Notes and selected emails are uploaded as **Fulcra Files**. Event importers
-write moments, durations, and numeric records through the annotations API.
+Notes and selected emails are uploaded as **Fulcra Files**. Collect's migrated
+Python record producers write native v1 Events and Metrics, with exact record
+readback through the supported datatype reads. Browser writers remain separate;
+their default v1 activation is incomplete.
 
 **Writing events:** record formats and delivery checks differ by importer.
 The typed endpoint does not deduplicate source IDs for callers, so importers

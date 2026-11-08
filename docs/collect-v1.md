@@ -31,13 +31,14 @@ Native v1 Event and Metric deletion is verified through `DeletedRecord`, includi
 and covering-window absence with an untouched control. A later same-ID replay
 revives the record, so Undo/history rollout still needs durable dispositions
 checked by every writer. The [platform mutation evidence](../FULCRA-PRIMITIVES.md#true-v1-custom-record-mutations)
-records the precise scope; the application Undo path has not switched yet. The
+records the precise scope; the quick-record protocol2 path below uses native
+Undo, while full packaged interactive acceptance remains incomplete. The
 shared client now submits schema-checked native tombstones with stable action-
 scoped IDs. The development media/PurpleAir writers check queryable exclusions
 before duplicate shortcuts and around pending uploads, repair observed revivals,
 and count only verified non-excluded rows. The media chunk holds a local account
-lease across twin planning and delivery. Other source writers and the Undo UI
-still need this integration; historical aliases/replay floors, controlled cutoff
+lease across twin planning and delivery. Other source families still need
+this integration; historical aliases/replay floors, controlled cutoff
 and durable action/pending recovery remain rollout gates.
 
 The [quick-record protocol2 backend](../packages/collect/README.md#quick-record-protocol-2-development)

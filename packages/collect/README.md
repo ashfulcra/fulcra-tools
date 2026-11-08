@@ -1000,7 +1000,8 @@ enforces this allowlist for core and plugin-mounted routes.
   the Fulcra account, bind one to a plugin, list a def's recent
   events, soft-delete a def.
 * **Fulcra auth** (`routes/fulcra_auth.py`) — set/clear the user-level
-  bearer token and offer explicit sign-in through the `fulcra` CLI.
+  bearer token and offer Collect-owned browser-link sign-in. The normal flow
+  does not adopt the CLI's independent credentials.
 * **OAuth** (`routes/oauth.py`) — `POST /api/oauth/{plugin_id}/start`
   and `GET /api/oauth/{plugin_id}/callback`. PKCE state lives in
   `oauth.py`; callbacks accept the provider's browser redirect without the
@@ -1374,8 +1375,9 @@ and stale renewal failures cannot relabel a newer successful sign-in.
 Manual tokens require an explicit new sign-in when expired. The principal-checked
 CLI renewal compatibility path serves only pre-upgrade credentials with no
 committed owned-auth revision; the next successful interactive sign-in retires
-that authority. Actual packaged/signed Keychain and restart QA remains a release
-gate; these source-level contracts do not claim a production cutover.
+that authority. The 0.1.5 signed upgrade retained quiet credential access;
+acceptance of every interactive sign-in/restart flow and production host cutover
+remains separate.
 
 ### Daemon and quiet-helper shutdown
 
@@ -1385,7 +1387,8 @@ cleanup. The previous signal handler is restored afterward. Quiet Keychain
 helpers monitor their requesting parent's lifetime and exit when it dies; they
 never signal another PID or process group. A terminated credential write has no
 success acknowledgement and remains UNKNOWN under the existing no-replay
-journal. This development change still requires signed-installer acceptance.
+journal. This behavior is included in the accepted signed/notarized 0.1.5
+installer; its publication does not complete host cutover or every lifecycle case.
 
 For a controlled historical catch-up, `fulcra-collect run trakt --timeout-seconds 7200` grants that one manual run up to two hours. The same
 daemon in-flight guard prevents overlap; ordinary and scheduled runs retain
